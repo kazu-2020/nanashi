@@ -5,6 +5,7 @@
 //! 空のセルはキーがないことで表す。
 
 mod ast;
+mod budget;
 mod catalog;
 mod cells;
 pub mod check;
@@ -19,6 +20,7 @@ mod restrict;
 mod store;
 
 pub use ast::*;
+pub use budget::*;
 pub use catalog::*;
 pub use config::*;
 pub(crate) use cells::*;

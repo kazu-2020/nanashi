@@ -117,7 +117,7 @@ pub(crate) fn intersect(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, f: impl F
 }
 
 /// 足りない軸の全メンバー（restrict の範囲）へ値を複製する。
-pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict) -> Result<Cube> {
+pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let out = Packing::new(dims, cat)?;
     if out == c.pack {
@@ -130,6 +130,8 @@ pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict) -> R
         .filter(|(_, d)| !c.dims().contains(d))
         .map(|(i, &d)| (i, members(cat, d, r)))
         .collect();
+    let n: usize = missing.iter().map(|(_, ms)| ms.len()).product();
+    b.need(n.saturating_mul(c.cells.len().max(1)).saturating_add(n), "EXPAND（軸の全メンバーへの展開）")?;
     let combos = product(&out, &missing);
     let combos = &combos;
     let cells = flat_map_cells(cfg, &c.cells, |k, v| {
@@ -180,7 +182,9 @@ pub(crate) fn replace_dim(dims: &[DimId], old: DimId, new: DimId) -> Vec<DimId> 
     dims.iter().map(|&d| if d == old { new } else { d }).collect()
 }
 
-pub(crate) fn dense(c: &Cube, cat: &Catalog, r: &Restrict) -> Vec<u64> {
+pub(crate) fn dense(c: &Cube, cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Vec<u64>> {
     let spans: Vec<(usize, Vec<u32>)> = c.dims().iter().enumerate().map(|(i, &d)| (i, members(cat, d, r))).collect();
-    product(&c.pack, &spans)
+    let n: usize = spans.iter().map(|(_, ms)| ms.len()).product();
+    b.need(n.saturating_mul(2), "ISBLANK / IFBLANK（軸の全組み合わせ）")?;
+    Ok(product(&c.pack, &spans))
 }

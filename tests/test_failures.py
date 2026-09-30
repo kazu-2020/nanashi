@@ -1,6 +1,7 @@
 """計算や入力の途中で失敗しても、モデルが壊れた状態で残らない。"""
 import unittest
 
+from sparse_engine import Model
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
@@ -119,6 +120,25 @@ class RustBoundary(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "使用中"):
             engine.core.recalc_changes(rplan, stores, [None] * len(names), [], [], [], [])
         check_values(self, m)
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core が必要")
+class MemoryBudget(unittest.TestCase):
+    def test_dense_formula_beyond_the_budget_is_an_error_not_an_oom(self):
+        m = Model(engine=RustEngine(max_bytes=64 << 20), max_cells=None)  # セル数の見積もりの検査は外す
+        m.add_dimension("Customer", [f"c{i}" for i in range(100_000)])
+        m.add_dimension("Sku", [f"s{i}" for i in range(20_000)])
+        m.add_input("Sales", ["Customer", "Sku"], {("c1", "s1"): 5.0})
+        m.add_formula("Filled", ["Customer", "Sku"], "IFBLANK(Sales, 0)")  # 20 億セル（32 GB）
+        with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+            m.recalc()
+        m.add_formula("Filled", ["Customer", "Sku"], "Sales * 2")  # 直せば計算できる
+        self.assertEqual(m.get("Filled", Customer="c1", Sku="s1"), 10.0)
+
+    def test_split_budget_gives_the_same_results(self):
+        from .test_redefine import run_random
+        run_random(self, seed=59, rounds=60,
+                   engines=[ReferenceEngine, lambda: RustEngine(max_bytes=1 << 16, par_min=0, widen_min_rows=0)])
 
 
 def check_values(test, m) -> None:

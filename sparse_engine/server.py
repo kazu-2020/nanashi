@@ -374,6 +374,7 @@ def main(argv=None) -> None:
     ap.add_argument("--max-body", type=int, default=16 << 20, help="本文の上限（バイト）")
     ap.add_argument("--max-cells", type=int, default=100_000, help="slice、rows、summary で返すセルの上限")
     ap.add_argument("--max-threads", type=int, default=64, help="同時に処理する要求の上限（超えたら 503）")
+    ap.add_argument("--max-bytes", type=int, help="Rust のエンジンで、1 つの式の評価が持つ途中結果の上限（バイト）")
     args = ap.parse_args(argv)
     tokens = None
     if args.tokens:
@@ -385,7 +386,7 @@ def main(argv=None) -> None:
     sys.setswitchinterval(args.switch_interval)
     if args.engine == "rust":
         from .rust_engine import RustEngine
-        engine = RustEngine()
+        engine = RustEngine(max_bytes=args.max_bytes)
     else:
         from .engine import ReferenceEngine
         engine = ReferenceEngine()

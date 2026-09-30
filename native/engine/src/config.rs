@@ -17,6 +17,8 @@ pub struct Config {
     pub semi_max: usize,
     /// これより行の多い Metric では、値が変わった範囲がセル全体の大半を占めれば全体に広げる。
     pub widen_min_rows: usize,
+    /// 1 つの式の評価が同時に持つ途中結果のバイト数の上限。並列に評価するときは、この予算を分ける。
+    pub max_bytes: usize,
     /// テスト用に、この Metric の番号の書き戻しで再計算を失敗させる（true なら panic させる）。
     pub fail_at: Option<(usize, bool)>,
 }
@@ -30,6 +32,7 @@ impl Default for Config {
             stream_always: false,
             semi_max: 4096,
             widen_min_rows: 4096,
+            max_bytes: usize::MAX,
             fail_at: None,
         }
     }

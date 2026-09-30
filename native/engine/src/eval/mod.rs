@@ -59,9 +59,22 @@ pub(crate) fn kleene(op: Op, a: Option<f64>, b: Option<f64>) -> Option<f64> {
     }
 }
 
+/// 式を評価する。途中結果が予算（cat.cfg.max_bytes）を超えるなら Err。
 pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cube> {
+    eval_with(node, cat, src, r, &Budget::new(cat.cfg.max_bytes))
+}
+
+/// 予算 b のもとで式を評価する（並列に評価するときは、式ごとに予算を分けて渡す）。
+pub fn eval_with(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
+    let mark = b.mark();
+    let out = node_value(node, cat, src, r, b)?;
+    b.settle(mark, &out)?;
+    Ok(out)
+}
+
+fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
-    let ev = |n: &Node| eval(n, cat, src, r);
+    let ev = |n: &Node| eval_with(n, cat, src, r, bud);
     match node {
         Node::Ref(i) => Ok(src[*i].read(cfg, r)),
 
@@ -80,7 +93,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             let b = match op {
                 // INNER JOIN の演算は、左が小さければ右を左のメンバーに絞って評価する
                 Op::Mul | Op::Div | Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => match semi(r, &a, cat) {
-                    Some(r2) => eval(rt, cat, src, &r2)?,
+                    Some(r2) => eval_with(rt, cat, src, &r2, bud)?,
                     None => ev(rt)?,
                 },
                 _ => ev(rt)?,
@@ -92,13 +105,13 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                 }
                 Op::Add | Op::Sub => {
                     let dims = merge(a.dims(), b.dims());
-                    let (a, b) = (expand(&a, &dims, cat, r)?, expand(&b, &dims, cat, r)?);
+                    let (a, b) = (expand(&a, &dims, cat, r, bud)?, expand(&b, &dims, cat, r, bud)?);
                     let op = *op;
                     Ok(union(cfg, a, b, Kind::Num, move |x, y| scalar(op, x.unwrap_or(0.0), y.unwrap_or(0.0))))
                 }
                 Op::And | Op::Or => {
                     let dims = merge(a.dims(), b.dims());
-                    let (a, b) = (expand(&a, &dims, cat, r)?, expand(&b, &dims, cat, r)?);
+                    let (a, b) = (expand(&a, &dims, cat, r, bud)?, expand(&b, &dims, cat, r, bud)?);
                     let op = *op;
                     Ok(union(cfg, a, b, Kind::Bool, move |x, y| kleene(op, x, y)))
                 }
@@ -123,8 +136,8 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             };
             // 各分岐は、条件がその値になるセルのメンバーに絞って評価する
             let branch = |n: &Node, part: &Cube| match semi(r, part, cat) {
-                Some(r2) => eval(n, cat, src, &r2),
-                None => eval(n, cat, src, r),
+                Some(r2) => eval_with(n, cat, src, &r2, bud),
+                None => eval_with(n, cat, src, r, bud),
             };
             let (yes, no) = (pick(true), pick(false));
             let t = branch(then, &yes)?;
@@ -136,7 +149,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             let dims = parts.iter().fold(Vec::new(), |acc, p| merge(&acc, p.dims()));
             let mut out = Cube { pack: Packing::new(&dims, cat)?, kind, cells: Vec::new() };
             for p in &parts {
-                out.cells.extend(expand(p, &dims, cat, r)?.cells);
+                out.cells.extend(expand(p, &dims, cat, r, bud)?.cells);
             }
             Ok(out)
         }
@@ -144,7 +157,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
         Node::Filter(child, cond) => {
             let x = ev(child)?;
             let c = match semi(r, &x, cat) {
-                Some(r2) => eval(cond, cat, src, &r2)?,
+                Some(r2) => eval_with(cond, cat, src, &r2, bud)?,
                 None => ev(cond)?,
             };
             let keep = Cube { pack: c.pack.clone(), kind: Kind::Bool, cells: map_cells(cfg, &c.cells, |k, v| (v != 0.0).then_some((k, v))) };
@@ -161,7 +174,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
         Node::On(child, other) => {
             let x = ev(child)?;
             let o = match semi(r, &x, cat) {
-                Some(r2) => eval(other, cat, src, &r2)?,
+                Some(r2) => eval_with(other, cat, src, &r2, bud)?,
                 None => ev(other)?,
             };
             intersect(&x, &o, x.kind, cat, |a, _| Some(a))
@@ -169,20 +182,20 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
 
         Node::Expand(child, dims) => {
             let c = ev(child)?;
-            expand(&c, &[c.dims(), &dims[..]].concat(), cat, r)
+            expand(&c, &[c.dims(), &dims[..]].concat(), cat, r, bud)
         }
 
         Node::IsBlank(child, _) => {
             let c = ev(child)?;
             let present: FxHashSet<u64> = c.cells.iter().map(|c| c.0).collect();
-            let cells = dense(&c, cat, r).into_iter().map(|k| (k, b2f(!present.contains(&k)))).collect();
+            let cells = dense(&c, cat, r, bud)?.into_iter().map(|k| (k, b2f(!present.contains(&k)))).collect();
             Ok(Cube { pack: c.pack, kind: Kind::Bool, cells })
         }
 
         Node::IfBlank(child, value, _, _) => {
             let c = ev(child)?;
             let present: FxHashMap<u64, f64> = c.cells.iter().copied().collect();
-            let cells = dense(&c, cat, r).into_iter().map(|k| (k, *present.get(&k).unwrap_or(value))).collect();
+            let cells = dense(&c, cat, r, bud)?.into_iter().map(|k| (k, *present.get(&k).unwrap_or(value))).collect();
             Ok(Cube { pack: c.pack, kind: c.kind, cells })
         }
 
@@ -194,7 +207,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                 let ms = (0..cat.dims[*s].size).filter(|&m| mp.fwd[m as usize] >= 0 && sel.has(mp.fwd[m as usize] as u32)).collect();
                 sub = sub.with(*s, Sel::new(ms, cat.dims[*s].size));
             }
-            let rows = rows_of(child, cat, src, &sub)?;
+            let rows = rows_of(child, cat, src, &sub, bud)?;
             let dims = replace_dim(&rows.pack().dims, *s, *dst);
             let out = Packing::new(&dims, cat)?;
             if few_groups(cfg, *agg, combos_in(&dims, cat, r), rows.len()) {
@@ -226,7 +239,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                 let ts = sel.members.iter().filter(|&&m| mp.fwd[m as usize] >= 0).map(|&m| mp.fwd[m as usize] as u32).collect();
                 sub = sub.with(*dst, Sel::new(ts, cat.dims[*dst].size));
             }
-            let c = eval(child, cat, src, &sub)?;
+            let c = eval_with(child, cat, src, &sub, bud)?;
             let out = Packing::new(&replace_dim(c.dims(), *dst, *s), cat)?;
             let (pt, ps) = (c.pack.pos(*dst).unwrap(), out.pos(*s).unwrap());
             let rest = Proj::new(&c.pack, &out);
@@ -249,15 +262,15 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                 if let Node::AsAxis { child: v, dim: target } = &**edges {
                     if let (Node::Ref(vi), true) = (&**v, sub.is_all()) {
                         if let Src::Store(vs) = &src[*vi] {
-                            let rows = rows_of(x, cat, src, &sub)?;
+                            let rows = rows_of(x, cat, src, &sub, bud)?;
                             if let Some(c) = remove_by_table(&rows, *dim, *target, vs, *agg, cat, r)? {
                                 return Ok(c);
                             }
                             // 引けなければ、結合してから集計する（On と同じ）
                             let xc = rows.into_cube();
                             let o = match semi(&sub, &xc, cat) {
-                                Some(r2) => eval(edges, cat, src, &r2)?,
-                                None => eval(edges, cat, src, &sub)?,
+                                Some(r2) => eval_with(edges, cat, src, &r2, bud)?,
+                                None => eval_with(edges, cat, src, &sub, bud)?,
                             };
                             let joined = intersect(&xc, &o, xc.kind, cat, |a, _| Some(a))?;
                             return remove_rows(Rows::Owned(joined), *dim, *agg, cat, r);
@@ -265,12 +278,12 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                     }
                 }
             }
-            remove_rows(rows_of(child, cat, src, &sub)?, *dim, *agg, cat, r)
+            remove_rows(rows_of(child, cat, src, &sub, bud)?, *dim, *agg, cat, r)
         }
 
         Node::AsAxis { child, dim } => {
             // メンバー番号を値に持つ Cube を、そのメンバーを dim の座標に持つ表（値は 1）にする
-            let c = eval(child, cat, src, &r.without(&[*dim]))?;
+            let c = eval_with(child, cat, src, &r.without(&[*dim]), bud)?;
             let out = Packing::new(&[c.dims(), &[*dim]].concat(), cat)?;
             let proj = Proj::new(&c.pack, &out);
             let (p, size) = (out.pos(*dim).unwrap(), cat.dims[*dim].size as f64);
@@ -282,7 +295,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
 
         Node::Select { child, dim, member, .. } => {
             // member の切り口を取り出し、dim を外す
-            let c = eval(child, cat, src, &r.with(*dim, Sel::new(vec![*member], cat.dims[*dim].size)))?;
+            let c = eval_with(child, cat, src, &r.with(*dim, Sel::new(vec![*member], cat.dims[*dim].size)), bud)?;
             let p = c.pack.pos(*dim).unwrap();
             let dims: Vec<DimId> = c.dims().iter().copied().filter(|d| d != dim).collect();
             let out = Packing::new(&dims, cat)?;
@@ -303,7 +316,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                 }
                 None => r.clone(),
             };
-            let c = eval(child, cat, src, &sub)?;
+            let c = eval_with(child, cat, src, &sub, bud)?;
             let p = c.pack.pos(*dim).unwrap();
             let cells = map_cells(cfg, &c.cells, |k, v| {
                 let t = c.pack.get(k, p) as i64 + n;

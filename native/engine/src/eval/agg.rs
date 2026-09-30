@@ -113,7 +113,7 @@ impl Rows {
 }
 
 /// node を r の範囲で評価したセル。範囲の絞り込みがない Ref は、格納データや読み出し元を写さずに渡す。
-pub(crate) fn rows_of(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Rows> {
+pub(crate) fn rows_of(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Rows> {
     if let Node::Ref(i) = node {
         if r.is_all() {
             match &src[*i] {
@@ -123,7 +123,7 @@ pub(crate) fn rows_of(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> 
             }
         }
     }
-    Ok(Rows::Owned(eval(node, cat, src, r)?))
+    Ok(Rows::Owned(eval_with(node, cat, src, r, b)?))
 }
 
 /// dims の、r の範囲での全組み合わせの数（集計先の数の上限）。

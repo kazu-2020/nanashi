@@ -361,7 +361,8 @@ impl Core {
         Ok(core)
     }
 
-    /// 調整値を変える。評価と再計算の段取りにはすぐ効き、格納データの持ち方（差分をまとめ直す件数、
+    /// 調整値を変える。max_bytes（1 つの式の評価が同時に持つ途中結果のバイト数の上限。None は上限なし）は
+    /// メモリの予算で、超えれば計算を始める前か途中で ValueError にする。評価と再計算の段取りにはすぐ効き、格納データの持ち方（差分をまとめ直す件数、
     /// 索引を作る行数、並列にする件数）は、このあと作る格納データから効く。fail_at はテスト用で、
     /// (Metric の番号, panic させるか) か None。
     #[pyo3(signature = (**config))]
@@ -377,6 +378,7 @@ impl Core {
                 "stream_always" => cfg.stream_always = v.extract()?,
                 "semi_max" => cfg.semi_max = v.extract()?,
                 "widen_min_rows" => cfg.widen_min_rows = v.extract()?,
+                "max_bytes" => cfg.max_bytes = v.extract::<Option<usize>>()?.unwrap_or(usize::MAX),
                 "fail_at" => cfg.fail_at = v.extract()?,
                 _ => return Err(err(format!("未知の調整値 {k}"))),
             }
@@ -576,7 +578,14 @@ impl Core {
             })
             .collect::<PyResult<_>>()?;
         let cat = self.cat.clone();
-        let cubes: Vec<nanashi_engine::Result<Cube>> = py.detach(move || jobs.par_iter().map(|(n, s, r)| eval(n, &cat, s, r)).collect());
+        // メモリの予算に限りがあれば、式ごとに予算をすべて使えるよう順に評価する
+        let cubes: Vec<nanashi_engine::Result<Cube>> = py.detach(move || {
+            if cat.cfg.max_bytes == usize::MAX {
+                jobs.par_iter().map(|(n, s, r)| eval(n, &cat, s, r)).collect()
+            } else {
+                jobs.iter().map(|(n, s, r)| eval(n, &cat, s, r)).collect()
+            }
+        });
         cubes.into_iter().map(|c| Ok(CubeHandle { cube: Arc::new(c.map_err(err)?) })).collect()
     }
 
