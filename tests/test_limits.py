@@ -152,7 +152,12 @@ class CellEstimates(unittest.TestCase):
 class Memory(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_rust_reports_storage_bytes(self):
+        import gc
+
         import nanashi_core
+        # heap() は数え始めてからの確保と解放の差なので、前のテストが残した循環参照のゴミ（Rust の格納データを
+        # 持つもの）が数えている途中で回収されると減る。数え始める前に回収しておく
+        gc.collect()
         nanashi_core.track_heap(True)
         self.addCleanup(nanashi_core.track_heap, False)
         before = nanashi_core.heap()[0]
