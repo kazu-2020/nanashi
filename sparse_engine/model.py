@@ -5,7 +5,11 @@
 その軸に沿った scan として 1 時点ずつ計算する。それ以外の循環はエラーにする。
 
 入力セルを変えると、その座標を影響範囲として計画の順に下流へ伝え、各 Metric は
-影響範囲だけを計算し直して差し替える。式や軸の定義を変えたときは全体を計算し直す。
+影響範囲だけを計算し直して差し替える。式や入力の定義を変えたときも、変えた Metric を計算し直して
+値が変わったセルだけを下流へ伝える（Metric の軸か値の種類を変えたときだけ全体を計算し直す）。
+
+複数の操作は transaction でまとめられ、失敗すれば取り消す。記録先（journal）を付けると、
+確定したトランザクションごとに記録を残す（journal.py）。
 
 集計だけの Metric（SUM / COUNT）は、集計元の変わった行の差分を足し込んで更新する（delta.py）。
 
@@ -15,7 +19,9 @@
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import functools
 import itertools
 from dataclasses import dataclass, field
 from statistics import mean
@@ -28,6 +34,7 @@ from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, colle
                        member_kind, resolve, union_region)
 from .expr import (BinOp, Coalesce, Const, Expr, Filter, Ref, mentions_member, references_metric,
                    rename_member, rename_metrics, uses_property)
+from .journal import AlreadyCommitted, Transaction, changes, jsonable, now
 from .parser import parse
 
 
@@ -93,6 +100,27 @@ class SliceLog:
         return repr(self._flush())
 
 
+def _operation(fn):
+    """モデルを変える操作。トランザクションの中なら意図として記録する（操作の中から呼んだ操作は
+    記録しない）。記録先があってトランザクションの外なら、1 回の呼び出しを 1 トランザクションにする。"""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        txn = self._txn
+        if txn is None:
+            if self.journal is None:
+                return fn(self, *args, **kwargs)
+            with self.transaction():
+                return wrapper(self, *args, **kwargs)
+        if txn.depth == 0:
+            txn.ops.append({"op": fn.__name__, "args": jsonable(list(args)), "kwargs": jsonable(kwargs)})
+        txn.depth += 1
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            txn.depth -= 1
+    return wrapper
+
+
 @dataclass
 class Model:
     engine: Engine = field(default_factory=default_engine)
@@ -124,6 +152,10 @@ class Model:
     _forced: dict[str, Restrict] = field(default_factory=dict)  # 次の再計算で必ず計算し直す計算 Metric の範囲
     _samples: dict[str, dict[str, Restrict]] = field(default_factory=dict)  # 分割軸の選択に使った、入力ごとの影響範囲
     _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
+    journal: Any = None  # 記録先（journal.FileJournal など）。None なら記録しない
+    seq: int = 0  # 確定した最後のトランザクションの通し番号
+    last_record: dict | None = None  # 最後に確定したトランザクションの記録
+    _txn: Transaction | None = None  # 実行中のトランザクション
 
     # ------------------------------------------------ Catalog
 
@@ -179,8 +211,70 @@ class Model:
         other._edges = dict(self._edges)
         other._samples = {src: dict(regions) for src, regions in self._samples.items()}  # 定義を変えると書き足す
         other._next_id = self._next_id
+        other.seq = self.seq
         other._full = False
         return other
+
+    # ------------------------------------------------ トランザクションと記録
+
+    @contextlib.contextmanager
+    def transaction(self, *, user: str | None = None, reason: str | None = None,
+                    client_op_id: str | None = None):
+        """複数の操作を 1 つのトランザクションにまとめる。
+
+            with m.transaction(user="alice", reason="予算の修正") as txn:
+                m.set_cell("Budget", 100, Product="A", Month="Jan")
+                m.spread("Budget", 1200, Product="B")
+            txn.seq, txn.record  # 確定した通し番号と記録
+
+        中で例外が起きたら、すべての操作を取り消して例外をそのまま投げる。抜けるときに再計算し、
+        式のエラーなどで失敗しても取り消す。成功したら記録先（journal）に記録を追記してから確定する。
+        追記に失敗しても取り消す。入れ子にすると、外側のトランザクションに含まれる。
+
+        client_op_id を渡すと、同じ ID のトランザクションが確定済みなら AlreadyCommitted を投げる
+        （中の操作は実行しない）。応答を受け取れなかった利用者が再送したときに、二重に確定しない。
+        """
+        if self._txn is not None:
+            yield self._txn
+            return
+        if client_op_id is not None and self.journal is not None:
+            if (seq := self.journal.seq_of(client_op_id)) is not None:
+                raise AlreadyCommitted(seq)
+        self.recalc()
+        saved = self.fork()  # 取り消すときに戻す版（格納データの本体は共有するので安い）
+        txn = self._txn = Transaction(user, reason, client_op_id)
+        try:
+            yield txn
+            self.recalc()
+            record = {"v": 1, "at": now(), "user": user, "reason": reason, "client_op_id": client_op_id,
+                      "ops": txn.ops, "changes": changes(saved, self)}
+            if self.journal is not None and txn.ops:
+                self.seq = self.journal.append(record)
+                record["seq"] = self.seq
+                txn.seq = self.seq
+            txn.record = self.last_record = record
+        except BaseException:
+            self._restore(saved)
+            raise
+        finally:
+            self._txn = None
+
+    def _restore(self, saved: Model) -> None:
+        """トランザクションの前の版 saved に戻す（観察用の記録と記録先はそのまま）。"""
+        self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、軸を戻す前に名前へ直す
+        keep = {k: getattr(self, k) for k in ("eval_log", "slice_log", "delta_log", "journal", "last_record")}
+        self.__dict__.update(saved.__dict__)
+        self.__dict__.update(keep)
+
+    def checkpoint(self) -> None:
+        """今の状態のスナップショットを記録先に置く。開くときは、このスナップショットと、
+        これより後の記録だけを読めばよくなる。"""
+        if self.journal is None:
+            raise ValueError("記録先（journal）がない")
+        if self._txn is not None:
+            raise ValueError("トランザクションの中ではスナップショットを取れない")
+        self.recalc()
+        self.journal.save_snapshot(self)
 
     # ------------------------------------------------ 保存と読み込み
 
@@ -197,6 +291,7 @@ class Model:
 
     # ------------------------------------------------ 定義
 
+    @_operation
     def add_dimension(self, name: str, members, *, ordered: bool = False) -> Dimension:
         if name in self.metrics:
             raise ValueError(f"{name}: 同じ名前の Metric がある（式の中で軸と区別できなくなる）")
@@ -221,6 +316,7 @@ class Model:
                 return m.name
         raise ValueError(f"ID {id} の Metric がない")
 
+    @_operation
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str]) -> None:
         """軸 dim にプロパティ prop（dim のメンバー -> target のメンバー）を付ける。同じ名前があれば置き換える。
 
@@ -232,6 +328,7 @@ class Model:
             if m.written is not None and uses_property(m.written, dim, prop):
                 self._redefine(m.name)
 
+    @_operation
     def add_input(self, name: str, dims, cells: Mapping[Key, float | bool] | None = None,
                   *, kind: Kind = "number", storage: Any = None, partition: str | None = None) -> None:
         """cells は {キー: 値}。大量のデータはエンジンの格納形式で storage に渡してもよい。
@@ -274,6 +371,7 @@ class Model:
         self._values[name] = storage
         self._redefine(name, old)
 
+    @_operation
     def add_formula(self, name: str, dims, formula: Expr | str, *, kind: Kind = "number",
                     partition: str | None = None, overridable: bool = False) -> None:
         """formula は AST か式の文字列。文字列の構文エラーはここで ParseError になる。
@@ -301,6 +399,7 @@ class Model:
 
     # ------------------------------------------------ Metric の削除と名前の変更
 
+    @_operation
     def remove_metric(self, name: str) -> None:
         """Metric を消す。どの式からも参照されていない Metric だけを消せる（消しても他の値は変わらない）。
         上書きできる Metric なら、上書き用の隠し入力も一緒に消す。ID は再利用しない。"""
@@ -322,6 +421,7 @@ class Model:
             self._plan = [s for s in self._plan if s.names[0] not in gone]
             self._levels = [[s for s in level if s.names[0] not in gone] for level in self._levels]
 
+    @_operation
     def rename_metric(self, old: str, new: str) -> None:
         """Metric の名前を変える。値は変わらないので計算し直さない。式の中の参照（Metric を使った
         BY も）はすべて新しい名前になる。上書き用の隠し入力の名前も一緒に変わる。ID は変わらない。"""
@@ -406,6 +506,7 @@ class Model:
 
     # ------------------------------------------------ 按分
 
+    @_operation
     def spread(self, name: str, total: float, *, how: str = "proportional",
                where: Mapping[str, str] | None = None, **coords: str) -> int:
         """入力 Metric の範囲に、合計が total になるよう値を配る。書き込んだセルの数を返す。
@@ -455,6 +556,7 @@ class Model:
 
     # ------------------------------------------------ メンバーの追加
 
+    @_operation
     def add_member(self, dim: str, member: str, **properties: str) -> None:
         """軸 dim の末尾にメンバーを足す。properties でプロパティの値も設定できる。
 
@@ -472,15 +574,20 @@ class Model:
         d.add_member(member, self._new_id())
         for prop, value in properties.items():
             d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
+        self._member_added(dim)
+        self._added.setdefault(dim, set()).add(member)
+
+    def _member_added(self, dim: str) -> None:
+        """軸 dim にメンバーを足したことをエンジンと格納データに反映する。"""
         self.engine.dimension_changed(self, dim)
         # メンバーが増えて、格納データのキーに収まらなくなったら詰め直す
         for store in (self._values, self._counts):
             for name in store:
                 store[name] = self.engine.fit(store[name], self)
-        self._added.setdefault(dim, set()).add(member)
 
     # ------------------------------------------------ メンバーの名前の変更と削除
 
+    @_operation
     def rename_member(self, dim: str, old: str, new: str) -> None:
         """軸 dim のメンバー old の名前を new にする。
 
@@ -490,17 +597,8 @@ class Model:
         d = self.dimension(dim)
         self.recalc()  # 変更範囲はメンバー名で持つので、ためている変更を先に片付ける
         self.slice_log._flush()  # 記録を今の名前で直しておく
-        d.rename_member(old, new)
-        for other in self.dimensions.values():
-            for prop, (target, mapping) in list(other.properties.items()):
-                if target == dim and old in mapping.values():
-                    other.properties[prop] = (target, {k: new if v == old else v for k, v in mapping.items()})
-        self.engine.dimension_changed(self, dim)
+        self._rename_member_raw(dim, old, new)
         for name, m in self.metrics.items():
-            if dim in m.dims:
-                self._values[name] = self.engine.rename_member(self._values[name], dim, old, new, self)
-                if name in self._counts:
-                    self._counts[name] = self.engine.rename_member(self._counts[name], dim, old, new, self)
             if m.written is not None:
                 m.written = rename_member(m.written, dim, old, new)
                 m.formula = rename_member(m.formula, dim, old, new)
@@ -509,6 +607,21 @@ class Model:
                 self._delta[name] = dataclasses.replace(plan, count=rename_member(plan.count, dim, old, new))
         self._delta_cache.clear()
 
+    def _rename_member_raw(self, dim: str, old: str, new: str) -> None:
+        """メンバーの名前の変更を、軸、プロパティの対応表、格納データに反映する（式は書き換えない）。"""
+        self.dimension(dim).rename_member(old, new)
+        for other in self.dimensions.values():
+            for prop, (target, mapping) in list(other.properties.items()):
+                if target == dim and old in mapping.values():
+                    other.properties[prop] = (target, {k: new if v == old else v for k, v in mapping.items()})
+        self.engine.dimension_changed(self, dim)
+        for name, m in self.metrics.items():
+            if dim in m.dims and name in self._values:  # 再生の途中では計算 Metric の格納データがない
+                self._values[name] = self.engine.rename_member(self._values[name], dim, old, new, self)
+                if name in self._counts:
+                    self._counts[name] = self.engine.rename_member(self._counts[name], dim, old, new, self)
+
+    @_operation
     def remove_member(self, dim: str, member: str) -> None:
         """軸 dim からメンバーを消す。
 
@@ -566,20 +679,28 @@ class Model:
         #    そのメンバーのセルが実際にある Metric の消えるセルと、計算し直す範囲だけにする
         todo = self._removal_regions(dim, member, has_cells)
         self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、詰める前に名前へ直す
+        self._drop_member(dim, member)
+        self._forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
+        self.recalc()
+
+    def _drop_member(self, dim: str, member: str) -> None:
+        """メンバーを消したことを、軸、プロパティの対応表、格納データ（位置を詰める）に反映する
+        （計算し直さない）。"""
+        d = self.dimension(dim)
+        index = d._index[member]
+        values_kind = member_kind(dim)
         d.remove_member(member)
         for other in self.dimensions.values():
             for prop, (target, mapping) in list(other.properties.items()):
                 if target == dim and member in mapping.values():
                     other.properties[prop] = (target, {k: v for k, v in mapping.items() if v != member})
-        eng.dimension_changed(self, dim, renumbered=True)
+        self.engine.dimension_changed(self, dim, renumbered=True)
         for name, m in self.metrics.items():
             values = m.kind == values_kind
-            if dim in m.dims or values:
-                self._values[name] = eng.remove_member(self._values[name], dim, index, member, values, self)
+            if name in self._values and (dim in m.dims or values):
+                self._values[name] = self.engine.remove_member(self._values[name], dim, index, member, values, self)
             if dim in m.dims and name in self._counts:
-                self._counts[name] = eng.remove_member(self._counts[name], dim, index, member, False, self)
-        self._forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
-        self.recalc()
+                self._counts[name] = self.engine.remove_member(self._counts[name], dim, index, member, False, self)
 
     def _removal_regions(self, dim: str, member: str, has_cells) -> dict[str, Restrict]:
         """入力を空にしたあと、メンバーを消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。
@@ -624,6 +745,7 @@ class Model:
 
     # ------------------------------------------------ 入力
 
+    @_operation
     def set_cell(self, name: str, value: float | bool | None, **coords: str) -> None:
         m = self.metrics[name]
         if m.formula is not None:
@@ -863,7 +985,8 @@ class Model:
             dim = self.dimensions[d]
             width = -(-len(dim.members) // partitions)
             total = -(-len(dim.members) // width)
-            return len({dim._index[x] // width for x in region[d]}) / total
+            # 記録したあとで名前を変えたり消したりしたメンバーは読み飛ばす（分割軸の選び方にしか使わない）
+            return len({dim._index[x] // width for x in region[d] if x in dim._index}) / total
 
         samples = [regions[name] for regions in self._samples.values() if name in regions]
         if not samples:

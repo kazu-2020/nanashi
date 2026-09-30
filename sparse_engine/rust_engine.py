@@ -354,3 +354,9 @@ class RustEngine:
 
     def size(self, store) -> int:
         return self.core.size(store)
+
+    def same(self, a, b) -> bool:
+        return self.core.same_store(a, b)
+
+    def diff(self, old, new):
+        return self.core.diff_stores(old, new)

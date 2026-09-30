@@ -5,6 +5,7 @@
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use imbl::ordmap::DiffItem;
 use imbl::OrdMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -658,6 +659,78 @@ impl Store {
             })
             .collect();
         Some(sets)
+    }
+
+    /// 同じ格納データ（複製しただけで、どちらにも書き込んでいない）か。
+    pub fn same_as(&self, other: &Store) -> bool {
+        Arc::ptr_eq(&self.base, &other.base) && self.delta.ptr_eq(&other.delta)
+    }
+
+    /// self（変更前）と other（変更後）で値が違うセルの (キー, 変更前, 変更後)。空のセルは None。
+    /// キーの詰め方が違えば比べられないので None を返す（呼び出し側が別の方法で比べる）。
+    /// 本体を共有していれば差分の木どうしだけを比べ、木の共有している部分も飛ばす。
+    #[allow(clippy::type_complexity)]
+    pub fn diff_cells(&self, other: &Store) -> Option<Vec<(u64, Option<f64>, Option<f64>)>> {
+        if self.pack != other.pack {
+            return None;
+        }
+        let mut out = Vec::new();
+        if Arc::ptr_eq(&self.base, &other.base) {
+            for item in self.delta.diff(&other.delta) {
+                let k = *match item {
+                    DiffItem::Add(k, _) | DiffItem::Remove(k, _) | DiffItem::Update { new: (k, _), .. } => k,
+                };
+                let (a, b) = (self.value_at(k), other.value_at(k));
+                if a != b {
+                    out.push((k, a, b));
+                }
+            }
+            return Some(out);
+        }
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        self.merged(0, None, |k, v| a.push((k, v)));
+        other.merged(0, None, |k, v| b.push((k, v)));
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() || j < b.len() {
+            let ka = a.get(i).map(|c| c.0);
+            let kb = b.get(j).map(|c| c.0);
+            match (ka, kb) {
+                (Some(x), Some(y)) if x == y => {
+                    if a[i].1 != b[j].1 {
+                        out.push((x, Some(a[i].1), Some(b[j].1)));
+                    }
+                    i += 1;
+                    j += 1;
+                }
+                (Some(x), Some(y)) if x < y => {
+                    out.push((x, Some(a[i].1), None));
+                    i += 1;
+                }
+                (Some(x), None) => {
+                    out.push((x, Some(a[i].1), None));
+                    i += 1;
+                }
+                (_, Some(y)) => {
+                    out.push((y, None, Some(b[j].1)));
+                    j += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        Some(out)
+    }
+
+    /// キー k のセルの値（空なら None）。
+    fn value_at(&self, k: u64) -> Option<f64> {
+        match self.delta.get(&k) {
+            Some(v) => *v,
+            None => self.base.keys.binary_search(&k).ok().map(|i| self.base.vals[i]),
+        }
+    }
+
+    /// キーを、宣言した軸の順のメンバー番号に直す。
+    pub fn decode(&self, k: u64) -> Vec<u32> {
+        self.metric_dims.iter().map(|d| self.pack.get(k, self.pack.pos(*d).unwrap())).collect()
     }
 
     /// 値が v のセルを消す（メンバー型の Metric で、消すメンバーを指す値を空にする）。

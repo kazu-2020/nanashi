@@ -61,6 +61,11 @@ class Engine(Protocol):
     def share(self, storage: Any) -> Any:
         """複製したモデルに渡す格納データ。以後の書き込みが互いに影響しないこと。"""
     def size(self, storage: Any) -> int: ...
+    def same(self, a: Any, b: Any) -> bool:
+        """a と b が同じ格納データ（複製しただけで、どちらにも書き込んでいない）か。わからなければ False。"""
+    def diff(self, old: Any, new: Any) -> list | None:
+        """old（変更前）と new（変更後）で値が違うセルの (軸ごとの位置の組, 変更前, 変更後) の列。
+        空のセルは None。安く比べられなければ None を返す（呼び出し側が名前で比べる）。"""
 
 
 class ReferenceEngine:
@@ -163,6 +168,12 @@ class ReferenceEngine:
 
     def size(self, storage: Cube) -> int:
         return len(storage)
+
+    def same(self, a, b) -> bool:
+        return a is b
+
+    def diff(self, old, new):
+        return None  # Cube はメンバー名で持つので、名前で比べてもらう
 
 
 def default_engine() -> Engine:

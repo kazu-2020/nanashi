@@ -343,6 +343,27 @@ impl Core {
         (cols, values, s.kind == Kind::Bool)
     }
 
+    /// 2 つのハンドルが同じ格納データ（複製しただけで、どちらにも書き込んでいない）を指すか。
+    fn same_store(&self, a: &Bound<'_, StoreHandle>, b: &Bound<'_, StoreHandle>) -> bool {
+        a.borrow().store.same_as(&b.borrow().store)
+    }
+
+    /// old（変更前）と new（変更後）で値が違うセルの (宣言した軸の順のメンバー番号, 変更前, 変更後)。
+    /// キーの詰め方が違えば None（呼び出し側が別の方法で比べる）。
+    #[allow(clippy::type_complexity)]
+    fn diff_stores(
+        &self,
+        py: Python<'_>,
+        old: &Bound<'_, StoreHandle>,
+        new: &Bound<'_, StoreHandle>,
+    ) -> Option<Vec<(Vec<u32>, Option<f64>, Option<f64>)>> {
+        let (a, b) = (old.borrow().store.clone(), new.borrow().store.clone());
+        py.detach(move || {
+            let cells = a.diff_cells(&b)?;
+            Some(cells.into_iter().map(|(k, x, y)| (b.decode(k), x, y)).collect())
+        })
+    }
+
     fn size(&self, store: &Bound<'_, StoreHandle>) -> usize {
         store.borrow().store.len()
     }

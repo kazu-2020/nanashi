@@ -59,7 +59,10 @@ class Dimension:
     def copy(self) -> Dimension:
         """同じメンバーとプロパティを持つ別の Dimension。対応表の dict は共有する
         （プロパティの変更は set_property_value で新しい dict に置き換えるので、共有しても干渉しない）。"""
-        other = Dimension(self.name, self.members, ordered=self.ordered, ids=self.ids, id=self.id)
+        other = Dimension.__new__(Dimension)  # 検査と表の作り直しを省く（トランザクションごとに複製するので）
+        other.name, other.id, other.ordered = self.name, self.id, self.ordered
+        other.members, other.ids = list(self.members), list(self.ids)
+        other._index, other._by_id = dict(self._index), dict(self._by_id)
         other.properties = dict(self.properties)
         return other
 
