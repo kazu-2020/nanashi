@@ -220,3 +220,60 @@ class RustAffectedMatchesPython(unittest.TestCase):
                 if x.formula is not None:
                     with self.subTest(metric=x.name):
                         self.assertEqual(m.engine.affected(x.formula, m, regions), affected(x.formula, m, regions))
+
+
+CYCLIC = [  # (名前, 軸, 式) の列。計画を作るときに失敗する循環。文言が両方の実装で一致すること
+    [("A", ["Product", "Month"], "B + 1"), ("B", ["Product", "Month"], "A * 2")],
+    [("A", ["Product", "Month"], "PREVIOUS(Month) + B"), ("B", ["Product", "Month"], "A[SELECT: Month + 1]")],
+    [("A", ["Product", "Month"], "PREVIOUS(Month) + B[EXPAND: Month]"), ("B", ["Product"], "A[REMOVE SUM: Month]")],
+    [("A", ["Product", "Month"], "PREVIOUS(Month) + B"), ("B", ["Product", "Month"], "A + C"), ("C", ["Product", "Month"], "B * 2")],
+    [("A", ["Product", "Month"], "PREVIOUS(Month) + B[EXPAND: Month]"), ("B", ["Product"], "A[SELECT: Month.\"Jan\"]")],
+]
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustPlanMatchesPython(unittest.TestCase):
+    """Rust の計算計画（段階の順、scan、段）は Python の参照実装と一致する。"""
+
+    def models(self):
+        from examples.fpa import build
+        from .test_incremental import model as incremental
+        yield model(RustEngine())
+        yield build(RustEngine(), employees=12, products=6, months=8, seed=3)
+        m = incremental()
+        fresh = Model(engine=RustEngine())
+        fresh.dimensions = m.dimensions
+        for name, x in m.metrics.items():
+            if x.formula is None:
+                fresh.add_input(name, x.dims, m.value(name).cells, kind=x.kind)
+            else:
+                fresh.add_formula(name, x.dims, x.formula, kind=x.kind)
+        yield fresh
+
+    def test_steps_and_levels(self):
+        for m in self.models():
+            m.recalc()
+            formulas = {n: x.formula for n, x in m.metrics.items()}
+            rust_plan, _, rust_levels = m._make_plan(formulas)
+            saved, m.engine.plan = m.engine.plan, None  # 参照実装の経路を通す
+            try:
+                py_plan, _, py_levels = m._make_plan(formulas)
+            finally:
+                m.engine.plan = saved
+            self.assertEqual([(s.names, s.scan_dim) for s in rust_plan], [(s.names, s.scan_dim) for s in py_plan])
+            self.assertEqual([[s.names for s in level] for level in rust_levels],
+                             [[s.names for s in level] for level in py_levels])
+
+    def test_cycle_messages(self):
+        from sparse_engine.evaluate import FormulaError as FE
+        for defs in CYCLIC:
+            messages = []
+            for engine in (ReferenceEngine, RustEngine):
+                m = model(engine())
+                with self.subTest(defs=[d[0] + "=" + d[2] for d in defs], engine=m.engine.name):
+                    with self.assertRaisesRegex(FE, "循環参照") as cm:
+                        for name, dims, text in defs:
+                            m.add_formula(name, dims, text)
+                        m.recalc()
+                    messages.append(str(cm.exception))
+            self.assertEqual(messages[0], messages[1], defs)

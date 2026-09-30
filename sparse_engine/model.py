@@ -1010,19 +1010,24 @@ class Model:
             formula = Coalesce(Ref(m.override_name), formula)  # 上書きがあればそれを優先
         return formula, w
 
+    def _make_plan(self, formulas: dict[str, Expr | None]) -> tuple[list[Step], dict[str, list[Edge]], list[list[Step]]]:
+        """依存グラフから計算計画（依存先が先の順の段階と、段ごとの段階）を作る。
+        エンジンが計画を作れるなら（Rust）それに任せる（依存グラフもエンジンが返す）。"""
+        fast = getattr(self.engine, "plan", None)
+        if fast is not None:
+            steps, levels, edges = fast(formulas, {n: self.metrics[n].dims for n in formulas}, self)
+            plan = [Step(names, dim) for names, dim in steps]
+            return plan, edges, [[plan[i] for i in level] for level in levels]
+        edges = {n: [] if f is None else list(collect_refs(f, self)) for n, f in formulas.items()}
+        plan = [self._make_step(scc, edges) for scc in _tarjan(edges)]
+        return plan, edges, _levels(plan, edges)
+
     def _compile_all(self) -> None:
-        edges: dict[str, list[Edge]] = {}
         self.warnings = {}
         for m in self.metrics.values():
-            if m.formula is None:
-                edges[m.name] = []
-                continue
-            m.formula, self.warnings[m.name] = self._checked(m)
-            edges[m.name] = list(collect_refs(m.formula, self))
-
-        self._plan = [self._make_step(scc, edges) for scc in _tarjan(edges)]
-        self._edges = edges
-        self._levels = _levels(self._plan, edges)
+            if m.formula is not None:
+                m.formula, self.warnings[m.name] = self._checked(m)
+        self._plan, self._edges, self._levels = self._make_plan({n: m.formula for n, m in self.metrics.items()})
         self._apply_layout()
         self._delta = {}
         if self.delta_aggregation:
@@ -1045,10 +1050,9 @@ class Model:
         """
         dirty = [n for n in self.metrics if n in self._pending.dirty]
         checked = {n: self._checked(self.metrics[n]) for n in dirty if self.metrics[n].formula is not None}
-        edges = dict(self._edges)
-        for n in dirty:
-            edges[n] = list(collect_refs(checked[n][0], self)) if n in checked else []
-        plan = [self._make_step(scc, edges) for scc in _tarjan(edges)]
+        formulas = {n: checked[n][0] if n in checked else (None if n in self._pending.dirty else m.formula)
+                    for n, m in self.metrics.items()}
+        plan, edges, levels = self._make_plan(formulas)
 
         for n, (formula, w) in checked.items():
             self.metrics[n].formula, self.warnings[n] = formula, w
@@ -1057,8 +1061,7 @@ class Model:
                 self.warnings.pop(n, None)
         scans = lambda steps: {n for s in steps if s.scan_dim is not None for n in s.names}
         moved = scans(self._plan) ^ scans(plan)  # scan に入った、または scan から出た Metric
-        self._plan, self._edges = plan, edges
-        self._levels = _levels(plan, edges)
+        self._plan, self._edges, self._levels = plan, edges, levels
         self._layout_changed(dirty)
 
         # 差分集計の計画は、変えた Metric と scan に出入りした Metric だけ作り直す

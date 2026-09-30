@@ -3,6 +3,7 @@
 
 mod check;
 mod core;
+mod graph;
 mod plan;
 
 use crate::check::{Env, TKind, Ty};
@@ -505,6 +506,15 @@ impl Core {
             })
             .collect();
         Ok(PlanHandle { plan: Arc::new(Plan { metrics: out, levels }) })
+    }
+
+    /// 計算計画を作る。formulas は Metric の番号順の (式, 読み出す Metric の番号) で、入力は None。
+    /// names と dims はその名前と軸。返すのは、依存先が先の順の段階 (Metric の番号の列, scan の軸) と、
+    /// 段ごとの段階の番号の列と、依存グラフの辺。循環の誤りは ValueError（文言は Python の参照実装と同じ）。
+    #[allow(clippy::type_complexity)]
+    fn plan(&self, formulas: Vec<Bound<'_, PyAny>>, names: Vec<String>, dims: Vec<Vec<DimId>>) -> PyResult<(Vec<(Vec<usize>, Option<DimId>)>, Vec<Vec<usize>>, graph::Edges)> {
+        let formulas: Vec<Option<Formula>> = formulas.iter().map(formula).collect::<PyResult<_>>()?;
+        graph::plan(&self.cat, &formulas, &names, &dims).map_err(err)
     }
 
     /// 入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲を返す。

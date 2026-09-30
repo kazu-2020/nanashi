@@ -9,12 +9,13 @@ Metric の格納データと評価の途中結果は Rust 側に置き、Python 
 """
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from typing import Any
 
 import nanashi_core
 
 from .core import Cube
-from .evaluate import Catalog, FormulaError, Type, member_kind
+from .evaluate import Catalog, Edge, FormulaError, Type, member_kind
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
@@ -35,6 +36,35 @@ class _Typed:
     @property
     def metrics(self):
         return self._cat.metrics
+
+
+class LazyEdges(MutableMapping):
+    """Rust が返した依存グラフ。Metric 名 -> Edge の列に直すのは、初めて使うときだけ
+    （計画を作るたびに全部の辺を Python のオブジェクトにすると、計画そのものより時間がかかる）。"""
+
+    def __init__(self, build):
+        self._build = build
+        self._data: dict | None = None
+
+    def _fill(self) -> dict:
+        if self._data is None:
+            self._data = self._build()
+        return self._data
+
+    def __getitem__(self, key):
+        return self._fill()[key]
+
+    def __setitem__(self, key, value):
+        self._fill()[key] = value
+
+    def __delitem__(self, key):
+        del self._fill()[key]
+
+    def __iter__(self):
+        return iter(self._fill())
+
+    def __len__(self):
+        return len(self._fill())
 
 
 class RustEngine:
@@ -243,6 +273,33 @@ class RustEngine:
     def _to_names(self, cat: Catalog, region) -> dict:
         """Rust の範囲（軸の番号 -> メンバー番号の列）を、メンバー名の範囲にする。"""
         return {self._names[d]: frozenset(cat.dimension(self._names[d]).members[j] for j in ms) for d, ms in region}
+
+    # ------------------------------------------------ 計算計画
+
+    def plan(self, formulas: dict, dims: dict, cat: Catalog) -> tuple[list, list]:
+        """依存グラフから計算計画を作る。formulas は Metric 名 -> 評価する式（入力は None）、dims は軸。
+        返すのは、依存先が先の順の段階 (名前の組, scan の軸) と、段ごとの段階の番号の列と、
+        依存グラフ（Metric 名 -> Edge の列）。循環の誤りは FormulaError（文言は Python の参照実装と同じ）。"""
+        names = list(formulas)
+        index = {n: i for i, n in enumerate(names)}
+        items = []
+        for n in names:
+            f = formulas[n]
+            if f is None:
+                items.append(None)
+            else:
+                compiled, reads = self._compile(f, cat)
+                items.append((compiled, [index[r] for r in reads]))
+        try:
+            steps, levels, edges = self.core.plan(items, names, [[self._dim(cat, d) for d in dims[n]] for n in names])
+        except ValueError as e:
+            raise FormulaError(str(e)) from None
+        def graph():
+            return {n: [Edge(names[t], tuple(sorted((self._names[d], k) for d, k in lags)),
+                             frozenset(self._names[d] for d in broken)) for t, lags, broken in es]
+                    for n, es in zip(names, edges)}
+        return ([(tuple(names[i] for i in ms), None if d is None else self._names[d]) for ms, d in steps], levels,
+                LazyEdges(graph))
 
     # ------------------------------------------------ 影響範囲
 
