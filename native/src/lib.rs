@@ -981,6 +981,15 @@ impl CellBlock {
         self.rows(py)?.eq(other)
     }
 
+    /// 座標が key（座標の ID の列）の行の [変更前, 変更後] の列（履歴を引くときに、全行を Python にしない）。
+    fn find<'py>(&self, py: Python<'py>, key: Vec<i64>) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+        if key.len() != self.c.ids.len() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<usize> = py.detach(|| (0..self.c.len()).filter(|&r| self.c.ids.iter().zip(&key).all(|(c, k)| c[r] == *k)).collect());
+        rows.into_iter().map(|r| Ok((self.value(py, self.c.old[r])?, self.value(py, self.c.new[r])?))).collect()
+    }
+
     /// keys（座標の ID の列の列）のどれかを含むか。
     fn contains_any(&self, py: Python<'_>, keys: Vec<Vec<i64>>) -> bool {
         py.detach(|| {

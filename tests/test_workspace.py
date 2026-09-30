@@ -295,6 +295,7 @@ class PgRustWithJournal(RustWithJournal):
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class LargeWriteConflicts(unittest.TestCase):
     """多くのセルを書き換えた記録（変更の塊）とも、同じセルの書き込みを見分ける。"""
+    journal_options = {"bulk_cells": 1000}  # 記録先があれば、按分（1500 セル）の変更はファイルに書く
 
     def setUp(self):
         from .test_journal import many_cells
@@ -336,7 +337,6 @@ class FileLargeWriteConflicts(JournalCase, LargeWriteConflicts):
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class PgLargeWriteConflicts(JournalCase, LargeWriteConflicts):
     store = PgStore
-    journal_options = {"bulk_cells": 1000}  # 按分（1500 セル）の変更はファイルに書く
 
 
 class Policies(unittest.TestCase):

@@ -344,5 +344,62 @@ class Blocks(unittest.TestCase):
         run_random(self, seed=57, rounds=80, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine])
 
 
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
+class CellFiles(unittest.TestCase):
+    """bulk_cells を超えるセルを書き換えた記録は、セルの変更を JSON の行にせず Parquet のファイルに書く。"""
+
+    def test_random_replay_with_files(self):
+        # ほとんどの記録で、セルの変更をファイルに置く経路を通す（参照実装の行の列も、変更の塊にして書く）
+        run_random(self, seed=61, rounds=60, engine=ReferenceEngine, reopen_engines=[ReferenceEngine],
+                   make=lambda tmp: FileJournal(tmp, fsync=False, bulk_cells=3))
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_random_replay_with_blocks_in_files(self):
+        import sparse_engine.journal as journal
+        saved, journal.BLOCK_MIN = journal.BLOCK_MIN, 1  # すべての変更を変更の塊で持つ
+        self.addCleanup(setattr, journal, "BLOCK_MIN", saved)
+        run_random(self, seed=63, rounds=60, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine],
+                   make=lambda tmp: FileJournal(tmp, bulk_cells=3))
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_large_write_goes_to_parquet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = many_cells(RustEngine(), n=12_000)
+            FileJournal(tmp).start(m)
+            with m.transaction(user="etl"):
+                m.spread("V", 24_000.0, how="even")
+            m.set_cell("V", 1.0, K="k7", T="t1")  # 少ないセルは、これまでどおり行に書く
+            (f,) = (Path(tmp) / "cells").glob("*.parquet")
+            self.assertTrue(f.name.endswith(f"-{m.metrics['V'].id}.parquet"))
+            lines = (Path(tmp) / "log.jsonl").read_text().splitlines()
+            self.assertLess(len(lines[0]), 1000)  # 記録の行には、ファイルの名前とハッシュだけ
+            self.assertIn('"cells":[', lines[1])
+            for e in (ReferenceEngine, RustEngine):
+                check_same_state(self, m, FileJournal(tmp).open(e()))
+            history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")  # 変更の塊を Rust で探す
+            self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
+            history = FileJournal(tmp).cell_history(m, "V", K="k7", T="t1")
+            self.assertEqual([(h["old"], h["new"]) for h in history], [(None, 1.0)])
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_corrupted_cell_file_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = many_cells(RustEngine())
+            FileJournal(tmp, bulk_cells=1000).start(m)
+            m.spread("V", 3000.0, how="even")
+            (f,) = (Path(tmp) / "cells").glob("*.parquet")
+            f.write_bytes(f.read_bytes()[:-10])
+            with self.assertRaisesRegex(ValueError, "壊れている"):
+                FileJournal(tmp).open(RustEngine())
+
+    def test_moved_directory_still_opens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = build_with(ReferenceEngine())
+            FileJournal(Path(tmp) / "a", bulk_cells=3).start(m)
+            m.spread("Cost", 100, Product="C")
+            (Path(tmp) / "a").rename(Path(tmp) / "b")  # ファイルの名前は記録先のディレクトリからの相対
+            check_same_state(self, m, FileJournal(Path(tmp) / "b").open(ReferenceEngine()))
+
+
 if __name__ == "__main__":
     unittest.main()
