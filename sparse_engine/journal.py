@@ -14,6 +14,10 @@
 削除のように多くのセルを書き換える操作の結果も漏れなく残る。Rust のエンジンでは、書き込んでいない
 Metric の格納データは複製前と同じものを指しているので比べずに済み、書き込んだ Metric も差分の木の
 違う部分だけを比べる。
+
+書き換えた入力セルは、Metric ごとに {"metric": ID, "dims": 軸の ID の列, "rows": 行} で持つ。rows は
+[座標の ID の列, 変更前, 変更後] の列で、Rust のエンジンで BLOCK_MIN 件以上なら、同じ行を順に返す
+変更の塊（nanashi_core.CellBlock）のまま持つ（Python のオブジェクトにしない）。JSON に書くときは行に直す。
 """
 from __future__ import annotations
 
@@ -28,6 +32,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .core import Dimension
+from .engine import parquet_value
+
+BLOCK_MIN = 1000  # 書き換えたセルがこれ以上なら、行の列でなく変更の塊で持つ（Rust のエンジン）
 from .expr import Expr
 from .parser import parse, to_formula
 
@@ -145,8 +152,8 @@ def changes(before, after) -> dict:
         o = old_metrics.get(m.id)
         old_store = before._values.get(o.name) if o is not None and o.formula is None else None
         rows = _cell_changes(before, o, old_store, after, m, after._values[m.name])
-        if rows:
-            cells.append({"metric": m.id, "rows": rows})
+        if len(rows):
+            cells.append({"metric": m.id, "dims": [after.dimension(d).id for d in m.dims], "rows": rows})
 
     for key, value in (("dimensions", added_dims), ("members", members), ("properties", props),
                        ("metrics", defs), ("metrics_removed", removed), ("cells", cells)):
@@ -159,8 +166,9 @@ def _value_dim(model, m):
     return model.dimension(m.kind.removeprefix("member:")) if m.kind.startswith("member:") else None
 
 
-def _cell_changes(before, o, old_store, after, m, new_store) -> list:
-    """入力 Metric m の、書き換わったセルの [座標の ID の列, 変更前, 変更後]。メンバー型の値は ID で持つ。"""
+def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
+    """入力 Metric m の、書き換わったセルの [座標の ID の列, 変更前, 変更後] の列（多ければ変更の塊）。
+    メンバー型の値は ID で持つ。"""
     eng = after.engine
     if old_store is not None and eng.same(old_store, new_store):
         return []
@@ -172,14 +180,22 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> list:
         to_value = lambda v: None if v is None else bool(v)
     else:
         to_value = lambda v: v
+    comparable = False
     if old_store is not None and o.dims == m.dims and o.kind == m.kind:
         # 位置が変わっていなければ（メンバーを足しただけなら）、エンジンに位置のまま比べてもらう
         olds = [before.dimension(d) for d in m.dims] + ([_value_dim(before, o)] if vdim is not None else [])
         news = dims + ([vdim] if vdim is not None else [])
-        if all(a.ids == b.ids[:len(a.ids)] for a, b in zip(olds, news)):
-            diff = eng.diff(old_store, new_store)
-            if diff is not None:
-                return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff]
+        comparable = all(a.ids == b.ids[:len(a.ids)] for a, b in zip(olds, news))
+    if hasattr(eng, "diff_block") and (old_store is None or comparable):
+        diff = eng.diff_block(old_store, new_store)
+        if diff is not None:
+            if len(diff) >= BLOCK_MIN:
+                return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
+            return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
+    elif comparable:
+        diff = eng.diff(old_store, new_store)
+        if diff is not None:
+            return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff]
     # 名前から ID に直して比べる（メンバーを消したときなど）
     new = _by_id(after, m, new_store)
     old = {} if old_store is None else _by_id(before, o, old_store)
@@ -253,6 +269,10 @@ def apply(model, record: dict) -> None:
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
         store = model._values[m.name]
+        if not isinstance(c["rows"], list) and hasattr(model.engine, "apply_block"):  # 変更の塊はまとめて書く
+            model._values[m.name] = model.engine.apply_block(store, c["rows"], [d.ids for d in dims],
+                                                             None if vdim is None else vdim.ids)
+            continue
         for ids, _, new in c["rows"]:
             if len(ids) != len(dims) or not all(i in d._by_id for d, i in zip(dims, ids)):
                 continue  # このトランザクションで消したメンバーのセル（メンバーと一緒に消えている）
@@ -459,7 +479,7 @@ class FileJournal(Journal):
     def append_many(self, records: list[dict]) -> list[int]:
         """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。"""
         seqs = list(range(self.head + 1, self.head + 1 + len(records)))
-        lines = "".join(json.dumps({**r, "seq": q}, ensure_ascii=False, separators=(",", ":")) + "\n"
+        lines = "".join(json.dumps({**r, "seq": q}, ensure_ascii=False, separators=(",", ":"), default=_json_rows) + "\n"
                         for r, q in zip(records, seqs))
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(lines)
@@ -508,6 +528,13 @@ class FileJournal(Journal):
             if snapshot_ok(p, meta):
                 out.append((meta["seq"], p))
         return sorted(out, reverse=True)
+
+
+def _json_rows(x: Any) -> list:
+    """変更の塊を、JSON に書ける行の列にする。"""
+    if hasattr(x, "rows"):
+        return x.rows()
+    raise TypeError(f"JSON にできない値: {type(x).__name__}")
 
 
 def _sha256(path: Path) -> str:

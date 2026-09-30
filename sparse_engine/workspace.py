@@ -61,9 +61,37 @@ class _Request:
     future: Future
 
 
-def written_cells(record: dict) -> set[tuple]:
+class Written:
+    """記録で書き換えた入力セル。行の列で持つものは (Metric の ID, 座標のメンバーの ID の組) の集合に、
+    変更の塊で持つものは塊のまま（Python のオブジェクトにせずに）持つ。"""
+
+    def __init__(self, record: dict):
+        self.cells: set[tuple] = set()
+        self.blocks: list[tuple[int, Any]] = []
+        for c in record["changes"].get("cells", []):
+            if isinstance(c["rows"], list):
+                self.cells.update((c["metric"], tuple(ids)) for ids, _, _ in c["rows"])
+            else:
+                self.blocks.append((c["metric"], c["rows"]))
+
+    def __bool__(self) -> bool:
+        return bool(self.cells or self.blocks)
+
+    def overlaps(self, other: Written) -> bool:
+        """同じセルを書き換えているか。"""
+        if self.cells & other.cells:
+            return True
+        for a, b in ((self, other), (other, self)):
+            for metric, block in a.blocks:
+                keys = [list(k) for m, k in b.cells if m == metric]
+                if keys and block.contains_any(keys):
+                    return True
+        return any(m == n and x.overlaps(y) for m, x in self.blocks for n, y in other.blocks)
+
+
+def written_cells(record: dict) -> Written:
     """記録で書き換えた入力セル（Metric の ID と、座標のメンバーの ID）。"""
-    return {(c["metric"], tuple(ids)) for c in record["changes"].get("cells", []) for ids, _, _ in c["rows"]}
+    return Written(record)
 
 
 def _follow(req: _Request, first: _Request) -> None:
@@ -366,7 +394,7 @@ class Workspace:
         self._recent.clear()
         self._ops.clear()
 
-    def _check(self, req: _Request, record: dict, pending: list[set]) -> None:
+    def _check(self, req: _Request, record: dict, pending: list[Written]) -> None:
         """読んだ版（req.expect）より後に、同じセルを変えた書き込みがあれば Conflict。"""
         if req.expect is None:
             return
@@ -377,11 +405,11 @@ class Workspace:
                                                and req.expect < self._recent[0][0] - 1):
             raise Conflict(f"通し番号 {req.expect} の版は古すぎて、その後の変更を確かめられない")
         for seq, user, cells in self._recent:
-            if seq > req.expect and mine & cells:
+            if seq > req.expect and mine.overlaps(cells):
                 raise Conflict(f"読んだ版（{req.expect}）の後に、{user} が同じセルを変えた（通し番号 {seq}）",
                                seq, user)
         for cells in pending:  # 同じまとまりで先に適用した書き込み（まだ通し番号がない）
-            if mine & cells:
+            if mine.overlaps(cells):
                 raise Conflict(f"読んだ版（{req.expect}）の後に、同じセルを変えた書き込みがある")
 
     # ------------------------------------------------ スナップショット

@@ -9,14 +9,12 @@ description = "計画ツールのための、疎な多次元計算エンジン"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = [
-    "numpy>=2.0,<3",
-]
+dependencies = []
 
 [project.optional-dependencies]
 rust = ["nanashi_core"]            # native/ を maturin でビルドしたもの（README の手順）
 postgres = ["psycopg>=3.2,<4"]     # 手元では psycopg[binary] でもよい（3.14t には binary の配布がないので純 Python 版）
-dev = ["maturin>=1.15,<2", "psycopg>=3.2,<4", "pyflakes>=3"]
+dev = ["maturin>=1.15,<2", "psycopg>=3.2,<4", "pyflakes>=3", "numpy>=2.0,<3"]  # numpy はベンチマークの入力を作るのに使う
 
 [tool.setuptools]
 packages = ["sparse_engine"]

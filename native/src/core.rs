@@ -840,6 +840,61 @@ impl Store {
         self.after_delta();
     }
 
+    /// まとめて書き込む。cols は宣言した軸の順のメンバー番号の列、values の None は消す。
+    /// 同じセルが複数あれば後のものが勝つ。件数が多ければ、差分に 1 件ずつ入れずに本体を作り直す。
+    pub fn write_many(&mut self, cols: &[&[u32]], values: &[Option<f64>]) {
+        if values.len() < 1024 {
+            let mut key = vec![0; cols.len()];
+            for (i, v) in values.iter().enumerate() {
+                for (k, c) in key.iter_mut().zip(cols) {
+                    *k = c[i];
+                }
+                self.write(&key, *v);
+            }
+            return;
+        }
+        let pos: Vec<usize> = self.metric_dims.iter().map(|d| self.pack.pos(*d).unwrap()).collect();
+        let pack = &self.pack;
+        let mut cells: Vec<(u64, Option<f64>)> = (0..values.len())
+            .into_par_iter()
+            .map(|i| {
+                let mut k = 0;
+                for (c, &p) in cols.iter().zip(&pos) {
+                    k |= pack.put(p, c[i]);
+                }
+                (k, values[i])
+            })
+            .collect();
+        cells.par_sort_by_key(|c| c.0); // 安定なので、同じキーは元の順に並ぶ
+        let mut updates: Vec<(u64, Option<f64>)> = Vec::with_capacity(cells.len());
+        for c in cells {
+            match updates.last_mut() {
+                Some(last) if last.0 == c.0 => *last = c,
+                _ => updates.push(c),
+            }
+        }
+        let mut out = Vec::with_capacity(self.base.keys.len() + self.delta.len() + updates.len());
+        let mut i = 0;
+        self.merged(0, None, |k, v| {
+            while i < updates.len() && updates[i].0 < k {
+                if let Some(x) = updates[i].1 {
+                    out.push((updates[i].0, x));
+                }
+                i += 1;
+            }
+            if i < updates.len() && updates[i].0 == k {
+                if let Some(x) = updates[i].1 {
+                    out.push((k, x));
+                }
+                i += 1;
+            } else {
+                out.push((k, v));
+            }
+        });
+        out.extend(updates[i..].iter().filter_map(|&(k, v)| v.map(|x| (k, x))));
+        self.set_sorted(out);
+    }
+
     /// 宣言した軸の順のメンバー番号の列と、値の列。
     pub fn rows(&self) -> (Vec<Vec<u32>>, Vec<f64>) {
         let pos: Vec<usize> = self.metric_dims.iter().map(|d| self.pack.pos(*d).unwrap()).collect();

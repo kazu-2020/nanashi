@@ -20,9 +20,9 @@ except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
 try:
-    import numpy  # noqa: F401  スナップショットの保存形式に使う
+    import nanashi_core  # noqa: F401  保存形式（Parquet）の読み書きに使う
 except ImportError:
-    numpy = None
+    nanashi_core = None
 
 
 def definitions(m: Model) -> dict:
@@ -108,7 +108,7 @@ class Transactions(unittest.TestCase):
         self.assertEqual(len(outer.record["ops"]), 2)
 
 
-@unittest.skipIf(numpy is None, "numpy が必要")
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class Journal(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
@@ -188,7 +188,8 @@ class Journal(unittest.TestCase):
         self.assertEqual([s for s, _ in FileJournal(self.path).snapshots()], [1, 0])
         check_same_state(self, self.m, self.reopen())
         # 新しいスナップショットが壊れていたら、古いスナップショットから記録を多く再生する
-        (self.path / "snapshots" / f"{1:020d}" / "inputs.npz").write_bytes(b"broken")
+        broken = next((self.path / "snapshots" / f"{1:020d}").glob("inputs.*.parquet"))
+        broken.write_bytes(b"broken")
         self.assertEqual([s for s, _ in FileJournal(self.path).snapshots()], [0])
         check_same_state(self, self.m, self.reopen())
 
@@ -225,7 +226,7 @@ class RustTransactions(Transactions):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
 
-@unittest.skipIf(RustEngine is None or numpy is None, "nanashi_core と numpy が必要")
+@unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class RustJournal(Journal):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
@@ -279,7 +280,7 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) 
                         check_same_state(test, m, make(tmp).open(e()))
 
 
-@unittest.skipIf(numpy is None, "numpy が必要")
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class RandomReplay(unittest.TestCase):
     def test_reference(self):
         engines = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
@@ -288,6 +289,44 @@ class RandomReplay(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_rust(self):
         run_random(self, seed=53, rounds=120, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine])
+
+
+def many_cells(engine, n: int = 1500) -> Model:
+    m = Model(engine=engine)
+    m.add_dimension("K", [f"k{i}" for i in range(n)])
+    m.add_dimension("T", ["t0", "t1"], ordered=True)
+    m.add_input("V", ["K", "T"], {(f"k{i}", "t0"): float(i) for i in range(n)})
+    m.add_formula("Sum", ["T"], "V[REMOVE SUM: K]")
+    m.recalc()
+    return m
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class Blocks(unittest.TestCase):
+    """Rust のエンジンで多くのセルを書き換えた記録は、行の列でなく変更の塊で持つ。"""
+
+    def test_large_changes_are_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = many_cells(RustEngine())
+            FileJournal(tmp, fsync=False).start(m)
+            with m.transaction(user="etl") as txn:
+                m.spread("V", 3000.0, how="even")  # 1500 セルすべてを 2 に
+            (c,) = txn.record["changes"]["cells"]
+            self.assertNotIsInstance(c["rows"], list)
+            self.assertEqual(len(c["rows"]), 1499)  # k2 はもともと 2
+            k, t = m.dimensions["K"], m.dimensions["T"]
+            self.assertEqual(c["dims"], [k.id, t.id])
+            self.assertEqual(sorted(c["rows"])[:2], [[[k.ids[0], t.ids[0]], 0.0, 2.0], [[k.ids[1], t.ids[0]], 1.0, 2.0]])
+            for e in (ReferenceEngine, RustEngine):  # ファイルには行として書く
+                check_same_state(self, m, FileJournal(tmp).open(e()))
+            history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")
+            self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
+
+    def test_random_replay_through_blocks(self):
+        import sparse_engine.journal as journal
+        saved, journal.BLOCK_MIN = journal.BLOCK_MIN, 1  # すべての変更を変更の塊で持つ
+        self.addCleanup(setattr, journal, "BLOCK_MIN", saved)
+        run_random(self, seed=57, rounds=80, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine])
 
 
 if __name__ == "__main__":

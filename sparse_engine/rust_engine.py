@@ -16,6 +16,7 @@ import nanashi_core
 
 from .core import Cube
 from .delta import COUNTED, DeltaPlan
+from .engine import parquet_columns, parquet_value
 from .evaluate import Catalog, Edge, FormulaError, Type, member_kind
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
@@ -399,6 +400,16 @@ class RustEngine:
         return self.core.from_arrays([self._dim(cat, d) for d in dims], self._index(cat, dims, partition),
                                      kind == "boolean", arrays, values)
 
+    def to_parquet(self, store, dims, kind, cat, meta) -> bytes:
+        stored = [self._names[i] for i in self.core.metric_dims(store)]
+        if stored != list(dims):
+            raise ValueError(f"格納データの軸 {stored} が {list(dims)} と違う")
+        return self.core.store_to_parquet(store, parquet_columns(dims, cat), parquet_value(kind), list(meta.items()))
+
+    def from_parquet(self, data, dims, kind, cat, partition=None):
+        return self.core.store_from_parquet(data, [self._dim(cat, d) for d in dims], self._index(cat, dims, partition),
+                                            parquet_value(kind), parquet_columns(dims, cat))
+
     def partition_of(self, store):
         i = self.core.index_dim(store)
         return None if i is None else self._names[i]
@@ -506,12 +517,6 @@ class RustEngine:
         return Cube(dims, {tuple(members[j][cols[j][i]] for j in range(len(dims))): values[i]
                            for i in range(len(values))})
 
-    def to_arrays(self, store, cat) -> dict:
-        """軸ごとのメンバー番号の numpy 配列と、値の配列 __v（保存用。Python のオブジェクトを作らない）。"""
-        cols, values, _ = self.core.arrays(store)
-        dims = [self._names[i] for i in self.core.metric_dims(store)]
-        return {d: c for d, c in zip(dims, cols)} | {"__v": values}
-
     def get(self, store, key, cat):
         dims = [self._names[i] for i in self.core.metric_dims(store)]
         v = self.core.get(store, [cat.dimension(d)._index[m] for d, m in zip(dims, key)])
@@ -570,4 +575,12 @@ class RustEngine:
         return self.core.same_store(a, b)
 
     def diff(self, old, new):
-        return self.core.diff_stores(old, new)
+        d = self.core.diff_block(old, new)
+        return None if d is None else d.rows()
+
+    def diff_block(self, old, new):
+        return self.core.diff_block(old, new)
+
+    def apply_block(self, store, block, dim_ids, value_ids):
+        self.core.apply_block(store, block, dim_ids, value_ids)
+        return store

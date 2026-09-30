@@ -5,18 +5,22 @@ mod check;
 mod core;
 mod graph;
 mod plan;
+mod pq;
 
 use crate::check::{Env, TKind, Ty};
 use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
 use crate::plan::{Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use bytes::Bytes;
+use numpy::PyReadonlyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::pybacked::PyBackedBytes;
+use pyo3::types::{PyBool, PyBytes, PyInt, PyIterator, PyList, PyTuple};
 use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 fn err(msg: String) -> PyErr {
     PyValueError::new_err(msg)
@@ -431,17 +435,50 @@ impl Core {
         (cols, values, is_bool, total)
     }
 
-    /// 全セルを numpy の配列で返す（軸ごとのメンバー番号の配列、値の配列、真偽値か）。
-    /// 保存など、大量のセルを Python のオブジェクトにせずに取り出すときに使う。
-    fn arrays<'py>(
+    /// 格納データを Parquet のバイト列にする（列は宣言した軸の順に names、値の列 v）。GIL を外して行う。
+    #[pyo3(signature = (store, names, value, meta))]
+    fn store_to_parquet<'py>(
         &self,
         py: Python<'py>,
         store: &Bound<'py, StoreHandle>,
-    ) -> (Vec<Bound<'py, PyArray1<u32>>>, Bound<'py, PyArray1<f64>>, bool) {
+        names: Vec<String>,
+        value: &str,
+        meta: Vec<(String, String)>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let s = store.borrow().store.clone();
-        let is_bool = s.kind == Kind::Bool;
-        let (cols, values) = py.detach(move || s.rows());
-        (cols.into_iter().map(|c| c.into_pyarray(py)).collect(), values.into_pyarray(py), is_bool)
+        let value = pq::Value::parse(value).map_err(err)?;
+        let buf = py
+            .detach(move || {
+                let (cols, values) = s.rows();
+                pq::write(&names, cols, values, value, &meta)
+            })
+            .map_err(err)?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// store_to_parquet で書いたバイト列から格納データを作る。GIL を外して行う。
+    #[allow(clippy::wrong_self_convention)] // Python から呼ぶ名前を保つ
+    #[pyo3(signature = (data, dims, index, value, names))]
+    fn store_from_parquet(
+        &self,
+        py: Python<'_>,
+        data: PyBackedBytes,
+        dims: Vec<DimId>,
+        index: Option<DimId>,
+        value: &str,
+        names: Vec<String>,
+    ) -> PyResult<StoreHandle> {
+        let value = pq::Value::parse(value).map_err(err)?;
+        let cat = self.cat.clone();
+        let store = py
+            .detach(move || {
+                let sizes: Vec<u32> = dims.iter().map(|d| cat.dims[*d].size).collect();
+                let (cols, values) = pq::read(Bytes::from_owner(data), &names, value, &sizes)?;
+                let cols: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
+                Store::new(&dims, index, kind_of(value == pq::Value::Bool), &cat)?.with_rows(&cols, &values)
+            })
+            .map_err(err)?;
+        Ok(StoreHandle { store: Arc::new(store) })
     }
 
     /// 2 つのハンドルが同じ格納データ（複製しただけで、どちらにも書き込んでいない）を指すか。
@@ -449,20 +486,78 @@ impl Core {
         a.borrow().store.same_as(&b.borrow().store)
     }
 
-    /// old（変更前）と new（変更後）で値が違うセルの (宣言した軸の順のメンバー番号, 変更前, 変更後)。
-    /// キーの詰め方が違えば None（呼び出し側が別の方法で比べる）。
-    #[allow(clippy::type_complexity)]
-    fn diff_stores(
+    /// old（変更前）と new（変更後）で値が違うセル。old が None なら new の全セル（変更前はすべて空）。
+    /// キーの詰め方が違えば None（呼び出し側が別の方法で比べる）。GIL を外して行う。
+    #[pyo3(signature = (old, new))]
+    fn diff_block(&self, py: Python<'_>, old: Option<&Bound<'_, StoreHandle>>, new: &Bound<'_, StoreHandle>) -> Option<Diff> {
+        let a = old.map(|o| o.borrow().store.clone());
+        let b = new.borrow().store.clone();
+        py.detach(move || {
+            let Some(a) = a else {
+                let (cols, values) = b.rows();
+                let old = vec![None; values.len()];
+                return Some(Diff { cols, old, new: values.into_iter().map(Some).collect() });
+            };
+            let cells = a.diff_cells(&b)?;
+            let mut cols = vec![Vec::with_capacity(cells.len()); b.metric_dims.len()];
+            let (mut old, mut new) = (Vec::with_capacity(cells.len()), Vec::with_capacity(cells.len()));
+            for (k, x, y) in cells {
+                for (c, m) in cols.iter_mut().zip(b.decode(k)) {
+                    c.push(m);
+                }
+                old.push(x);
+                new.push(y);
+            }
+            Some(Diff { cols, old, new })
+        })
+    }
+
+    /// 変更の塊を格納データにまとめて書き込む（記録の再生）。dim_ids は宣言した軸の順に、軸ごとの
+    /// メンバーの位置から ID への表。value_ids はメンバー型の値の軸の同じ表（ほかの型なら None）。
+    /// 今の軸にない ID のセルは飛ばす（そのトランザクションで消したメンバーのセル）。
+    #[pyo3(signature = (store, block, dim_ids, value_ids))]
+    fn apply_block(
         &self,
         py: Python<'_>,
-        old: &Bound<'_, StoreHandle>,
-        new: &Bound<'_, StoreHandle>,
-    ) -> Option<Vec<(Vec<u32>, Option<f64>, Option<f64>)>> {
-        let (a, b) = (old.borrow().store.clone(), new.borrow().store.clone());
-        py.detach(move || {
-            let cells = a.diff_cells(&b)?;
-            Some(cells.into_iter().map(|(k, x, y)| (b.decode(k), x, y)).collect())
-        })
+        store: &Bound<'_, StoreHandle>,
+        block: &CellBlock,
+        dim_ids: Vec<Vec<i64>>,
+        value_ids: Option<Vec<i64>>,
+    ) -> PyResult<()> {
+        let mut s = store.borrow().store.clone();
+        let c = &block.c;
+        if c.ids.len() != s.metric_dims.len() || dim_ids.len() != c.ids.len() {
+            return Ok(()); // 軸の数が違う（Metric を定義し直した）。名前で比べる経路と同じく飛ばす
+        }
+        let s = py.detach(move || -> Result<Arc<Store>, String> {
+            let pos = |ids: &[i64]| -> FxHashMap<i64, u32> { ids.iter().enumerate().map(|(p, &i)| (i, p as u32)).collect() };
+            let maps: Vec<FxHashMap<i64, u32>> = dim_ids.iter().map(|x| pos(x)).collect();
+            let vmap = value_ids.as_deref().map(pos);
+            let mut cols: Vec<Vec<u32>> = vec![Vec::with_capacity(c.len()); maps.len()];
+            let mut values = Vec::with_capacity(c.len());
+            'row: for r in 0..c.len() {
+                let mut key = Vec::with_capacity(maps.len());
+                for (m, ids) in maps.iter().zip(&c.ids) {
+                    match m.get(&ids[r]) {
+                        Some(&p) => key.push(p),
+                        None => continue 'row,
+                    }
+                }
+                let v = match (c.new[r], &vmap) {
+                    (Some(v), Some(vm)) => Some(*vm.get(&(v as i64)).ok_or_else(|| format!("値のメンバーの ID {} が軸にない", v as i64))? as f64),
+                    (v, _) => v,
+                };
+                for (col, p) in cols.iter_mut().zip(key) {
+                    col.push(p);
+                }
+                values.push(v);
+            }
+            let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
+            Arc::make_mut(&mut s).write_many(&slices, &values);
+            Ok(s)
+        });
+        store.borrow_mut().store = s.map_err(err)?;
+        Ok(())
     }
 
     fn size(&self, store: &Bound<'_, StoreHandle>) -> usize {
@@ -732,6 +827,277 @@ fn set_widen_min_rows(n: usize) {
     plan::WIDEN_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 2 つの格納データの差（宣言した軸の順のメンバー番号の列と、変更前後の値）。Python のオブジェクトにはしない。
+#[pyclass(frozen)]
+struct Diff {
+    cols: Vec<Vec<u32>>,
+    old: Vec<Option<f64>>,
+    new: Vec<Option<f64>>,
+}
+
+#[pymethods]
+impl Diff {
+    fn __len__(&self) -> usize {
+        self.new.len()
+    }
+
+    /// (メンバー番号の列, 変更前, 変更後) の列。
+    #[allow(clippy::type_complexity)]
+    fn rows(&self) -> Vec<(Vec<u32>, Option<f64>, Option<f64>)> {
+        (0..self.new.len()).map(|r| (self.cols.iter().map(|c| c[r]).collect(), self.old[r], self.new[r])).collect()
+    }
+
+    /// メンバー番号を ID に直した変更の塊にする。dim_ids は軸ごとの位置から ID への表、value_ids は
+    /// メンバー型の値の軸の表（ほかの型なら None）、value は値の種類（number、boolean、member）。
+    #[pyo3(signature = (dim_ids, value_ids, value))]
+    fn to_block(&self, py: Python<'_>, dim_ids: Vec<Vec<i64>>, value_ids: Option<Vec<i64>>, value: &str) -> PyResult<CellBlock> {
+        let kind = pq::Change::parse(value).map_err(err)?;
+        if dim_ids.len() != self.cols.len() {
+            return Err(err("軸の表の数が軸の数と合わない".into()));
+        }
+        let c = py
+            .detach(|| -> Result<pq::Changes, String> {
+                let at = |ids: &[i64], p: u32| ids.get(p as usize).copied().ok_or_else(|| format!("メンバー番号 {p} の ID がない"));
+                let ids = self
+                    .cols
+                    .iter()
+                    .zip(&dim_ids)
+                    .map(|(c, t)| c.iter().map(|&p| at(t, p)).collect::<Result<Vec<i64>, String>>())
+                    .collect::<Result<_, _>>()?;
+                let conv = |xs: &[Option<f64>]| -> Result<Vec<Option<f64>>, String> {
+                    match &value_ids {
+                        None => Ok(xs.to_vec()),
+                        Some(t) => xs.iter().map(|v| v.map(|x| at(t, x as u32).map(|i| i as f64)).transpose()).collect(),
+                    }
+                };
+                Ok(pq::Changes { ids, old: conv(&self.old)?, new: conv(&self.new)?, kind })
+            })
+            .map_err(err)?;
+        Ok(CellBlock::new(c))
+    }
+}
+
+/// 1 つの入力 Metric の、書き換えたセルの塊（座標はメンバーの ID）。記録の "rows" に、行の列の
+/// 代わりに入る。行の列と同じく、長さを持ち、[座標の ID の列, 変更前, 変更後] を順に返す。
+#[pyclass(frozen, sequence)]
+struct CellBlock {
+    c: pq::Changes,
+    keys: OnceLock<FxHashSet<Vec<i64>>>, // 座標の集まり（重なりを調べるときに作る）
+}
+
+impl CellBlock {
+    fn new(c: pq::Changes) -> CellBlock {
+        CellBlock { c, keys: OnceLock::new() }
+    }
+
+    fn key(&self, r: usize) -> Vec<i64> {
+        self.c.ids.iter().map(|x| x[r]).collect()
+    }
+
+    fn keys(&self) -> &FxHashSet<Vec<i64>> {
+        self.keys.get_or_init(|| (0..self.c.len()).map(|r| self.key(r)).collect())
+    }
+
+    fn value<'py>(&self, py: Python<'py>, v: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match (v, self.c.kind) {
+            (None, _) => py.None().into_bound(py),
+            (Some(x), pq::Change::Num) => x.into_pyobject(py)?.into_any(),
+            (Some(x), pq::Change::Bool) => PyBool::new(py, x != 0.0).to_owned().into_any(),
+            (Some(x), pq::Change::Int) => (x as i64).into_pyobject(py)?.into_any(),
+        })
+    }
+}
+
+fn copy_float(out: &mut String, v: Option<f64>) {
+    use std::fmt::Write;
+    match v {
+        None => out.push_str("\\N"),
+        Some(x) if x.is_nan() => out.push_str("NaN"),
+        Some(x) if x.is_infinite() => out.push_str(if x > 0.0 { "Infinity" } else { "-Infinity" }),
+        Some(x) => write!(out, "{x:?}").unwrap(),
+    }
+}
+
+fn copy_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r")
+}
+
+#[pymethods]
+impl CellBlock {
+    fn __len__(&self) -> usize {
+        self.c.len()
+    }
+
+    /// 座標の軸の数。
+    #[getter]
+    fn width(&self) -> usize {
+        self.c.ids.len()
+    }
+
+    /// 行の列 [座標の ID の列, 変更前, 変更後]（メンバー型の値は ID、真偽値は bool）。
+    fn rows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let rows = PyList::empty(py);
+        for r in 0..self.c.len() {
+            let row = PyList::new(py, [
+                PyList::new(py, self.key(r))?.into_any(),
+                self.value(py, self.c.old[r])?,
+                self.value(py, self.c.new[r])?,
+            ])?;
+            rows.append(row)?;
+        }
+        Ok(rows)
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
+        self.rows(py)?.try_iter()
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(b) = other.cast::<CellBlock>() {
+            return Ok(self.c == b.get().c);
+        }
+        self.rows(py)?.eq(other)
+    }
+
+    /// keys（座標の ID の列の列）のどれかを含むか。
+    fn contains_any(&self, py: Python<'_>, keys: Vec<Vec<i64>>) -> bool {
+        py.detach(|| {
+            let set = self.keys();
+            keys.iter().any(|k| set.contains(k))
+        })
+    }
+
+    /// other と同じセルを含むか。
+    fn overlaps(&self, py: Python<'_>, other: &CellBlock) -> bool {
+        py.detach(|| {
+            let (small, large) = if self.c.len() <= other.c.len() { (self, other) } else { (other, self) };
+            let set = large.keys();
+            (0..small.c.len()).any(|r| set.contains(&small.key(r)))
+        })
+    }
+
+    /// Parquet のバイト列にする（列は names の軸、old、new）。
+    #[pyo3(signature = (names, meta))]
+    fn to_parquet<'py>(&self, py: Python<'py>, names: Vec<String>, meta: Vec<(String, String)>) -> PyResult<Bound<'py, PyBytes>> {
+        let buf = py.detach(|| pq::write_changes(&names, &self.c, &meta)).map_err(err)?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// to_parquet で書いたバイト列から作る。
+    #[staticmethod]
+    fn from_parquet(py: Python<'_>, data: PyBackedBytes) -> PyResult<CellBlock> {
+        let (_, c) = py.detach(move || pq::read_changes(Bytes::from_owner(data))).map_err(err)?;
+        Ok(CellBlock::new(c))
+    }
+
+    /// 行の列 [座標の ID の列, 変更前, 変更後] から作る。値の型は、すべて真偽値なら boolean、
+    /// すべて整数ならメンバーの ID、ほかは number とみなす。
+    #[staticmethod]
+    fn from_rows(rows: &Bound<'_, PyAny>) -> PyResult<CellBlock> {
+        let mut ids: Vec<Vec<i64>> = Vec::new();
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        let (mut floats, mut bools, mut ints) = (false, false, false);
+        let mut value = |v: Bound<'_, PyAny>| -> PyResult<Option<f64>> {
+            if v.is_none() {
+                Ok(None)
+            } else if let Ok(b) = v.cast::<PyBool>() {
+                bools = true;
+                Ok(Some(if b.is_true() { 1.0 } else { 0.0 }))
+            } else if v.cast::<PyInt>().is_ok() {
+                ints = true;
+                Ok(Some(v.extract::<i64>()? as f64))
+            } else {
+                floats = true;
+                Ok(Some(v.extract::<f64>()?))
+            }
+        };
+        for (r, row) in rows.try_iter()?.enumerate() {
+            let row = row?;
+            let key: Vec<i64> = row.get_item(0)?.extract()?;
+            if r == 0 {
+                ids = vec![Vec::new(); key.len()];
+            } else if key.len() != ids.len() {
+                return Err(err("行ごとに軸の数が違う".into()));
+            }
+            for (col, k) in ids.iter_mut().zip(key) {
+                col.push(k);
+            }
+            old.push(value(row.get_item(1)?)?);
+            new.push(value(row.get_item(2)?)?);
+        }
+        let kind = if floats || (bools && ints) {
+            pq::Change::Num
+        } else if bools {
+            pq::Change::Bool
+        } else if ints {
+            pq::Change::Int
+        } else {
+            pq::Change::Num
+        };
+        Ok(CellBlock::new(pq::Changes { ids, old, new, kind }))
+    }
+
+    /// PostgreSQL の COPY（テキスト形式）の行（model_id、seq、metric、座標の配列、変更前、変更後）。
+    fn copy_text<'py>(&self, py: Python<'py>, model_id: &str, seq: i64, metric: i64) -> Bound<'py, PyBytes> {
+        let text = py.detach(|| {
+            use std::fmt::Write;
+            let prefix = format!("{}\t{seq}\t{metric}\t", copy_escape(model_id));
+            let mut out = String::with_capacity(self.c.len() * (prefix.len() + 40));
+            for r in 0..self.c.len() {
+                out.push_str(&prefix);
+                out.push('{');
+                for (j, x) in self.c.ids.iter().enumerate() {
+                    if j > 0 {
+                        out.push(',');
+                    }
+                    write!(out, "{}", x[r]).unwrap();
+                }
+                out.push_str("}\t");
+                copy_float(&mut out, self.c.old[r]);
+                out.push('\t');
+                copy_float(&mut out, self.c.new[r]);
+                out.push('\n');
+            }
+            out
+        });
+        PyBytes::new(py, text.as_bytes())
+    }
+}
+
+/// 軸ごとのメンバー番号の列と値の列を Parquet のバイト列にする（格納データを持たないエンジン用）。
+#[pyfunction]
+fn write_parquet<'py>(
+    py: Python<'py>,
+    names: Vec<String>,
+    cols: Vec<Vec<u32>>,
+    values: Vec<f64>,
+    value: &str,
+    meta: Vec<(String, String)>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let value = pq::Value::parse(value).map_err(err)?;
+    let buf = py.detach(move || pq::write(&names, cols, values, value, &meta)).map_err(err)?;
+    Ok(PyBytes::new(py, &buf))
+}
+
+/// write_parquet で書いたバイト列を (列の並び, 値の並び) に戻す。sizes は軸ごとのメンバー数。
+#[pyfunction]
+fn read_parquet(
+    py: Python<'_>,
+    data: PyBackedBytes,
+    names: Vec<String>,
+    value: &str,
+    sizes: Vec<u32>,
+) -> PyResult<(Vec<Vec<u32>>, Vec<f64>)> {
+    let value = pq::Value::parse(value).map_err(err)?;
+    py.detach(move || pq::read(Bytes::from_owner(data), &names, value, &sizes)).map_err(err)
+}
+
+/// Parquet のフッターのキーと値（本体は読まない）。
+#[pyfunction]
+fn parquet_metadata(py: Python<'_>, data: PyBackedBytes) -> PyResult<Vec<(String, String)>> {
+    py.detach(move || pq::metadata(Bytes::from_owner(data))).map_err(err)
+}
+
 #[pymodule(gil_used = false)] // free-threaded の Python でも GIL を有効に戻さない（格納データは Arc と永続的な木で共有する）
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(track_heap, m)?)?;
@@ -743,10 +1109,15 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_semi_max, m)?)?;
     m.add_function(wrap_pyfunction!(set_postings_min_rows, m)?)?;
     m.add_function(wrap_pyfunction!(set_widen_min_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(write_parquet, m)?)?;
+    m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
+    m.add_function(wrap_pyfunction!(parquet_metadata, m)?)?;
     m.add_class::<Core>()?;
     m.add_class::<Expr>()?;
     m.add_class::<CubeHandle>()?;
     m.add_class::<StoreHandle>()?;
     m.add_class::<PlanHandle>()?;
+    m.add_class::<Diff>()?;
+    m.add_class::<CellBlock>()?;
     Ok(())
 }

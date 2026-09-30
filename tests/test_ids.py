@@ -17,9 +17,9 @@ except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
 try:
-    import numpy  # noqa: F401  保存形式に使う
+    import nanashi_core  # noqa: F401  保存形式（Parquet）の読み書きに使う
 except ImportError:
-    numpy = None
+    nanashi_core = None
 
 
 def all_ids(m: Model) -> list[int]:
@@ -206,7 +206,7 @@ class RenameMetric(unittest.TestCase):
             self.m.rename_metric("Margin", "__x")
 
 
-@unittest.skipIf(numpy is None, "numpy が必要")
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class Storage(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
@@ -229,6 +229,8 @@ class Storage(unittest.TestCase):
         m = build_with(self.engine())
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
+            from .legacy import to_format2
+            to_format2(tmp, m)  # 版 1 も入力の値は inputs.npz に持つ
             path = Path(tmp) / "model.json"
             meta = json.loads(path.read_text())
             meta["format"] = 1
@@ -259,7 +261,7 @@ class RustRenameMetric(RenameMetric):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
 
-@unittest.skipIf(RustEngine is None or numpy is None, "nanashi_core と numpy が必要")
+@unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class RustStorage(Storage):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
