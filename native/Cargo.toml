@@ -1,0 +1,17 @@
+[package]
+name = "nanashi_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nanashi_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = "0.29"
+numpy = "0.29"
+rayon = "1.12"
+rustc-hash = "2.1"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,126 @@
+[
+  {
+    "engine": "polars",
+    "metrics": 30,
+    "build": 0.06922583398409188,
+    "compile": 0.0010015829466283321,
+    "full": 0.01918704097624868,
+    "first_edit": 0.016171458992175758,
+    "edits": {
+      "Volume 1 セル": {
+        "ms": 8.814624976366758,
+        "metrics": 10,
+        "ms_per_metric": 0.8814624976366758
+      },
+      "Price 1 商品": {
+        "ms": 2.2631660103797913,
+        "metrics": 9,
+        "ms_per_metric": 0.251462890042199
+      },
+      "Cost 1 商品の 1 月": {
+        "ms": 3.5161249106749892,
+        "metrics": 11,
+        "ms_per_metric": 0.31964771915227175
+      }
+    },
+    "formulas": 30,
+    "scan_metrics": 0,
+    "delta_metrics": 3,
+    "levels": 6,
+    "cells": 1186056,
+    "peak_mb": 166.140625
+  },
+  {
+    "engine": "polars",
+    "metrics": 100,
+    "build": 0.06988504203036427,
+    "compile": 0.003519000019878149,
+    "full": 0.24467479204759002,
+    "first_edit": 0.04681524995248765,
+    "edits": {
+      "Volume 1 セル": {
+        "ms": 18.248209031298757,
+        "metrics": 28,
+        "ms_per_metric": 0.6517217511178127
+      },
+      "Price 1 商品": {
+        "ms": 9.605417028069496,
+        "metrics": 29,
+        "ms_per_metric": 0.33122127682998265
+      },
+      "Cost 1 商品の 1 月": {
+        "ms": 25.56666696909815,
+        "metrics": 56,
+        "ms_per_metric": 0.45654762444818126
+      }
+    },
+    "formulas": 100,
+    "scan_metrics": 4,
+    "delta_metrics": 9,
+    "levels": 11,
+    "cells": 4822393,
+    "peak_mb": 291.328125
+  },
+  {
+    "engine": "polars",
+    "metrics": 300,
+    "build": 0.07242154201958328,
+    "compile": 0.011598624987527728,
+    "full": 1.126909250044264,
+    "first_edit": 0.2684855000115931,
+    "edits": {
+      "Volume 1 セル": {
+        "ms": 88.75150000676513,
+        "metrics": 136,
+        "ms_per_metric": 0.652584558873273
+      },
+      "Price 1 商品": {
+        "ms": 23.48270802758634,
+        "metrics": 73,
+        "ms_per_metric": 0.3216809318847444
+      },
+      "Cost 1 商品の 1 月": {
+        "ms": 78.6897090729326,
+        "metrics": 160,
+        "ms_per_metric": 0.49181068170582876
+      }
+    },
+    "formulas": 300,
+    "scan_metrics": 19,
+    "delta_metrics": 24,
+    "levels": 16,
+    "cells": 25222636,
+    "peak_mb": 807.078125
+  },
+  {
+    "engine": "polars",
+    "metrics": 1000,
+    "build": 0.090943832998164,
+    "compile": 0.03918445797171444,
+    "full": 3.5985773330321535,
+    "first_edit": 1.1594576250063255,
+    "edits": {
+      "Volume 1 セル": {
+        "ms": 373.7669159891084,
+        "metrics": 584,
+        "ms_per_metric": 0.6400118424471034
+      },
+      "Price 1 商品": {
+        "ms": 66.32641598116606,
+        "metrics": 200,
+        "ms_per_metric": 0.3316320799058303
+      },
+      "Cost 1 商品の 1 月": {
+        "ms": 301.4062090078369,
+        "metrics": 560,
+        "ms_per_metric": 0.5382253732282801
+      }
+    },
+    "formulas": 1000,
+    "scan_metrics": 67,
+    "delta_metrics": 100,
+    "levels": 23,
+    "cells": 76987532,
+    "peak_mb": 1972.546875
+  }
+]
