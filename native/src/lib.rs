@@ -7,7 +7,7 @@ mod plan;
 
 use crate::check::{Env, TKind, Ty};
 use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
-use crate::plan::{Delta, Formula, Metric, Plan, Reg, Step};
+use crate::plan::{Delta, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -505,6 +505,32 @@ impl Core {
             })
             .collect();
         Ok(PlanHandle { plan: Arc::new(Plan { metrics: out, levels }) })
+    }
+
+    /// 入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲を返す。
+    fn propagate(&self, py: Python<'_>, plan: &PlanHandle, changed: Vec<(usize, Region)>, added: Vec<(DimId, Vec<u32>)>) -> Vec<(usize, Region)> {
+        let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
+        let (cat, plan) = (self.cat.clone(), plan.plan.clone());
+        let regions = py.detach(move || plan::propagate(&cat, &plan, changed, &added));
+        regions.into_iter().enumerate().filter_map(|(m, r)| r.map(|r| (m, r.into_parts()))).collect()
+    }
+
+    /// 軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric ごと）。stores は Metric の番号順の格納データ。
+    fn removal_regions(&self, py: Python<'_>, plan: &PlanHandle, stores: Vec<Bound<'_, StoreHandle>>, dim: DimId, member: u32) -> Vec<(usize, Region)> {
+        let stores: Vec<Arc<Store>> = stores.iter().map(|h| h.borrow().store.clone()).collect();
+        let (cat, plan) = (self.cat.clone(), plan.plan.clone());
+        let todo = py.detach(move || plan::removal_regions(&cat, &plan, &stores, dim, member));
+        todo.into_iter().map(|(m, r)| (m, r.into_parts())).collect()
+    }
+
+    /// 1 つの式の影響範囲。regions は式の Ref の番号ごとの変更範囲（None は変わっていない）。
+    #[pyo3(signature = (expr, regions, added, removed = None))]
+    fn affected(&self, expr: &Expr, regions: Vec<Option<Region>>, added: Vec<(DimId, Vec<u32>)>, removed: Option<(DimId, u32)>) -> Option<Region> {
+        let regions: Vec<Option<Reg>> = regions.into_iter().map(|r| r.map(Reg::new)).collect();
+        let refs: Vec<usize> = (0..regions.len()).collect();
+        let added: Vec<(DimId, Vec<u32>)> = added.into_iter().map(|(d, mut ms)| { ms.sort_unstable(); ms.dedup(); (d, ms) }).collect();
+        let env = RangeEnv { cat: &self.cat, regions: &regions, added: &added, removed };
+        env.affected(&expr.node, &refs).map(|r| r.into_parts())
     }
 
     /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の

@@ -166,3 +166,57 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
         for dims, text in BAD_FORMULAS:
             with self.assertRaises(FE):
                 infer(resolve(parse(text, self_name="Bad"), m), m, [])
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustAffectedMatchesPython(unittest.TestCase):
+    """Rust の影響範囲（伝搬、メンバーの削除、単一の式）は、Python の参照実装と一致する。"""
+
+    def models(self):
+        from examples.fpa import build
+        yield model(RustEngine())
+        yield build(RustEngine(), employees=12, products=6, months=8, seed=3)
+
+    def test_propagate(self):
+        for m in self.models():
+            m.recalc()
+            inputs = [n for n, x in m.metrics.items() if x.formula is None]
+            cases = []
+            for name in inputs:
+                dims = m.metrics[name].dims
+                cases.append(({name: {d: frozenset([m.dimensions[d].members[0]]) for d in dims}}, None))
+                cases.append(({name: {}}, None))
+            cases.append(({n: {d: frozenset(m.dimensions[d].members[:2]) for d in m.metrics[n].dims} for n in inputs[:3]},
+                          {"Month": frozenset(["Zzz"])}))
+            for changed, added in cases:
+                if added:
+                    for d, ms in added.items():
+                        for x in ms:
+                            if x not in m.dimensions[d]:
+                                m.dimensions[d].add_member(x, m._new_id())
+                                m._member_added(d)
+                with self.subTest(changed=list(changed), added=added):
+                    self.assertEqual(m._propagate(changed, added), m._propagate_py(changed, added))
+
+    def test_removal_regions(self):
+        for m in self.models():
+            m.recalc()
+            for dim in m.dimensions:
+                member = m.dimensions[dim].members[1]
+
+                def has_cells(name, dim=dim, member=member):
+                    point = {dim: frozenset([member])}
+                    return dim in m.metrics[name].dims and m.engine.size(m.engine.filter(m._values[name], point, m)) > 0
+                with self.subTest(dim=dim, member=member):
+                    self.assertEqual(m._removal_regions(dim, member, has_cells), m._removal_regions_py(dim, member, has_cells))
+
+    def test_single_formula(self):
+        from sparse_engine.evaluate import affected
+        for m in self.models():
+            m.recalc()
+            inputs = [n for n, x in m.metrics.items() if x.formula is None]
+            regions = {n: {d: frozenset(m.dimensions[d].members[:1]) for d in m.metrics[n].dims} for n in inputs}
+            for x in m.metrics.values():
+                if x.formula is not None:
+                    with self.subTest(metric=x.name):
+                        self.assertEqual(m.engine.affected(x.formula, m, regions), affected(x.formula, m, regions))

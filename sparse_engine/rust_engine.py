@@ -49,6 +49,7 @@ class RustEngine:
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
         self._exprs: dict[int, tuple] = {}  # id(式) -> (式, 変換結果, 読む名前, 型, 警告)
         self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
+        self._prop_plan: tuple[Any, Any, list[str]] | None = None  # 影響範囲の伝搬だけに使う、式だけの計画
 
     def fork(self, cat: Catalog) -> RustEngine:
         """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
@@ -59,6 +60,7 @@ class RustEngine:
         other._maps = dict(self._maps)
         other._exprs = dict(self._exprs)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
         other._plan = self._plan  # 計算計画も Metric の番号と式だけに依存する（複製は同じ計画を持つ）
+        other._prop_plan = self._prop_plan
         return other
 
     def share(self, store):
@@ -100,6 +102,18 @@ class RustEngine:
         for d, ms in (region or {}).items():
             index = cat.dimension(d)._index
             out.append((self._dim(cat, d), [index[m] for m in ms]))
+        return out
+
+    def _region_lenient(self, cat: Catalog, region) -> list | None:
+        """_region と同じだが、記録したあとで名前を変えたり消したりしたメンバーは読み飛ばす
+        （分割軸の選択に使う影響範囲は、古い名前を含みうる）。どの軸も残らなければ None（影響なし）。"""
+        out = []
+        for d, ms in (region or {}).items():
+            index = cat.dimension(d)._index
+            kept = [index[m] for m in ms if m in index]
+            if not kept:
+                return None
+            out.append((self._dim(cat, d), kept))
         return out
 
     def _index(self, cat: Catalog, dims, partition: str | None) -> int | None:
@@ -223,9 +237,62 @@ class RustEngine:
             [(index[n], region(r)) for n, r in forced.items()])
 
         def named(entries):
-            return [(names[i], {self._names[d]: frozenset(cat.dimension(self._names[d]).members[j] for j in ms)
-                                for d, ms in r}) for i, _, r in entries]
+            return [(names[i], self._to_names(cat, r)) for i, _, r in entries]
         return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
+
+    def _to_names(self, cat: Catalog, region) -> dict:
+        """Rust の範囲（軸の番号 -> メンバー番号の列）を、メンバー名の範囲にする。"""
+        return {self._names[d]: frozenset(cat.dimension(self._names[d]).members[j] for j in ms) for d, ms in region}
+
+    # ------------------------------------------------ 影響範囲
+
+    def _prop_plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
+        """影響範囲の伝搬に使う、式だけの Rust の計算計画（差分集計の計画は要らない。分割軸を選ぶ時点では
+        まだできていない）。計画を作り直すまで使い回す。"""
+        if self._prop_plan is not None and self._prop_plan[0] is plan.steps:
+            return self._prop_plan[1], self._prop_plan[2]
+        names = list(cat.metrics)
+        index = {n: i for i, n in enumerate(names)}
+
+        def bound(expr):
+            compiled, reads = self._compile(expr, cat)
+            return compiled, [index[n] for n in reads]
+
+        metrics = [(None if m.formula is None else bound(m.formula), None, None, False) for m in cat.metrics.values()]
+        levels = [[(None if s.scan_dim is None else self._dim(cat, s.scan_dim), [index[n] for n in s.names])
+                   for s in level] for level in plan.levels]
+        rplan = self.core.make_plan(metrics, levels)
+        self._prop_plan = (plan.steps, rplan, names)
+        return rplan, names
+
+    def _added(self, cat: Catalog, added) -> list:
+        return [(self._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in (added or {}).items()]
+
+    def propagate(self, plan, cat: Catalog, changed: dict, added=None) -> dict:
+        """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲（changed を含む）。"""
+        rplan, names = self._prop_plan_for(plan, cat)
+        index = {n: i for i, n in enumerate(names)}
+        out = self.core.propagate(rplan, [(index[n], self._region(cat, r)) for n, r in changed.items()],
+                                  self._added(cat, added))
+        return {names[i]: self._to_names(cat, r) for i, r in out}
+
+    def removal_regions(self, plan, stores: dict, cat: Catalog, dim: str, member: str) -> dict:
+        """軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。"""
+        rplan, names = self._prop_plan_for(plan, cat)
+        out = self.core.removal_regions(rplan, [stores[n] for n in names], self._dim(cat, dim),
+                                        cat.dimension(dim)._index[member])
+        return {names[i]: self._to_names(cat, r) for i, r in out}
+
+    def affected(self, expr: Expr, cat: Catalog, regions: dict, added=None, removed=None):
+        """1 つの式の影響範囲。regions は Metric 名 -> 変更範囲。"""
+        compiled, names = self._compile(expr, cat)
+        regs = [self._region_lenient(cat, regions[n]) if n in regions else None for n in names]
+        gone = None
+        if removed:
+            (d, m), = removed.items()
+            gone = (self._dim(cat, d), cat.dimension(d)._index[m])
+        r = self.core.affected(compiled, regs, self._added(cat, added), gone)
+        return None if r is None else self._to_names(cat, r)
 
     def _plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
         """Model の計算計画（CompiledPlan）を Rust の計算計画にする。計画を作り直すまで使い回す。"""
@@ -303,6 +370,7 @@ class RustEngine:
         if renumbered:  # 変換済みの式はメンバーの番号（定数、SELECT）を持っているので作り直す
             self._exprs.clear()
             self._plan = None
+            self._prop_plan = None
         if dim in self._dims:
             d, i = self._dims[dim]
             if d is cat.dimension(dim):

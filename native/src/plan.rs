@@ -111,10 +111,11 @@ fn union(a: Option<Reg>, b: Option<Reg>) -> Option<Reg> {
 }
 
 /// 影響範囲の計算に使う環境。regions は Metric の番号ごとの変更範囲、added は軸ごとの追加したメンバー。
-struct Env<'a> {
-    cat: &'a Catalog,
-    regions: &'a [Option<Reg>],
-    added: &'a [(DimId, Vec<u32>)],
+pub struct Env<'a> {
+    pub cat: &'a Catalog,
+    pub regions: &'a [Option<Reg>],
+    pub added: &'a [(DimId, Vec<u32>)], // 軸ごとの追加したメンバー（昇順）
+    pub removed: Option<(DimId, u32)>,  // これから消すメンバー（前月参照の読み先が変わる時点を含める）
 }
 
 impl Env<'_> {
@@ -129,7 +130,7 @@ impl Env<'_> {
     }
 
     /// 式の結果のうち、値が変わりうる範囲。refs は式の Ref の番号 -> Metric の番号。
-    fn affected(&self, node: &Node, refs: &[usize]) -> Option<Reg> {
+    pub fn affected(&self, node: &Node, refs: &[usize]) -> Option<Reg> {
         let af = |n: &Node| self.affected(n, refs);
         match node {
             Node::Ref(i) => self.regions[refs[*i]].clone(),
@@ -169,7 +170,21 @@ impl Env<'_> {
                     }
                     None => Some(r),
                 });
-                self.grow(r, &[*dim]) // 末尾に足した時点には、ずらした値が入りうる
+                let mut r = self.grow(r, &[*dim]); // 末尾に足した時点には、ずらした値が入りうる
+                if let Some((rd, p)) = self.removed {
+                    if rd == *dim {
+                        // 消すメンバーを読み飛ばすようになる時点
+                        let (size, p, n) = (self.cat.dims[*dim].size as i64, p as i64, *n);
+                        let span: Vec<u32> = if n > 0 { p + 1..p + n + 1 } else { p + n..p }
+                            .filter(|q| (0..size).contains(q))
+                            .map(|q| q as u32)
+                            .collect();
+                        if !span.is_empty() {
+                            r = union(r, Some(Reg::new(vec![(*dim, span)])));
+                        }
+                    }
+                }
+                r
             }
             Node::ByAgg { child, src, dst, map, .. } => {
                 // 集約: 変わった社員の部署が変わる
@@ -197,6 +212,118 @@ impl Env<'_> {
             }
         }
     }
+}
+
+/// scan に含まれる Metric の影響範囲。互いを参照し合うので、範囲が増えなくなるまで伝搬を繰り返す
+/// （範囲は単調に広がるだけで有限なので必ず止まる）。regions の names の分をその場で広げる。
+fn scan_regions(cat: &Catalog, plan: &Plan, regions: &mut [Option<Reg>], names: &[usize], added: &[(DimId, Vec<u32>)], removed: Option<(DimId, u32)>) {
+    loop {
+        let mut grown = false;
+        for &n in names {
+            let f = plan.metrics[n].formula.as_ref().expect("計算 Metric");
+            let r = union(regions[n].clone(), Env { cat, regions, added, removed }.affected(&f.node, &f.refs));
+            if r != regions[n] {
+                regions[n] = r;
+                grown = true;
+            }
+        }
+        if !grown {
+            break;
+        }
+    }
+}
+
+/// 入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲（changed を含む）。
+/// Python の Model._propagate と同じ。分割軸の選択に使う。
+pub fn propagate(cat: &Catalog, plan: &Plan, changed: Vec<(usize, Reg)>, added: &[(DimId, Vec<u32>)]) -> Vec<Option<Reg>> {
+    let mut regions: Vec<Option<Reg>> = vec![None; plan.metrics.len()];
+    for (m, r) in changed {
+        regions[m] = Some(r);
+    }
+    let added: Vec<(DimId, Vec<u32>)> = added.iter().map(|(d, ms)| (*d, sorted(ms.clone()))).collect();
+    for level in &plan.levels {
+        for step in level {
+            match step {
+                Step::One(m) => {
+                    if let Some(f) = &plan.metrics[*m].formula {
+                        let r = Env { cat, regions: &regions, added: &added, removed: None }.affected(&f.node, &f.refs);
+                        if r.is_some() {
+                            regions[*m] = r;
+                        }
+                    }
+                }
+                Step::Scan(_, names) => scan_regions(cat, plan, &mut regions, names, &added, None),
+            }
+        }
+    }
+    regions
+}
+
+/// 入力を空にしたあと、軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric -> 消すメンバーを
+/// 除いた範囲）。Python の Model._removal_regions と同じ。
+///
+/// 計算 Metric がそのメンバーを指す値を持つのは、そのメンバーのセル自身（軸の値）か、それを前月参照や
+/// 引き下ろしで運んだセルだけなので、消えるセルからの伝搬で足りる。全メンバーへ値を広げる演算が
+/// そのメンバーに作っていたセルは、消すメンバーを「追加したメンバー」として伝えて拾う。
+pub fn removal_regions(cat: &Catalog, plan: &Plan, stores: &[Arc<Store>], dim: DimId, member: u32) -> Vec<(usize, Reg)> {
+    let n = plan.metrics.len();
+    let point = Reg::new(vec![(dim, vec![member])]);
+    let point_r = point.restrict(cat);
+    let added = vec![(dim, vec![member])];
+    let removed = Some((dim, member));
+    let has_cells: Vec<bool> = (0..n)
+        .map(|m| stores[m].metric_dims.contains(&dim) && !stores[m].read(&point_r).cells.is_empty())
+        .collect();
+    // 下流から見て変わる範囲（消えるセルと、計算し直す範囲）と、計算し直す範囲
+    let mut changes: Vec<Option<Reg>> = vec![None; n];
+    let mut todo: Vec<(usize, Reg)> = Vec::new();
+
+    // 消すメンバーを除いた範囲。その軸のメンバーがそれだけなら、どのセルも残らない
+    let surviving = |r: Option<Reg>| -> Option<Reg> {
+        let r = r?;
+        match r.get(dim) {
+            None => Some(r),
+            Some(ms) => {
+                let rest: Vec<u32> = ms.iter().copied().filter(|&x| x != member).collect();
+                if rest.is_empty() { None } else { Some(r.set(dim, rest)) }
+            }
+        }
+    };
+    let settle = |m: usize, r: Option<Reg>, changes: &mut Vec<Option<Reg>>, todo: &mut Vec<(usize, Reg)>| {
+        let r = surviving(r);
+        if let Some(r) = &r {
+            todo.push((m, r.clone()));
+        }
+        let c = union(if has_cells[m] { Some(point.clone()) } else { None }, r);
+        if c.is_some() {
+            changes[m] = c;
+        }
+    };
+    for level in &plan.levels {
+        for step in level {
+            match step {
+                Step::One(m) => {
+                    if let Some(f) = &plan.metrics[*m].formula {
+                        let r = Env { cat, regions: &changes, added: &added, removed }.affected(&f.node, &f.refs);
+                        settle(*m, r, &mut changes, &mut todo);
+                    }
+                }
+                Step::Scan(_, names) => {
+                    for &x in names {
+                        if has_cells[x] {
+                            changes[x] = Some(point.clone()); // scan の中の前月参照は、消えるセルからも伝わる
+                        }
+                    }
+                    scan_regions(cat, plan, &mut changes, names, &added, removed);
+                    for &x in names {
+                        let r = changes[x].take();
+                        settle(x, r, &mut changes, &mut todo);
+                    }
+                }
+            }
+        }
+    }
+    todo
 }
 
 // ------------------------------------------------------------------ 計算計画
@@ -366,7 +493,7 @@ impl<'a> Run<'a> {
     }
 
     fn env(&self) -> Env<'_> {
-        Env { cat: self.cat, regions: &self.regions, added: self.added }
+        Env { cat: self.cat, regions: &self.regions, added: self.added, removed: None }
     }
 
     fn formula(&self, m: usize) -> &'a Formula {
@@ -550,20 +677,7 @@ impl<'a> Run<'a> {
         for &n in names {
             self.regions[n] = union(self.regions[n].take(), self.forced[n].clone());
         }
-        loop {
-            let mut grown = false;
-            for &n in names {
-                let f = self.formula(n);
-                let r = union(self.regions[n].clone(), self.env().affected(&f.node, &f.refs));
-                if r != self.regions[n] {
-                    self.regions[n] = r;
-                    grown = true;
-                }
-            }
-            if !grown {
-                break;
-            }
-        }
+        scan_regions(self.cat, self.plan, &mut self.regions, names, self.added, None);
         let active: Vec<(usize, Reg)> = names.iter().filter_map(|&n| self.regions[n].clone().map(|r| (n, r))).collect();
         for (n, r) in &active {
             if self.plan.metrics[*n].source {

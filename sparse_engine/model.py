@@ -780,6 +780,14 @@ class Model:
 
     def _removal_regions(self, dim: str, member: str, has_cells) -> dict[str, Restrict]:
         """入力を空にしたあと、メンバーを消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。
+        エンジンが影響範囲を計算できるなら（Rust）それに任せる。"""
+        fast = getattr(self.engine, "removal_regions", None)
+        if fast is not None:
+            return fast(self.compiled(), self._values, self, dim, member)
+        return self._removal_regions_py(dim, member, has_cells)
+
+    def _removal_regions_py(self, dim: str, member: str, has_cells) -> dict[str, Restrict]:
+        """_removal_regions の参照実装。
 
         計算 Metric がそのメンバーを指す値を持つのは、そのメンバーのセル自身（軸の値）か、
         それを前月参照や引き下ろしで運んだセルだけなので、消えるセルからの伝搬で足りる。
@@ -1164,7 +1172,7 @@ class Model:
                 m = self.metrics[n]
                 for src, regions in self._samples.items():
                     regions.pop(n, None)
-                    if m.formula is not None and (r := affected(m.formula, self, regions)) is not None:
+                    if m.formula is not None and (r := self._affected(m.formula, regions)) is not None:
                         regions[n] = r
                 if (point := self._sample_point(n)) is not None:
                     self._samples[n] = {n: point}
@@ -1183,7 +1191,22 @@ class Model:
     def _propagate(self, changed: dict[str, Restrict],
                    added: dict[str, frozenset[str]] | None = None) -> dict[str, Restrict]:
         """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲を返す
-        （changed を含む）。"""
+        （changed を含む）。エンジンが影響範囲を計算できるなら（Rust）それに任せる。"""
+        fast = getattr(self.engine, "propagate", None)
+        if fast is not None:
+            return fast(self.compiled(), self, changed, added)
+        return self._propagate_py(changed, added)
+
+    def _affected(self, formula: Expr, regions: dict[str, Restrict]) -> Restrict | None:
+        """1 つの式の影響範囲。エンジンが計算できるなら（Rust）それに任せる。"""
+        fast = getattr(self.engine, "affected", None)
+        if fast is not None:
+            return fast(formula, self, regions)
+        return affected(formula, self, regions)
+
+    def _propagate_py(self, changed: dict[str, Restrict],
+                      added: dict[str, frozenset[str]] | None = None) -> dict[str, Restrict]:
+        """_propagate の参照実装。"""
         regions = dict(changed)
         for step in self._plan:
             if step.scan_dim is None:
