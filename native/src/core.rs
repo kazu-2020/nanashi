@@ -8,7 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use imbl::ordmap::DiffItem;
 use imbl::OrdMap;
 use std::ops::Bound;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// 差分がこの件数（と本体の 1/8）を超えたら本体にまとめ直す。テストでは小さくして、まとめ直しを頻繁に起こす。
@@ -476,6 +476,22 @@ impl Store {
         let mut cells = Vec::new();
         self.for_each_in(r, |k, v| cells.push((k, v)));
         Cube { pack: self.pack.clone(), kind: self.kind, cells }
+    }
+
+    /// 差分がなければ本体の行数（本体の行を番号で直接読める）。差分があれば None。
+    pub fn base_rows(&self) -> Option<usize> {
+        self.delta.is_empty().then(|| self.base.keys.len())
+    }
+
+    /// 本体の i 行目（base_rows が Some のときだけ使う）。
+    #[inline]
+    pub fn base_cell(&self, i: usize) -> (u64, f64) {
+        (self.base.keys[i], self.base.vals[i])
+    }
+
+    /// 全セルを、本体と差分を突き合わせながらキー順に渡す。
+    pub fn for_each(&self, f: impl FnMut(u64, f64)) {
+        self.merged(0, None, f);
     }
 
     /// 格納データが確保しているメモリ（バイト）。本体は確保した容量、索引は作ったものだけを数える。
@@ -1240,6 +1256,198 @@ fn group(mut pairs: Vec<(u64, f64)>, pack: Packing, agg: Agg) -> Cube {
     Cube { pack, kind: Kind::Num, cells }
 }
 
+// ------------------------------------------------------------------ 読みながらの集計
+
+impl Acc {
+    fn merge(&mut self, o: &Acc) {
+        if o.cnt == 0 {
+            return;
+        }
+        if self.cnt == 0 {
+            *self = *o;
+            return;
+        }
+        self.sum += o.sum;
+        self.cnt += o.cnt;
+        self.min = self.min.min(o.min);
+        self.max = self.max.max(o.max);
+    }
+}
+
+/// 集計元のセルの並び。格納データや読み出し元の Cube は写さずに、行の番号で読む。
+enum Rows {
+    Store(Arc<Store>), // 差分のない格納データの本体
+    Shared(Arc<Cube>), // 読み出し元の Cube（scan の途中など）
+    Owned(Cube),       // 式を評価した結果
+}
+
+impl Rows {
+    fn pack(&self) -> &Packing {
+        match self {
+            Rows::Store(s) => &s.pack,
+            Rows::Shared(c) => &c.pack,
+            Rows::Owned(c) => &c.pack,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Rows::Store(s) => s.base_rows().unwrap_or(0),
+            Rows::Shared(c) => c.cells.len(),
+            Rows::Owned(c) => c.cells.len(),
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> (u64, f64) {
+        match self {
+            Rows::Store(s) => s.base_cell(i),
+            Rows::Shared(c) => c.cells[i],
+            Rows::Owned(c) => c.cells[i],
+        }
+    }
+
+    fn into_cube(self) -> Cube {
+        match self {
+            Rows::Store(s) => s.read(&Restrict::all(0)),
+            Rows::Shared(c) => (*c).clone(),
+            Rows::Owned(c) => c,
+        }
+    }
+}
+
+/// node を r の範囲で評価したセル。範囲の絞り込みがない Ref は、格納データや読み出し元を写さずに渡す。
+fn rows_of(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Rows> {
+    if let Node::Ref(i) = node {
+        if r.is_all() {
+            match &src[*i] {
+                Src::Store(s) if s.base_rows().is_some() => return Ok(Rows::Store(s.clone())),
+                Src::Cube(c) => return Ok(Rows::Shared(c.clone())),
+                _ => {}
+            }
+        }
+    }
+    Ok(Rows::Owned(eval(node, cat, src, r)?))
+}
+
+/// dims の、r の範囲での全組み合わせの数（集計先の数の上限）。
+fn combos_in(dims: &[DimId], cat: &Catalog, r: &Restrict) -> f64 {
+    dims.iter().fold(1.0, |n, &d| n * r.get(d).map_or(cat.dims[d].size as usize, |s| s.members.len()) as f64)
+}
+
+/// 集計先がこの数以下なら、集計元を写さずに読みながら足し込む。集計先ごとの途中の値（約 50 B）を
+/// スレッドごとに持ち、最後にスレッドの間で合算するので、集計元の件数の 1/(16 × スレッド数) を
+/// 上限にする（それより多ければ、合算の手間とメモリが、集計元を (集計先, 値) に写して並べ替える
+/// 費用に近づく）。First は並びに意味があるので対象にしない。
+fn few_groups(agg: Agg, groups: f64, rows: usize) -> bool {
+    if matches!(agg, Agg::First) {
+        return false;
+    }
+    STREAM_ALWAYS.load(Ordering::Relaxed) || groups * (rayon::current_num_threads() * 16) as f64 <= rows as f64
+}
+
+/// true なら、集計先の数によらず読みながら集計する（テスト用）。
+pub static STREAM_ALWAYS: AtomicBool = AtomicBool::new(false);
+
+/// rows を読みながら、key が返す集計先ごとに値を足し込む（件数が多ければ並列に）。
+fn fold_groups(rows: &Rows, key: impl Fn(u64) -> Option<u64> + Sync) -> FxHashMap<u64, Acc> {
+    let add = |mut g: FxHashMap<u64, Acc>, i: usize| {
+        let (k, v) = rows.get(i);
+        if let Some(o) = key(k) {
+            g.entry(o).or_insert_with(Acc::new).add(v);
+        }
+        g
+    };
+    let n = rows.len();
+    if !par(n) {
+        return (0..n).fold(FxHashMap::default(), add);
+    }
+    let min_len = (n / rayon::current_num_threads()).max(1); // スレッドごとに 1 つの途中の値の表
+    (0..n).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
+        for (k, x) in &b {
+            a.entry(*k).or_insert_with(Acc::new).merge(x);
+        }
+        a
+    })
+}
+
+fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, agg: Agg) -> Cube {
+    let mut cells: Vec<(u64, f64)> = groups.into_iter().map(|(k, a)| (k, a.finish(agg))).collect();
+    cells.sort_unstable_by_key(|c| c.0);
+    Cube { pack, kind: Kind::Num, cells }
+}
+
+/// rows から dim を外して集計する（REMOVE）。r は結果の範囲（集計先の数の見積もりに使う）。
+fn remove_rows(rows: Rows, dim: DimId, agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Cube> {
+    let dims: Vec<DimId> = rows.pack().dims.iter().copied().filter(|d| *d != dim).collect();
+    let out = Packing::new(&dims, cat)?;
+    if few_groups(agg, combos_in(&dims, cat, r), rows.len()) {
+        let proj = Proj::new(rows.pack(), &out);
+        let groups = fold_groups(&rows, |k| Some(proj.apply(rows.pack(), &out, k)));
+        return Ok(finish_groups(groups, out, agg));
+    }
+    let c = rows.into_cube();
+    let proj = Proj::new(&c.pack, &out);
+    let pairs = map_cells(&c.cells, |k, v| Some((proj.apply(&c.pack, &out, k), v)));
+    Ok(group(pairs, out, agg))
+}
+
+/// 対応表（メンバー型の Metric、例: 社員・月 -> 部署）を、その軸の全組み合わせの配列にしたもの。
+/// 表の大きさが Metric の件数の 4 倍（少なくとも 2^20）か 2^27 を超えるなら作らない。
+struct Table {
+    cells: Vec<u32>,              // 組み合わせの番号 -> 行き先のメンバー（なければ u32::MAX）
+    strides: Vec<(DimId, usize)>, // 軸と、組み合わせの番号での桁の重み
+}
+
+impl Table {
+    fn of(v: &Store, target: DimId, cat: &Catalog) -> Option<Table> {
+        let dense = combos_in(&v.pack.dims, cat, &Restrict::all(0));
+        let rows = v.base_rows().unwrap_or_else(|| v.rows_hint()) as f64;
+        if dense > (4.0 * rows).max((1u64 << 20) as f64) || dense > (1u64 << 27) as f64 {
+            return None;
+        }
+        let mut strides = Vec::with_capacity(v.pack.dims.len());
+        let mut w = 1usize;
+        for &d in v.pack.dims.iter().rev() {
+            strides.push((d, w));
+            w *= cat.dims[d].size as usize;
+        }
+        let mut cells = vec![u32::MAX; dense as usize];
+        let size = cat.dims[target].size as f64;
+        v.for_each(|k, val| {
+            if val >= 0.0 && val < size {
+                let i: usize = strides.iter().enumerate().map(|(j, &(_, s))| v.pack.get(k, v.pack.dims.len() - 1 - j) as usize * s).sum();
+                cells[i] = val as u32;
+            }
+        });
+        Some(Table { cells, strides })
+    }
+}
+
+/// `x[BY agg: D.V]`（型検査が Remove(On(x, AsAxis(V, T)), D) に書き換えたもの）を、結合の結果を
+/// 作らずに集計する。x の各セルについて、対応表から行き先 T のメンバーを引いて足し込む。
+/// 範囲の絞り込みがない全体の評価で、対応表が格納データのときだけ使い、使えなければ None。
+fn remove_by_table(x: &Rows, dim: DimId, target: DimId, v: &Store, agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Option<Cube>> {
+    let xp = x.pack();
+    if xp.pos(dim).is_none() || !v.pack.dims.iter().all(|d| xp.pos(*d).is_some()) {
+        return Ok(None);
+    }
+    let dims: Vec<DimId> = xp.dims.iter().copied().filter(|d| *d != dim).chain([target]).collect();
+    if !few_groups(agg, combos_in(&dims, cat, r), x.len()) {
+        return Ok(None);
+    }
+    let Some(table) = Table::of(v, target, cat) else { return Ok(None) };
+    let out = Packing::new(&dims, cat)?;
+    let (proj, pt) = (Proj::new(xp, &out), out.pos(target).unwrap());
+    let at: Vec<(usize, usize)> = table.strides.iter().map(|&(d, s)| (xp.pos(d).unwrap(), s)).collect();
+    let groups = fold_groups(x, |k| {
+        let i: usize = at.iter().map(|&(p, s)| xp.get(k, p) as usize * s).sum();
+        let t = table.cells[i];
+        (t != u32::MAX).then(|| proj.apply(xp, &out, k) | out.put(pt, t))
+    });
+    Ok(Some(finish_groups(groups, out, agg)))
+}
+
 /// 片側がこれ以下の件数なら、もう片側の読み出しをその側に現れるメンバーに絞る（準結合）。
 pub static SEMI_MAX: AtomicUsize = AtomicUsize::new(4096);
 
@@ -1402,8 +1610,20 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                 let ms = (0..cat.dims[*s].size).filter(|&m| mp.fwd[m as usize] >= 0 && sel.has(mp.fwd[m as usize] as u32)).collect();
                 sub = sub.with(*s, Sel::new(ms, cat.dims[*s].size));
             }
-            let c = eval(child, cat, src, &sub)?;
-            let out = Packing::new(&replace_dim(c.dims(), *s, *dst), cat)?;
+            let rows = rows_of(child, cat, src, &sub)?;
+            let dims = replace_dim(&rows.pack().dims, *s, *dst);
+            let out = Packing::new(&dims, cat)?;
+            if few_groups(*agg, combos_in(&dims, cat, r), rows.len()) {
+                let xp = rows.pack();
+                let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
+                let rest = Proj::new(xp, &out);
+                let groups = fold_groups(&rows, |k| {
+                    let t = mp.fwd[xp.get(k, ps) as usize];
+                    (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
+                });
+                return Ok(finish_groups(groups, out, *agg));
+            }
+            let c = rows.into_cube();
             let (ps, pd) = (c.pack.pos(*s).unwrap(), out.pos(*dst).unwrap());
             let rest = Proj::new(&c.pack, &out);
             let pairs = map_cells(&c.cells, |k, v| {
@@ -1439,12 +1659,29 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
         }
 
         Node::Remove { child, dim, agg } => {
-            let c = eval(child, cat, src, &r.without(&[*dim]))?;
-            let dims: Vec<DimId> = c.dims().iter().copied().filter(|d| d != dim).collect();
-            let out = Packing::new(&dims, cat)?;
-            let proj = Proj::new(&c.pack, &out);
-            let pairs = map_cells(&c.cells, |k, v| Some((proj.apply(&c.pack, &out, k), v)));
-            Ok(group(pairs, out, *agg))
+            let sub = r.without(&[*dim]);
+            // Metric を使った BY の集約（Remove(On(x, AsAxis(V, T)), D)）は、対応表を引きながら集計する
+            if let Node::On(x, edges) = &**child {
+                if let Node::AsAxis { child: v, dim: target } = &**edges {
+                    if let (Node::Ref(vi), true) = (&**v, sub.is_all()) {
+                        if let Src::Store(vs) = &src[*vi] {
+                            let rows = rows_of(x, cat, src, &sub)?;
+                            if let Some(c) = remove_by_table(&rows, *dim, *target, vs, *agg, cat, r)? {
+                                return Ok(c);
+                            }
+                            // 引けなければ、結合してから集計する（On と同じ）
+                            let xc = rows.into_cube();
+                            let o = match semi(&sub, &xc, cat) {
+                                Some(r2) => eval(edges, cat, src, &r2)?,
+                                None => eval(edges, cat, src, &sub)?,
+                            };
+                            let joined = intersect(&xc, &o, xc.kind, cat, |a, _| Some(a))?;
+                            return remove_rows(Rows::Owned(joined), *dim, *agg, cat, r);
+                        }
+                    }
+                }
+            }
+            remove_rows(rows_of(child, cat, src, &sub)?, *dim, *agg, cat, r)
         }
 
         Node::AsAxis { child, dim } => {

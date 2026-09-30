@@ -355,5 +355,31 @@ class EagerHeuristics(unittest.TestCase):
         run_random(self, seed=47, rounds=80, engines=[RustEngine])
 
 
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class StreamedAggregation(unittest.TestCase):
+    """集計先が少ないときに集計元を写さずに読みながら集計する経路（Metric を使った BY は対応表を
+    引きながら）を、小さなモデルでも常に使い、並列の足し込みも働かせて、結果が変わらないことを確かめる。"""
+
+    def setUp(self):
+        nanashi_core.set_stream_always(True)
+        nanashi_core.set_par_min(0)
+
+    def tearDown(self):
+        nanashi_core.set_stream_always(False)
+        nanashi_core.set_par_min(16_384)
+
+    def test_random_rust(self):
+        run_random(self, seed=53, rounds=80, engines=[ReferenceEngine, RustEngine])
+
+    def test_other_suites(self):  # Metric を使った BY（異動、損益計画）を含むテストも、この設定で回す
+        from .test_dynamic_hierarchy import RustMatchesReference as Dynamic
+        from .test_expr_coverage import EveryNodeEverywhere
+        from .test_fpa import RustMatchesReference as Fpa
+        for case, name in [(EveryNodeEverywhere, "test_rust_handles_every_node_and_agrees"),
+                           (Dynamic, "test_random_edits"), (Fpa, "test_random_edits")]:
+            with self.subTest(case=case.__module__, test=name):
+                getattr(case(name), name)()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -720,6 +720,12 @@ fn set_postings_min_rows(n: usize) {
     core::POSTINGS_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// true なら、集計先の数によらず、集計元を写さずに読みながら集計する（テスト用）。
+#[pyfunction]
+fn set_stream_always(on: bool) {
+    core::STREAM_ALWAYS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// 値が変わった範囲が大半を占めるとき全体に広げる、Metric の行数の下限を変える（テスト用。0 なら常に）。
 #[pyfunction]
 fn set_widen_min_rows(n: usize) {
@@ -733,6 +739,7 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reset_heap_peak, m)?)?;
     m.add_function(wrap_pyfunction!(set_compact_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_par_min, m)?)?;
+    m.add_function(wrap_pyfunction!(set_stream_always, m)?)?;
     m.add_function(wrap_pyfunction!(set_semi_max, m)?)?;
     m.add_function(wrap_pyfunction!(set_postings_min_rows, m)?)?;
     m.add_function(wrap_pyfunction!(set_widen_min_rows, m)?)?;
