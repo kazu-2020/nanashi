@@ -160,7 +160,7 @@ BAD_FORMULAS = [  # (Metric の軸, 式) 型検査で失敗するもの。文言
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class RustTypeCheckMatchesPython(unittest.TestCase):
-    """Rust の型検査は、型、警告、エラーの文言が Python の参照実装と一致する。"""
+    """Rust の型検査は、型、警告、エラー（コードと値、文言）が Python の参照実装と一致する。"""
 
     def test_types_and_warnings(self):
         m = model(RustEngine())
@@ -200,7 +200,8 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
                     with self.assertRaises(FE) as cm:
                         m.add_formula("Bad", dims, text)
                         m.recalc()
-                    messages.append(str(cm.exception))
+                    e = cm.exception
+                    messages.append((e.code, e.params, str(e)))
             self.assertEqual(messages[0], messages[1], text)
         # 参照実装の型推論そのものも、同じ式で同じ文言を出す（add_formula の経路と食い違わない）
         m = model(ReferenceEngine())
@@ -295,6 +296,33 @@ class Aggregations(unittest.TestCase):
                 core.compile(("remove", ("ref", 0), d, name), ["X"], [([d], "number", -1)])
 
 
+class Messages(unittest.TestCase):
+    """誤りと警告の文言は messages.MESSAGES だけにあり、Rust は文言を持たずにコードと値を返す。"""
+
+    def test_every_code_has_a_message(self):
+        import pathlib
+        import re
+
+        from sparse_engine.messages import MESSAGES
+        root = pathlib.Path(__file__).resolve().parent.parent
+        rust = "".join(p.read_text() for p in (root / "native" / "engine" / "src").rglob("*.rs"))
+        python = "".join(p.read_text() for p in (root / "sparse_engine").glob("*.py"))
+        used = set(re.findall(r'Diag::new\("(\w+)"\)', rust))
+        used |= set(re.findall(r'(?:FormulaError|msg|render|__init__)\(\s*"(\w+)"', python))
+        used |= set(re.findall(r'\("(if_then|if_else)"', rust))
+        self.assertGreater(len(used), 40)
+        self.assertEqual(sorted(used - MESSAGES.keys()), [])
+        self.assertEqual(sorted(MESSAGES.keys() - used), [])
+
+    def test_errors_carry_their_code(self):
+        m = model(ReferenceEngine())
+        with self.assertRaises(FormulaError) as cm:
+            m.add_formula("Bad", ["Product"], "PREVIOUS(Product)")
+            m.recalc()
+        self.assertEqual(cm.exception.code, "previous_unordered")
+        self.assertEqual(cm.exception.params, {"dim": "Product"})
+
+
 CYCLIC = [  # (名前, 軸, 式) の列。計画を作るときに失敗する循環。文言が両方の実装で一致すること
     [("A", ["Product", "Month"], "B + 1"), ("B", ["Product", "Month"], "A * 2")],
     [("A", ["Product", "Month"], "PREVIOUS(Month) + B"), ("B", ["Product", "Month"], "A[SELECT: Month + 1]")],
@@ -345,7 +373,8 @@ class RustPlanMatchesPython(unittest.TestCase):
                         for name, dims, text in defs:
                             m.add_formula(name, dims, text)
                         m.recalc()
-                    messages.append(str(cm.exception))
+                    e = cm.exception
+                    messages.append((e.code, e.params, str(e)))
             self.assertEqual(messages[0], messages[1], defs)
 
 

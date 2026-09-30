@@ -1,11 +1,13 @@
-//! 式の型推論（軸と値の種類）。意味と文言は Python の参照実装（evaluate.infer）と同じで、
-//! テスト（tests/test_expr_coverage.py）で突き合わせる。
+//! 式の型推論（軸と値の種類）。意味と誤り（コードと値。文言は Python の messages.MESSAGES）は
+//! Python の参照実装（evaluate.infer）と同じで、テスト（tests/test_expr_coverage.py）で突き合わせる。
 //!
 //! 型を決めながら、評価と影響範囲が使う情報も式に書き込む。
 //! - Bin、If、IsBlank、IfBlank の grow: 軸にメンバーを追加したとき、新しいメンバーへ値が広がる軸
 //! - By: 式が持つ軸から、集約（ByAgg）か引き下ろし（ByLookup）かを決める
 
-use crate::{bits_for, Agg, Catalog, DimId, Node, Op, Result};
+use crate::{bits_for, Agg, Arg, Catalog, DimId, Diag, Node, Op};
+
+type Result<T> = std::result::Result<T, Diag>;
 
 /// 値の種類。number、boolean、または軸のメンバー（member:<軸>）。
 #[derive(Clone, Debug, PartialEq)]
@@ -28,31 +30,26 @@ pub struct Env<'a> {
     pub types: &'a [Ty],
 }
 
-fn kind_name(k: &TKind, cat: &Catalog) -> String {
+fn kind(k: &TKind, cat: &Catalog) -> Arg {
     match k {
         TKind::Num => "number".into(),
         TKind::Bool => "boolean".into(),
-        TKind::Member(d) => format!("member:{}", cat.dims[*d].name),
+        TKind::Member(d) => format!("member:{}", cat.dims[*d].name).into(),
     }
 }
 
-/// Python の list の表示（['A', 'B']）。
-fn list_repr(dims: &[DimId], cat: &Catalog) -> String {
-    format!("[{}]", dims.iter().map(|&d| format!("'{}'", cat.dims[d].name)).collect::<Vec<_>>().join(", "))
+fn name(d: DimId, cat: &Catalog) -> Arg {
+    Arg::Str(cat.dims[d].name.clone())
 }
 
-/// Python の tuple の表示（('A', 'B')、('A',)、()）。
-fn tuple_repr(dims: &[DimId], cat: &Catalog) -> String {
-    let items: Vec<String> = dims.iter().map(|&d| format!("'{}'", cat.dims[d].name)).collect();
-    match items.len() {
-        0 => "()".into(),
-        1 => format!("({},)", items[0]),
-        _ => format!("({})", items.join(", ")),
-    }
+/// 軸の名前の list（Python の参照実装が list で埋めるところ）。
+fn list(dims: &[DimId], cat: &Catalog) -> Arg {
+    Arg::List(dims.iter().map(|&d| name(d, cat)).collect())
 }
 
-fn ty_repr(t: &Ty, cat: &Catalog) -> String {
-    format!("Type(dims={}, kind='{}')", tuple_repr(&t.dims, cat), kind_name(&t.kind, cat))
+/// 軸の名前の tuple（Python の参照実装が型の軸 Type.dims を埋めるところ）。
+fn tuple(dims: &[DimId], cat: &Catalog) -> Arg {
+    Arg::Tuple(dims.iter().map(|&d| name(d, cat)).collect())
 }
 
 fn merge(a: &[DimId], b: &[DimId]) -> Vec<DimId> {
@@ -86,19 +83,19 @@ fn op_name(op: Op) -> &'static str {
     }
 }
 
-fn need(t: &Ty, kind: TKind, what: &str, cat: &Catalog) -> Result<()> {
-    if t.kind != kind {
-        return Err(format!("{what} には {} が必要だが {} が渡された", kind_name(&kind, cat), kind_name(&t.kind, cat)));
+fn need(t: &Ty, want: TKind, what: Diag, cat: &Catalog) -> Result<()> {
+    if t.kind != want {
+        return Err(Diag::new("need_kind").arg("what", what).arg("want", kind(&want, cat)).arg("got", kind(&t.kind, cat)));
     }
     Ok(())
 }
 
-fn agg_kind(agg: Agg, t: &Ty, what: &str, cat: &Catalog) -> Result<TKind> {
+fn agg_kind(agg: Agg, t: &Ty, what: Diag, cat: &Catalog) -> Result<TKind> {
     match agg {
         Agg::First => Ok(t.kind.clone()),
         Agg::Count => Ok(TKind::Num),
         _ => {
-            need(t, TKind::Num, &format!("{what} の {}", agg_name(agg)), cat)?;
+            need(t, TKind::Num, Diag::new("agg_of").arg("what", what).arg("agg", agg_name(agg)), cat)?;
             Ok(TKind::Num)
         }
     }
@@ -118,27 +115,22 @@ fn agg_name(agg: Agg) -> &'static str {
 /// 結果の軸 dims のうち covered にない軸へ、この項の値が複製されるかを調べる。
 /// 項が定数（軸なし）なら警告だけ出して許す。軸を持つ Metric なら、別の軸への暗黙の展開は
 /// セル数が爆発しうるのでエラーにし、expand か on で意図を書かせる。
-fn check_expand(warnings: &mut Vec<String>, what: &str, dims: &[DimId], covered: &[DimId], own: &[DimId], cat: &Catalog) -> Result<()> {
+fn check_expand(warnings: &mut Vec<Diag>, what: Diag, dims: &[DimId], covered: &[DimId], own: &[DimId], cat: &Catalog) -> Result<()> {
     let missing: Vec<DimId> = dims.iter().copied().filter(|d| !covered.contains(d)).collect();
     if missing.is_empty() {
         return Ok(());
     }
     if !own.is_empty() {
-        let names = missing.iter().map(|&d| cat.dims[d].name.clone()).collect::<Vec<_>>().join(", ");
-        return Err(format!(
-            "{what}（軸 {}）に {} 軸がない。全メンバーへ展開するなら [EXPAND: {names}]、相手に値があるセルだけなら [ON: 相手] を付ける（Python の DSL では .expand / .on）",
-            list_repr(own, cat),
-            list_repr(&missing, cat)
-        ));
+        return Err(Diag::new("not_expanded").arg("what", what).arg("own", list(own, cat)).arg("missing", list(&missing, cat)));
     }
-    warnings.push(format!("{what}が {} 方向に全メンバーへ展開される（密化）", list_repr(&missing, cat)));
+    warnings.push(Diag::new("densify").arg("what", what).arg("missing", list(&missing, cat)));
     Ok(())
 }
 
 /// 式の型を決める。密になる演算は warnings に積む。grow と By の種類を式に書き込む。
 /// 式の型（軸と値の種類）を決める。途中の結果も含めて、各ノードの結果の軸の組み合わせが 64 ビットの
 /// キーに収まるかも確かめる（収まらなければ、評価の途中でなく、ここで直し方を示してエラーにする）。
-pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Result<Ty> {
+pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<Diag>) -> Result<Ty> {
     let ty = infer_node(node, env, warnings)?;
     key_fits(&ty.dims, env.cat)?;
     Ok(ty)
@@ -146,20 +138,15 @@ pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Resu
 
 /// 軸の組み合わせが、1 セルのキー（64 ビット）に収まるか。
 pub fn key_fits(dims: &[DimId], cat: &Catalog) -> Result<()> {
-    let bits: Vec<(String, u32)> = dims.iter().map(|&d| (cat.dims[d].name.clone(), bits_for(cat.dims[d].size))).collect();
-    let total: u32 = bits.iter().map(|b| b.1).sum();
+    let total: u32 = dims.iter().map(|&d| bits_for(cat.dims[d].size)).sum();
     if total <= 64 {
         return Ok(());
     }
-    let detail: Vec<String> = bits.iter().map(|(n, b)| format!("{n} {b} ビット")).collect();
-    Err(format!(
-        "式の途中の結果の軸 [{}] が 64 ビットのキーに収まらない（{}）。先に集計して軸を減らしてから組み合わせるか、メンバー数の多い軸を持つ Metric を分ける",
-        bits.iter().map(|b| b.0.clone()).collect::<Vec<_>>().join(", "),
-        detail.join(", ")
-    ))
+    let bits = dims.iter().map(|&d| Arg::Msg(Diag::new("key_bits").arg("dim", name(d, cat)).arg("bits", bits_for(cat.dims[d].size)))).collect();
+    Err(Diag::new("key_too_wide").arg("dims", list(dims, cat)).arg("bits", Arg::List(bits)))
 }
 
-fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Result<Ty> {
+fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<Diag>) -> Result<Ty> {
     let cat = env.cat;
     match node {
         Node::Ref(i) => Ok(env.types[*i].clone()),
@@ -171,15 +158,17 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
             let (op, lt, rt) = (*op, infer(l, env, warnings)?, infer(r, env, warnings)?);
             let dims = merge(&lt.dims, &rt.dims);
             let name = op_name(op);
-            let kind = match op {
+            let (left, right) = (Diag::new("left").arg("op", name), Diag::new("right").arg("op", name));
+            let kinds = || Diag::new("operand_kinds").arg("op", name).arg("left", kind(&lt.kind, cat)).arg("right", kind(&rt.kind, cat));
+            let result = match op {
                 Op::Add | Op::Sub | Op::Mul | Op::Div => {
-                    need(&lt, TKind::Num, &format!("'{name}' の左辺"), cat)?;
-                    need(&rt, TKind::Num, &format!("'{name}' の右辺"), cat)?;
+                    need(&lt, TKind::Num, left.clone(), cat)?;
+                    need(&rt, TKind::Num, right.clone(), cat)?;
                     TKind::Num
                 }
                 Op::Eq | Op::Ne => {
                     if lt.kind != rt.kind {
-                        return Err(format!("'{name}' の両辺の種類が違う: {} と {}", kind_name(&lt.kind, cat), kind_name(&rt.kind, cat)));
+                        return Err(kinds());
                     }
                     TKind::Bool
                 }
@@ -187,56 +176,55 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
                     if matches!(lt.kind, TKind::Member(_)) || matches!(rt.kind, TKind::Member(_)) {
                         // メンバーの大小は、順序付きの軸（時間など）で、並び順で比べる
                         if lt.kind != rt.kind {
-                            return Err(format!("'{name}' の両辺の種類が違う: {} と {}", kind_name(&lt.kind, cat), kind_name(&rt.kind, cat)));
+                            return Err(kinds());
                         }
                         let TKind::Member(d) = lt.kind else { unreachable!() };
                         if !cat.dims[d].ordered {
-                            return Err(format!("'{name}': {} は順序付きの軸ではないので大小を比べられない（= と <> は使える）", cat.dims[d].name));
+                            return Err(Diag::new("unordered_compare").arg("op", name).arg("dim", self::name(d, cat)));
                         }
                     } else {
-                        need(&lt, TKind::Num, &format!("'{name}' の左辺"), cat)?;
-                        need(&rt, TKind::Num, &format!("'{name}' の右辺"), cat)?;
+                        need(&lt, TKind::Num, left.clone(), cat)?;
+                        need(&rt, TKind::Num, right.clone(), cat)?;
                     }
                     TKind::Bool
                 }
                 Op::And | Op::Or => {
-                    need(&lt, TKind::Bool, &format!("'{name}' の左辺"), cat)?;
-                    need(&rt, TKind::Bool, &format!("'{name}' の右辺"), cat)?;
+                    need(&lt, TKind::Bool, left.clone(), cat)?;
+                    need(&rt, TKind::Bool, right.clone(), cat)?;
                     TKind::Bool
                 }
             };
             if matches!(op, Op::Add | Op::Sub | Op::And | Op::Or) {
                 // 片側だけのセルも結果に残る演算
-                check_expand(warnings, &format!("'{name}' の左辺"), &dims, &lt.dims, &lt.dims, cat)?;
-                check_expand(warnings, &format!("'{name}' の右辺"), &dims, &rt.dims, &rt.dims, cat)?;
+                check_expand(warnings, left, &dims, &lt.dims, &lt.dims, cat)?;
+                check_expand(warnings, right, &dims, &rt.dims, &rt.dims, cat)?;
                 *grow = dims.iter().copied().filter(|d| !lt.dims.contains(d) || !rt.dims.contains(d)).collect();
             }
-            Ok(Ty { dims, kind })
+            Ok(Ty { dims, kind: result })
         }
 
         Node::Not(c) => {
             let t = infer(c, env, warnings)?;
-            need(&t, TKind::Bool, "NOT", cat)?;
+            need(&t, TKind::Bool, Diag::new("not"), cat)?;
             Ok(t)
         }
 
         Node::If(cond, then, else_, grow) => {
             let ct = infer(cond, env, warnings)?;
-            need(&ct, TKind::Bool, "IF の条件", cat)?;
-            let mut branches = vec![("IF の THEN", infer(then, env, warnings)?)];
+            need(&ct, TKind::Bool, Diag::new("if_cond"), cat)?;
+            let mut branches = vec![("if_then", infer(then, env, warnings)?)];
             if let Some(e) = else_ {
-                branches.push(("IF の ELSE", infer(e, env, warnings)?));
+                branches.push(("if_else", infer(e, env, warnings)?));
             }
             if branches.len() == 2 && branches[0].1.kind != branches[1].1.kind {
-                let kinds: Vec<String> = branches.iter().map(|(_, t)| format!("'{}'", kind_name(&t.kind, cat))).collect();
-                return Err(format!("IF の THEN と ELSE の種類が違う: [{}]", kinds.join(", ")));
+                return Err(Diag::new("if_kinds").arg("kinds", Arg::List(branches.iter().map(|(_, t)| kind(&t.kind, cat)).collect())));
             }
             let mut dims = ct.dims.clone();
             for (_, t) in &branches {
                 dims = merge(&dims, &t.dims);
             }
             for (what, t) in &branches {
-                check_expand(warnings, what, &dims, &merge(&ct.dims, &t.dims), &t.dims, cat)?;
+                check_expand(warnings, Diag::new(what), &dims, &merge(&ct.dims, &t.dims), &t.dims, cat)?;
             }
             *grow = dims.iter().copied().filter(|d| branches.iter().any(|(_, b)| !merge(&ct.dims, &b.dims).contains(d))).collect();
             Ok(Ty { dims, kind: branches[0].1.kind.clone() })
@@ -244,10 +232,10 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
 
         Node::Filter(child, cond) => {
             let (t, ct) = (infer(child, env, warnings)?, infer(cond, env, warnings)?);
-            need(&ct, TKind::Bool, "FILTER の条件", cat)?;
+            need(&ct, TKind::Bool, Diag::new("filter_cond"), cat)?;
             let extra: Vec<DimId> = ct.dims.iter().copied().filter(|d| !t.dims.contains(d)).collect();
             if !extra.is_empty() {
-                return Err(format!("FILTER の条件が対象にない軸 {} を持っている", list_repr(&extra, cat)));
+                return Err(Diag::new("filter_dims").arg("extra", list(&extra, cat)));
             }
             Ok(t)
         }
@@ -256,13 +244,13 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
             let t = infer(child, env, warnings)?;
             for &d in dims.iter() {
                 if t.dims.contains(&d) {
-                    return Err(format!("EXPAND {}: すでに軸にある", cat.dims[d].name));
+                    return Err(Diag::new("expand_present").arg("dim", name(d, cat)));
                 }
             }
             let mut seen = Vec::new();
             for &d in dims.iter() {
                 if seen.contains(&d) {
-                    return Err(format!("EXPAND {}: 軸が重複している", list_repr(dims, cat)));
+                    return Err(Diag::new("expand_repeated").arg("dims", list(dims, cat)));
                 }
                 seen.push(d);
             }
@@ -277,7 +265,11 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
         Node::Coalesce(first, second) => {
             let (ft, st) = (infer(first, env, warnings)?, infer(second, env, warnings)?);
             if !same_set(&ft.dims, &st.dims) || ft.kind != st.kind {
-                return Err(format!("上書きの軸と種類が式と一致しない: {} と {}", ty_repr(&ft, cat), ty_repr(&st, cat)));
+                return Err(Diag::new("coalesce_mismatch")
+                    .arg("first_dims", tuple(&ft.dims, cat))
+                    .arg("first_kind", kind(&ft.kind, cat))
+                    .arg("second_dims", tuple(&st.dims, cat))
+                    .arg("second_kind", kind(&st.kind, cat)));
             }
             Ok(st)
         }
@@ -285,7 +277,7 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
         Node::IsBlank(child, grow) => {
             let t = infer(child, env, warnings)?;
             if !t.dims.is_empty() {
-                warnings.push(format!("ISBLANK が {} の全組み合わせに展開される（密化）", list_repr(&t.dims, cat)));
+                warnings.push(Diag::new("isblank_dense").arg("dims", list(&t.dims, cat)));
             }
             *grow = t.dims.clone();
             Ok(Ty { dims: t.dims, kind: TKind::Bool })
@@ -295,10 +287,10 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
             let t = infer(child, env, warnings)?;
             let vkind = if *is_bool { TKind::Bool } else { TKind::Num };
             if vkind != t.kind {
-                return Err(format!("IFBLANK の既定値は {} でなければならない", kind_name(&t.kind, cat)));
+                return Err(Diag::new("ifblank_kind").arg("kind", kind(&t.kind, cat)));
             }
             if !t.dims.is_empty() {
-                warnings.push(format!("IFBLANK が {} の全組み合わせに展開される（密化）", list_repr(&t.dims, cat)));
+                warnings.push(Diag::new("ifblank_dense").arg("dims", list(&t.dims, cat)));
             }
             *grow = t.dims.clone();
             Ok(t)
@@ -307,24 +299,24 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
         Node::By { child, src, dst, map, agg, dim, prop } => {
             let t = infer(child, env, warnings)?;
             let (src, dst, map, agg) = (*src, *dst, *map, *agg);
-            let what = format!("BY {dim}.{prop}");
-            let target = cat.dims[dst].name.clone();
+            let what = Diag::new("by").arg("dim", &*dim).arg("prop", &*prop);
+            let target = name(dst, cat);
             let (resolved, ty) = if t.dims.contains(&src) {
                 if t.dims.contains(&dst) {
-                    return Err(format!("{what}: 集約先の {target} がすでに軸にある"));
+                    return Err(Diag::new("by_target_present").arg("what", what).arg("target", target));
                 }
                 let agg = agg.unwrap_or(Agg::Sum);
-                let kind = agg_kind(agg, &t, &what, cat)?;
+                let kind = agg_kind(agg, &t, what, cat)?;
                 let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::Kind::Num)));
                 (Node::ByAgg { child, src, dst, map, agg }, Ty { dims: replace(&t.dims, src, dst), kind })
             } else if t.dims.contains(&dst) {
                 if agg.is_some() {
-                    return Err(format!("{what}: 引き下ろし（lookup）に集計関数は指定できない"));
+                    return Err(Diag::new("by_lookup_agg").arg("what", what));
                 }
                 let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::Kind::Num)));
                 (Node::ByLookup { child, src, dst, map }, Ty { dims: replace(&t.dims, dst, src), kind: t.kind })
             } else {
-                return Err(format!("{what}: 式の軸 {} に {dim} も {target} もない", tuple_repr(&t.dims, cat)));
+                return Err(Diag::new("by_no_dims").arg("what", what).arg("dims", tuple(&t.dims, cat)).arg("dim", &*dim).arg("target", target));
             };
             *node = resolved;
             Ok(ty)
@@ -333,7 +325,7 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
             // 型を決めた式をもう一度検査したとき（誤りはないので、型を決め直すだけ）
             let t = infer(child, env, warnings)?;
             let (src, dst, agg) = (*src, *dst, *agg);
-            let kind = agg_kind(agg, &t, "BY", cat)?;
+            let kind = agg_kind(agg, &t, Diag::new("by").arg("dim", name(src, cat)).arg("prop", name(dst, cat)), cat)?;
             Ok(Ty { dims: replace(&t.dims, src, dst), kind })
         }
         Node::ByLookup { child, src, dst, .. } => {
@@ -349,35 +341,36 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
             //   集約:     child ⋈ 対応表 を D について集計する   -> D が T に置き換わる
             //   引き下ろし: child ⋈ 対応表 から T を外す（各行の T は 1 つ） -> T が D（と V の軸）に置き換わる
             let (src, metric, agg) = (*src, *metric, *agg);
-            let what = format!("BY {dim}.{prop}");
+            let what = Diag::new("by").arg("dim", &*dim).arg("prop", &*prop);
             let vt = env.types[metric].clone();
             let TKind::Member(target) = vt.kind else {
-                return Err(format!("{what}: {prop} はメンバー型の Metric ではない（{}）", kind_name(&vt.kind, cat)));
+                return Err(Diag::new("by_not_member").arg("what", what).arg("prop", &*prop).arg("kind", kind(&vt.kind, cat)));
             };
             if !vt.dims.contains(&src) {
-                return Err(format!("{what}: {prop} の軸 {} に {dim} がない", tuple_repr(&vt.dims, cat)));
+                return Err(Diag::new("by_metric_no_dim").arg("what", what).arg("prop", &*prop).arg("dims", tuple(&vt.dims, cat)).arg("dim", &*dim));
             }
             let t = infer(child, env, warnings)?;
             let edges_dims = [vt.dims.as_slice(), &[target]].concat();
             let joined = merge(&t.dims, &edges_dims); // On(child, AsAxis(V)) の軸
             let (remove, agg, ty) = if t.dims.contains(&src) {
                 if t.dims.contains(&target) {
-                    return Err(format!("{what}: 集約先の {} がすでに軸にある", cat.dims[target].name));
+                    return Err(Diag::new("by_target_present").arg("what", what).arg("target", name(target, cat)));
                 }
                 let missing: Vec<DimId> = vt.dims.iter().copied().filter(|d| !t.dims.contains(d)).collect();
                 if !missing.is_empty() {
-                    return Err(format!("{what}: 式が {prop} の軸 {} を持っていない", list_repr(&missing, cat)));
+                    return Err(Diag::new("by_metric_missing").arg("what", what).arg("prop", &*prop).arg("missing", list(&missing, cat)));
                 }
                 let agg = agg.unwrap_or(Agg::Sum);
-                let kind = agg_kind(agg, &Ty { dims: joined.clone(), kind: t.kind.clone() }, &format!("REMOVE {}", cat.dims[src].name), cat)?;
+                let remove = Diag::new("remove").arg("dim", name(src, cat));
+                let kind = agg_kind(agg, &Ty { dims: joined.clone(), kind: t.kind.clone() }, remove, cat)?;
                 (src, agg, Ty { dims: joined.iter().copied().filter(|d| *d != src).collect(), kind })
             } else if t.dims.contains(&target) {
                 if agg.is_some() {
-                    return Err(format!("{what}: 引き下ろし（lookup）に集計関数は指定できない"));
+                    return Err(Diag::new("by_lookup_agg").arg("what", what));
                 }
                 (target, Agg::First, Ty { dims: joined.iter().copied().filter(|d| *d != target).collect(), kind: t.kind.clone() })
             } else {
-                return Err(format!("{what}: 式の軸 {} に {dim} も {} もない", tuple_repr(&t.dims, cat), cat.dims[target].name));
+                return Err(Diag::new("by_no_dims").arg("what", what).arg("dims", tuple(&t.dims, cat)).arg("dim", &*dim).arg("target", name(target, cat)));
             };
             let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::Kind::Num)));
             let edges = Box::new(Node::AsAxis { child: Box::new(Node::Ref(metric)), dim: target });
@@ -388,11 +381,11 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
         Node::Remove { child, dim, agg } => {
             let t = infer(child, env, warnings)?;
             let (dim, agg) = (*dim, *agg);
-            let what = format!("REMOVE {}", cat.dims[dim].name);
+            let what = Diag::new("remove").arg("dim", name(dim, cat));
             if !t.dims.contains(&dim) {
-                return Err(format!("{what}: 式の軸 {} にない", tuple_repr(&t.dims, cat)));
+                return Err(Diag::new("remove_absent").arg("what", what).arg("dims", tuple(&t.dims, cat)));
             }
-            let kind = agg_kind(agg, &t, &what, cat)?;
+            let kind = agg_kind(agg, &t, what, cat)?;
             Ok(Ty { dims: t.dims.iter().copied().filter(|d| *d != dim).collect(), kind })
         }
 
@@ -400,10 +393,10 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
             let t = infer(child, env, warnings)?;
             let dim = *dim;
             if !t.dims.contains(&dim) {
-                return Err(format!("PREVIOUS {}: 式の軸 {} にない", cat.dims[dim].name, tuple_repr(&t.dims, cat)));
+                return Err(Diag::new("previous_absent").arg("dim", name(dim, cat)).arg("dims", tuple(&t.dims, cat)));
             }
             if !cat.dims[dim].ordered {
-                return Err(format!("PREVIOUS {}: 順序付きの軸ではない", cat.dims[dim].name));
+                return Err(Diag::new("previous_unordered").arg("dim", name(dim, cat)));
             }
             Ok(t)
         }
@@ -411,7 +404,7 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
         Node::AsAxis { child, dim } => {
             let t = infer(child, env, warnings)?;
             let dim = *dim;
-            need(&t, TKind::Member(dim), "対応表", cat)?;
+            need(&t, TKind::Member(dim), Diag::new("edges"), cat)?;
             Ok(Ty { dims: [t.dims.as_slice(), &[dim]].concat(), kind: TKind::Num })
         }
 
@@ -419,7 +412,7 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Res
             let t = infer(child, env, warnings)?;
             let dim = *dim;
             if !t.dims.contains(&dim) {
-                return Err(format!("SELECT {}.\"{name}\": 式の軸 {} に {} がない", cat.dims[dim].name, tuple_repr(&t.dims, cat), cat.dims[dim].name));
+                return Err(Diag::new("select_absent").arg("dim", self::name(dim, cat)).arg("member", &*name).arg("dims", tuple(&t.dims, cat)));
             }
             Ok(Ty { dims: t.dims.iter().copied().filter(|d| *d != dim).collect(), kind: t.kind })
         }
@@ -446,7 +439,7 @@ fn without(dims: &[DimId], dim: DimId) -> Vec<DimId> {
 /// (軸, セル数)。値のあるセルだけが結果に残る演算は小さい側で、片側だけでも残る演算は和で、
 /// 全組み合わせに値を作る演算は軸の大きさの積で見積もり、どれも結果の軸の全組み合わせで頭打ちにする。
 /// 意味は Python の参照実装（evaluate.estimate）と同じ。
-pub fn estimate(node: &Node, cat: &Catalog, refs: &[(Vec<DimId>, f64)]) -> Result<(Vec<DimId>, f64)> {
+pub fn estimate(node: &Node, cat: &Catalog, refs: &[(Vec<DimId>, f64)]) -> crate::Result<(Vec<DimId>, f64)> {
     let est = |n: &Node| estimate(n, cat, refs);
     let (dims, n) = match node {
         Node::Ref(i) => refs[*i].clone(),

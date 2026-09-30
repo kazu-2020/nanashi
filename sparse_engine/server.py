@@ -161,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as e:
             self._fail(e)
         except FormulaError as e:
-            self._fail(ApiError(400, "formula", str(e)))
+            self._fail(ApiError(400, "formula", str(e), code=e.code))
         except ValueError as e:  # 引数の誤り（Model は利用者の誤りを ValueError にする）
             self._fail(ApiError(400, "bad_request", str(e)))
         except Exception:  # それ以外は内部の誤り。中身は応答に出さず、ログで引けるように ID を付ける

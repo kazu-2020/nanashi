@@ -36,6 +36,7 @@ from .evaluate import Edge, FormulaError, Kind, Restrict, Type, combos, member_k
 from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_member, references_metric,
                    rename_member, rename_metrics, uses_property)
 from .journal import AlreadyCommitted, Transaction, changes, jsonable, now
+from .messages import msg
 from .parser import parse
 from .planner import CompiledPlan, Step
 
@@ -302,12 +303,12 @@ class Model:
 
     def dimension(self, name: str) -> Dimension:
         if name not in self.dimensions:
-            raise FormulaError(f"未知の軸 {name}")
+            raise FormulaError("unknown_dim", name=name)
         return self.dimensions[name]
 
     def metric_type(self, name: str) -> Type:
         if name not in self.metrics:
-            raise FormulaError(f"未知の Metric {name}")
+            raise FormulaError("unknown_metric", name=name)
         m = self.metrics[name]
         return Type(m.dims, m.kind)
 
@@ -1105,9 +1106,9 @@ class Model:
         """m の式を評価できる形に直して型を検査し、(評価に使う式, 警告) を返す。"""
         formula, t, w = self.engine.planner.check(m.written, self)
         if set(t.dims) != set(m.dims):
-            raise FormulaError(f"{m.name}: 式の軸 {t.dims} が宣言した軸 {m.dims} と一致しない")
+            raise FormulaError("formula_dims", metric=m.name, dims=t.dims, declared=m.dims)
         if t.kind != m.kind:
-            raise FormulaError(f"{m.name}: 式の値は {t.kind} だが {m.kind} として宣言されている")
+            raise FormulaError("formula_kind", metric=m.name, kind=t.kind, declared=m.kind)
         if m.overridable:  # 検査は利用者が書いた式で済ませてから包む
             formula = Coalesce(Ref(m.override_name), formula)  # 上書きがあればそれを優先
         return formula, w
@@ -1244,10 +1245,8 @@ class Model:
                     changed.add(n)
                 if self.max_cells is not None and out[n] > self.max_cells:
                     dense = [w for w in warnings.get(n, self.warnings.get(n, [])) if w.endswith("（密化）")]
-                    raise FormulaError(
-                        f"{n}: 結果のセル数が最大 {out[n]:,.0f} と見積もられ、上限 {self.max_cells:,} を超える"
-                        + (f"。密になる演算: {'、'.join(dense)}" if dense else "")
-                        + "。値のあるセルだけに絞るなら [ON: 相手] か FILTER を使う。上限は Model(max_cells=...) で変えられる")
+                    raise FormulaError("too_many_cells", metric=n, cells=out[n], limit=self.max_cells,
+                                       dense=msg("dense_ops", ops=dense) if dense else "")
         return out, refs, users
 
     def _delta_plan(self, formula: Expr) -> DeltaPlan | None:

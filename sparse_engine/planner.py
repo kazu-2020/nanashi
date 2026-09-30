@@ -414,23 +414,23 @@ def _make_step(cat, scc: list[str], edges: dict[str, list[Edge]]) -> Step:
 
     lag_dims = {d for _, e in internal for d, n in e.lags if n >= 1}
     if len(lag_dims) != 1:
-        raise FormulaError(f"循環参照: {sorted(members)}（時間方向のずらしを通らない循環がある）")
+        raise FormulaError("cycle_no_lag", members=sorted(members))
     dim = lag_dims.pop()
     same_time: dict[str, set[str]] = {n: set() for n in scc}
     for src, e in internal:
         if dim not in cat.metrics[src].dims:
-            raise FormulaError(f"循環参照: {src} が scan 軸 {dim} を持たない")
+            raise FormulaError("cycle_scan_dim", src=src, dim=dim)
         if dim in e.broken:
-            raise FormulaError(f"循環参照: {src} -> {e.target} の経路で {dim} を集約・付け替えている")
+            raise FormulaError("cycle_broken", src=src, target=e.target, dim=dim)
         if e.lag(dim) < 0:
-            raise FormulaError(f"循環参照: {src} が {e.target} の未来の値を参照している")
+            raise FormulaError("cycle_future", src=src, target=e.target)
         if e.lag(dim) == 0:
             same_time[src].add(e.target)
 
     # 同じ時点どうしの依存（ずらし 0）は非循環でなければならない
     order = _tarjan(same_time)
     if any(len(c) > 1 or c[0] in same_time[c[0]] for c in order):
-        raise FormulaError(f"循環参照: {sorted(members)} が同じ時点で循環している")
+        raise FormulaError("cycle_same_time", members=sorted(members))
     return Step(tuple(c[0] for c in order), scan_dim=dim)
 
 

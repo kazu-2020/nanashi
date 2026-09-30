@@ -21,6 +21,12 @@ from .planner import Step
 from .evaluate import Catalog, Edge, FormulaError, Type, member_kind, resolve
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
+from .messages import from_rust, render
+
+
+def _formula_error(e: nanashi_core.Diagnostic) -> FormulaError:
+    code, params = from_rust(*e.args)
+    return FormulaError(code, **params)
 
 
 class LazyEdges(MutableMapping):
@@ -161,9 +167,10 @@ class RustEngine:
         tree = self._tree(expr, cat, names)
         reads = [cat.metric_type(n) for n in names]
         try:
-            compiled, dims, kind, d, warnings = self.core.compile(tree, names, [self._type(cat, r) for r in reads])
-        except ValueError as e:
-            raise FormulaError(str(e)) from None
+            compiled, dims, kind, d, found = self.core.compile(tree, names, [self._type(cat, r) for r in reads])
+        except nanashi_core.Diagnostic as e:
+            raise _formula_error(e) from None
+        warnings = [render(*from_rust(code, params)) for code, params in found]
         t = Type(tuple(self._names[i] for i in dims), member_kind(self._names[d]) if kind == "member" else kind)
         if len(self._exprs) >= EXPRS_MAX:  # 定義を何度も変えても増え続けないように、溢れたら作り直させる
             self._exprs.clear()
@@ -193,7 +200,7 @@ class RustEngine:
             case Member(dim, member):
                 d = cat.dimension(dim)
                 if member not in d:
-                    raise FormulaError(f'{dim}."{member}": {dim} にメンバー {member!r} がない')
+                    raise FormulaError("unknown_member", dim=dim, member=member)
                 return ("member", self._dim(cat, dim), d._index[member])
             case BinOp(op, left, right):
                 return ("bin", op, t(left), t(right))
@@ -220,7 +227,7 @@ class RustEngine:
                     return ("by", t(child), self._dim(cat, dim), self._dim(cat, target), self._map(cat, dim, prop),
                             agg, dim, prop)
                 if prop not in getattr(cat, "metrics", {}):
-                    raise FormulaError(f"{dim} にプロパティ {prop} がなく、同じ名前の Metric もない")
+                    raise FormulaError("no_property_or_metric", dim=dim, prop=prop)
                 if prop not in names:  # 対応表がメンバー型の Metric。書き換えは Rust の型検査が行う
                     names.append(prop)
                 return ("bymetric", t(child), self._dim(cat, dim), names.index(prop), agg, dim, prop)
@@ -233,7 +240,7 @@ class RustEngine:
             case Select(child, dim, member):
                 d = cat.dimension(dim)
                 if member not in d:
-                    raise FormulaError(f'SELECT {dim}."{member}": {dim} にメンバー {member!r} がない')
+                    raise FormulaError("select_member", dim=dim, member=member)
                 return ("select", t(child), self._dim(cat, dim), d._index[member], member)
         raise TypeError(e)
 
@@ -477,7 +484,7 @@ class RustPlanner:
 
     def check(self, written: Expr, cat: Catalog) -> tuple[Expr, Type, list[str]]:
         """式を評価できる形に直して型を検査する。Metric を使った BY は、Python でなく Rust の型検査が
-        書き換える（check.rs）。型の誤りは FormulaError（文言は Python の参照実装と同じ）。
+        書き換える（check.rs）。型の誤りは FormulaError（コードと値は Python の参照実装と同じ）。
         変換した式は取っておき、評価に使い回す。"""
         formula = resolve(written, cat, by_metric=False)
         _, _, t, warnings = self.e._compile_full(formula, cat)
@@ -520,7 +527,7 @@ class RustPlanner:
     # ------------------------------------------------ 計算計画
 
     def plan(self, formulas: dict, dims: dict, cat: Catalog) -> tuple[list, Any, list]:
-        """依存グラフから計算計画を作る。循環の誤りは FormulaError（文言は Python の参照実装と同じ）。
+        """依存グラフから計算計画を作る。循環の誤りは FormulaError（コードと値は Python の参照実装と同じ）。
         依存グラフ（Metric 名 -> Edge の列）は、初めて使うときに Python のオブジェクトにする。"""
         names = list(formulas)
         index = {n: i for i, n in enumerate(names)}
@@ -534,8 +541,8 @@ class RustPlanner:
                 items.append((compiled, [index[r] for r in reads]))
         try:
             steps, levels, edges = self.e.core.plan(items, names, [[self.e._dim(cat, d) for d in dims[n]] for n in names])
-        except ValueError as e:
-            raise FormulaError(str(e)) from None
+        except nanashi_core.Diagnostic as e:
+            raise _formula_error(e) from None
 
         def graph():
             return {n: [Edge(names[t], tuple(sorted((self.e._names[d], k) for d, k in lags)),

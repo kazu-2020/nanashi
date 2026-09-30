@@ -76,7 +76,7 @@ class ParseError(FormulaError):
         line = text[start:end if end != -1 else len(text)]
         caret = " " * _width(text[start:pos]) + "^"
         row = text.count("\n", 0, pos) + 1
-        super().__init__(f"{row} 行 {pos - start + 1} 文字目: {message}\n  {line}\n  {caret}")
+        super().__init__("syntax", row=row, col=pos - start + 1, detail=message, line=line, caret=caret)
         self.pos = pos
 
 

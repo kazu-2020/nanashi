@@ -3,7 +3,7 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, pq, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
+use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -18,6 +18,40 @@ use std::sync::{Arc, OnceLock};
 
 fn err(msg: String) -> PyErr {
     PyValueError::new_err(msg)
+}
+
+pyo3::create_exception!(
+    nanashi_core,
+    Diagnostic,
+    PyValueError,
+    "式の誤り。args は (コード, 値の dict)。文言は Python の sparse_engine.messages が作る。"
+);
+
+fn py_arg<'py>(py: Python<'py>, a: &Arg) -> PyResult<Bound<'py, PyAny>> {
+    let all = |xs: &[Arg]| xs.iter().map(|x| py_arg(py, x)).collect::<PyResult<Vec<_>>>();
+    Ok(match a {
+        Arg::Str(s) => s.into_pyobject(py)?.into_any(),
+        Arg::Int(n) => n.into_pyobject(py)?.into_any(),
+        Arg::Tuple(xs) => PyTuple::new(py, all(xs)?)?.into_any(),
+        Arg::List(xs) => PyList::new(py, all(xs)?)?.into_any(),
+        Arg::Msg(d) => py_diag(py, d)?.into_any(),
+    })
+}
+
+/// (コード, 値の dict)。
+fn py_diag<'py>(py: Python<'py>, d: &Diag) -> PyResult<Bound<'py, PyTuple>> {
+    let args = PyDict::new(py);
+    for (k, v) in &d.args {
+        args.set_item(k, py_arg(py, v)?)?;
+    }
+    (d.code, args).into_pyobject(py)
+}
+
+fn diag_err(py: Python<'_>, d: Diag) -> PyErr {
+    match py_diag(py, &d) {
+        Ok(t) => Diagnostic::new_err(t.unbind()),
+        Err(e) => e,
+    }
 }
 
 fn kind_of(is_bool: bool) -> Kind {
@@ -461,15 +495,16 @@ impl Core {
 
     /// 式を変換して型を検査する。names は Ref の番号ごとの名前、types はその型
     /// （軸の番号の列, "number" | "boolean" | "member", メンバー型なら軸の番号）。
-    /// 返すのは (変換した式, 軸の番号の列, 種類, メンバー型の軸の番号, 警告)。型の誤りは ValueError
-    /// （文言は Python の参照実装と同じ）。
+    /// 返すのは (変換した式, 軸の番号の列, 種類, メンバー型の軸の番号, 警告)。型の誤りは Diagnostic、
+    /// 警告は (コード, 値の dict) の列（文言は Python の sparse_engine.messages が作る）。
     #[allow(clippy::type_complexity)]
-    fn compile(
+    fn compile<'py>(
         &self,
-        tree: &Bound<'_, PyAny>,
+        py: Python<'py>,
+        tree: &Bound<'py, PyAny>,
         names: Vec<String>,
         types: Vec<(Vec<DimId>, String, i64)>,
-    ) -> PyResult<(Expr, Vec<DimId>, String, i64, Vec<String>)> {
+    ) -> PyResult<(Expr, Vec<DimId>, String, i64, Vec<Bound<'py, PyTuple>>)> {
         let mut node = self.node(tree)?;
         self.check_node(&node, types.len())?;
         types.iter().try_for_each(|(dims, _, d)| {
@@ -487,7 +522,8 @@ impl Core {
         let _ = &names; // 名前は Python 側の文言にだけ使う
         let env = Env { cat: &self.cat, types: &types };
         let mut warnings = Vec::new();
-        let ty = check::infer(&mut node, &env, &mut warnings).map_err(err)?;
+        let ty = check::infer(&mut node, &env, &mut warnings).map_err(|d| diag_err(py, d))?;
+        let warnings = warnings.iter().map(|w| py_diag(py, w)).collect::<PyResult<_>>()?;
         let (kind, d) = kind_to(&ty.kind);
         Ok((Expr { node: Arc::new(node), refs }, ty.dims, kind, d, warnings))
     }
@@ -867,16 +903,16 @@ impl Core {
 
     /// 計算計画を作る。formulas は Metric の番号順の (式, 読み出す Metric の番号) で、入力は None。
     /// names と dims はその名前と軸。返すのは、依存先が先の順の段階 (Metric の番号の列, scan の軸) と、
-    /// 段ごとの段階の番号の列と、依存グラフの辺。循環の誤りは ValueError（文言は Python の参照実装と同じ）。
+    /// 段ごとの段階の番号の列と、依存グラフの辺。循環の誤りは Diagnostic。
     #[allow(clippy::type_complexity)]
-    fn plan(&self, formulas: Vec<Bound<'_, PyAny>>, names: Vec<String>, dims: Vec<Vec<DimId>>) -> PyResult<(Vec<(Vec<usize>, Option<DimId>)>, Vec<Vec<usize>>, graph::Edges)> {
+    fn plan(&self, py: Python<'_>, formulas: Vec<Bound<'_, PyAny>>, names: Vec<String>, dims: Vec<Vec<DimId>>) -> PyResult<(Vec<(Vec<usize>, Option<DimId>)>, Vec<Vec<usize>>, graph::Edges)> {
         let formulas: Vec<Option<Formula>> = formulas.iter().map(formula).collect::<PyResult<_>>()?;
         check_refs(formulas.iter(), formulas.len())?;
         if names.len() != formulas.len() || dims.len() != formulas.len() {
             return Err(err("名前と軸の数が式の数と合わない".into()));
         }
         dims.iter().try_for_each(|ds| self.dims(ds))?;
-        graph::plan(&self.cat, &formulas, &names, &dims).map_err(err)
+        graph::plan(&self.cat, &formulas, &names, &dims).map_err(|d| diag_err(py, d))
     }
 
     /// 入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲を返す。
@@ -1371,6 +1407,7 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_metadata, m)?)?;
+    m.add("Diagnostic", m.py().get_type::<Diagnostic>())?;
     m.add_class::<Core>()?;
     m.add_class::<Expr>()?;
     m.add_class::<CubeHandle>()?;

@@ -106,7 +106,7 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "x", "ops": []})[0], 400)
         formula = {"client_op_id": "op-3", "ops": [{"op": "add_formula", "args": ["Bad", ["Product", "Month"], "ByMonth + Stock"]}]}
         status, err = self.c.post("/writes", formula)
-        self.assertEqual(status, 400)
+        self.assertEqual((status, err["error"], err["code"]), (400, "formula", "not_expanded"))  # 呼ぶ側はコードで見分ける
         self.assertIn("EXPAND", err["message"])
 
     def test_optimistic_concurrency(self):
