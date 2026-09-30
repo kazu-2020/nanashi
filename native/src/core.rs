@@ -73,10 +73,12 @@ pub struct Mapping {
     pub inv: Vec<Vec<u32>>, // dst メンバー -> src メンバーの一覧
 }
 
+/// 軸と対応表。複製したモデルどうしで Arc で共有し、変えるときに写す（対応表は Arc なので、
+/// 軸を 1 つ変えても対応表の中身までは写さない）。
 #[derive(Clone, Default, Debug)]
 pub struct Catalog {
     pub dims: Vec<DimInfo>,
-    pub maps: Vec<Mapping>,
+    pub maps: Vec<Arc<Mapping>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -172,21 +174,21 @@ impl Proj {
 
 // ------------------------------------------------------------------ 範囲（restrict）
 
-/// 1 つの軸で対象にするメンバーの集合。
+/// 1 つの軸で対象にするメンバーの集合。所属の検査はビット集合で行う（メンバー数の 1/8 バイト）。
 #[derive(Debug)]
 pub struct Sel {
     pub members: Vec<u32>, // 昇順
-    mask: Vec<bool>,
+    mask: Vec<u64>,
 }
 
 impl Sel {
     pub fn new(mut members: Vec<u32>, size: u32) -> Sel {
         members.sort_unstable();
         members.dedup();
-        let mut mask = vec![false; size as usize];
+        let mut mask = vec![0u64; (size as usize).div_ceil(64)];
         for &m in &members {
-            if (m as usize) < mask.len() {
-                mask[m as usize] = true;
+            if (m as usize) < size as usize {
+                mask[(m >> 6) as usize] |= 1u64 << (m & 63);
             }
         }
         Sel { members, mask }
@@ -194,7 +196,7 @@ impl Sel {
 
     #[inline]
     pub fn has(&self, m: u32) -> bool {
-        self.mask.get(m as usize).copied().unwrap_or(false)
+        self.mask.get((m >> 6) as usize).is_some_and(|w| (w >> (m & 63)) & 1 == 1)
     }
 }
 
@@ -726,6 +728,35 @@ impl Store {
             Some(v) => *v,
             None => self.base.keys.binary_search(&k).ok().map(|i| self.base.vals[i]),
         }
+    }
+
+    /// 1 セルの値（宣言した軸の順のメンバー番号）。空なら None。二分探索と差分の木の検索で済む。
+    pub fn get(&self, key: &[u32]) -> Option<f64> {
+        self.value_at(self.encode(key))
+    }
+
+    /// r の範囲の行を、宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す
+    /// （軸ごとのメンバー番号の列、値の列、範囲の全行数）。分割軸が宣言の先頭なら並べ直さずに済む。
+    pub fn rows_in(&self, r: &Restrict, offset: usize, limit: Option<usize>) -> (Vec<Vec<u32>>, Vec<f64>, usize) {
+        let mut cells = Vec::new();
+        self.for_each_in(r, |k, v| cells.push((k, v)));
+        let pos: Vec<usize> = self.metric_dims.iter().map(|d| self.pack.pos(*d).unwrap()).collect();
+        if pos.windows(2).any(|w| w[0] > w[1]) {
+            cells.sort_by_cached_key(|c| pos.iter().map(|&p| self.pack.get(c.0, p)).collect::<Vec<u32>>());
+        }
+        let total = cells.len();
+        let start = offset.min(total);
+        let end = limit.map_or(total, |l| start.saturating_add(l).min(total));
+        let page = &cells[start..end];
+        let mut cols = vec![Vec::with_capacity(page.len()); pos.len()];
+        let mut values = Vec::with_capacity(page.len());
+        for &(k, v) in page {
+            for (c, &p) in cols.iter_mut().zip(&pos) {
+                c.push(self.pack.get(k, p));
+            }
+            values.push(v);
+        }
+        (cols, values, total)
     }
 
     /// キーを、宣言した軸の順のメンバー番号に直す。

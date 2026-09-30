@@ -29,7 +29,7 @@ from typing import Any, Mapping
 
 from .core import Cube, Dimension, Key
 from .delta import DeltaPlan, plan_for, rename
-from .engine import Engine, default_engine
+from .engine import CompiledPlan, Engine, default_engine
 from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, collect_refs, infer,
                        member_kind, resolve, union_region)
 from .expr import (BinOp, Coalesce, Const, Expr, Filter, Ref, mentions_member, references_metric,
@@ -60,6 +60,49 @@ class Step:
     scan_dim: str | None = None  # None なら通常の 1 Metric の計算
 
 
+@dataclass
+class Pending:
+    """前回の再計算のあとにためている変更。recalc が消費して空にする。
+
+    Model の操作はここに変更を積むだけで、値の計算はしない。rename_member のように名前で持つ
+    記録を壊す操作は、先に recalc でここを空にしてから行う。
+    """
+    full: bool = True  # 次の recalc で全体を計算し直すか
+    changed: dict[str, Restrict] = field(default_factory=dict)  # 入力 Metric の変更範囲
+    old_cells: dict[str, dict[Key, Any]] = field(default_factory=dict)  # 入力の変更前の値（差分集計用）
+    old_slices: dict[str, Any] = field(default_factory=dict)  # 範囲ごと空にした入力の、変更前の値
+    added: dict[str, set[str]] = field(default_factory=dict)  # 前回の再計算以降に追加したメンバー
+    dirty: set[str] = field(default_factory=set)  # 前回の計画のあとで定義を変えた Metric
+    forced: dict[str, Restrict] = field(default_factory=dict)  # 次の再計算で必ず計算し直す計算 Metric の範囲
+
+    def empty(self) -> bool:
+        return not (self.full or self.changed or self.added or self.forced)
+
+    def forget(self, names) -> None:
+        """消した Metric の分を捨てる。"""
+        for n in names:
+            for store in (self.changed, self.old_cells, self.old_slices, self.forced):
+                store.pop(n, None)
+        self.dirty -= set(names)
+
+
+LOG_MAX = 10_000  # 観察用の記録の上限（古いものから捨てる）
+
+
+class Log(list):
+    """観察用の記録。上限を超えたら古いものから捨てる（長く動かしても伸び続けない）。"""
+
+    def append(self, item) -> None:
+        super().append(item)
+        if len(self) > LOG_MAX:
+            del self[:len(self) - LOG_MAX]
+
+    def extend(self, items) -> None:
+        super().extend(items)
+        if len(self) > LOG_MAX:
+            del self[:len(self) - LOG_MAX]
+
+
 class SliceLog:
     """再計算した (Metric, 範囲) の記録（観察用）。エンジンがメンバーの番号で返した範囲は、
     読まれたときに名前へ直す（1 回の変更で何百もの範囲を直すと、それだけで時間がかかるため）。"""
@@ -72,6 +115,8 @@ class SliceLog:
         for named in self._later:
             self._items.extend(named())
         self._later.clear()
+        if len(self._items) > LOG_MAX:
+            del self._items[:len(self._items) - LOG_MAX]
         return self._items
 
     def append(self, item: tuple[str, Restrict]) -> None:
@@ -132,26 +177,19 @@ class Model:
     layout: dict[str, str | None] = field(default_factory=dict)  # Metric ごとの分割軸
     metrics: dict[str, Metric] = field(default_factory=dict)
     warnings: dict[str, list[str]] = field(default_factory=dict)
-    eval_log: list[str] = field(default_factory=list)  # 再計算した Metric 名（観察用）
+    eval_log: Log = field(default_factory=Log)  # 再計算した Metric 名（観察用）
     slice_log: SliceLog = field(default_factory=lambda: SliceLog())  # 再計算した範囲（観察用）
-    delta_log: list[str] = field(default_factory=list)  # 差分集計で更新した Metric（観察用）
+    delta_log: Log = field(default_factory=Log)  # 差分集計で更新した Metric（観察用）
     _values: dict[str, Any] = field(default_factory=dict)  # エンジンごとの格納形式
     _plan: list[Step] | None = None
     _levels: list[list[Step]] = field(default_factory=list)  # 依存関係の段ごとの計画（全体の再計算用）
-    _full: bool = True  # 次の recalc で全体を計算し直すか
-    _changed: dict[str, Restrict] = field(default_factory=dict)  # 入力 Metric の変更範囲
-    _reads: dict[str, Restrict] | None = None  # scan の下見で記録する読み出し範囲
+    _pending: Pending = field(default_factory=Pending)  # 前回の再計算のあとにためている変更
     _work: dict[str, Any] = field(default_factory=dict)  # scan 中の読み出し元（切り出し済み）
     _delta: dict[str, DeltaPlan] = field(default_factory=dict)  # 差分集計する Metric -> 計画
     _counts: dict[str, Any] = field(default_factory=dict)  # 差分集計する SUM の各グループの件数
-    _old_cells: dict[str, dict[Key, Any]] = field(default_factory=dict)  # 入力の変更前の値
-    _old_slices: dict[str, Any] = field(default_factory=dict)  # 範囲ごと空にした入力の、変更前の値
-    _added: dict[str, set[str]] = field(default_factory=dict)  # 前回の再計算以降に追加したメンバー
     _temp_types: dict[str, Type] = field(default_factory=dict)  # 差分計算中の一時的な名前の型
     _delta_cache: dict[str, tuple] = field(default_factory=dict)  # Metric -> (計画, 件数の差分の式, 値の差分の式)
     _edges: dict[str, list[Edge]] = field(default_factory=dict)  # 依存グラフ（Metric -> 参照先）
-    _dirty: set[str] = field(default_factory=set)  # 前回の計画のあとで定義を変えた Metric
-    _forced: dict[str, Restrict] = field(default_factory=dict)  # 次の再計算で必ず計算し直す計算 Metric の範囲
     _samples: dict[str, dict[str, Restrict]] = field(default_factory=dict)  # 分割軸の選択に使った、入力ごとの影響範囲
     _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
     journal: Any = None  # 記録先（journal.FileJournal など）。None なら記録しない
@@ -186,11 +224,16 @@ class Model:
         """name を restrict の範囲に絞って返す（参照実装の評価器が使う）。"""
         return self.engine.view(self.source(name), restrict or None, self)
 
+    def compiled(self) -> CompiledPlan:
+        """今の計算計画（エンジンが差分再計算の段取りを組むのに使う）。recalc の中でだけ有効。"""
+        return CompiledPlan(self._plan, self._levels, self._delta, frozenset(self._delta_sources()),
+                            self.delta_exprs)
+
     def refresh(self) -> None:
         """全体を計算し直す。差分集計を続けてたまった浮動小数点の誤差もなくなる。"""
         if self._frozen:
             raise ValueError("公開済みの版は計算し直せない（Workspace.write の中で計算し直す）")
-        self._full = True
+        self._pending.full = True
         self.recalc()
 
     # ------------------------------------------------ 複製
@@ -217,7 +260,7 @@ class Model:
         other._samples = {src: dict(regions) for src, regions in self._samples.items()}  # 定義を変えると書き足す
         other._next_id = self._next_id
         other.seq = self.seq
-        other._full = False
+        other._pending = Pending(full=False)
         return other
 
     # ------------------------------------------------ トランザクションと記録
@@ -273,9 +316,9 @@ class Model:
     def _restore(self, saved: Model) -> None:
         """トランザクションの前の版 saved に戻す（観察用の記録と記録先はそのまま）。"""
         self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、軸を戻す前に名前へ直す
-        keep = {k: getattr(self, k) for k in ("eval_log", "slice_log", "delta_log", "journal", "last_record")}
-        self.__dict__.update(saved.__dict__)
-        self.__dict__.update(keep)
+        for f in dataclasses.fields(Model):
+            if f.name not in _KEPT_ON_RESTORE:
+                setattr(self, f.name, getattr(saved, f.name))
 
     def checkpoint(self) -> None:
         """今の状態のスナップショットを記録先に置く。開くときは、このスナップショットと、
@@ -322,10 +365,17 @@ class Model:
 
     def metric_name(self, id: int) -> str:
         """ID の Metric の今の名前。"""
-        for m in self.metrics.values():
-            if m.id == id:
-                return m.name
-        raise ValueError(f"ID {id} の Metric がない")
+        m = self.metrics_by_id().get(id)
+        if m is None:
+            raise ValueError(f"ID {id} の Metric がない")
+        return m.name
+
+    def metrics_by_id(self) -> dict[int, Metric]:
+        """ID -> Metric。記録の再生のように ID で何度も引くときは、これを 1 回作って使う。"""
+        return {m.id: m for m in self.metrics.values()}
+
+    def dimensions_by_id(self) -> dict[int, Dimension]:
+        return {d.id: d for d in self.dimensions.values()}
 
     @_operation
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str]) -> None:
@@ -352,6 +402,7 @@ class Model:
         dims = tuple(dims)
         for d in dims:
             self.dimension(d)
+        self._check_key_width(name, dims)
         old = self.metrics.get(name)
         new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition),
                      id=old.id if old is not None else self._new_id())
@@ -367,17 +418,17 @@ class Model:
                 raise
             storage = self.engine.from_cells(dims, kind, {k: v for k, v in checked.items() if v is not None},
                                              self, partition)
-        if old is not None and self._plan is not None and self._same_type(old, new) and name not in self._forced:
+        if old is not None and self._plan is not None and self._same_type(old, new) and name not in self._pending.forced:
             # 差分集計には変更前の値が要る。まだ再計算していない変更があれば、その前の値に戻して取っておく
-            if name not in self._old_slices:
+            if name not in self._pending.old_slices:
                 before = self.engine.share(self._values[name])
-                for key, value in self._old_cells.pop(name, {}).items():
+                for key, value in self._pending.old_cells.pop(name, {}).items():
                     before = self.engine.write(before, key, value, self)
-                self._old_slices[name] = before
+                self._pending.old_slices[name] = before
             # 変更前後で値が違うセルだけを変更範囲にする
-            _, diff = self.engine.replace_diff(self.engine.share(self._old_slices[name]), {}, storage, self)
+            _, diff = self.engine.replace_diff(self.engine.share(self._pending.old_slices[name]), {}, storage, self)
             if diff is not None:
-                self._changed[name] = union_region(self._changed.get(name), diff)
+                self._pending.changed[name] = union_region(self._pending.changed.get(name), diff)
         self.metrics[name] = new
         self._values[name] = storage
         self._redefine(name, old)
@@ -398,10 +449,13 @@ class Model:
         if isinstance(formula, str):
             formula = parse(formula, self_name=name)
         dims = tuple(dims)
+        for d in dims:
+            self.dimension(d)
+        self._check_key_width(name, dims)
         old = self.metrics.get(name)
         m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable,
                    id=old.id if old is not None else self._new_id())
-        if old is not None and old.formula is None and name in self._changed:
+        if old is not None and old.formula is None and name in self._pending.changed:
             self._invalidate()  # 未反映の入力の変更があった入力を式にするのは、全体で計算し直す
         self.metrics[name] = m
         if overridable and m.override_name not in self.metrics:  # 読み込みでは上書き値が先に入る
@@ -422,12 +476,11 @@ class Model:
         gone = {name} | ({m.override_name} if m.overridable and m.override_name in self.metrics else set())
         for n in gone:
             for store in (self.metrics, self._values, self._counts, self._delta, self._delta_cache, self.layout,
-                          self.warnings, self._edges, self._samples, self._forced, self._changed,
-                          self._old_cells, self._old_slices):
+                          self.warnings, self._edges, self._samples):
                 store.pop(n, None)
             for regions in self._samples.values():
                 regions.pop(n, None)
-        self._dirty -= gone
+        self._pending.forget(gone)
         if self._plan is not None:  # 誰も参照していないので、計画からその段階を外すだけで済む
             self._plan = [s for s in self._plan if s.names[0] not in gone]
             self._levels = [[s for s in level if s.names[0] not in gone] for level in self._levels]
@@ -496,7 +549,7 @@ class Model:
         if self._plan is None or (old is not None and not self._same_type(old, self.metrics[name])):
             self._invalidate()
             return
-        self._dirty.add(name)
+        self._pending.dirty.add(name)
 
     def _check_name(self, name: str) -> None:
         if name in self.dimensions:
@@ -514,6 +567,18 @@ class Model:
         if partition is not None and partition not in dims:
             raise ValueError(f"{name}: 分割軸 {partition} が軸 {dims} にない")
         return partition
+
+    def _check_key_width(self, name: str, dims: tuple[str, ...]) -> None:
+        """エンジンが 1 セルのキーを固定幅の整数で持つなら、軸の組み合わせがその幅に収まるか確かめる
+        。"""
+        width = getattr(self.engine, "key_bits", None)
+        if width is None or not dims:
+            return
+        bits = {d: max(1, (len(self.dimension(d).members) - 1).bit_length()) for d in dims}
+        if sum(bits.values()) > width:
+            detail = ", ".join(f"{d} {b} ビット" for d, b in bits.items())
+            raise ValueError(f"{name}: 軸の組み合わせが {width} ビットのキーに収まらない（{detail}）。"
+                             "軸を減らすか、メンバー数の多い軸を持つ Metric を分ける")
 
     # ------------------------------------------------ 按分
 
@@ -586,7 +651,7 @@ class Model:
         for prop, value in properties.items():
             d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
         self._member_added(dim)
-        self._added.setdefault(dim, set()).add(member)
+        self._pending.added.setdefault(dim, set()).add(member)
 
     def _member_added(self, dim: str) -> None:
         """軸 dim にメンバーを足したことをエンジンと格納データに反映する。"""
@@ -605,7 +670,7 @@ class Model:
         値も計算結果も変わらない（エンジンの中ではメンバーを番号で持つ）ので、計算し直さない。
         プロパティの対応表、メンバー型の Metric、式の中の `dim."old"` もすべて新しい名前になる。
         """
-        d = self.dimension(dim)
+        self.dimension(dim)  # 軸があることを確かめる
         self.recalc()  # 変更範囲はメンバー名で持つので、ためている変更を先に片付ける
         self.slice_log._flush()  # 記録を今の名前で直しておく
         self._rename_member_raw(dim, old, new)
@@ -677,13 +742,13 @@ class Model:
             if r is None:
                 continue
             if name in sources:
-                self._old_slices[name] = eng.filter(self._values[name], r or None, self)
+                self._pending.old_slices[name] = eng.filter(self._values[name], r or None, self)
             if here:
                 empty = eng.empty(m.dims, m.kind, self.layout.get(name), cat=self)
                 self._values[name] = eng.replace(self._values[name], point, empty, self)
             if there is not None:
                 self._values[name] = eng.drop_value(self._values[name], index, self)
-            self._changed[name] = r
+            self._pending.changed[name] = r
         self.recalc()
 
         # 2. メンバーを消して変わる範囲を、消す前の軸と対応表のもとで求める。下流に伝えるのは、
@@ -691,7 +756,7 @@ class Model:
         todo = self._removal_regions(dim, member, has_cells)
         self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、詰める前に名前へ直す
         self._drop_member(dim, member)
-        self._forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
+        self._pending.forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
         self.recalc()
 
     def _drop_member(self, dim: str, member: str) -> None:
@@ -768,14 +833,14 @@ class Model:
         value = self._check(name, key, value)
         if self._plan is not None and name in self._delta_sources():
             # 差分集計には変更前の値が要る。前回の再計算以降で最初に触れたときの値を覚えておく
-            old = self._old_cells.setdefault(name, {})
+            old = self._pending.old_cells.setdefault(name, {})
             if key not in old:
                 point = {d: frozenset([member]) for d, member in zip(m.dims, key)}
                 cube = self.engine.to_cube(self.engine.filter(self._values[name], point, self), self)
                 old[key] = cube.cells.get(key)
         self._values[name] = self.engine.write(self._values[name], key, value, self)
         point = {d: frozenset([member]) for d, member in zip(m.dims, key)}
-        self._changed[name] = union_region(self._changed.get(name), point)
+        self._pending.changed[name] = union_region(self._pending.changed.get(name), point)
 
     def _check(self, name: str, key: Key, value: float | bool | None) -> float | bool | None:
         """キーと値を検査し、格納する値（None は空）を返す。"""
@@ -803,30 +868,113 @@ class Model:
     # ------------------------------------------------ 参照
 
     def value(self, name: str) -> Cube:
+        """Metric の全セル。大きな Metric では get、slice、rows、summarize で必要な分だけ読む方が速い。"""
         self.recalc()
-        cube = self.engine.to_cube(self._values[name], self)
-        kind = self.metrics[name].kind
-        if kind.startswith("member:"):  # メンバーの番号を名前に戻す
-            members = self.dimension(kind.removeprefix("member:")).members
-            cube = Cube(cube.dims, {k: members[int(v)] for k, v in cube.cells.items()})
-        return cube
+        return self._shown(name, self.engine.to_cube(self._values[name], self))
 
     def raw(self, name: str) -> Any:
         """エンジンの格納形式のまま返す（大きな Metric を Cube に変換しないため）。"""
         self.recalc()
         return self._values[name]
 
-    def get(self, name: str, **coords: str) -> float | None:
-        return self.value(name).get(**coords)
+    def get(self, name: str, **coords: str) -> float | bool | str | None:
+        """1 セルの値。空なら None。Metric 全体を読まず、そのセルだけを引く。"""
+        self.recalc()
+        m = self._metric(name)
+        key = tuple(coords[d] if d in coords else self._missing(name, d) for d in m.dims)
+        for d, member in zip(m.dims, key):
+            if member not in self.dimension(d):
+                return None  # ないメンバーのセルは空（消した、名前を変えた直後の読み出しなど）
+        return self._decode(m, self.engine.get(self._values[name], key, self))
+
+    def slice(self, name: str, **coords) -> Cube:
+        """coords で絞った範囲のセル。各軸はメンバー名か、その集まり（list など）で指定する。
+        指定しない軸は全メンバー。
+
+            m.slice("Revenue", Product="p0001")                   # ある商品の全版・全月
+            m.slice("Revenue", Product=["p0001", "p0002"], Month="m01")
+        """
+        self.recalc()
+        restrict = self._restrict(name, coords)
+        return self._shown(name, self.engine.to_cube(self.engine.filter(self._values[name], restrict, self), self))
+
+    def rows(self, name: str, *, offset: int = 0, limit: int | None = None, **coords) -> tuple[list, int]:
+        """coords で絞った範囲の行を、宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す。
+        戻り値は ([(座標, 値), ...], 範囲の全行数)。表示やページングに使う。"""
+        self.recalc()
+        m = self._metric(name)
+        if offset < 0 or (limit is not None and limit < 0):
+            raise ValueError("offset と limit は 0 以上")
+        rows, total = self.engine.rows(self._values[name], self._restrict(name, coords), self, offset, limit)
+        return [(k, self._decode(m, v)) for k, v in rows], total
+
+    def summarize(self, name: str, keep=(), agg: str = "sum", **coords) -> Cube:
+        """coords で絞った範囲を、keep の軸だけ残して集計する（SUM、AVG、MIN、MAX、COUNT）。
+
+            m.summarize("Revenue", keep=["Month"], Product=["p0001", "p0002"])  # 2 商品の月別合計
+            m.summarize("Revenue").cells[()]                                    # 総合計
+        """
+        self.recalc()
+        m = self._metric(name)
+        keep = tuple(keep)
+        agg = agg.lower()
+        if agg not in ("sum", "avg", "min", "max", "count"):
+            raise ValueError(f"集計は sum、avg、min、max、count のいずれか（{agg!r}）")
+        if agg != "count" and m.kind != "number":
+            raise ValueError(f"{name} は {m.kind} なので {agg} で集計できない（count は使える）")
+        for d in keep:
+            if d not in m.dims:
+                raise ValueError(f"{name}: 軸 {d} がない")
+        return self.engine.aggregate(self._values[name], m.dims, keep, agg, self._restrict(name, coords), self)
+
+    def _metric(self, name: str) -> Metric:
+        if name not in self.metrics:
+            raise ValueError(f"Metric {name} がない")
+        return self.metrics[name]
+
+    @staticmethod
+    def _missing(name: str, dim: str):
+        raise ValueError(f"{name}: 軸 {dim} のメンバーを指定していない")
+
+    def _restrict(self, name: str, coords: Mapping[str, Any]) -> Restrict:
+        """coords（軸 -> メンバー名か、その集まり）を検査して、絞り込みの形にする。"""
+        m = self._metric(name)
+        out: Restrict = {}
+        for d, ms in coords.items():
+            if d not in m.dims:
+                raise ValueError(f"{name}: 軸 {d} がない")
+            members = frozenset([ms]) if isinstance(ms, str) else frozenset(ms)
+            for x in members:
+                if x not in self.dimension(d):
+                    raise ValueError(f"{name}: {d} に {x!r} がない")
+            out[d] = members
+        return out
+
+    def _decode(self, m: Metric, v):
+        """エンジンの値（float）を利用者に見せる値にする。"""
+        if v is None:
+            return None
+        if m.kind.startswith("member:"):
+            return self.dimension(m.kind.removeprefix("member:")).members[int(v)]
+        if m.kind == "boolean":
+            return bool(v)
+        return v
+
+    def _shown(self, name: str, cube: Cube) -> Cube:
+        kind = self.metrics[name].kind
+        if kind.startswith("member:"):  # メンバーの番号を名前に戻す
+            members = self.dimension(kind.removeprefix("member:")).members
+            return Cube(cube.dims, {k: members[int(v)] for k, v in cube.cells.items()})
+        return cube
 
     # ------------------------------------------------ 計算計画
 
     def _invalidate(self) -> None:
         self._plan = None
-        self._full = True
+        self._pending.full = True
 
     def _compile(self) -> None:
-        if self._plan is not None and not self._dirty:
+        if self._plan is not None and not self._pending.dirty:
             return
         if self._plan is None:
             self._compile_all()
@@ -873,8 +1021,8 @@ class Model:
                         self._delta[m.name] = plan
         self._counts = {n: self.engine.empty(self.metrics[n].dims, "number", self.layout[n], cat=self)
                         for n, plan in self._delta.items() if plan.count is not None}
-        self._dirty.clear()
-        self._forced.clear()
+        self._pending.dirty.clear()
+        self._pending.forced.clear()
 
     def _compile_changed(self) -> None:
         """定義を変えた Metric（_dirty）だけを検査して、計算計画を直す。
@@ -883,7 +1031,7 @@ class Model:
         分割軸は新しい Metric だけ選び、既存の Metric は今の格納データのまま使う。
         変えた計算 Metric は、次の再計算で全体を計算し直す（_forced）。
         """
-        dirty = [n for n in self.metrics if n in self._dirty]
+        dirty = [n for n in self.metrics if n in self._pending.dirty]
         checked = {n: self._checked(self.metrics[n]) for n in dirty if self.metrics[n].formula is not None}
         edges = dict(self._edges)
         for n in dirty:
@@ -914,8 +1062,8 @@ class Model:
                     if dp.count is not None:
                         self._counts[n] = self.engine.empty(m.dims, "number", self.layout[n], cat=self)
             if m.formula is not None:
-                self._forced[n] = {}  # 件数も含めて、全体を計算し直す
-        self._dirty.clear()
+                self._pending.forced[n] = {}  # 件数も含めて、全体を計算し直す
+        self._pending.dirty.clear()
 
     def _delta_sources(self) -> set[str]:
         """差分集計で、変更前の値が要る Metric（集計元と対応表）。"""
@@ -1064,32 +1212,32 @@ class Model:
 
     def recalc(self) -> None:
         self._compile()
-        if not self._full and not self._changed and not self._added and not self._forced:
+        if self._pending.empty():
             return
-        full, self._full = self._full, False
-        added = {d: frozenset(ms) for d, ms in self._added.items()}
-        self._added.clear()
+        full, self._pending.full = self._pending.full, False
+        added = {d: frozenset(ms) for d, ms in self._pending.added.items()}
+        self._pending.added.clear()
         if full:
-            self._changed.clear()
-            self._old_cells.clear()
-            self._old_slices.clear()
-            self._forced.clear()
+            self._pending.changed.clear()
+            self._pending.old_cells.clear()
+            self._pending.old_slices.clear()
+            self._pending.forced.clear()
             self._recalc_all()
             return
         # 計画の順に、計算しながら影響範囲を伝える。各 Metric は書き戻すときに新旧の値を比べ、
         # 実際に値が変わったセルだけを下流への影響範囲にする（変わらなければ下流は計算しない）
-        regions: dict[str, Restrict] = dict(self._changed)
+        regions: dict[str, Restrict] = dict(self._pending.changed)
         # 差分集計の集計元と対応表について、変更前の値を確保しておく
         sources = self._delta_sources()
-        olds = {n: self._old_input_slice(n, regions[n]) for n in self._changed if n in sources}
-        self._changed.clear()
-        self._old_cells.clear()
-        self._old_slices.clear()
+        olds = {n: self._old_input_slice(n, regions[n]) for n in self._pending.changed if n in sources}
+        self._pending.changed.clear()
+        self._pending.old_cells.clear()
+        self._pending.old_slices.clear()
         # 定義を変えた計算 Metric は、影響範囲に関係なく計算し直す（差分集計は使わない）
-        forced, self._forced = self._forced, {}
+        forced, self._pending.forced = self._pending.forced, {}
         fast = getattr(self.engine, "recalc_changes", None)
         if fast is not None:  # 段取りごとエンジンに任せる（Rust）。意味は以下の Python の経路と同じ
-            done, named = fast(self, regions, added, olds, forced)
+            done, named = fast(self.compiled(), self._values, self._counts, self, regions, added, olds, forced)
             self.eval_log.extend(n for n, _ in done)
             self.delta_log.extend(n for n, delta in done if delta)
             self.slice_log.extend_later(named)
@@ -1154,10 +1302,10 @@ class Model:
 
     def _old_input_slice(self, name: str, region: Restrict) -> Any:
         """入力 Metric の region の、変更前の値。今の値から、触れたセルだけ覚えておいた値に戻す。"""
-        if name in self._old_slices:  # 範囲ごと空にした（メンバーの削除）。region はその範囲
-            return self._old_slices[name]
+        if name in self._pending.old_slices:  # 範囲ごと空にした（メンバーの削除）。region はその範囲
+            return self._pending.old_slices[name]
         old = self.engine.filter(self._values[name], region or None, self)
-        for key, value in self._old_cells.get(name, {}).items():
+        for key, value in self._pending.old_cells.get(name, {}).items():
             old = self.engine.write(old, key, value, self)
         return old
 
@@ -1184,7 +1332,7 @@ class Model:
         """
         eng = self.engine
         r = self._delta_range(plan, regions)
-        d_count_f, d_value_f = self._delta_exprs(m, plan)
+        d_count_f, d_value_f = self.delta_exprs(m, plan)
         work, types = {}, {}
         for i, n in enumerate((plan.source, *plan.aux)):
             new = eng.filter(self._values[n], r, self)
@@ -1229,8 +1377,9 @@ class Model:
         self.delta_log.append(m.name)
         return changed
 
-    def _delta_exprs(self, m: Metric, plan: DeltaPlan) -> tuple[Expr, Expr]:
-        """件数と値の差分を求める式。Metric ごとに一度だけ作る（エンジンが変換結果をキャッシュできるように）。"""
+    def delta_exprs(self, m: Metric, plan: DeltaPlan) -> tuple[Expr, Expr]:
+        """件数と値の差分を求める式。Metric ごとに一度だけ作る（エンジンが変換結果をキャッシュできるように）。
+        式が読む __new{i} と __old{i} は、集計元と対応表（plan.source、plan.aux）の変更後と変更前の値。"""
         cached = self._delta_cache.get(m.name)
         if cached is None or cached[0] is not plan:
             names = (plan.source, *plan.aux)
@@ -1290,6 +1439,8 @@ class Model:
             self.eval_log.append(n)
             self.slice_log.append((n, r))
 
+
+_KEPT_ON_RESTORE = frozenset({"eval_log", "slice_log", "delta_log", "journal", "last_record"})
 
 # 差分集計の後半で使う式（名前は _apply_delta の作業データ）
 _ALIVE = BinOp(">", Ref("__new_count"), Const(0.0))

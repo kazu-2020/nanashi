@@ -6,14 +6,40 @@ Model は依存グラフ、計算計画、影響範囲の伝搬だけを受け�
 from __future__ import annotations
 
 import os
-from typing import Any, Mapping, Protocol
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from .core import Cube, Key
 from .evaluate import Catalog, Kind, Restrict, _filter, evaluate, inside
-from .expr import Expr
+from .expr import AGGREGATORS, Expr
+
+
+@dataclass(frozen=True)
+class CompiledPlan:
+    """Model が作った計算計画のうち、エンジンが差分再計算の段取りに使う部分。
+
+    steps は依存先が先の順の計算の段階、levels は互いに依存しない段階を段ごとにまとめたもの。
+    delta は差分集計する Metric とその計画、sources は差分集計で変更前の値が要る Metric。
+    delta_exprs(metric, plan) は差分集計の (件数の差分の式, 値の差分の式)。
+    """
+    steps: list
+    levels: list
+    delta: dict
+    sources: frozenset
+    delta_exprs: Callable
 
 
 class Engine(Protocol):
+    """格納と評価の差し替え口。
+
+    必須の口に加えて、次の任意の口を持つエンジンは Model がそれを使う。
+    - recalc_changes(plan, stores, counts, cat, changed, added, olds, forced):
+        差分再計算の段取りごと引き受ける（Rust）。意味は Model.recalc の Python の経路と同じ。
+    - from_arrays(dims, kind, cols, cat, partition) / to_arrays(storage, cat):
+        軸ごとのメンバー番号の配列と値の配列で、大量のセルを出し入れする（保存と読み込み）。
+    - key_bits: 1 セルのキーの固定幅（ビット）。Model は軸の組み合わせがこれに収まるか検査する。
+    """
     name: str
 
     def empty(self, dims: tuple[str, ...], kind: Kind, partition: str | None = None,
@@ -56,6 +82,15 @@ class Engine(Protocol):
     def replace_diff(self, storage: Any, region: Restrict, new: Any, cat: Catalog) -> tuple[Any, Restrict | None]:
         """replace と同じだが、値が実際に変わったセルを囲む範囲も返す（変化なしなら None）。"""
     def to_cube(self, storage: Any, cat: Catalog) -> Cube: ...
+    def get(self, storage: Any, key: Key, cat: Catalog) -> Any:
+        """1 セルの値（空なら None）。格納データ全体を読まないこと。"""
+    def rows(self, storage: Any, restrict: Restrict, cat: Catalog, offset: int = 0,
+             limit: int | None = None) -> tuple[list[tuple[Key, Any]], int]:
+        """restrict の範囲の行を、宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す
+        （行の列と、範囲の全行数）。"""
+    def aggregate(self, storage: Any, dims: tuple[str, ...], keep: tuple[str, ...], agg: str,
+                  restrict: Restrict, cat: Catalog) -> Cube:
+        """restrict の範囲を keep の軸だけ残して agg で集計した Cube。"""
     def fork(self, cat: Catalog) -> Engine:
         """複製したモデル cat 用のエンジン。"""
     def share(self, storage: Any) -> Any:
@@ -166,6 +201,29 @@ class ReferenceEngine:
     def to_cube(self, storage, cat):
         return storage
 
+    def get(self, storage: Cube, key, cat):
+        return storage.cells.get(key)
+
+    def rows(self, storage: Cube, restrict, cat, offset=0, limit=None):
+        cube = _filter(storage, restrict or None)
+        order = [cat.dimension(d)._index for d in cube.dims]
+        keys = sorted(cube.cells, key=lambda k: tuple(ix[m] for ix, m in zip(order, k)))
+        total = len(keys)
+        page = keys[offset:] if limit is None else keys[offset:offset + limit]
+        return [(k, cube.cells[k]) for k in page], total
+
+    def aggregate(self, storage: Cube, dims, keep, agg, restrict, cat):
+        return aggregate_cube(_filter(storage, restrict or None), keep, agg)
+
+    def to_arrays(self, storage: Cube, cat) -> dict:
+        import numpy as np
+        index = [cat.dimension(d)._index for d in storage.dims]
+        keys = list(storage.cells)
+        out = {d: np.fromiter((index[j][k[j]] for k in keys), dtype=np.uint32, count=len(keys))
+               for j, d in enumerate(storage.dims)}
+        out["__v"] = np.fromiter((float(v) for v in storage.cells.values()), dtype=np.float64, count=len(keys))
+        return out
+
     def size(self, storage: Cube) -> int:
         return len(storage)
 
@@ -174,6 +232,17 @@ class ReferenceEngine:
 
     def diff(self, old, new):
         return None  # Cube はメンバー名で持つので、名前で比べてもらう
+
+
+def aggregate_cube(cube: Cube, keep: Iterable[str], agg: str) -> Cube:
+    """cube を keep の軸だけ残して agg で集計する（参照実装と、エンジンの結果の検査に使う）。"""
+    keep = tuple(d for d in cube.dims if d in set(keep))
+    idx = [cube.dims.index(d) for d in keep]
+    groups: dict[tuple, list] = defaultdict(list)
+    for k, v in cube.cells.items():
+        groups[tuple(k[i] for i in idx)].append(v)
+    fn = AGGREGATORS[agg]
+    return Cube(keep, {k: fn(vs) for k, vs in groups.items()})
 
 
 def default_engine() -> Engine:

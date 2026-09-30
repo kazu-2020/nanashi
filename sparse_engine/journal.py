@@ -34,6 +34,10 @@ from .parser import parse, to_formula
 LOG_VERSION = 1
 
 
+class Stale(Exception):
+    """手元のモデルが記録先より古い（別のプロセスが書き込んだ）。開き直せば続けられる。"""
+
+
 class AlreadyCommitted(Exception):
     """同じ client_op_id のトランザクションは確定済み（再送されたとき）。seq はその記録の通し番号。"""
 
@@ -199,12 +203,13 @@ def _by_id(model, m, store) -> dict:
 def apply(model, record: dict) -> None:
     """記録の結果を model に書き込む（計算し直さない。再生のあとで全体を計算し直す）。"""
     ch = record["changes"]
-    dim_of = lambda i: next(d for d in model.dimensions.values() if d.id == i)
-    metric_of = lambda i: next((m for m in model.metrics.values() if m.id == i), None)
+    dims_by_id = model.dimensions_by_id()  # 軸はこの記録で足すものもあるので、足したら入れる
+    dim_of = lambda i: dims_by_id[i] if i in dims_by_id else next(d for d in model.dimensions.values() if d.id == i)
+    metric_of = lambda i: model.metrics_by_id().get(i)
 
     for d in ch.get("dimensions", []):
-        model.dimensions[d["name"]] = Dimension(d["name"], [n for _, n in d["members"]], ordered=d["ordered"],
-                                                ids=[i for i, _ in d["members"]], id=d["id"])
+        model.dimensions[d["name"]] = dims_by_id[d["id"]] = Dimension(
+            d["name"], [n for _, n in d["members"]], ordered=d["ordered"], ids=[i for i, _ in d["members"]], id=d["id"])
     for e in ch.get("members", []):
         d = dim_of(e["dim"])
         for i in e["removed"]:
@@ -242,8 +247,9 @@ def apply(model, record: dict) -> None:
         d.properties[p["prop"]] = (t.name, mapping)
         model.engine.dimension_changed(model, d.name)
 
+    by_id = model.metrics_by_id()
     for c in ch.get("cells", []):
-        m = metric_of(c["metric"])
+        m = by_id[c["metric"]]
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
         store = model._values[m.name]
@@ -310,6 +316,14 @@ class Journal:
     def append(self, record: dict) -> int:
         """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
         return self.append_many([record])[0]
+
+    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
+        """確定済みの client_op_id -> 通し番号（まとめて 1 回で引ける記録先はそうする）。"""
+        out = {}
+        for i in client_op_ids:
+            if (seq := self.seq_of(i)) is not None:
+                out[i] = seq
+        return out
 
     def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
         """セルの変更の履歴（古い順）。メンバー型の値は今の名前に直す（消したメンバーは ID のまま）。"""
@@ -417,27 +431,28 @@ class FileJournal(Journal):
     # ------------------------------------------------ 記録
 
     def _scan(self) -> None:
+        """記録を 1 行ずつ読んで、最後の通し番号と client_op_id の表を作る（ログ全体をメモリに置かない）。"""
         if not self.log_path.exists():
             return
+        size = self.log_path.stat().st_size
         good = 0
         with open(self.log_path, "rb") as f:
-            data = f.read()
-        for line in data.splitlines(keepends=True):
-            try:
-                if not line.endswith(b"\n"):
-                    raise ValueError("途中で切れた行")
-                rec = json.loads(line)
-            except ValueError:
-                if good + len(line) < len(data):
-                    raise ValueError(f"{self.log_path}: {good} バイト目の記録が壊れている") from None
-                break  # 最後の行だけが壊れているなら、書いている途中で落ちた。捨てる
-            if rec["seq"] != self.head + 1:
-                raise ValueError(f"{self.log_path}: 通し番号が {self.head} の次でなく {rec['seq']}")
-            self.head = rec["seq"]
-            if rec.get("client_op_id") is not None:
-                self._by_client_op[rec["client_op_id"]] = rec["seq"]
-            good += len(line)
-        if good < len(data):
+            for line in f:
+                try:
+                    if not line.endswith(b"\n"):
+                        raise ValueError("途中で切れた行")
+                    rec = json.loads(line)
+                except ValueError:
+                    if good + len(line) < size:
+                        raise ValueError(f"{self.log_path}: {good} バイト目の記録が壊れている") from None
+                    break  # 最後の行だけが壊れているなら、書いている途中で落ちた。捨てる
+                if rec["seq"] != self.head + 1:
+                    raise ValueError(f"{self.log_path}: 通し番号が {self.head} の次でなく {rec['seq']}")
+                self.head = rec["seq"]
+                if rec.get("client_op_id") is not None:
+                    self._by_client_op[rec["client_op_id"]] = rec["seq"]
+                good += len(line)
+        if good < size:
             with open(self.log_path, "r+b") as f:
                 f.truncate(good)
 
@@ -460,6 +475,9 @@ class FileJournal(Journal):
 
     def seq_of(self, client_op_id: str) -> int | None:
         return self._by_client_op.get(client_op_id)
+
+    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
+        return {i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op}
 
     def records(self, after: int = 0) -> Iterator[dict]:
         if not self.log_path.exists():

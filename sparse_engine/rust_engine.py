@@ -19,9 +19,28 @@ from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Fil
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
 
+class _Typed:
+    """一時的な名前（差分集計の作業データ）の型を足した Catalog。式の変換で型推論に使う。"""
+
+    def __init__(self, cat: Catalog, types: dict):
+        self._cat, self._types = cat, types
+
+    def dimension(self, name: str):
+        return self._cat.dimension(name)
+
+    def metric_type(self, name: str):
+        t = self._types.get(name)
+        return t if t is not None else self._cat.metric_type(name)
+
+    @property
+    def metrics(self):
+        return self._cat.metrics
+
+
 class RustEngine:
     name = "rust"
     partitions = 1 << 20  # 分割軸のメンバーごとに範囲検索できる（分割軸の自動選択に使う）
+    key_bits = 64  # 1 セルのキーは各軸のメンバー番号を詰めた 64 ビット整数
 
     def __init__(self):
         self.core = nanashi_core.Core()
@@ -161,75 +180,73 @@ class RustEngine:
 
     # ------------------------------------------------ 差分再計算の段取り
 
-    def recalc_changes(self, model, changed: dict, added: dict, olds: dict, forced: dict) -> tuple[list, Any]:
-        """Model.recalc の差分の経路を Rust で行う。changed は入力の変更範囲、added は追加したメンバー、
+    def recalc_changes(self, plan, stores: dict, counts: dict, cat: Catalog, changed: dict, added: dict,
+                       olds: dict, forced: dict) -> tuple[list, Any]:
+        """Model.recalc の差分の経路を Rust で行う。plan は Model.compiled()、stores と counts は
+        Metric ごとの格納データと差分集計の件数、changed は入力の変更範囲、added は追加したメンバー、
         olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
         格納データはその場で書き換わる。
 
         再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
         """
-        plan, names = self._plan_for(model)
+        rplan, names = self._plan_for(plan, cat)
         index = {n: i for i, n in enumerate(names)}
-        region = lambda r: self._region(model, r)
+        region = lambda r: self._region(cat, r)
         log = self.core.recalc_changes(
-            plan,
-            [model._values[n] for n in names],
-            [model._counts.get(n) for n in names],
+            rplan,
+            [stores[n] for n in names],
+            [counts.get(n) for n in names],
             [(index[n], region(r)) for n, r in changed.items()],
-            [(self._dim(model, d), [model.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
+            [(self._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
             [(index[n], h) for n, h in olds.items()],
             [(index[n], region(r)) for n, r in forced.items()])
 
         def named(entries):
-            return [(names[i], {self._names[d]: frozenset(model.dimension(self._names[d]).members[j] for j in ms)
+            return [(names[i], {self._names[d]: frozenset(cat.dimension(self._names[d]).members[j] for j in ms)
                                 for d, ms in r}) for i, _, r in entries]
         return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
 
-    def _plan_for(self, model) -> tuple[Any, list[str]]:
-        """Model の計算計画を Rust の計算計画にする。計画を作り直すまで使い回す。"""
-        if self._plan is not None and self._plan[0] is model._plan:
+    def _plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
+        """Model の計算計画（CompiledPlan）を Rust の計算計画にする。計画を作り直すまで使い回す。"""
+        if self._plan is not None and self._plan[0] is plan.steps:
             return self._plan[1], self._plan[2]
-        names = list(model.metrics)
+        names = list(cat.metrics)
         index = {n: i for i, n in enumerate(names)}
-        sources = model._delta_sources()
 
         def bound(expr):
-            compiled, reads = self._compile(expr, model)
+            compiled, reads = self._compile(expr, cat)
             return compiled, [index[n] for n in reads]
 
         metrics = []
         for n in names:
-            m = model.metrics[n]
+            m = cat.metrics[n]
             count = delta = None
-            dp = model._delta.get(n)
+            dp = plan.delta.get(n)
             if dp is not None:
                 count = None if dp.count is None else bound(dp.count)
-                delta = self._delta_parts(model, m, dp)
-            metrics.append((None if m.formula is None else bound(m.formula), count, delta, n in sources))
-        levels = [[(None if s.scan_dim is None else self._dim(model, s.scan_dim), [index[n] for n in s.names])
-                   for s in level] for level in model._levels]
-        plan = self.core.make_plan(metrics, levels)
-        self._plan = (model._plan, plan, names)
-        return plan, names
+                delta = self._delta_parts(plan, cat, m, dp, index)
+            metrics.append((None if m.formula is None else bound(m.formula), count, delta, n in plan.sources))
+        levels = [[(None if s.scan_dim is None else self._dim(cat, s.scan_dim), [index[n] for n in s.names])
+                   for s in level] for level in plan.levels]
+        rplan = self.core.make_plan(metrics, levels)
+        self._plan = (plan.steps, rplan, names)
+        return rplan, names
 
-    def _delta_parts(self, model, m, dp) -> tuple:
+    def _delta_parts(self, plan, cat: Catalog, m, dp, index: dict) -> tuple:
         """差分集計の ([集計元, 対応表...], 件数の差分の式, 値の差分の式)。差分の式が読む __new{i} と
-        __old{i}（Model._delta_exprs の作業データ）は、作業データの番号 2i と 2i + 1 にする。"""
+        __old{i}（plan.delta_exprs の作業データ）は、作業データの番号 2i と 2i + 1 にする。"""
         inputs = (dp.source, *dp.aux)
-        d_count, d_value = model._delta_exprs(m, dp)
+        d_count, d_value = plan.delta_exprs(m, dp)
         types = {}
         for i, n in enumerate(inputs):
-            types[f"__new{i}"] = types[f"__old{i}"] = model.metric_type(n)
-        model._temp_types = types
-        try:
-            def slots(expr):
-                compiled, reads = self._compile(expr, model)
-                return compiled, [2 * int(r[5:]) + (r.startswith("__old")) for r in reads]
-            count = slots(d_count)
-            value = None if dp.count is None else slots(d_value)
-        finally:
-            model._temp_types = {}
-        index = {n: i for i, n in enumerate(model.metrics)}
+            types[f"__new{i}"] = types[f"__old{i}"] = cat.metric_type(n)
+        typed = _Typed(cat, types)  # 作業データの型を足した Catalog で変換する（cat は書き換えない）
+
+        def slots(expr):
+            compiled, reads = self._compile(expr, typed)
+            return compiled, [2 * int(r[5:]) + (r.startswith("__old")) for r in reads]
+        count = slots(d_count)
+        value = None if dp.count is None else slots(d_value)
         return [index[n] for n in inputs], count, value
 
     # ------------------------------------------------ Engine
@@ -351,6 +368,53 @@ class RustEngine:
             values = [v != 0.0 for v in values]
         return Cube(dims, {tuple(members[j][cols[j][i]] for j in range(len(dims))): values[i]
                            for i in range(len(values))})
+
+    def to_arrays(self, store, cat) -> dict:
+        """軸ごとのメンバー番号の numpy 配列と、値の配列 __v（保存用。Python のオブジェクトを作らない）。"""
+        cols, values, _ = self.core.arrays(store)
+        dims = [self._names[i] for i in self.core.metric_dims(store)]
+        return {d: c for d, c in zip(dims, cols)} | {"__v": values}
+
+    def get(self, store, key, cat):
+        dims = [self._names[i] for i in self.core.metric_dims(store)]
+        v = self.core.get(store, [cat.dimension(d)._index[m] for d, m in zip(dims, key)])
+        return v if v is None or not self._is_bool(store) else v != 0.0
+
+    def rows(self, store, restrict, cat, offset=0, limit=None):
+        cols, values, is_bool, total = self.core.rows_in(store, self._region(cat, restrict), offset, limit)
+        dims = [self._names[i] for i in self.core.metric_dims(store)]
+        members = [cat.dimension(d).members for d in dims]
+        rows = [(tuple(members[j][cols[j][i]] for j in range(len(dims))), values[i] != 0.0 if is_bool else values[i])
+                for i in range(len(values))]
+        return rows, total
+
+    def aggregate(self, store, dims, keep, agg, restrict, cat):
+        """範囲を切り出してから、残さない軸を REMOVE で集計する（式の変換結果はキャッシュしない）。
+        REMOVE は軸を 1 つずつ外すので、avg は sum と count を別々に集計してから割り、count は最初の軸だけ
+        count で数えて残りは sum で足す（min、max、sum はそのまま重ねられる）。"""
+        sliced = self.core.filter(store, self._region(cat, restrict))
+        gone = [self._dim(cat, d) for d in dims if d not in keep]
+        order = tuple(d for d in dims if d in keep)
+        if not gone:  # 外す軸がなければ、各セルがそのまま 1 件のグループ
+            cube = self.to_cube(sliced, cat).reorder(order)
+            return Cube(order, {k: 1.0 for k in cube.cells}) if agg == "count" else cube
+
+        def run(first: str, rest: str) -> Cube:
+            tree = ("ref", 0)
+            for i, d in enumerate(gone):
+                tree = ("remove", tree, d, first if i == 0 else rest)
+            cube = self.core.evaluate(self.core.compile(tree), [sliced], [])
+            return self.to_cube(self.core.store_from(cube, None), cat).reorder(order)
+
+        if agg == "avg":
+            total, count = run("sum", "sum"), run("count", "sum")
+            return Cube(order, {k: v / count.cells[k] for k, v in total.cells.items()})
+        if agg == "count":
+            return run("count", "sum")
+        return run(agg, agg)
+
+    def _is_bool(self, store) -> bool:
+        return bool(self.core.is_bool(store))
 
     def size(self, store) -> int:
         return self.core.size(store)

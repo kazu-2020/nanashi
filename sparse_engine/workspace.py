@@ -2,17 +2,22 @@
 
 Workspace はモデルを 1 つ預かり、確定した状態を「版」として公開する。版は作ったら変えない。
 読み出しはいつでも公開中の版（version）を見るので、書き込みの途中の値や、取り消された変更は見えない。
+版は読み出し専用のビュー（Version）で、1 セル、範囲、ページ、集計を必要な分だけ読める。
 
 書き込みは 1 本のスレッド（ライター）が列から順に取り出して処理する。列に溜まっている書き込みを
 1 つのまとまりにして、公開中の版の複製に 1 件ずつトランザクションとして適用し、記録は 1 回の
 書き出しでまとめて確定する（グループコミット）。確定したら、複製を新しい版として公開する。
 
-    ws = Workspace(model, FileJournal("plan/"))
+    ws = Workspace(model, FileJournal("plan/"), checkpoint_every=1000)
     seq = ws.write(lambda m: m.set_cell("Price", 12, Product="A"), user="alice")
     ws.version.get("Price", Product="A")
 
 1 件の書き込みが失敗したら、その 1 件だけを取り消して、同じまとまりのほかの書き込みは確定する。
-記録の書き出しに失敗したら、まとまり全体を捨て、公開中の版は変えない。
+記録の書き出しに失敗したら、まとまり全体を捨て、公開中の版は変えない。記録先が「手元の版が古い」
+と言えば（別のプロセスが書き込んだ）、記録先から開き直して最新の版を公開する。
+
+列の長さ（max_queue）を決めると、溢れたときは submit が Overloaded を投げる（過負荷を上流に伝える）。
+checkpoint_every か checkpoint_interval を決めると、その間隔でスナップショットを別のスレッドで取る。
 
 格納データの本体は版どうしで共有するので、版を作る費用は差分の分だけで済む。古い版は、
 読んでいる人がいなくなれば捨てられる。
@@ -21,12 +26,16 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import logging
 import queue
 import threading
+import time
 from concurrent.futures import Future
 from typing import Any, Callable
 
-from .journal import FileJournal, Journal
+from .journal import FileJournal, Journal, Stale
+
+log = logging.getLogger(__name__)
 
 
 class Conflict(Exception):
@@ -36,6 +45,10 @@ class Conflict(Exception):
         super().__init__(message)
         self.seq = seq
         self.user = user
+
+
+class Overloaded(Exception):
+    """書き込みの列が満杯（max_queue）で、timeout の間に空かなかった。"""
 
 
 @dataclasses.dataclass
@@ -61,6 +74,72 @@ def _follow(req: _Request, first: _Request) -> None:
         req.future.set_result(first.future.result())
 
 
+class Version:
+    """公開中の版の読み出し専用のビュー。
+
+    読み出しは Model と同じ名前（get、slice、rows、summarize、value）で、必要な分だけ読む。
+    手元で試したいときは fork で複製を取る（複製は普通の Model なので書き換えられる）。
+    """
+
+    __slots__ = ("_model",)
+
+    def __init__(self, model):
+        self._model = model
+
+    @property
+    def seq(self) -> int:
+        """この版の通し番号。"""
+        return self._model.seq
+
+    @property
+    def model(self):
+        """裏の Model。読み出しにだけ使う（操作を呼ぶと ValueError）。記録先のスナップショットなどに渡す。"""
+        return self._model
+
+    @property
+    def dimensions(self):
+        return self._model.dimensions
+
+    @property
+    def metrics(self):
+        return self._model.metrics
+
+    @property
+    def warnings(self):
+        return self._model.warnings
+
+    def dimension(self, name: str):
+        return self._model.dimension(name)
+
+    def metric_type(self, name: str):
+        return self._model.metric_type(name)
+
+    def get(self, name: str, **coords):
+        return self._model.get(name, **coords)
+
+    def value(self, name: str):
+        return self._model.value(name)
+
+    def slice(self, name: str, **coords):
+        return self._model.slice(name, **coords)
+
+    def rows(self, name: str, **kwargs):
+        return self._model.rows(name, **kwargs)
+
+    def summarize(self, name: str, keep=(), agg: str = "sum", **coords):
+        return self._model.summarize(name, keep, agg, **coords)
+
+    def raw(self, name: str):
+        return self._model.raw(name)
+
+    def fork(self):
+        """この版の複製（書き換えられる Model）。ホワットイフ分析に使う。"""
+        return self._model.fork()
+
+    def __repr__(self) -> str:
+        return f"Version(seq={self.seq})"
+
+
 class Workspace:
     """モデルを預かり、版の公開と単一ライターで、同時の読み書きを受け付ける。
 
@@ -69,22 +148,24 @@ class Workspace:
     """
 
     def __init__(self, model, journal: Journal | None = None, *, max_batch: int = 64,
-                 keep_recent: int = 10_000):
-        model.journal = None  # 記録はライターがまとめて書く
-        model.recalc()
-        if journal is not None:
-            model.seq = journal.head
-        model._frozen = True
-        self._version = model
+                 keep_recent: int = 10_000, max_queue: int = 0, checkpoint_every: int | None = None,
+                 checkpoint_interval: float | None = None):
         self.journal = journal
         self.max_batch = max_batch
-        self._queue: queue.Queue = queue.Queue()
+        self._publish(model)
+        self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         # 排他の確認に使う、最近の書き込み (通し番号, 利用者, 書き換えたセル)。これより古い版を
         # 読んだ書き込みは確かめられないので拒否する
         self._recent: collections.deque = collections.deque(maxlen=keep_recent)
-        self._known_since = model.seq
         self._ops: dict[str, int] = {}  # このライターが確定した client_op_id（記録先にあるものは seq_of で引く）
         self._closed = False
+        if (checkpoint_every is not None or checkpoint_interval is not None) and journal is None:
+            raise ValueError("スナップショットを取るには記録先（journal）が要る")
+        self.checkpoint_every = checkpoint_every
+        self.checkpoint_interval = checkpoint_interval
+        self._checkpoint_seq = self._version.seq  # 最後にスナップショットを取った（または取り始めた）版
+        self._checkpoint_at = time.monotonic()
+        self._checkpointing: threading.Thread | None = None
         self._thread = threading.Thread(target=self._run, name="nanashi-writer", daemon=True)
         self._thread.start()
 
@@ -95,11 +176,22 @@ class Workspace:
             journal = FileJournal(journal)
         return cls(journal.open(engine), journal, **kwargs)
 
+    def _publish(self, model) -> None:
+        """model を公開中の版にする（記録はライターがまとめて書くので、モデル自身には記録させない）。"""
+        model.journal = None
+        model.recalc()
+        if self.journal is not None:
+            model.seq = self.journal.head
+        model._frozen = True
+        self._version_model = model
+        self._version = Version(model)
+        self._known_since = model.seq
+
     # ------------------------------------------------ 読み出し
 
     @property
-    def version(self):
-        """公開中の版。読み出しにだけ使う（書き換えると ValueError）。"""
+    def version(self) -> Version:
+        """公開中の版（読み出し専用）。"""
         return self._version
 
     @property
@@ -110,36 +202,49 @@ class Workspace:
     # ------------------------------------------------ 書き込み
 
     def submit(self, fn: Callable[[Any], Any], *, user: str | None = None, reason: str | None = None,
-               client_op_id: str | None = None, expect: int | None = None) -> Future:
+               client_op_id: str | None = None, expect: int | None = None,
+               timeout: float | None = None) -> Future:
         """書き込みを列に入れる。fn はモデルを受け取って操作する関数で、1 つのトランザクションとして
         適用する。結果は確定した通し番号の Future（失敗すれば例外）。
 
         expect に読んだ版の通し番号を渡すと、それより後に同じセルを変えた書き込みがあれば Conflict にする
         （比べるのは、この書き込みが実際に書き換えた入力セル）。client_op_id が確定済みなら、
-        適用せずに元の通し番号を返す。
+        適用せずに元の通し番号を返す。列が満杯（max_queue）なら timeout の間だけ待ち、Overloaded を投げる。
         """
         if self._closed:
             raise RuntimeError("Workspace は閉じている")
         future: Future = Future()
-        self._queue.put(_Request(fn, user, reason, client_op_id, expect, future))
+        try:
+            self._queue.put(_Request(fn, user, reason, client_op_id, expect, future), timeout=timeout)
+        except queue.Full:
+            raise Overloaded(f"書き込みの列が満杯（{self._queue.maxsize} 件）") from None
         return future
 
-    def write(self, fn: Callable[[Any], Any], **kwargs) -> int:
-        """submit して、確定するまで待つ。確定した通し番号を返す。"""
-        return self.submit(fn, **kwargs).result()
+    def write(self, fn: Callable[[Any], Any], *, timeout: float | None = None, **kwargs) -> int:
+        """submit して、確定するまで待つ。確定した通し番号を返す。timeout を過ぎたら TimeoutError
+        （まだ列にいれば取り消し、適用が始まっていれば結果を待たずに返る）。"""
+        future = self.submit(fn, timeout=timeout, **kwargs)
+        try:
+            return future.result(timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def checkpoint(self) -> None:
         """公開中の版のスナップショットを記録先に置く（版は変わらないので、どのスレッドからでもよい）。"""
         if self.journal is None:
             raise ValueError("記録先（journal）がない")
-        self.journal.save_snapshot(self._version)
+        self._checkpoint_seq, self._checkpoint_at = self._version.seq, time.monotonic()
+        self.journal.save_snapshot(self._version_model)
 
     def close(self) -> None:
-        """列に入っている書き込みを処理し終えてから、ライターを止める。"""
+        """列に入っている書き込みを処理し終えてから、ライターを止める。取りかけのスナップショットも待つ。"""
         if not self._closed:
             self._closed = True
             self._queue.put(None)
             self._thread.join()
+            if self._checkpointing is not None:
+                self._checkpointing.join()
 
     def __enter__(self) -> Workspace:
         return self
@@ -167,25 +272,29 @@ class Workspace:
                 batch.append(nxt)
             try:
                 self._process(batch)
-            except BaseException as e:  # 想定外の失敗でも、待っている利用者に知らせてから続ける
+            except Exception as e:  # 想定外の失敗でも、待っている利用者に知らせてから続ける
+                log.exception("書き込みのまとまりの処理に失敗した")
                 for req in batch:
                     if not req.future.done():
                         req.future.set_exception(e)
+            except BaseException as e:  # KeyboardInterrupt などは知らせてから止まる
+                for req in batch:
+                    if not req.future.done():
+                        req.future.set_exception(e)
+                raise
 
     def _process(self, batch: list[_Request]) -> None:
-        working = self._version.fork()  # 公開中の版は変えない
+        working = self._version_model.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
         aliases: list[tuple[_Request, _Request]] = []  # 同じまとまりで同じ client_op_id を送ったもの
         firsts: dict[str, _Request] = {}
+        known = self._known_ops(batch)  # 確定済みの client_op_id は、まとまりごとに 1 回で引く
         for req in batch:
             if not req.future.set_running_or_notify_cancel():
                 continue
             if req.client_op_id is not None:
-                done = self._ops.get(req.client_op_id)
-                if done is None and self.journal is not None:
-                    done = self.journal.seq_of(req.client_op_id)
-                if done is not None:
-                    req.future.set_result(done)
+                if req.client_op_id in known:
+                    req.future.set_result(known[req.client_op_id])
                     continue
                 if req.client_op_id in firsts:
                     aliases.append((req, firsts[req.client_op_id]))
@@ -198,7 +307,7 @@ class Workspace:
                                          self._check(req, rec, pending)) as txn:
                     req.fn(working)
                 applied.append((req, txn.record))
-            except BaseException as e:
+            except Exception as e:
                 req.future.set_exception(e)
 
         committed = [(req, rec) for req, rec in applied if rec["ops"]]
@@ -213,7 +322,9 @@ class Workspace:
                 seqs = self.journal.append_many([rec for _, rec in committed])
             else:
                 seqs = list(range(working.seq + 1, working.seq + 1 + len(committed)))
-        except BaseException as e:  # 記録できなければ、まとまり全体を捨てる（公開中の版は変えない）
+        except Exception as e:  # 記録できなければ、まとまり全体を捨てる（公開中の版は変えない）
+            if isinstance(e, Stale):
+                self._reload()  # 別のプロセスが書き込んでいた。知らせる前に、記録先から最新の版を開き直す
             for req, _ in applied:
                 req.future.set_exception(e)
             for req, _ in aliases:
@@ -228,12 +339,32 @@ class Workspace:
         if seqs:
             working.seq = seqs[-1]
         working._frozen = True
-        self._version = working  # 公開する
+        self._version_model, self._version = working, Version(working)  # 公開する
 
         for req, rec in applied:
             req.future.set_result(rec.get("seq", working.seq))
         for req, first in aliases:
             _follow(req, first)
+        self._maybe_checkpoint()
+
+    def _known_ops(self, batch: list[_Request]) -> dict[str, int]:
+        ids = [r.client_op_id for r in batch if r.client_op_id is not None]
+        known = {i: self._ops[i] for i in ids if i in self._ops}
+        unknown = [i for i in ids if i not in known]
+        if unknown and self.journal is not None:
+            known.update(self.journal.seq_of_many(unknown))
+        return known
+
+    def _reload(self) -> None:
+        """記録先から最新の版を開き直す（手元の版が古いと言われたとき）。"""
+        try:
+            model = self.journal.open(self._version_model.engine)
+        except Exception:
+            log.exception("記録先からの開き直しに失敗した")
+            return
+        self._publish(model)
+        self._recent.clear()
+        self._ops.clear()
 
     def _check(self, req: _Request, record: dict, pending: list[set]) -> None:
         """読んだ版（req.expect）より後に、同じセルを変えた書き込みがあれば Conflict。"""
@@ -252,3 +383,28 @@ class Workspace:
         for cells in pending:  # 同じまとまりで先に適用した書き込み（まだ通し番号がない）
             if mine & cells:
                 raise Conflict(f"読んだ版（{req.expect}）の後に、同じセルを変えた書き込みがある")
+
+    # ------------------------------------------------ スナップショット
+
+    def _maybe_checkpoint(self) -> None:
+        """決めた間隔を過ぎていれば、公開したばかりの版のスナップショットを別のスレッドで取り始める
+        （取っている最中なら、次の公開で改めて確かめる）。"""
+        if self.journal is None or (self.checkpoint_every is None and self.checkpoint_interval is None):
+            return
+        if self._checkpointing is not None and self._checkpointing.is_alive():
+            return
+        due = (self.checkpoint_every is not None and self._version.seq - self._checkpoint_seq >= self.checkpoint_every) \
+            or (self.checkpoint_interval is not None and time.monotonic() - self._checkpoint_at >= self.checkpoint_interval)
+        if not due:
+            return
+        model = self._version_model
+        self._checkpoint_seq, self._checkpoint_at = model.seq, time.monotonic()
+
+        def run():
+            try:
+                self.journal.save_snapshot(model)
+            except Exception:
+                log.exception("スナップショットの保存に失敗した（次の間隔で取り直す）")
+        thread = threading.Thread(target=run, name="nanashi-checkpoint", daemon=True)
+        thread.start()
+        self._checkpointing = thread

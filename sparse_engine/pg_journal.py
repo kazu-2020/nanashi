@@ -19,13 +19,17 @@
 書き込むプロセスは 1 つに限る。最初に追記するときにリースを取り、世代番号を 1 つ進める。確定は
 「通し番号が読んだとおりで、世代番号が自分のもの」のときだけ通る 1 回のトランザクションで行う。
 リースが切れて別のプロセスが書き込みを始めていれば、古いプロセスの確定は拒否される（締め出し）。
-読み込んだあとに別のプロセスが書き込んでいた場合も、手元のモデルが古いので拒否する。
+読み込んだあとに別のプロセスが書き込んでいた場合も、手元のモデルが古いので拒否する（Stale）。
+
+リースは書き込みのない間も別のスレッドで延長する（heartbeat）。別のプロセスが期限内のリースを
+持っていれば、acquire は期限が切れるまで待ってから取る（落ちたプロセスのリースを待つ）。
 """
 from __future__ import annotations
 
 import os
 import socket
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Iterator
@@ -34,7 +38,7 @@ import numpy as np
 import psycopg
 from psycopg.types.json import Jsonb
 
-from .journal import Journal, _sha256, _shown, _sync, snapshot_ok, write_snapshot
+from .journal import Journal, Stale, _sha256, _shown, _sync, snapshot_ok, write_snapshot
 
 SCHEMA = """
 create table if not exists nanashi_model (
@@ -83,13 +87,17 @@ create table if not exists nanashi_snapshot (
 ANALYZE_ROWS = 100_000
 
 
-class Fenced(Exception):
+class Fenced(Stale):
     """書き込むためのリースを持っていないか、別のプロセスが先に書き込んでいた。"""
 
 
 class PgJournal(Journal):
     def __init__(self, dsn: str, model_id: str, snapshot_dir, *, lease_ttl: float = 30.0,
-                 holder: str | None = None, bulk_cells: int = 10_000):
+                 holder: str | None = None, bulk_cells: int = 10_000, heartbeat: bool = True,
+                 acquire_wait: float | None = None):
+        """lease_ttl はリースの期限（秒）。heartbeat なら、リースを持っている間は期限の 1/3 ごとに延長する。
+        acquire_wait は、別のプロセスのリースが切れるのを待つ長さ（既定は lease_ttl）。
+        holder はリースの持ち主の名前（既定はホスト名、プロセス番号、乱数）。"""
         self.dsn = dsn
         self.model_id = model_id
         self.snapshot_dir = Path(snapshot_dir) / model_id
@@ -103,6 +111,7 @@ class PgJournal(Journal):
         self._index_conn = None
         self._index_lock = threading.Lock()
         self.lease_ttl = lease_ttl
+        self.acquire_wait = lease_ttl if acquire_wait is None else acquire_wait
         self.holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.epoch: int | None = None  # 取ったリースの世代番号（まだ取っていなければ None）
         self.conn = psycopg.connect(dsn, autocommit=True)  # 複数の文は transaction() で囲む
@@ -110,11 +119,38 @@ class PgJournal(Journal):
             self.conn.execute(SCHEMA)
             self.conn.execute("insert into nanashi_model (model_id) values (%s) on conflict do nothing", (model_id,))
         self.head = self._db_head()
+        self._stop = threading.Event()
+        self._heartbeat: threading.Thread | None = None
+        if heartbeat:
+            self._heartbeat = threading.Thread(target=self._beat, name="nanashi-lease", daemon=True)
+            self._heartbeat.start()
 
     def close(self) -> None:
-        self.conn.close()
-        if self._index_conn is not None:
-            self._index_conn.close()
+        """リースを手放してから閉じる（次に書くプロセスが期限を待たずに済む）。"""
+        self._stop.set()
+        if self._heartbeat is not None:
+            self._heartbeat.join()
+        try:
+            self.release()
+        finally:
+            self.conn.close()
+            if self._index_conn is not None:
+                self._index_conn.close()
+
+    def release(self) -> None:
+        """持っているリースを手放す。持っていなければ何もしない。"""
+        with self._lock:
+            if self.epoch is None or self.conn.closed:
+                return
+            self.conn.execute("update nanashi_model set lease_expires = now()"
+                              " where model_id = %s and writer_epoch = %s and lease_holder = %s",
+                              (self.model_id, self.epoch, self.holder))
+            self.epoch = None
+
+    def open(self, engine=None):
+        """記録先の最新の状態を開く（手元の通し番号が古くても、表の通し番号から開き直す）。"""
+        self.head = self._db_head()
+        return super().open(engine)
 
     def _db_head(self) -> int:
         with self._lock:
@@ -123,23 +159,56 @@ class PgJournal(Journal):
 
     # ------------------------------------------------ リース
 
-    def acquire(self) -> int:
-        """書き込むためのリースを取り、世代番号を返す。別のプロセスが期限内のリースを持っていれば Fenced。
-        手元のモデルを読み込んだあとに別のプロセスが書き込んでいたら、手元が古いので Fenced。"""
-        with self._lock, self.conn.transaction():
-            row = self.conn.execute(
-                "update nanashi_model set writer_epoch = writer_epoch + 1, lease_holder = %s,"
-                " lease_expires = now() + make_interval(secs => %s)"
-                " where model_id = %s and (lease_holder is null or lease_holder = %s or lease_expires < now())"
-                " returning writer_epoch, head_seq",
-                (self.holder, self.lease_ttl, self.model_id, self.holder)).fetchone()
-        if row is None:
-            raise Fenced(f"{self.model_id}: 別のプロセスが書き込み中（リースの期限内）")
+    def acquire(self, wait: float | None = None) -> int:
+        """書き込むためのリースを取り、世代番号を返す。別のプロセスが期限内のリースを持っていれば、
+        期限が切れるまで wait 秒（既定は acquire_wait）まで待ってから取り、それでも取れなければ Fenced。
+        手元のモデルを読み込んだあとに別のプロセスが書き込んでいたら、手元が古いのですぐ Fenced。"""
+        wait = self.acquire_wait if wait is None else wait
+        deadline = time.monotonic() + wait
+        while True:
+            with self._lock, self.conn.transaction():
+                row = self.conn.execute(
+                    "update nanashi_model set writer_epoch = writer_epoch + 1, lease_holder = %s,"
+                    " lease_expires = now() + make_interval(secs => %s)"
+                    " where model_id = %s and (lease_holder is null or lease_holder = %s or lease_expires < now())"
+                    " returning writer_epoch, head_seq",
+                    (self.holder, self.lease_ttl, self.model_id, self.holder)).fetchone()
+                if row is None:
+                    other = self.conn.execute(
+                        "select lease_holder, head_seq, extract(epoch from lease_expires - now())"
+                        " from nanashi_model where model_id = %s", (self.model_id,)).fetchone()
+            if row is not None:
+                break
+            holder, head, left = other
+            if head != self.head:
+                raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Fenced(f"{self.model_id}: 別のプロセス（{holder}）が書き込み中（リースの期限内）")
+            time.sleep(min(remaining, max(0.05, min(float(left or 0) + 0.05, 1.0))))
         epoch, head = row
         if head != self.head:
             raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
         self.epoch = epoch
         return epoch
+
+    def _beat(self) -> None:
+        """リースを持っている間、期限の 1/3 ごとに延長する。延長できなければ（締め出された）リースを手放す。"""
+        while not self._stop.wait(self.lease_ttl / 3):
+            if self.epoch is None:
+                continue
+            try:
+                with self._lock:
+                    if self.epoch is None:
+                        continue
+                    cur = self.conn.execute(
+                        "update nanashi_model set lease_expires = now() + make_interval(secs => %s)"
+                        " where model_id = %s and writer_epoch = %s and lease_holder = %s",
+                        (self.lease_ttl, self.model_id, self.epoch, self.holder))
+                    if cur.rowcount != 1:
+                        self.epoch = None
+            except Exception:  # 接続の一時的な失敗。次の確定で改めて確かめる
+                pass
 
     # ------------------------------------------------ 記録
 
@@ -249,6 +318,15 @@ class PgJournal(Journal):
             row = self.conn.execute("select seq from nanashi_operation where model_id = %s and client_op_id = %s",
                                     (self.model_id, client_op_id)).fetchone()
         return None if row is None else row[0]
+
+    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
+        if not client_op_ids:
+            return {}
+        with self._lock:
+            rows = self.conn.execute("select client_op_id, seq from nanashi_operation"
+                                     " where model_id = %s and client_op_id = any(%s)",
+                                     (self.model_id, list(client_op_ids))).fetchall()
+        return dict(rows)
 
     def records(self, after: int = 0) -> Iterator[dict]:
         with self._lock, self.conn.transaction():

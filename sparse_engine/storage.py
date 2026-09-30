@@ -40,12 +40,11 @@ def save(model, path) -> None:
                         "overridable": m.overridable})
         if m.formula is not None:
             continue
-        cube = model.engine.to_cube(model._values[m.name], model)
-        index = [model.dimension(d)._index for d in cube.dims]
-        keys = list(cube.cells)
-        for j, d in enumerate(cube.dims):
-            arrays[f"{i}.{d}"] = np.array([index[j][k[j]] for k in keys], dtype=np.uint32)
-        arrays[f"{i}.__v"] = np.array([float(v) for v in cube.cells.values()], dtype=np.float64)
+        # 軸ごとのメンバー番号と値の配列で取り出す（Rust なら GIL を外して、Python のオブジェクトを作らずに）
+        cols = model.engine.to_arrays(model._values[m.name], model)
+        for d in m.dims:
+            arrays[f"{i}.{d}"] = np.ascontiguousarray(cols[d], dtype=np.uint32)
+        arrays[f"{i}.__v"] = np.ascontiguousarray(cols["__v"], dtype=np.float64)
     meta = {"format": FORMAT_VERSION, "next_id": model._next_id, "dimensions": dims, "metrics": metrics,
             "options": {"auto_layout": model.auto_layout, "delta_aggregation": model.delta_aggregation}}
     (path / "model.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))

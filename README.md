@@ -13,12 +13,14 @@ Python 3.12 以上と、Rust のツールチェーン（cargo）を使う。
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install numpy maturin
+.venv/bin/pip install -e ".[dev]"
 VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
 ```
 
+`pyproject.toml` が依存（numpy、開発用に maturin、psycopg、pyflakes）の版を決めている。
 最後の行で、Rust のエンジン（`nanashi_core`）をビルドして `.venv` に入れる。
 Rust のエンジンがなくても、参照実装のエンジンだけで動く。
+GitHub Actions（`.github/workflows/test.yml`）が、両方のエンジンでテストと静的検査を回す。
 
 テストは次のように実行する。
 `SPARSE_ENGINE` で既定のエンジンを選ぶ（`reference` または `rust`）。
@@ -69,7 +71,22 @@ print(m.value("Cost").format(m.dimensions))
 
 入力の Metric は `add_input`、式で決まる Metric は `add_formula` で登録する。
 Metric の軸と値の種類は登録時に決め、あとから変えない。
-値を読むと（`value`、`get`）、変更のあった範囲だけが計算し直される。
+値を読むと、変更のあった範囲だけが計算し直される。
+
+## 値の読み出し
+
+読み出しは、必要な分だけ読む 4 つの口と、全部を読む `value` がある。
+大きな Metric では `value` が Metric 全体を Python の dict に変換するので、表示や API には必要な分だけ読む口を使う。
+
+```python
+m.get("Revenue", Product="p0001", Version="予算", Month="m01")   # 1 セル。空なら None
+m.slice("Revenue", Product="p0001")                              # 範囲を Cube で（軸はメンバー名か、その集まり）
+m.rows("Payroll", Department="営業", offset=0, limit=50)          # 行の列と全行数（宣言した軸の順に並ぶ）
+m.summarize("Revenue", keep=["Month"], Product=["p0001", "p0002"])  # keep の軸だけ残して集計（SUM、AVG、MIN、MAX、COUNT）
+```
+
+Rust のエンジンでは、これらは格納データを丸ごと読まず、GIL も外して読む。
+490 万セルの損益計画で、137 万セルの Metric の 1 セルを `get` で読むのは 0.01 ms 未満、`value` で丸ごと読むと約 500 ms かかる（「性能」の表）。
 
 ## 式の言語
 
@@ -295,6 +312,7 @@ m2 = Model.load("plan/", RustEngine())
 
 計算 Metric の値は保存せず、読み込み後の最初の再計算で求め直す。
 式は利用者が書いた元の文字列で保存する。
+入力の値は、エンジンから軸ごとのメンバー番号と値の配列で取り出して書くので、大きなモデルでも Python のオブジェクトを作らない（Rust では GIL も外す）。
 軸、メンバー、Metric の ID も保存する（保存形式の版 2）。
 ID を持たない版 1 のファイルも読め、そのときは ID を新しく振る。
 
@@ -371,6 +389,11 @@ ws = Workspace.open(journal, RustEngine())
 リースが切れて別のプロセスがリースを取れば、古いプロセスの確定は、まだ新しいプロセスが書いていなくても拒否される（`Fenced`）。
 読み込んだあとに別のプロセスが書き込んでいれば、手元のモデルが古いので、リースを取るときに拒否する。
 
+リースは、書き込みがない間も別のスレッドが期限の 1/3 ごとに延長する（`heartbeat=False` で止められる）。
+閉じるとき（`close`）はリースを手放すので、次に書くプロセスは期限を待たない。
+落ちたプロセスのリースが残っていれば、`acquire` は期限が切れるまで（既定で `lease_ttl` の長さまで）待ってから取るので、再起動が期限のぶん失敗し続けることはない（`acquire_wait=0` で待たない）。
+`Fenced` は `journal.Stale` の一種で、`Workspace` はこれを受けると記録先から最新の版を開き直す。
+
 1 万セルを超える変更は、変更前後の値をファイル（オブジェクトストレージの代わり）に書いて確定し、セルの変更の表への書き込みは確定の後に回す（`index_pending`）。
 セルの索引の更新は 1 行あたりの費用が大きく、確定の経路に入れると大量の書き込みの確定が十数倍遅くなるためである。
 セルの履歴を引くときは、先に未反映の分を反映する。
@@ -384,11 +407,12 @@ ws = Workspace.open(journal, RustEngine())
 ```python
 from sparse_engine.workspace import Conflict, Workspace
 
-ws = Workspace.open("plan/", RustEngine())      # 記録から復元したモデルを預かる（Workspace(model, journal) でもよい）
+ws = Workspace.open("plan/", RustEngine(), checkpoint_every=1000)  # 記録から復元したモデルを預かる
 
 seq = ws.write(lambda m: m.set_cell("Price", 12, Product="A"), user="alice", reason="値上げ")
-v = ws.version                                   # 公開中の版（書き換えると ValueError）
-v.get("Revenue", Product="A", Month="Jan")
+v = ws.version                                   # 公開中の版（読み出し専用のビュー）
+v.get("Revenue", Product="A", Month="Jan")       # get、slice、rows、summarize、value が使える
+what_if = v.fork()                               # 手元で試すための複製（普通の Model）
 
 try:  # 読んだ版より後に、同じセルを他人が変えていたら拒否する
     ws.write(lambda m: m.set_cell("Price", 13, Product="A"), user="bob", expect=v.seq)
@@ -397,6 +421,7 @@ except Conflict as e:
 ```
 
 版は作ったら変えない。
+`version` は読み出し専用のビュー（`Version`）で、書き込む操作を持たない（裏の `Model` は `version.model` で取れるが、操作を呼ぶと ValueError）。
 読み出しはいつでも公開中の版をまるごと見るので、書き込みの途中の値（明細は新しいのに合計が古い、など）や、取り消された変更は見えない。
 書き込みは公開していない複製だけを書き換える。
 格納データの本体は版どうしで共有するので、版を作る費用は差分の分だけで済み、古い版は読んでいる人がいなくなれば捨てられる。
@@ -407,7 +432,10 @@ except Conflict as e:
 - 1 件の書き込みが失敗したら、その 1 件だけを取り消し、同じまとまりのほかの書き込みは確定する。
 - 記録の書き出しに失敗したら、まとまり全体を捨て、公開中の版は変えない。
 - `expect=` に読んだ版の通し番号を渡すと、それより後に同じセルを変えた書き込みがあれば `Conflict` にする。比べるのは、その書き込みが実際に書き換えた入力セルなので、按分なら配った範囲全体が対象になる。
-- `client_op_id=` が確定済みなら、適用せずに元の通し番号を返す。
+- `client_op_id=` が確定済みなら、適用せずに元の通し番号を返す。確定済みかどうかは、まとまりごとに 1 回で記録先に引く。
+- `max_queue=` で列の長さを決めると、溢れたときは `submit` が `timeout=` の間だけ待ってから `Overloaded` を投げる。`write(timeout=)` は確定を待つ長さで、過ぎれば列から取り消して `TimeoutError`。
+- `checkpoint_every=`（記録の件数）か `checkpoint_interval=`（秒）を決めると、その間隔で公開した版のスナップショットを別のスレッドで取る。取っている間も書き込みは止まらない（格納データの本体は版どうしで共有している）。
+- 記録先が「手元の版が古い」と言えば（`journal.Stale`。PostgreSQL で別のプロセスが書き込んだとき）、そのまとまりを失敗にしてから、記録先から最新の版を開き直す。
 
 損益計画（490 万セル）で、8 人が 50 件ずつ給与を書き込むと、毎秒約 500 件を確定する（1 件ずつトランザクションで確定すると毎秒約 190 件）。
 応答の時間は中央値 15 ms、95 パーセンタイル 21 ms で、1 回の書き出しで平均 4 件を確定した（手元の macOS、ディスクまで書き出す設定）。
@@ -475,6 +503,24 @@ Apple M4（10 コア、メモリ 16 GB）での、Rust エンジンの測定値�
 多数の利用者の書き込みを受けるときは、複数のトランザクションをまとめて書き出す仕組み（グループコミット）が要る。
 （入力する値が上の表と違うので、その場で書き込む場合の時間も上の表と少し違う。）
 
+読み出し（`bench_reads.py`、損益計画（大）、PayrollByEmployee は 137 万セル）：
+
+| 読み出し | 時間 |
+|---|---|
+| `value` で PayrollByEmployee を丸ごと Cube に | 483 ms |
+| `get` で PayrollByEmployee の 1 セル | 0.01 ms 未満 |
+| `slice` で 1 商品の全版・全月（Revenue） | 0.02 ms |
+| `rows` で 1 部署の先頭 50 行（Payroll） | 0.02 ms |
+| `summarize` で売上の月別合計（全商品） | 2.2 ms |
+| `save`（スナップショット、490 万セル） | 18 ms |
+
+`get` が読み出し API になる前は、1 セル読むのにも `value` と同じ約 500 ms かかり、その間 GIL を握っていた。
+`save` も Python で全セルを走査していて約 500 ms かかった。
+
+8 人の読み手が休みなく読み続ける中での書き込み（給与を 1 人変更、単独なら 0.6 ms）は、読み手が `get` でも中央値 82 ms かかる。
+読みの費用ではなく、ライターが GIL を取り直すたびに Python のスレッド切り替えの間隔（既定 5 ms）を待つためで、`sys.setswitchinterval(0.0005)` にすると 7.5 ms になる。
+読み手を多く抱えるプロセスでは、切り替えの間隔を短くするか、free-threaded の Python を使う。
+
 記録先を比べると次のとおり（`bench_journal.py`、損益計画、PostgreSQL は手元の Docker）。
 
 | 計測 | ファイル | PostgreSQL |
@@ -508,26 +554,33 @@ Rust のエンジンは、並列化、差分のまとめ直し、準結合、転
 
 | 場所 | 役割 |
 |---|---|
-| `sparse_engine/model.py` | Model。定義、計算計画、影響範囲の伝搬、差分集計、scan |
+| `sparse_engine/model.py` | Model。定義、読み出し、計算計画、影響範囲の伝搬、差分集計、scan。ためている変更は `Pending` にまとめる |
 | `sparse_engine/evaluate.py` | 型の検査、影響範囲、参照実装の評価器 |
 | `sparse_engine/parser.py` | 式の文字列の解析と、構文木から文字列への変換 |
 | `sparse_engine/delta.py` | 差分集計の対象になる式の判定 |
-| `sparse_engine/engine.py`、`rust_engine.py` | エンジンの差し替え口と、参照実装、Rust の橋渡し |
+| `sparse_engine/engine.py`、`rust_engine.py` | エンジンの差し替え口（`Engine`、計画を渡す `CompiledPlan`）と、参照実装、Rust の橋渡し |
 | `sparse_engine/storage.py` | 保存と読み込み |
 | `sparse_engine/journal.py` | トランザクションの記録、記録先（ファイル）、スナップショットと記録の再生による復元 |
 | `sparse_engine/workspace.py` | 版の公開と単一ライター（同時の読み書き、グループコミット、楽観的な排他） |
 | `sparse_engine/pg_journal.py` | PostgreSQL の記録先（リースと締め出し、大量の変更の後からの反映） |
 | `native/` | Rust のエンジン（PyO3） |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
-| `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py` | ベンチマーク |
+| `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py` | ベンチマーク |
+| `tests/test_expr_coverage.py` | すべての種類の式のノードを、すべての実装の場所（構文、型推論、影響範囲、評価、依存、Rust）に通す |
+
+式の意味は、Python の参照実装と Rust の両方に実装している（`expr.py`、`parser.py`、`evaluate.py`、`rust_engine.py`、`lib.rs`、`core.rs`、`plan.rs`）。
+ノードを 1 種類足すときはこれらをすべて直し、`tests/test_expr_coverage.py` のモデルにそのノードを使う式を足す。
+足し忘れた場所があれば、このテストが失敗する。
 
 ## 制約と今後
 
 - 順序付きの軸の途中へのメンバーの挿入には対応していない（追加は末尾だけ）。
 - 同時に読み書きするときは `Workspace` を通す。`Model` を直接複数のスレッドから使うことはできない（Rust の再計算中は、別のスレッドから読むと格納データが空に見える）。
 - PostgreSQL の記録先のスナップショットと大量の変更のファイルは、オブジェクトストレージの代わりにローカルのディレクトリに置いている。参照されなくなったファイルの片付け（確定に失敗したときに残るものなど）もまだない。
-- PostgreSQL の記録先のリースは、書き込むたびに延長するだけで、書き込みのない間に延長する仕組みはない。期限が切れても、別のプロセスがリースを取っていなければ、次の書き込みでそのまま延長される。別のプロセスが取っていれば締め出され、開き直しが必要になる。
-- ライターは 1 つのまとまりを確定し終えてから次のまとまりを計算する（確定を待つ間に次を計算するパイプライン化はしていない）。重い書き込み（全体の再計算に近いもの）が列にあると、その間ほかの書き込みは待たされる。
+- ライターは 1 つのまとまりを確定し終えてから次のまとまりを計算する（確定を待つ間に次を計算するパイプライン化はしていない）。重い書き込み（全体の再計算に近いもの）が列にあると、その間ほかの書き込みは待たされる。列の長さ（`max_queue`）と待ち時間で過負荷を上流に伝えることはできる。
+- Rust のエンジンは 1 セルのキーを 64 ビットの整数で持つので、軸のビット幅（メンバー数の対数）の合計が 64 を超える Metric は作れない（登録時に、軸ごとのビット幅と直し方を示して拒否する）。メンバー数が 2 の 22 乗を超える軸には、分割軸以外の索引を作らない。
+- 式の評価は演算ごとに中間結果を実体化し、演算の融合はしない。メモリは中間結果の合計になる。
+- 並列化の閾値（`nanashi_core.set_par_min` など）と rayon のスレッドプールはプロセス全体で 1 つで、モデルごとには変えられない。
 - 楽観的な排他で比べるのは入力セルだけで、定義やメンバーの変更どうしの食い違いは確かめない。
 - 影響範囲は軸ごとの集合の直積で持つので、離れた 2 セルの変更はそれらを囲む範囲に広がる。
 - 差分集計を続けると浮動小数点の誤差が積み上がる。`refresh()` で全体を計算し直すと誤差はなくなる。

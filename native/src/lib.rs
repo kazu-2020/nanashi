@@ -6,7 +6,7 @@ mod plan;
 
 use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
 use crate::plan::{Delta, Formula, Metric, Plan, Reg, Step};
-use numpy::PyReadonlyArray1;
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -223,13 +223,13 @@ impl Core {
     /// src のメンバー番号 -> dst のメンバー番号（なければ -1）の対応を登録する。
     fn add_mapping(&mut self, dst_size: u32, fwd: Vec<i64>) -> usize {
         let cat = Arc::make_mut(&mut self.cat);
-        cat.maps.push(mapping(dst_size, fwd));
+        cat.maps.push(Arc::new(mapping(dst_size, fwd)));
         cat.maps.len() - 1
     }
 
     /// 登録済みの対応を置き換える（メンバーの追加やプロパティの設定のあと）。番号は変わらない。
     fn set_mapping(&mut self, id: usize, dst_size: u32, fwd: Vec<i64>) {
-        Arc::make_mut(&mut self.cat).maps[id] = mapping(dst_size, fwd);
+        Arc::make_mut(&mut self.cat).maps[id] = Arc::new(mapping(dst_size, fwd));
     }
 
     /// メンバーが増えてキーのビット幅に収まらなくなった格納データを詰め直す。収まるなら None。
@@ -276,6 +276,11 @@ impl Core {
         Arc::make_mut(&mut store.borrow_mut().store).write(&key, value);
     }
 
+    /// 1 セルの値（宣言した軸の順のメンバー番号）。空なら None。格納データ全体を読まない。
+    fn get(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>) -> Option<f64> {
+        store.borrow().store.get(&key)
+    }
+
     fn evaluate(&self, py: Python<'_>, expr: &Expr, sources: Vec<Bound<'_, PyAny>>, region: Region) -> PyResult<CubeHandle> {
         let src: Vec<Src> = sources.iter().map(Core::source).collect::<PyResult<_>>()?;
         let (node, cat, r) = (expr.node.clone(), self.cat.clone(), self.restrict(&region));
@@ -295,8 +300,10 @@ impl Core {
     }
 
     /// 格納データから region の範囲を切り出した、新しい格納データ。
-    fn filter(&self, store: &Bound<'_, StoreHandle>, region: Region) -> StoreHandle {
-        StoreHandle { store: Arc::new(store.borrow().store.slice(&self.restrict(&region))) }
+    /// 格納データから region の範囲を切り出した、新しい格納データ（GIL を外して読む）。
+    fn filter(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region) -> StoreHandle {
+        let (s, r) = (store.borrow().store.clone(), self.restrict(&region));
+        StoreHandle { store: Arc::new(py.detach(move || s.slice(&r))) }
     }
 
     fn replace(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region, new: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -337,10 +344,40 @@ impl Core {
         Ok(StoreHandle { store: Arc::new(out) })
     }
 
-    fn rows(&self, store: &Bound<'_, StoreHandle>) -> (Vec<Vec<u32>>, Vec<f64>, bool) {
-        let s = &store.borrow().store;
-        let (cols, values) = s.rows();
-        (cols, values, s.kind == Kind::Bool)
+    fn rows(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>) -> (Vec<Vec<u32>>, Vec<f64>, bool) {
+        let s = store.borrow().store.clone();
+        let (cols, values) = py.detach(move || s.rows());
+        (cols, values, store.borrow().store.kind == Kind::Bool)
+    }
+
+    /// region の範囲の行を宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す
+    /// （軸ごとのメンバー番号の列、値の列、真偽値か、範囲の全行数）。表示やページングに使う。
+    #[pyo3(signature = (store, region, offset = 0, limit = None))]
+    fn rows_in(
+        &self,
+        py: Python<'_>,
+        store: &Bound<'_, StoreHandle>,
+        region: Region,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> (Vec<Vec<u32>>, Vec<f64>, bool, usize) {
+        let (s, r) = (store.borrow().store.clone(), self.restrict(&region));
+        let is_bool = s.kind == Kind::Bool;
+        let (cols, values, total) = py.detach(move || s.rows_in(&r, offset, limit));
+        (cols, values, is_bool, total)
+    }
+
+    /// 全セルを numpy の配列で返す（軸ごとのメンバー番号の配列、値の配列、真偽値か）。
+    /// 保存など、大量のセルを Python のオブジェクトにせずに取り出すときに使う。
+    fn arrays<'py>(
+        &self,
+        py: Python<'py>,
+        store: &Bound<'py, StoreHandle>,
+    ) -> (Vec<Bound<'py, PyArray1<u32>>>, Bound<'py, PyArray1<f64>>, bool) {
+        let s = store.borrow().store.clone();
+        let is_bool = s.kind == Kind::Bool;
+        let (cols, values) = py.detach(move || s.rows());
+        (cols.into_iter().map(|c| c.into_pyarray(py)).collect(), values.into_pyarray(py), is_bool)
     }
 
     /// 2 つのハンドルが同じ格納データ（複製しただけで、どちらにも書き込んでいない）を指すか。
@@ -366,6 +403,10 @@ impl Core {
 
     fn size(&self, store: &Bound<'_, StoreHandle>) -> usize {
         store.borrow().store.len()
+    }
+
+    fn is_bool(&self, store: &Bound<'_, StoreHandle>) -> bool {
+        store.borrow().store.kind == Kind::Bool
     }
 
     fn index_dim(&self, store: &Bound<'_, StoreHandle>) -> Option<DimId> {

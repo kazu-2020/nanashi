@@ -1,4 +1,5 @@
 """PostgreSQL の記録先（PgJournal）。NANASHI_PG_DSN（既定は手元の 55432 番）の PostgreSQL が必要。"""
+import importlib
 import os
 import tempfile
 import time
@@ -22,7 +23,7 @@ DSN = os.environ.get("NANASHI_PG_DSN", "postgresql://postgres@127.0.0.1:55432/na
 
 def available() -> bool:
     try:
-        import numpy  # noqa: F401  スナップショットの保存形式に使う
+        importlib.import_module("numpy")  # スナップショットの保存形式に使う
         import psycopg
         psycopg.connect(DSN, connect_timeout=2).close()
         return True
@@ -90,19 +91,19 @@ class PgJournalTests(unittest.TestCase):
         ws.write(move("p5", "p6", "Feb", 2))
         ws.close()
         reopened = Workspace.open(self.journal(), ReferenceEngine())
-        check_same_state(self, ws.version, reopened.version)
+        check_same_state(self, ws.version.model, reopened.version.model)
         history = reopened.journal.cell_history(reopened.version, "Stock", Product="p6", Month="Feb")
         self.assertEqual([(h["seq"], h["old"], h["new"]) for h in history], [(11, 100.0, 102.0)])
         reopened.close()
 
     def test_only_one_writer(self):
         m = build_with(ReferenceEngine())
-        first = self.journal(lease_ttl=1.0)
+        first = self.journal(lease_ttl=1.0, heartbeat=False)  # 落ちたプロセスのように、リースを延長しない
         first.start(m)
         m.set_cell("Price", 12, Product="A")  # first がリースを取る
-        second = self.journal(lease_ttl=1.0)
+        second = self.journal(lease_ttl=1.0, acquire_wait=0)
         other = second.open(ReferenceEngine())
-        with self.assertRaises(Fenced):  # 期限内は取れない
+        with self.assertRaises(Fenced):  # 期限内は取れない（待たない設定）
             other.set_cell("Price", 13, Product="A")
         time.sleep(1.2)
         other.set_cell("Price", 14, Product="A")  # 期限が切れたら取れる（世代番号が進む）
@@ -112,12 +113,49 @@ class PgJournalTests(unittest.TestCase):
 
     def test_lost_lease_fences_before_the_new_writer_writes(self):
         m = build_with(ReferenceEngine())
-        self.journal(lease_ttl=0.5).start(m)
+        self.journal(lease_ttl=0.5, heartbeat=False).start(m)
         m.set_cell("Price", 12, Product="A")  # m がリースを取る
         time.sleep(0.7)
         self.journal(lease_ttl=0.5).acquire()  # 別のプロセスがリースを取っただけで、まだ書いていない
         with self.assertRaises(Fenced):  # 通し番号は合っていても、世代番号が古いので締め出される
             m.set_cell("Price", 13, Product="A")
+
+    def test_heartbeat_keeps_the_lease_while_idle(self):
+        m = build_with(ReferenceEngine())
+        first = self.journal(lease_ttl=0.6)  # 書き込みがなくても延長する
+        first.start(m)
+        m.set_cell("Price", 12, Product="A")
+        time.sleep(1.0)  # 期限より長く何もしない
+        other = self.journal(lease_ttl=0.6, acquire_wait=0).open(ReferenceEngine())
+        with self.assertRaises(Fenced):  # まだ持っている
+            other.set_cell("Price", 13, Product="A")
+        m.set_cell("Price", 14, Product="A")  # 自分は書ける
+        self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 14)
+
+    def test_acquire_waits_for_a_dead_writers_lease(self):
+        m = build_with(ReferenceEngine())
+        dead = self.journal(lease_ttl=0.6, heartbeat=False)  # 落ちたプロセス（延長しない）
+        dead.start(m)
+        m.set_cell("Price", 12, Product="A")
+        other = self.journal(lease_ttl=0.6, acquire_wait=3.0).open(ReferenceEngine())
+        t = time.perf_counter()
+        other.set_cell("Price", 13, Product="A")  # 期限が切れるのを待ってから取る（失敗しない）
+        self.assertLess(time.perf_counter() - t, 3.0)
+        self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 13)
+
+    def test_workspace_reloads_when_another_process_wrote(self):
+        m = stock_model(ReferenceEngine())
+        self.journal().start(m)
+        ws = Workspace(m, self.journal(lease_ttl=0.5, heartbeat=False))
+        ws.write(move("p0", "p1", "Jan", 1))
+        time.sleep(0.7)
+        other = Workspace.open(self.journal(lease_ttl=0.5), ReferenceEngine())  # 別のプロセスが書く
+        other.write(move("p2", "p3", "Jan", 5))
+        other.close()
+        with self.assertRaises(Fenced):  # 手元は締め出され、
+            ws.write(move("p4", "p5", "Jan", 2))
+        self.assertEqual(ws.version.get("Stock", Product="p3", Month="Jan"), 105)  # 最新の版を開き直している
+        ws.close()
 
     def test_stale_reader_cannot_write(self):
         m = build_with(ReferenceEngine())

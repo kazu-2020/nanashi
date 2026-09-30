@@ -2,7 +2,6 @@
 import random
 import tempfile
 import threading
-import time
 import unittest
 
 from sparse_engine import Model
@@ -82,13 +81,15 @@ class Basics(unittest.TestCase):
         self.assertEqual(v0.get("Stock", Product="p1", Month="Jan"), 100)  # 古い版は変わらない
 
     def test_published_versions_cannot_be_changed(self):
+        self.assertFalse(hasattr(self.ws.version, "set_cell"))  # 版は読み出し専用のビュー
+        model = self.ws.version.model  # 裏の Model も、公開済みなので操作を受け付けない
         with self.assertRaisesRegex(ValueError, "公開済み"):
-            self.ws.version.set_cell("Stock", 1, Product="p0", Month="Jan")
+            model.set_cell("Stock", 1, Product="p0", Month="Jan")
         with self.assertRaisesRegex(ValueError, "公開済み"):
-            with self.ws.version.transaction():
+            with model.transaction():
                 pass
         with self.assertRaisesRegex(ValueError, "公開済み"):
-            self.ws.version.refresh()
+            model.refresh()
 
     def test_failed_write_changes_nothing(self):
         v = self.ws.version
@@ -211,7 +212,7 @@ class WithJournal(unittest.TestCase):
             ws.write(move("p0", "p9", "Apr", 3))
             ws.close()
             reopened = Workspace.open(tmp, self.engine())
-            check_same_state(self, ws.version, reopened.version)
+            check_same_state(self, ws.version.model, reopened.version.model)
             self.assertEqual(reopened.seq, 11)
             reopened.close()
 
@@ -238,3 +239,51 @@ class RustWithJournal(WithJournal):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Policies(unittest.TestCase):
+    """列の上限、待ち時間、スナップショットの間隔。"""
+
+    def test_full_queue_raises_overloaded(self):
+        from sparse_engine.workspace import Overloaded
+        ws = Workspace(model(ReferenceEngine()), max_queue=2)
+        try:
+            release = hold(ws)  # ライターを止めておく
+            ws.submit(move("p0", "p1", "Jan", 1))
+            ws.submit(move("p1", "p2", "Jan", 1))
+            with self.assertRaises(Overloaded):
+                ws.submit(move("p2", "p3", "Jan", 1), timeout=0.05)
+            release()
+        finally:
+            ws.close()
+
+    def test_write_timeout_cancels_a_queued_write(self):
+        ws = Workspace(model(ReferenceEngine()))
+        try:
+            release = hold(ws)
+            with self.assertRaises(TimeoutError):
+                ws.write(move("p0", "p1", "Jan", 1), timeout=0.05)  # 列で待っているうちに諦める
+            release()
+            self.assertEqual(ws.version.get("Stock", Product="p1", Month="Jan"), 100)  # 取り消されている
+        finally:
+            ws.close()
+
+    def test_snapshots_are_taken_every_n_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = model(ReferenceEngine())
+            FileJournal(tmp).start(m)
+            ws = Workspace(m, FileJournal(tmp), checkpoint_every=5)
+            for i in range(12):
+                ws.write(move(f"p{i}", f"p{i + 1}", "Jan", 1))
+                if ws._checkpointing is not None:
+                    ws._checkpointing.join()
+            ws.close()
+            seqs = [s for s, _ in FileJournal(tmp).snapshots()]
+            self.assertEqual(sorted(seqs), [0, 5, 10])
+            reopened = Workspace.open(tmp, ReferenceEngine())
+            check_same_state(self, ws.version.model, reopened.version.model)
+            reopened.close()
+
+    def test_snapshot_policy_needs_a_journal(self):
+        with self.assertRaisesRegex(ValueError, "記録先"):
+            Workspace(model(ReferenceEngine()), checkpoint_every=5)
