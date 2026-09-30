@@ -3,7 +3,6 @@
 ファイルの置き場所は、ローカルのディレクトリと、S3 互換のオブジェクトストレージ（NANASHI_S3_ENDPOINT、
 既定は手元の 59000 番。boto3 が必要）の両方で同じテストを回す。"""
 import hashlib
-import importlib
 import json
 import os
 import tempfile
@@ -15,6 +14,7 @@ from pathlib import Path
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.workspace import Workspace
 
+from .journals import DSN, PG_AVAILABLE
 from .test_engines import build_with
 from .test_journal import check_same_state, run_random
 from .test_workspace import model as stock_model, move
@@ -24,24 +24,13 @@ try:
 except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
-DSN = os.environ.get("NANASHI_PG_DSN", "postgresql://postgres@127.0.0.1:55432/nanashi")
 S3_ENDPOINT = os.environ.get("NANASHI_S3_ENDPOINT", "http://127.0.0.1:59000")
 S3_BUCKET = "nanashi-test"
 
 
-def available() -> bool:
-    try:
-        importlib.import_module("nanashi_core")  # 保存形式（Parquet）の読み書きに使う
-        import psycopg
-        psycopg.connect(DSN, connect_timeout=2).close()
-        return True
-    except Exception:
-        return False
-
-
 def s3_client():
     """テスト用のバケットを作ったクライアント。つながらなければ None。
-    認証情報は README の docker run で決めたもの（NANASHI_S3_ACCESS_KEY、NANASHI_S3_SECRET_KEY で変えられる）。"""
+    認証情報は compose.yaml で決めたもの（NANASHI_S3_ACCESS_KEY、NANASHI_S3_SECRET_KEY で変えられる）。"""
     try:
         import boto3
         from botocore.config import Config
@@ -67,7 +56,7 @@ def overwrite(journal, uri: str, data: bytes) -> None:
         Path(uri).write_bytes(data)
 
 
-AVAILABLE = available()
+AVAILABLE = PG_AVAILABLE
 S3 = s3_client() if AVAILABLE else None
 if AVAILABLE:
     import nanashi_core

@@ -280,6 +280,8 @@ def main(argv=None) -> None:
     finally:
         server.server_close()
         ws.close()
+        if hasattr(journal, "close"):  # PgJournal: リースの延長を止めて、接続を閉じる
+            journal.close()
 
 
 if __name__ == "__main__":

@@ -1,14 +1,13 @@
 """版の公開と単一ライター（Workspace）。"""
 import random
-import tempfile
 import threading
 import unittest
 
 from sparse_engine import Model
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.journal import FileJournal
 from sparse_engine.workspace import Conflict, Workspace
 
+from .journals import JournalCase, PgStore
 from .test_incremental import same, snapshot
 from .test_journal import check_same_state
 
@@ -39,6 +38,33 @@ def model(engine) -> Model:
     return m
 
 
+def workspace(test, m: Model, **kwargs) -> Workspace:
+    """m の Workspace。test が記録先を持っていれば（JournalCase）、m を最初のスナップショットにして、
+    その記録先に記録する（記録先の設定は test.journal_options）。"""
+    journals = getattr(test, "journals", None)
+    if journals is None:
+        return Workspace(m, **kwargs)
+    options = getattr(test, "journal_options", {})
+    journals.journal(**options).start(m)
+    return Workspace(m, journals.journal(**options), **kwargs)
+
+
+def reopen(test, ws: Workspace, engine) -> None:
+    """記録先から開き直した状態が、ws の公開中の版と同じことを確かめる（記録先がなければ何もしない）。
+    開き直した側で書き込めることも確かめる（閉じた ws が書き込みの権利を手放している）。"""
+    journals = getattr(test, "journals", None)
+    if journals is None:
+        return
+    reopened = Workspace.open(journals.journal(**getattr(test, "journal_options", {})), engine)
+    try:
+        check_same_state(test, ws.version.model, reopened.version.model)
+        test.assertEqual(reopened.seq, ws.seq)
+        seq = reopened.write(lambda m: m.add_dimension("Reopened", ["x"]))
+        test.assertEqual(seq, ws.seq + 1)
+    finally:
+        reopened.close()
+
+
 def hold(ws: Workspace):
     """ライターを止めておく書き込みを入れる。止まったのを確かめてから返すので、後から入れた書き込みは
     1 つのまとまりに溜まる。返す関数を呼ぶとライターが動き出す。"""
@@ -67,10 +93,11 @@ class Basics(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
     def setUp(self):
-        self.ws = Workspace(model(self.engine()))
+        self.ws = workspace(self, model(self.engine()))
 
     def tearDown(self):
         self.ws.close()
+        reopen(self, self.ws, self.engine())
 
     def test_write_publishes_a_new_version(self):
         v0 = self.ws.version
@@ -135,11 +162,20 @@ class RustBasics(Basics):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
 
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class FileBasics(JournalCase, RustBasics):
+    pass
+
+
+class PgBasics(JournalCase, RustBasics):
+    store = PgStore
+
+
 class Concurrency(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
     def test_readers_always_see_a_whole_version(self):
-        ws = Workspace(model(self.engine()))
+        ws = workspace(self, model(self.engine()))
         expected = 100.0 * len(PRODUCTS) * len(MONTHS)
         stop, errors, reads = threading.Event(), [], [0]
 
@@ -180,6 +216,7 @@ class Concurrency(unittest.TestCase):
         for name, cells in snapshot(v2).items():
             self.assertTrue(same(incremental[name], cells), name)
         self.assertEqual(full.get("Total"), v.get("Total"))
+        reopen(self, ws, self.engine())
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -187,49 +224,58 @@ class RustConcurrency(Concurrency):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
 
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class FileConcurrency(JournalCase, RustConcurrency):
+    pass
+
+
+class PgConcurrency(JournalCase, RustConcurrency):
+    store = PgStore
+
+
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
-class WithJournal(unittest.TestCase):
+class WithJournal(JournalCase, unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
     def test_group_commit_and_reopen(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            m = model(self.engine())
-            FileJournal(tmp).start(m)
-            ws = Workspace(m, FileJournal(tmp))
-            calls = [0]
-            original = ws.journal.append_many
+        ws = workspace(self, model(self.engine()))
+        calls = [0]
+        original = ws.journal.append_many
 
-            def counting(records):
-                calls[0] += 1
-                return original(records)
-            ws.journal.append_many = counting
-            release = hold(ws)
-            futures = [ws.submit(move(f"p{i}", f"p{i + 1}", "Mar", 1), user="u") for i in range(10)]
-            release()
-            self.assertEqual(sorted(f.result() for f in futures), list(range(1, 11)))
-            self.assertEqual(calls[0], 1)  # 溜まった 10 件を 1 回の書き出しで確定する（止めた書き込みは何も変えない）
-            ws.checkpoint()
-            ws.write(move("p0", "p9", "Apr", 3))
-            ws.close()
-            reopened = Workspace.open(tmp, self.engine())
-            check_same_state(self, ws.version.model, reopened.version.model)
-            self.assertEqual(reopened.seq, 11)
-            reopened.close()
+        def counting(records):
+            calls[0] += 1
+            return original(records)
+        ws.journal.append_many = counting
+        release = hold(ws)
+        futures = [ws.submit(move(f"p{i}", f"p{i + 1}", "Mar", 1), user="u", client_op_id=f"r{i}")
+                   for i in range(10)]
+        release()
+        self.assertEqual(sorted(f.result() for f in futures), list(range(1, 11)))
+        self.assertEqual(calls[0], 1)  # 溜まった 10 件を 1 回の書き出しで確定する（止めた書き込みは何も変えない）
+        self.assertEqual(ws.write(move("p0", "p1", "Jan", 1), client_op_id="r3"), futures[3].result())
+        ws.checkpoint()
+        ws.write(move("p0", "p9", "Apr", 3))
+        ws.close()
+        self.assertEqual(ws.seq, 11)
+        reopen(self, ws, self.engine())
+        again = Workspace.open(self.journals.journal(), self.engine())  # 開き直しても、確定済みの ID を覚えている
+        self.assertEqual(again.write(move("p0", "p1", "Jan", 1), client_op_id="r3"), futures[3].result())
+        again.close()
 
     def test_journal_failure_discards_the_batch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            m = model(self.engine())
-            FileJournal(tmp).start(m)
-            ws = Workspace(m, FileJournal(tmp))
-            v = ws.version
+        ws = workspace(self, model(self.engine()))
+        v = ws.version
 
-            def broken(records):
-                raise OSError("disk full")
-            ws.journal.append_many = broken
-            with self.assertRaises(OSError):
-                ws.write(move("p0", "p1", "Jan", 1))
-            self.assertIs(ws.version, v)
-            ws.close()
+        def broken(records):
+            raise OSError("disk full")
+        original, ws.journal.append_many = ws.journal.append_many, broken
+        with self.assertRaises(OSError):
+            ws.write(move("p0", "p1", "Jan", 1))
+        self.assertIs(ws.version, v)
+        ws.journal.append_many = original
+        self.assertEqual(ws.write(move("p0", "p1", "Jan", 1)), 1)  # 捨てたまとまりの後も続けて書ける
+        ws.close()
+        reopen(self, ws, self.engine())
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core が必要")
@@ -237,16 +283,29 @@ class RustWithJournal(WithJournal):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
 
+class PgWithJournal(WithJournal):
+    store = PgStore
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core が必要")
+class PgRustWithJournal(RustWithJournal):
+    store = PgStore
+
+
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class LargeWriteConflicts(unittest.TestCase):
     """多くのセルを書き換えた記録（変更の塊）とも、同じセルの書き込みを見分ける。"""
+    journal_options = {"bulk_cells": 1000}  # 記録先があれば、按分（1500 セル）の変更はファイルに書く
 
     def setUp(self):
         from .test_journal import many_cells
         m = many_cells(RustEngine())
         m.add_input("W", ["K"], {})
-        self.ws = Workspace(m)
-        self.addCleanup(self.ws.close)
+        self.ws = workspace(self, m)
+
+    def tearDown(self):
+        self.ws.close()
+        reopen(self, self.ws, RustEngine())
 
     def test_small_write_after_large_write(self):
         read = self.ws.seq
@@ -270,8 +329,14 @@ class LargeWriteConflicts(unittest.TestCase):
             self.ws.write(lambda m: m.spread("V", 4500.0, how="even"), user="etl3", expect=read)
 
 
-if __name__ == "__main__":
-    unittest.main()
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class FileLargeWriteConflicts(JournalCase, LargeWriteConflicts):
+    pass
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class PgLargeWriteConflicts(JournalCase, LargeWriteConflicts):
+    store = PgStore
 
 
 class Policies(unittest.TestCase):
@@ -301,22 +366,28 @@ class Policies(unittest.TestCase):
         finally:
             ws.close()
 
-    def test_snapshots_are_taken_every_n_records(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            m = model(ReferenceEngine())
-            FileJournal(tmp).start(m)
-            ws = Workspace(m, FileJournal(tmp), checkpoint_every=5)
-            for i in range(12):
-                ws.write(move(f"p{i}", f"p{i + 1}", "Jan", 1))
-                if ws._checkpointing is not None:
-                    ws._checkpointing.join()
-            ws.close()
-            seqs = [s for s, _ in FileJournal(tmp).snapshots()]
-            self.assertEqual(sorted(seqs), [0, 5, 10])
-            reopened = Workspace.open(tmp, ReferenceEngine())
-            check_same_state(self, ws.version.model, reopened.version.model)
-            reopened.close()
-
     def test_snapshot_policy_needs_a_journal(self):
         with self.assertRaisesRegex(ValueError, "記録先"):
             Workspace(model(ReferenceEngine()), checkpoint_every=5)
+
+
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
+class Snapshots(JournalCase, unittest.TestCase):
+    def test_snapshots_are_taken_every_n_records(self):
+        ws = workspace(self, model(ReferenceEngine()), checkpoint_every=5)
+        for i in range(12):
+            ws.write(move(f"p{i}", f"p{i + 1}", "Jan", 1))
+            if ws._checkpointing is not None:
+                ws._checkpointing.join()
+        ws.close()
+        seqs = [s for s, _ in self.journals.journal().snapshots()]
+        self.assertEqual(sorted(seqs), [0, 5, 10])
+        reopen(self, ws, ReferenceEngine())
+
+
+class PgSnapshots(Snapshots):
+    store = PgStore
+
+
+if __name__ == "__main__":
+    unittest.main()

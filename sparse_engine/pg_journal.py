@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import socket
 import threading
@@ -43,7 +42,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .engine import native
-from .journal import BrokenSnapshot, Journal, Stale, _shown
+from .journal import (BrokenSnapshot, Journal, Stale, _shown, as_block, cell_count, read_cell_files,
+                      write_cell_files)
 from .objects import open_objects
 from .storage import dump, read
 
@@ -231,7 +231,7 @@ class PgJournal(Journal):
                 self.acquire()
             seqs = list(range(self.head + 1, self.head + 1 + len(records)))
             # 大量のセルは、確定の前にファイルを置いておく（確定に失敗したら参照されないファイルが残るだけ）
-            blobs = [self._write_blob(r) if _cell_count(r) > self.bulk_cells else None for r in records]
+            blobs = [self._write_blob(r) if cell_count(r) > self.bulk_cells else None for r in records]
             with self.conn.transaction():
                 cur = self.conn.execute(
                     "update nanashi_model set head_seq = %s, lease_expires = now() + make_interval(secs => %s)"
@@ -262,26 +262,15 @@ class PgJournal(Journal):
 
     def _write_blob(self, record: dict) -> dict:
         """記録のセルの変更を Metric ごとの Parquet にして置き、置き場所、ハッシュ、件数を返す。"""
-        core = native()
         prefix = f"{self.model_id}/cells/{uuid.uuid4().hex}"
-        files = []
-        for c in record["changes"].get("cells", []):
-            block = _block(core, c["rows"])
-            # 列の名前は軸の ID（記録に軸がなければ c0、c1、…）
-            names = [f"d{i}" for i in c["dims"]] if "dims" in c else [f"c{j}" for j in range(block.width)]
-            data = block.to_parquet(names, [("nanashi", json.dumps({"metric": c["metric"]}))])
-            uri = self.objects.put(f"{prefix}-{c['metric']}.parquet", data)
-            files.append({"metric": c["metric"], "uri": uri, "sha256": hashlib.sha256(data).hexdigest(),
-                          "cells": len(block)})
-        return {"format": "parquet", "prefix": self.objects.uri(prefix), "files": files, "cells": _cell_count(record)}
+        files = write_cell_files(record, lambda name, data: self.objects.put(f"{prefix}-{name}", data))
+        return {"format": "parquet", "prefix": self.objects.uri(prefix), "files": files, "cells": cell_count(record)}
 
     def _read_blob(self, blob: dict) -> list[dict]:
         """_write_blob で置いたセルの変更を読む（Metric ごとの変更の塊）。以前の版の npz も読む。"""
         if blob.get("format") != "parquet":
             return _read_npz(self._get_checked(blob))
-        core = native()
-        return [{"metric": f["metric"], "rows": core.CellBlock.from_parquet(self._get_checked(f))}
-                for f in blob["files"]]
+        return read_cell_files(blob["files"], self.objects.get)
 
     def _get_checked(self, f: dict) -> bytes:
         data = self.objects.get(f["uri"])
@@ -306,7 +295,7 @@ class PgJournal(Journal):
                     with conn.cursor().copy("copy nanashi_cell_change (model_id, seq, metric_id, coords,"
                                             " old_value, new_value) from stdin") as copy:
                         for c in cells:  # COPY のテキストは Rust で作る（行ごとに Python を通さない）
-                            copy.write(_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
+                            copy.write(as_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
                     conn.execute("update nanashi_operation set indexed = true where model_id = %s and seq = %s",
                                  (self.model_id, seq))
                 loaded += blob["cells"]
@@ -406,15 +395,6 @@ class PgJournal(Journal):
         with self._lock, self.conn.transaction():
             for table in ("nanashi_cell_change", "nanashi_operation", "nanashi_snapshot", "nanashi_model"):
                 self.conn.execute(f"delete from {table} where model_id = %s", (self.model_id,))
-
-
-def _cell_count(record: dict) -> int:
-    return sum(len(c["rows"]) for c in record["changes"].get("cells", []))
-
-
-def _block(core, rows):
-    """行の列なら変更の塊にする（変更の塊ならそのまま）。"""
-    return core.CellBlock.from_rows(rows) if isinstance(rows, list) else rows
 
 
 def _copy_cells(copy, model_id: str, seq: int, cells: list[dict]) -> None:

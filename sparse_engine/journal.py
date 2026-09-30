@@ -29,11 +29,12 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .core import Dimension
-from .engine import parquet_value
+from .engine import native, parquet_value
 
 BLOCK_MIN = 1000  # 書き換えたセルがこれ以上なら、行の列でなく変更の塊で持つ（Rust のエンジン）
 from .expr import Expr
@@ -338,9 +339,13 @@ class Journal:
         snapshots()                スナップショットの (通し番号, 置き場所) を新しい順に
         load_snapshot(place)       置き場所のスナップショットを読む。壊れていれば BrokenSnapshot
                                    （open は 1 つ前のスナップショットから記録を多く再生する）
+        release()                  書き込みの権利（PgJournal のリース）を手放す。次の書き手が待たずに済む
     """
 
     head: int = 0
+
+    def release(self) -> None:
+        """書き込みの権利を手放す。権利を持たない記録先（FileJournal）では何もしない。"""
 
     def append(self, record: dict) -> int:
         """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
@@ -363,10 +368,12 @@ class Journal:
             for c in rec["changes"].get("cells", []):
                 if c["metric"] != m.id:
                     continue
-                for ids, old, new in c["rows"]:
-                    if list(ids) == key:
-                        out.append({"seq": rec["seq"], "at": rec["at"], "user": rec["user"],
-                                    "reason": rec["reason"], "old": old, "new": new})
+                rows = c["rows"]
+                found = ([(old, new) for ids, old, new in rows if list(ids) == key] if isinstance(rows, list)
+                         else rows.find(key))  # 変更の塊は、全行を Python にせずに探す
+                for old, new in found:
+                    out.append({"seq": rec["seq"], "at": rec["at"], "user": rec["user"],
+                                "reason": rec["reason"], "old": old, "new": new})
         return _shown(model, m, out)
 
     def open(self, engine=None):
@@ -447,16 +454,22 @@ class FileJournal(Journal):
     """ディレクトリに記録とスナップショットを置く。
 
         path/log.jsonl                 1 行 1 トランザクションの記録。追記して fsync する
+        path/cells/<乱数>-<Metric>.parquet   bulk_cells を超えるセルを書き換えた記録の、セルの変更
         path/snapshots/<通し番号>/     その時点のモデル（Model.save の形式）と meta.json（通し番号、ハッシュ）
 
     最後の行が途中で切れていれば（書いている途中で落ちた）、開くときに捨てる。
     スナップショットは一時ディレクトリに書いてから名前を変えるので、途中のものは見えない。
+    大量のセルの変更は、JSON の行にせず Metric ごとの Parquet に書き（PgJournal と同じ形式）、記録の行には
+    ファイルの名前とハッシュだけを入れる。ファイルを書き出してから行を追記するので、確定した記録の
+    ファイルは必ずそろっている（行を書く前に落ちれば、参照されないファイルが残るだけ）。
     """
 
-    def __init__(self, path, *, fsync: bool = True):
+    def __init__(self, path, *, fsync: bool = True, bulk_cells: int = 10_000):
         self.path = Path(path)
         self.fsync = fsync
+        self.bulk_cells = bulk_cells
         (self.path / "snapshots").mkdir(parents=True, exist_ok=True)
+        self.cells_dir = self.path / "cells"
         self.log_path = self.path / "log.jsonl"
         self.head = 0  # 最後の記録の通し番号
         self._by_client_op: dict[str, int] = {}
@@ -493,8 +506,16 @@ class FileJournal(Journal):
     def append_many(self, records: list[dict]) -> list[int]:
         """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。"""
         seqs = list(range(self.head + 1, self.head + 1 + len(records)))
-        lines = "".join(json.dumps({**r, "seq": q}, ensure_ascii=False, separators=(",", ":"), default=_json_rows) + "\n"
-                        for r, q in zip(records, seqs))
+        lines = []
+        for r, q in zip(records, seqs):
+            line = {**r, "seq": q}
+            if cell_count(r) > self.bulk_cells:  # 大量のセルは、先にファイルへ書き出す
+                line["changes"] = {k: v for k, v in r["changes"].items() if k != "cells"}
+                line["cells_blob"] = self._write_cells(r)
+            lines.append(json.dumps(line, ensure_ascii=False, separators=(",", ":"), default=_json_rows) + "\n")
+        if self.fsync and any("cells_blob" in line for line in lines):
+            _fsync_dir(self.cells_dir)  # ファイルの名前の変更も、記録の行より先にディスクへ
+        lines = "".join(lines)
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(lines)
             f.flush()
@@ -513,6 +534,23 @@ class FileJournal(Journal):
     def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
         return {i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op}
 
+    def _write_cells(self, record: dict) -> dict:
+        """記録のセルの変更を cells/ の Parquet に書き、記録の行に入れる参照（名前は path からの相対）を返す。"""
+        self.cells_dir.mkdir(exist_ok=True)
+        prefix = uuid.uuid4().hex
+
+        def put(name: str, data: bytes) -> str:  # 一時ファイルに書いてから名前を変える
+            final = self.cells_dir / f"{prefix}-{name}"
+            tmp = final.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                if self.fsync:
+                    _sync(f.fileno())
+            os.rename(tmp, final)
+            return final.relative_to(self.path).as_posix()
+        return {"format": "parquet", "files": write_cell_files(record, put), "cells": cell_count(record)}
+
     def records(self, after: int = 0) -> Iterator[dict]:
         if not self.log_path.exists():
             return
@@ -520,6 +558,9 @@ class FileJournal(Journal):
             for line in f:
                 rec = json.loads(line)
                 if rec["seq"] > after:
+                    if "cells_blob" in rec:  # 大量のセルはファイルから、変更の塊として読む
+                        rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"],
+                                                                   lambda uri: (self.path / uri).read_bytes())
                     yield rec
 
     # ------------------------------------------------ スナップショット
@@ -542,6 +583,43 @@ class FileJournal(Journal):
             if snapshot_ok(p, meta):
                 out.append((meta["seq"], p))
         return sorted(out, reverse=True)
+
+
+def cell_count(record: dict) -> int:
+    """記録の中の、書き換えた入力セルの数。"""
+    return sum(len(c["rows"]) for c in record["changes"].get("cells", []))
+
+
+def as_block(core, rows):
+    """行の列なら変更の塊にする（変更の塊ならそのまま）。"""
+    return core.CellBlock.from_rows(rows) if isinstance(rows, list) else rows
+
+
+def write_cell_files(record: dict, put: Callable[[str, bytes], str]) -> list[dict]:
+    """記録のセルの変更を Metric ごとの Parquet にし、put(<Metric の ID>.parquet, 中身) で置いて、
+    [{"metric", "uri"（put が返した置き場所）, "sha256", "cells"}] を返す。"""
+    core = native()
+    files = []
+    for c in record["changes"].get("cells", []):
+        block = as_block(core, c["rows"])
+        # 列の名前は軸の ID（記録に軸がなければ c0、c1、…）
+        names = [f"d{i}" for i in c["dims"]] if "dims" in c else [f"c{j}" for j in range(block.width)]
+        data = block.to_parquet(names, [("nanashi", json.dumps({"metric": c["metric"]}))])
+        files.append({"metric": c["metric"], "uri": put(f"{c['metric']}.parquet", data),
+                      "sha256": hashlib.sha256(data).hexdigest(), "cells": len(block)})
+    return files
+
+
+def read_cell_files(files: list[dict], get: Callable[[str], bytes]) -> list[dict]:
+    """write_cell_files で置いたセルの変更を、get(置き場所) で読み、Metric ごとの変更の塊で返す。"""
+    core = native()
+    cells = []
+    for f in files:
+        data = get(f["uri"])
+        if hashlib.sha256(data).hexdigest() != f["sha256"]:
+            raise ValueError(f"{f['uri']}: セルの変更のファイルが壊れている")
+        cells.append({"metric": f["metric"], "rows": core.CellBlock.from_parquet(data)})
+    return cells
 
 
 def _json_rows(x: Any) -> list:

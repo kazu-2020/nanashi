@@ -266,13 +266,16 @@ class Workspace:
         self.journal.save_snapshot(self._version_model)
 
     def close(self) -> None:
-        """列に入っている書き込みを処理し終えてから、ライターを止める。取りかけのスナップショットも待つ。"""
+        """列に入っている書き込みを処理し終えてから、ライターを止める。取りかけのスナップショットも待つ。
+        記録先の書き込みの権利（PgJournal のリース）も手放すので、次に開く書き手は期限を待たずに書ける。"""
         if not self._closed:
             self._closed = True
             self._queue.put(None)
             self._thread.join()
             if self._checkpointing is not None:
                 self._checkpointing.join()
+            if self.journal is not None:
+                self.journal.release()
 
     def __enter__(self) -> Workspace:
         return self

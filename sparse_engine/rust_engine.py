@@ -450,6 +450,14 @@ class RustEngine:
         self.core.write(store, codes, None if value is None else float(value))
         return store
 
+    def write_many(self, store, cols, values, cat):
+        self.core.write_many(store, cols, values)  # int や bool も f64 として受け取る
+        return store
+
+    def columns(self, store, restrict, cat):
+        cols, values, is_bool, _ = self.core.rows_in(store, self._region(cat, restrict), 0, None)
+        return cols, [v != 0.0 for v in values] if is_bool else values
+
     def evaluate(self, expr, cat, restrict):
         compiled, names = self._compile(expr, cat)
         return self.core.evaluate(compiled, [cat.source(n) for n in names], self._region(cat, restrict))
