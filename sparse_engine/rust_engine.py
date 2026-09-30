@@ -16,7 +16,7 @@ import nanashi_core
 from .core import Cube
 from .evaluate import Catalog, infer
 from .expr import (BinOp, By, Const, Expand, Expr, Filter, If, IfBlank, IsBlank, Not, On, Ref,
-                   Remove, Shift)
+                   Remove, Select, Shift)
 
 
 class RustEngine:
@@ -121,6 +121,8 @@ class RustEngine:
                 return ("remove", t(child), self._dim(cat, dim), agg)
             case Shift(child, dim, n):
                 return ("shift", t(child), self._dim(cat, dim), n)
+            case Select(child, dim, member):
+                return ("select", t(child), self._dim(cat, dim), cat.dimension(dim)._index[member])
         raise TypeError(e)
 
     # ------------------------------------------------ Engine

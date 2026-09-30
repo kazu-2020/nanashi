@@ -63,6 +63,10 @@ class Expr:
         """result[t] = self[t - n]。自己参照に使うと時間方向の scan になる。"""
         return Shift(self, dim, n)
 
+    def select(self, dim: str, member: str) -> Select:
+        """Pigment の `[SELECT: Dim."member"]`。member の切り口を取り出し、dim を結果から外す。"""
+        return Select(self, dim, member)
+
     def ifblank(self, value: Value) -> IfBlank:
         return IfBlank(self, _literal(value))
 
@@ -175,6 +179,13 @@ class Shift(Expr):
     child: Expr
     dim: str
     n: int
+
+
+@dataclass(eq=False)
+class Select(Expr):
+    child: Expr
+    dim: str
+    member: str
 
 
 @dataclass(eq=False)

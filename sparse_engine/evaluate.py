@@ -16,6 +16,7 @@
 | not               | 変わらない                    |
 | IF(c, a, b)       | c の support の部分集合        |
 | FILTER(x, c)      | x ∩ {c が TRUE}               |
+| x[SELECT: D."m"]  | x の D = m の切り口（D は外れる） |
 | IFBLANK / ISBLANK | 全メンバー（密）              |
 """
 from __future__ import annotations
@@ -28,7 +29,7 @@ from typing import Iterator, Literal, Protocol
 
 from .core import Cube, Dimension
 from .expr import (AGGREGATORS, ARITH, COMPARE, LOGIC, BinOp, By, Const, Expand, Expr, Filter,
-                   If, IfBlank, IsBlank, Not, On, Ref, Remove, Shift)
+                   If, IfBlank, IsBlank, Not, On, Ref, Remove, Select, Shift)
 
 Restrict = dict[str, frozenset[str]]
 Kind = Literal["number", "boolean"]
@@ -211,6 +212,14 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
                 raise FormulaError(f"PREVIOUS {dim}: 順序付きの軸ではない")
             return t
 
+        case Select(child, dim, member):
+            t = infer(child, cat, warnings)
+            if dim not in t.dims:
+                raise FormulaError(f'SELECT {dim}."{member}": 式の軸 {t.dims} に {dim} がない')
+            if member not in cat.dimension(dim):
+                raise FormulaError(f'SELECT {dim}."{member}": {dim} にメンバー {member!r} がない')
+            return Type(tuple(d for d in t.dims if d != dim), t.kind)
+
         case IfBlank(child, value):
             t = infer(child, cat, warnings)
             vkind = "boolean" if isinstance(value, bool) else "number"
@@ -258,7 +267,7 @@ def collect_refs(expr: Expr, cat: Catalog,
             yield from collect_refs(child, cat, lags, broken)
         case Shift(child, dim, n):
             yield from collect_refs(child, cat, {**lags, dim: lags.get(dim, 0) + n}, broken)
-        case Remove(child, dim, _):
+        case Remove(child, dim, _) | Select(child, dim, _):
             yield from collect_refs(child, cat, lags, broken | {dim})
         case By(child, dim, prop, _):
             target, _ = _property(cat, dim, prop)
@@ -334,6 +343,11 @@ def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict],
         case Remove(child, dim, _):
             r = af(child)
             return None if r is None else _without(r, dim)
+        case Select(child, dim, member):
+            r = af(child)
+            if r is None or (dim in r and member not in r[dim]):
+                return None  # 変更が選んだメンバーに届かない
+            return _without(r, dim)
         case Shift(child, dim, n):
             r = af(child)
             if r is not None and dim in r:
@@ -537,6 +551,12 @@ def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube
             cells = {k[:i] + (s,) + k[i + 1:]: v
                      for k, v in c.cells.items() for s in fanout.get(k[i], ())}
             return Cube(_replace(c.dims, target, dim), cells)
+
+        case Select(child, dim, member):
+            c = evaluate(child, cat, {**(restrict or {}), dim: frozenset([member])})
+            i = c.dims.index(dim)
+            return Cube(c.dims[:i] + c.dims[i + 1:],
+                        {k[:i] + k[i + 1:]: v for k, v in c.cells.items() if k[i] == member})
 
         case Remove(child, dim, agg):
             c = evaluate(child, cat, _without(restrict, dim))

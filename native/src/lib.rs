@@ -142,6 +142,7 @@ impl Core {
             },
             "remove" => Node::Remove { child: child(1)?, dim: t.get_item(2)?.extract()?, agg: agg(t.get_item(3)?.extract()?)? },
             "shift" => Node::Shift { child: child(1)?, dim: t.get_item(2)?.extract()?, n: t.get_item(3)?.extract()? },
+            "select" => Node::Select { child: child(1)?, dim: t.get_item(2)?.extract()?, member: t.get_item(3)?.extract()? },
             _ => return Err(err(format!("未知のノード {tag}"))),
         })
     }

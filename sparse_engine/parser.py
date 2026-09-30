@@ -6,6 +6,7 @@
     Bonus     = Salary * Rate[BY: Employee.Department]
     Cash      = PREVIOUS(Month) + Funding - TotalCost
     Order     = IF(Stock[SELECT: Month - 1] < 5, 10, 0)
+    Variance  = Sales[SELECT: Version."予算"] - Sales[SELECT: Version."実績"]
 
 文法（優先順位の低い順）:
 
@@ -22,14 +23,17 @@
     modifier := "BY" [agg] ":" name "." name ("," name "." name)*
               | "REMOVE" [agg] ":" name ("," name)*
               | "FILTER" ":" expr
-              | "SELECT" ":" name ("+" | "-") INTEGER
+              | "SELECT" ":" select ("," select)*
               | "EXPAND" ":" name ("," name)*
               | "ON" ":" expr
     call     := "IF" "(" expr "," expr ["," expr] ")"
               | "IFBLANK" "(" expr "," 定数 ")"
               | "ISBLANK" "(" expr ")"
               | "PREVIOUS" "(" name ["," INTEGER] ")"
+    select   := name ("+" | "-") INTEGER     前後の時点へずらす（軸は残る）
+              | name "." MEMBER              そのメンバーの切り口を取り出す（軸は外れる）
     name     := 識別子 | "'" 任意の文字（' は '' と書く） "'"
+    MEMBER   := '"' 任意の文字（" は "" と書く） '"'
 
 キーワード・関数名・集計関数名は大文字小文字を区別しない。Metric 名と軸名は区別する。
 PREVIOUS(Month) はその式を持つ Metric 自身の前の時点を指す（self_name が必要）。
@@ -43,7 +47,7 @@ from typing import Callable, TypeVar
 
 from .evaluate import FormulaError
 from .expr import (AGGREGATORS, BinOp, By, Const, Expand, Expr, Filter, If, IfBlank, IsBlank,
-                   Not, On, Ref, Remove, Shift)
+                   Not, On, Ref, Remove, Select, Shift)
 
 KEYWORDS = {"AND", "OR", "NOT", "TRUE", "FALSE"}
 FUNCTIONS = {"IF", "IFBLANK", "ISBLANK", "PREVIOUS"}
@@ -55,6 +59,7 @@ _TOKEN = re.compile(r"""
   | (?P<num>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)
   | (?P<ident>[^\W\d]\w*)
   | (?P<quoted>'(?:[^']|'')*')
+  | (?P<member>"(?:[^"]|"")*")
   | (?P<op><>|<=|>=|[-+*/=<>()\[\],:.])
 """, re.VERBOSE)
 _IDENT = re.compile(r"[^\W\d]\w*\Z")
@@ -77,7 +82,7 @@ class ParseError(FormulaError):
 
 @dataclass(frozen=True)
 class Token:
-    kind: str  # num / ident / quoted / op / eof
+    kind: str  # num / ident / quoted / member / op / eof
     text: str
     pos: int
 
@@ -90,8 +95,8 @@ def tokenize(text: str) -> list[Token]:
     while pos < len(text):
         m = _TOKEN.match(text, pos)
         if m is None:
-            if text[pos] == "'":
-                raise ParseError("' が閉じていない", text, pos)
+            if text[pos] in "'\"":
+                raise ParseError(f"{text[pos]} が閉じていない", text, pos)
             raise ParseError(f"使えない文字 {text[pos]!r}", text, pos)
         if m.lastgroup != "ws":
             tokens.append(Token(m.lastgroup, m.group(), pos))
@@ -321,13 +326,24 @@ class _Parser:
         elif word == "EXPAND":
             e = Expand(e, tuple(self.comma_list(self.name)))
         else:  # SELECT
-            dim = self.name()
-            if not self.at_op("+", "-"):
-                self.error(f"SELECT には '{dim} - 1' のようなずらし量が必要")
-            sign = self.advance().text
-            n = self.integer()
-            e = Shift(e, dim, n if sign == "-" else -n)
+            for item in self.comma_list(self.select_item):
+                e = item(e)
         return e
+
+    def select_item(self) -> Callable[[Expr], Expr]:
+        """`Month - 1`（ずらし）か `Version."実績"`（メンバーの指定）。"""
+        dim = self.name()
+        if self.at_op("."):
+            self.advance()
+            if self.tok.kind != "member":
+                self.error(f'メンバーは二重引用符で囲む（例: {dim}."{self.tok.text or "名前"}"）')
+            member = self.advance().text[1:-1].replace('""', '"')
+            return lambda e: Select(e, dim, member)
+        if not self.at_op("+", "-"):
+            self.error(f'SELECT には \'{dim} - 1\' のようなずらし量か、{dim}."メンバー" の指定が必要')
+        sign = self.advance().text
+        n = self.integer()
+        return lambda e: Shift(e, dim, n if sign == "-" else -n)
 
     def dim_prop(self) -> tuple[str, str]:
         dim = self.name()
@@ -398,4 +414,7 @@ def _fmt(e: Expr) -> tuple[str, int]:
         case Shift(x, dim, n):
             sign = "-" if n >= 0 else "+"
             return f"{_wrap(x, _POSTFIX)}[SELECT: {_name(dim)} {sign} {abs(n)}]", _POSTFIX
+        case Select(x, dim, member):
+            quoted = '"' + member.replace('"', '""') + '"'
+            return f"{_wrap(x, _POSTFIX)}[SELECT: {_name(dim)}.{quoted}]", _POSTFIX
     raise TypeError(e)

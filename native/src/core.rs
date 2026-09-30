@@ -571,6 +571,7 @@ pub enum Node {
     ByLookup { child: Box<Node>, src: DimId, dst: DimId, map: usize },
     Remove { child: Box<Node>, dim: DimId, agg: Agg },
     Shift { child: Box<Node>, dim: DimId, n: i64 },
+    Select { child: Box<Node>, dim: DimId, member: u32 },
 }
 
 /// 式が読む Metric（格納データ、または評価の途中結果）。
@@ -992,6 +993,17 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             let proj = Proj::new(&c.pack, &out);
             let pairs = map_cells(&c.cells, |k, v| Some((proj.apply(&c.pack, &out, k), v)));
             Ok(group(pairs, out, *agg))
+        }
+
+        Node::Select { child, dim, member } => {
+            // member の切り口を取り出し、dim を外す
+            let c = eval(child, cat, src, &r.with(*dim, Sel::new(vec![*member], cat.dims[*dim].size)))?;
+            let p = c.pack.pos(*dim).unwrap();
+            let dims: Vec<DimId> = c.dims().iter().copied().filter(|d| d != dim).collect();
+            let out = Packing::new(&dims, cat)?;
+            let proj = Proj::new(&c.pack, &out);
+            let cells = map_cells(&c.cells, |k, v| (c.pack.get(k, p) == *member).then(|| (proj.apply(&c.pack, &out, k), v)));
+            Ok(Cube { pack: out, kind: c.kind, cells })
         }
 
         Node::Shift { child, dim, n } => {
