@@ -914,8 +914,9 @@ pub enum Agg {
 
 /// 式の構文木。Bin、If、IsBlank、IfBlank の Vec<DimId> は、軸にメンバーを追加したときに
 /// 新しいメンバーへ値が広がる軸（影響範囲の計算に使う。評価には使わない）で、型検査（check.rs）が埋める。
-/// By は型検査が式の軸を見て ByAgg か ByLookup に決めるので、評価には現れない。
-#[derive(Debug)]
+/// By は型検査が式の軸を見て ByAgg か ByLookup に決め、ByMetric（対応表がメンバー型の Metric）は
+/// 型検査が AsAxis との結合と集計に書き換えるので、どちらも評価には現れない。
+#[derive(Clone, Debug)]
 pub enum Node {
     Ref(usize), // 評価時に渡す読み出し元の番号
     DimRef(DimId), // 軸そのもの。値は各セルのメンバー番号
@@ -930,6 +931,7 @@ pub enum Node {
     IsBlank(Box<Node>, Vec<DimId>),
     IfBlank(Box<Node>, f64, bool, Vec<DimId>), // 既定値と、それが真偽値か
     By { child: Box<Node>, src: DimId, dst: DimId, map: usize, agg: Option<Agg>, dim: String, prop: String },
+    ByMetric { child: Box<Node>, src: DimId, metric: usize, agg: Option<Agg>, dim: String, prop: String }, // metric は Ref の番号
     ByAgg { child: Box<Node>, src: DimId, dst: DimId, map: usize, agg: Agg },
     ByLookup { child: Box<Node>, src: DimId, dst: DimId, map: usize },
     Remove { child: Box<Node>, dim: DimId, agg: Agg },
@@ -1255,7 +1257,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
 
         Node::Const(v, kind) => Ok(Cube { pack: Packing::new(&[], cat)?, kind: *kind, cells: vec![(0, *v)] }),
         Node::MemberConst(_, m) => Ok(Cube { pack: Packing::new(&[], cat)?, kind: Kind::Num, cells: vec![(0, *m as f64)] }),
-        Node::By { .. } => Err("型を決めていない式は評価できない".into()),
+        Node::By { .. } | Node::ByMetric { .. } => Err("型を決めていない式は評価できない".into()),
 
         Node::Bin(op, l, rt, _) => {
             let a = ev(l)?;

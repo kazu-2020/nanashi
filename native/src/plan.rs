@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::core::{eval, Catalog, Cube, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store, PAR_MIN};
+use crate::core::{eval, Agg, Catalog, Cube, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store, PAR_MIN};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -135,7 +135,7 @@ impl Env<'_> {
         match node {
             Node::Ref(i) => self.regions[refs[*i]].clone(),
             Node::Const(..) | Node::MemberConst(..) => None,
-            Node::By { .. } => unreachable!("型を決めた式だけを使う"),
+            Node::By { .. } | Node::ByMetric { .. } => unreachable!("型を決めた式だけを使う"),
             Node::DimRef(d) => self.grow(None, &[*d]),
             Node::Bin(_, l, r, grow) => self.grow(union(af(l), af(r)), grow),
             Node::Filter(l, r) | Node::On(l, r) | Node::Coalesce(l, r) => union(af(l), af(r)),
@@ -349,6 +349,117 @@ pub struct Metric {
     pub source: bool, // 差分集計の集計元か対応表（変更前の値を取っておく）
 }
 
+// ------------------------------------------------------------------ 差分集計の判定と式
+
+/// 差分集計の対象になる式か。意味は Python の delta.plan_for と同じ。
+///
+/// 対象は「1 つの Metric を集計していくだけ」の式。途中で SELECT で切り口を取っても、Metric を使った
+/// BY の対応表（On(x, AsAxis(Ref))）と結合してもよい。一番内側が SUM か COUNT で、外側がすべて SUM なら
+/// 結果は集計元について足し算で分解できる。返すのは (集計元の Ref の番号, 対応表の Ref の番号, 件数が要るか)。
+/// SUM は「値のあるセルが 1 つもなければ空」なので、件数を裏で持って 0 と空を区別する（COUNT なら自身が件数）。
+pub fn delta_pattern(node: &Node) -> Option<(usize, Vec<usize>, bool)> {
+    let mut aggs: Vec<Agg> = Vec::new(); // 外側から内側の順
+    let mut aux = Vec::new();
+    let mut e = node;
+    loop {
+        match e {
+            Node::ByAgg { child, agg, .. } | Node::Remove { child, agg, .. } => {
+                aggs.push(*agg);
+                e = child;
+            }
+            Node::On(child, other) => match &**other {
+                Node::AsAxis { child: inner, .. } if matches!(**inner, Node::Ref(_)) => {
+                    let Node::Ref(i) = **inner else { unreachable!() };
+                    aux.push(i); // 対応表との結合は、集計元について線形
+                    e = child;
+                }
+                _ => break,
+            },
+            Node::Select { child, .. } => e = child, // 切り口を取り出すだけで、分解を崩さない
+            _ => break,
+        }
+    }
+    let Node::Ref(source) = *e else { return None };
+    let last = *aggs.last()?;
+    if !matches!(last, Agg::Sum | Agg::Count) || aggs[..aggs.len() - 1].iter().any(|a| !matches!(a, Agg::Sum)) {
+        return None;
+    }
+    Some((source, aux, matches!(last, Agg::Sum)))
+}
+
+fn has_agg(e: &Node) -> bool {
+    match e {
+        Node::ByAgg { .. } | Node::Remove { .. } => true,
+        Node::Select { child, .. } | Node::On(child, _) => has_agg(child),
+        _ => false,
+    }
+}
+
+/// 一番内側の集計を COUNT に置き換えた式（外側の SUM と SELECT はそのまま）。
+pub fn inner_count(e: &Node) -> Node {
+    match e {
+        Node::ByAgg { child, src, dst, map, .. } if !has_agg(child) => {
+            Node::ByAgg { child: child.clone(), src: *src, dst: *dst, map: *map, agg: Agg::Count }
+        }
+        Node::Remove { child, dim, .. } if !has_agg(child) => Node::Remove { child: child.clone(), dim: *dim, agg: Agg::Count },
+        Node::ByAgg { child, src, dst, map, agg } => {
+            Node::ByAgg { child: Box::new(inner_count(child)), src: *src, dst: *dst, map: *map, agg: *agg }
+        }
+        Node::Remove { child, dim, agg } => Node::Remove { child: Box::new(inner_count(child)), dim: *dim, agg: *agg },
+        Node::Select { child, dim, member, name } => {
+            Node::Select { child: Box::new(inner_count(child)), dim: *dim, member: *member, name: name.clone() }
+        }
+        Node::On(child, other) => Node::On(Box::new(inner_count(child)), other.clone()),
+        other => other.clone(),
+    }
+}
+
+/// Ref の番号を offset だけずらした複製（同じ式の変更前と変更後を 1 つの式の中で区別するため）。
+fn shift_refs(e: &Node, offset: usize) -> Node {
+    let s = |n: &Node| Box::new(shift_refs(n, offset));
+    match e {
+        Node::Ref(i) => Node::Ref(i + offset),
+        Node::Const(..) | Node::DimRef(_) | Node::MemberConst(..) => e.clone(),
+        Node::Bin(op, l, r, grow) => Node::Bin(*op, s(l), s(r), grow.clone()),
+        Node::Not(c) => Node::Not(s(c)),
+        Node::If(c, t, x, grow) => Node::If(s(c), s(t), x.as_ref().map(|x| s(x)), grow.clone()),
+        Node::Filter(l, r) => Node::Filter(s(l), s(r)),
+        Node::On(l, r) => Node::On(s(l), s(r)),
+        Node::Coalesce(l, r) => Node::Coalesce(s(l), s(r)),
+        Node::Expand(c, dims) => Node::Expand(s(c), dims.clone()),
+        Node::IsBlank(c, grow) => Node::IsBlank(s(c), grow.clone()),
+        Node::IfBlank(c, v, b, grow) => Node::IfBlank(s(c), *v, *b, grow.clone()),
+        Node::ByAgg { child, src, dst, map, agg } => Node::ByAgg { child: s(child), src: *src, dst: *dst, map: *map, agg: *agg },
+        Node::ByLookup { child, src, dst, map } => Node::ByLookup { child: s(child), src: *src, dst: *dst, map: *map },
+        Node::Remove { child, dim, agg } => Node::Remove { child: s(child), dim: *dim, agg: *agg },
+        Node::Shift { child, dim, n } => Node::Shift { child: s(child), dim: *dim, n: *n },
+        Node::Select { child, dim, member, name } => Node::Select { child: s(child), dim: *dim, member: *member, name: name.clone() },
+        Node::AsAxis { child, dim } => Node::AsAxis { child: s(child), dim: *dim },
+        Node::By { .. } | Node::ByMetric { .. } => unreachable!("型を決めた式だけを使う"),
+    }
+}
+
+/// 差分集計の計画と、件数の式。意味は Python の Model.delta_exprs と同じ。
+///
+/// 差分の式は「新しい値での集計 - 古い値での集計」で、集計元と対応表の変更後を作業データの 2i 番、
+/// 変更前を 2i + 1 番から読む。式の refs は、元の式の Ref の番号（変更後）と、それを式の Ref の数だけ
+/// ずらした番号（変更前）を、作業データの番号に写す。
+pub fn derive_delta(f: &Formula) -> Option<(Delta, Option<Formula>)> {
+    let (source, aux, needs_count) = delta_pattern(&f.node)?;
+    let mut input_refs = vec![source];
+    input_refs.extend(aux.iter().copied().filter(|a| *a != source));
+    let inputs: Vec<usize> = input_refs.iter().map(|&i| f.refs[i]).collect();
+    let n = f.refs.len();
+    let slot = |i: usize, old: bool| input_refs.iter().position(|&r| r == i).map(|j| 2 * j + old as usize).unwrap_or(0);
+    let refs: Vec<usize> = (0..n).map(|i| slot(i, false)).chain((0..n).map(|i| slot(i, true))).collect();
+    let diff = |node: &Node| Formula { node: Arc::new(Node::Bin(Op::Sub, Box::new(node.clone()), Box::new(shift_refs(node, n)), vec![])), refs: refs.clone() };
+    let count_node = if needs_count { inner_count(&f.node) } else { (*f.node).clone() };
+    let d_count = diff(&count_node);
+    let d_value = needs_count.then(|| diff(&f.node));
+    let count = needs_count.then(|| Formula { node: Arc::new(count_node), refs: f.refs.clone() });
+    Some((Delta { inputs, d_count, d_value }, count))
+}
+
 pub enum Step {
     One(usize),
     Scan(DimId, Vec<usize>), // 時間軸に沿って 1 時点ずつ計算する Metric の組
@@ -416,6 +527,7 @@ struct Run<'a> {
     counts: &'a mut [Option<Arc<Store>>],
     added: &'a [(DimId, Vec<u32>)],
     forced: Vec<Option<Reg>>, // 定義を変えたので、影響範囲に関係なく計算し直す範囲
+    full: bool,               // 全体の再計算（格納データが空で行数を見積もれなくても、段は並列に計算する）
     regions: Vec<Option<Reg>>,
     olds: Vec<Option<Src>>,
     log: Log,
@@ -434,6 +546,7 @@ pub fn recalc(
     added: &[(DimId, Vec<u32>)],
     olds: Vec<(usize, Src)>,
     forced: Vec<(usize, Reg)>,
+    full: bool,
 ) -> Result<Log> {
     let n = plan.metrics.len();
     let added: Vec<(DimId, Vec<u32>)> = added.iter().map(|(d, ms)| (*d, sorted(ms.clone()))).collect();
@@ -444,6 +557,7 @@ pub fn recalc(
         counts,
         added: &added,
         forced: vec![None; n],
+        full,
         regions: vec![None; n],
         olds: vec![None; n],
         log: Vec::new(),
@@ -478,7 +592,7 @@ impl<'a> Run<'a> {
         // 小さな仕事ばかりなら、並列にする受け渡しの費用のほうが大きいので順に計算する
         let weight: usize = tasks.iter().map(|t| t.weight).sum();
         let run: &Self = self;
-        let done: Vec<Result<Done>> = if tasks.len() > 1 && weight >= PAR_MIN.load(Ordering::Relaxed) {
+        let done: Vec<Result<Done>> = if tasks.len() > 1 && (self.full || weight >= PAR_MIN.load(Ordering::Relaxed)) {
             tasks.par_iter().map(|t| run.compute(t)).collect()
         } else {
             tasks.iter().map(|t| run.compute(t)).collect()
@@ -548,16 +662,29 @@ impl<'a> Run<'a> {
             (Some(d), true) => self.compute_delta(t.m, d, &t.region)?,
             _ => {
                 let r = t.region.restrict(self.cat);
-                let value = self.eval(self.formula(t.m), None, &r)?;
-                let count = match &metric.count {
-                    Some(c) => Some(self.eval(c, None, &r)?),
-                    None => None,
-                };
-                (value, count)
+                match &metric.count {
+                    // 件数の式は値の式と同じ集計元を読むので、仕事が大きければ並列に評価する
+                    Some(c) if self.full || t.weight >= PAR_MIN.load(Ordering::Relaxed) => {
+                        let (value, count) = rayon::join(|| self.eval(self.formula(t.m), None, &r), || self.eval(c, None, &r));
+                        (value?, Some(count?))
+                    }
+                    Some(c) => {
+                        let value = self.eval(self.formula(t.m), None, &r)?;
+                        (value, Some(self.eval(c, None, &r)?))
+                    }
+                    None => (self.eval(self.formula(t.m), None, &r)?, None),
+                }
             }
         };
         let (value, count) = if t.region.is_all() {
-            let (store, sets) = self.stores[t.m].replaced_all(&value)?;
+            let (store, sets) = if self.full {
+                // 全体の再計算では下流も全体を計算し直すので、値が変わった範囲は求めない
+                let mut s = self.stores[t.m].emptied();
+                s.replace(&Restrict::all(self.cat.dims.len()), &value)?;
+                (s, None)
+            } else {
+                self.stores[t.m].replaced_all(&value)?
+            };
             let count = match count {
                 Some(c) => {
                     let mut s = self.counts[t.m].as_ref().expect("件数の格納").emptied();

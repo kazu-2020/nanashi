@@ -270,8 +270,9 @@ Metric の軸か値の種類を変えたときは、それを参照する式の�
 ### エンジン
 
 格納と評価は **エンジン** に任せ、Model は定義と操作、トランザクション、分割軸の選択を受け持つ。
-式の型検査（軸と値の種類、密になる演算の警告、エラーの文言）、計算計画（依存グラフ、強連結成分、scan の判定、依存の段）、影響範囲の計算（入力の変更の伝搬、分割軸の選択、メンバーの削除で変わる範囲）は、Rust のエンジンでは Rust（`check.rs`、`graph.rs`、`plan.rs`）が行い、参照実装では Python（`evaluate.py`、`model.py`）が行う。
-両方の型、文言、計画、範囲が一致することをテストで確かめている（`tests/test_expr_coverage.py`）。
+式の型検査（軸と値の種類、密になる演算の警告、エラーの文言、Metric を使った BY の書き換え）、計算計画（依存グラフ、強連結成分、scan の判定、依存の段）、差分集計の判定と差分の式、影響範囲の計算（入力の変更の伝搬、分割軸の選択、メンバーの削除で変わる範囲）は、Rust のエンジンでは Rust（`check.rs`、`graph.rs`、`plan.rs`）が行い、参照実装では Python（`evaluate.py`、`delta.py`、`model.py`）が行う。
+全体の再計算も、Rust では差分再計算と同じ段取り（すべての計算 Metric を全体について計算し直す指示）で行う。
+両方の型、文言、計画、差分集計の判定、範囲が一致することをテストで確かめている（`tests/test_expr_coverage.py`）。
 エンジンは 2 つある。
 
 - **参照実装**（`ReferenceEngine`）：Python の dict で持つ。正しさの基準で、テストで他のエンジンの結果と突き合わせる。
@@ -497,7 +498,7 @@ Apple M4（10 コア、メモリ 16 GB）での、Rust エンジンの測定値�
 | 計算 Metric 数 | 全セル数 | 全体の再計算 | 1 セルの変更（計算し直した Metric 数） |
 |---|---|---|---|
 | 300 | 2522 万 | 516 ms | 1.4 ms（95 個） |
-| 1000 | 7699 万 | 1,359 ms | 4.6 ms（394 個） |
+| 1000 | 7699 万 | 1,150 ms | 4.6 ms（394 個） |
 
 同じモデル（1000 Metric）で定義を変えた場合（変える前は、どれも全体の再計算の約 1,350 ms かかっていた）：
 
@@ -591,13 +592,13 @@ Rust のエンジンは、並列化、差分のまとめ直し、準結合、転
 | `sparse_engine/workspace.py` | 版の公開と単一ライター（同時の読み書き、グループコミット、楽観的な排他） |
 | `sparse_engine/pg_journal.py` | PostgreSQL の記録先（リースと締め出し、大量の変更の後からの反映） |
 | `sparse_engine/server.py` | HTTP サーバー（Workspace を JSON の API で公開する） |
-| `native/` | Rust のエンジン（PyO3）。`check.rs` が型検査、`graph.rs` が計算計画、`core.rs` が格納と評価、`plan.rs` が影響範囲と差分再計算の段取り |
+| `native/` | Rust のエンジン（PyO3）。`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`core.rs` が格納と評価、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
 | `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py`、`bench_http.py` | ベンチマーク |
 | `tests/test_expr_coverage.py` | すべての種類の式のノードを、すべての実装の場所（構文、型推論、影響範囲、評価、依存、Rust）に通す |
 
 式の意味は、Python の参照実装と Rust の両方に実装している。
-Rust のエンジンを使うときの本番の経路は、構文（`expr.py`、`parser.py`）、名前の解決（`evaluate.resolve`、`rust_engine._tree`）、型検査（`check.rs`）、計算計画（`graph.rs`）、影響範囲（`plan.rs`）、評価（`core.rs`）で、Python の `evaluate.py` と `model.py` の計画は参照実装にだけ使う（`resolve` の中で Metric を使った BY を書き換えるときの型推論と、差分集計の判定（`delta.py`）を除く）。
+Rust のエンジンを使うときの本番の経路は、構文（`expr.py`、`parser.py`）、名前の解決（`evaluate.resolve` の軸の名前の解決、`rust_engine._tree`）、型検査と BY の書き換え（`check.rs`）、計算計画（`graph.rs`）、差分集計の判定と影響範囲と再計算の段取り（`plan.rs`）、評価（`core.rs`）で、Python の `evaluate.py`、`delta.py`、`model.py` の計画と再計算は参照実装にだけ使う。
 ノードを 1 種類足すときはこれらをすべて直し、`tests/test_expr_coverage.py` のモデルにそのノードを使う式を足す。
 足し忘れた場所があれば、このテストが失敗する。
 

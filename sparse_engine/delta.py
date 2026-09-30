@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 
 from .evaluate import Catalog, infer
-from .expr import AsAxis, By, Expr, On, Ref, Remove, Select
+from .expr import AsAxis, By, Const, Expr, On, Ref, Remove, Select
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,10 @@ class DeltaPlan:
     source: str               # 集計元の Metric
     count: Expr | None        # 各グループの件数を求める式。None なら Metric 自身が件数（COUNT の集計）
     aux: tuple[str, ...] = ()  # 変わっていない前提で読む Metric（Metric を使った BY の対応表）
+
+
+# エンジンが件数の式と差分の式を自分で作るとき（Rust）に、count に置く印。「件数が要る」ことだけを表す
+COUNTED = Const(1.0)
 
 
 def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:

@@ -59,9 +59,33 @@ def node_types(e: Expr) -> set:
     return {type(e)} | {t for _, c in _children(e) for t in node_types(c)}
 
 
+class python_resolved:
+    """Rust のエンジンでは Metric を使った BY を Rust が書き換えるので、Model の式には By が残る。
+    Python の参照実装（型推論、影響範囲、計画、評価）に渡すときは、Python の resolve で書き換えた式に
+    一時的に差し替える。"""
+
+    def __init__(self, m: Model):
+        self.m = m
+
+    def __enter__(self):
+        from sparse_engine.evaluate import resolve
+        self.saved = {n: x.formula for n, x in self.m.metrics.items()}
+        for x in self.m.metrics.values():
+            if x.written is not None:
+                x.formula = resolve(x.written, self.m)
+                if x.overridable:
+                    from sparse_engine.expr import Coalesce, Ref
+                    x.formula = Coalesce(Ref(x.override_name), x.formula)
+        return self.m
+
+    def __exit__(self, *exc):
+        for n, f in self.saved.items():
+            self.m.metrics[n].formula = f
+
+
 class EveryNodeEverywhere(unittest.TestCase):
     def test_model_uses_every_kind_of_node(self):
-        m = model()
+        m = model(ReferenceEngine())
         m.recalc()
         used = set()
         for x in m.metrics.values():
@@ -71,7 +95,7 @@ class EveryNodeEverywhere(unittest.TestCase):
         self.assertEqual(missing, set(), "このテストのモデルに、これらのノードを使う式を足すこと")
 
     def test_every_place_handles_every_node(self):
-        m = model()
+        m = model(ReferenceEngine())
         m.recalc()
         for x in m.metrics.values():
             if x.written is None:
@@ -196,7 +220,10 @@ class RustAffectedMatchesPython(unittest.TestCase):
                                 m.dimensions[d].add_member(x, m._new_id())
                                 m._member_added(d)
                 with self.subTest(changed=list(changed), added=added):
-                    self.assertEqual(m._propagate(changed, added), m._propagate_py(changed, added))
+                    got = m._propagate(changed, added)
+                    with python_resolved(m):
+                        want = m._propagate_py(changed, added)
+                    self.assertEqual(got, want)
 
     def test_removal_regions(self):
         for m in self.models():
@@ -208,7 +235,10 @@ class RustAffectedMatchesPython(unittest.TestCase):
                     point = {dim: frozenset([member])}
                     return dim in m.metrics[name].dims and m.engine.size(m.engine.filter(m._values[name], point, m)) > 0
                 with self.subTest(dim=dim, member=member):
-                    self.assertEqual(m._removal_regions(dim, member, has_cells), m._removal_regions_py(dim, member, has_cells))
+                    got = m._removal_regions(dim, member, has_cells)
+                    with python_resolved(m):
+                        want = m._removal_regions_py(dim, member, has_cells)
+                    self.assertEqual(got, want)
 
     def test_single_formula(self):
         from sparse_engine.evaluate import affected
@@ -219,7 +249,10 @@ class RustAffectedMatchesPython(unittest.TestCase):
             for x in m.metrics.values():
                 if x.formula is not None:
                     with self.subTest(metric=x.name):
-                        self.assertEqual(m.engine.affected(x.formula, m, regions), affected(x.formula, m, regions))
+                        got = m.engine.affected(x.formula, m, regions)
+                        with python_resolved(m):
+                            want = affected(m.metrics[x.name].formula, m, regions)
+                        self.assertEqual(got, want)
 
 
 CYCLIC = [  # (名前, 軸, 式) の列。計画を作るときに失敗する循環。文言が両方の実装で一致すること
@@ -253,11 +286,11 @@ class RustPlanMatchesPython(unittest.TestCase):
     def test_steps_and_levels(self):
         for m in self.models():
             m.recalc()
-            formulas = {n: x.formula for n, x in m.metrics.items()}
-            rust_plan, _, rust_levels = m._make_plan(formulas)
+            rust_plan, _, rust_levels = m._make_plan({n: x.formula for n, x in m.metrics.items()})
             saved, m.engine.plan = m.engine.plan, None  # 参照実装の経路を通す
             try:
-                py_plan, _, py_levels = m._make_plan(formulas)
+                with python_resolved(m):
+                    py_plan, _, py_levels = m._make_plan({n: x.formula for n, x in m.metrics.items()})
             finally:
                 m.engine.plan = saved
             self.assertEqual([(s.names, s.scan_dim) for s in rust_plan], [(s.names, s.scan_dim) for s in py_plan])
@@ -277,3 +310,41 @@ class RustPlanMatchesPython(unittest.TestCase):
                         m.recalc()
                     messages.append(str(cm.exception))
             self.assertEqual(messages[0], messages[1], defs)
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustDeltaPlanMatchesPython(unittest.TestCase):
+    """Rust の差分集計の判定（集計元、対応表、件数が要るか）は Python の参照実装と一致する。"""
+
+    def test_delta_plans(self):
+        from sparse_engine.delta import plan_for
+        from sparse_engine.evaluate import resolve
+        from examples.fpa import build
+        from .test_incremental import model as incremental
+        models = [model(RustEngine()), build(RustEngine(), employees=12, products=6, months=8, seed=3)]
+        m = incremental()
+        fresh = Model(engine=RustEngine())
+        fresh.dimensions = m.dimensions
+        for name, x in m.metrics.items():
+            if x.formula is None:
+                fresh.add_input(name, x.dims, m.value(name).cells, kind=x.kind)
+            else:
+                fresh.add_formula(name, x.dims, x.formula, kind=x.kind)
+        models.append(fresh)
+        seen = 0
+        for m in models:
+            m.recalc()
+            for x in m.metrics.values():
+                if x.written is None:
+                    continue
+                got = m.engine.delta_plan(m.metrics[x.name].formula, m)
+                want = plan_for(resolve(x.written, m), m)
+                with self.subTest(metric=x.name):
+                    if want is None:
+                        self.assertIsNone(got)
+                    else:
+                        self.assertIsNotNone(got)
+                        self.assertEqual((got.source, got.aux, got.count is not None),
+                                         (want.source, want.aux, want.count is not None))
+                        seen += 1
+        self.assertGreater(seen, 5)

@@ -15,27 +15,10 @@ from typing import Any
 import nanashi_core
 
 from .core import Cube
+from .delta import COUNTED, DeltaPlan
 from .evaluate import Catalog, Edge, FormulaError, Type, member_kind
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
-
-
-class _Typed:
-    """一時的な名前（差分集計の作業データ）の型を足した Catalog。式の変換で型推論に使う。"""
-
-    def __init__(self, cat: Catalog, types: dict):
-        self._cat, self._types = cat, types
-
-    def dimension(self, name: str):
-        return self._cat.dimension(name)
-
-    def metric_type(self, name: str):
-        t = self._types.get(name)
-        return t if t is not None else self._cat.metric_type(name)
-
-    @property
-    def metrics(self):
-        return self._cat.metrics
 
 
 class LazyEdges(MutableMapping):
@@ -225,11 +208,15 @@ class RustEngine:
                 return ("ifblank", t(child), float(value), isinstance(value, bool))
             case By(child, dim, prop, agg):
                 props = cat.dimension(dim).properties
-                if prop not in props:
-                    raise FormulaError(f"{dim} にプロパティ {prop} がない")
-                target, _ = props[prop]
-                return ("by", t(child), self._dim(cat, dim), self._dim(cat, target), self._map(cat, dim, prop),
-                        agg, dim, prop)
+                if prop in props:
+                    target, _ = props[prop]
+                    return ("by", t(child), self._dim(cat, dim), self._dim(cat, target), self._map(cat, dim, prop),
+                            agg, dim, prop)
+                if prop not in getattr(cat, "metrics", {}):
+                    raise FormulaError(f"{dim} にプロパティ {prop} がなく、同じ名前の Metric もない")
+                if prop not in names:  # 対応表がメンバー型の Metric。書き換えは Rust の型検査が行う
+                    names.append(prop)
+                return ("bymetric", t(child), self._dim(cat, dim), names.index(prop), agg, dim, prop)
             case Remove(child, dim, agg):
                 return ("remove", t(child), self._dim(cat, dim), agg)
             case Shift(child, dim, n):
@@ -246,7 +233,7 @@ class RustEngine:
     # ------------------------------------------------ 差分再計算の段取り
 
     def recalc_changes(self, plan, stores: dict, counts: dict, cat: Catalog, changed: dict, added: dict,
-                       olds: dict, forced: dict) -> tuple[list, Any]:
+                       olds: dict, forced: dict, full: bool = False) -> tuple[list, Any]:
         """Model.recalc の差分の経路を Rust で行う。plan は Model.compiled()、stores と counts は
         Metric ごとの格納データと差分集計の件数、changed は入力の変更範囲、added は追加したメンバー、
         olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
@@ -264,7 +251,7 @@ class RustEngine:
             [(index[n], region(r)) for n, r in changed.items()],
             [(self._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
             [(index[n], h) for n, h in olds.items()],
-            [(index[n], region(r)) for n, r in forced.items()])
+            [(index[n], region(r)) for n, r in forced.items()], full)
 
         def named(entries):
             return [(names[i], self._to_names(cat, r)) for i, _, r in entries]
@@ -315,7 +302,7 @@ class RustEngine:
             compiled, reads = self._compile(expr, cat)
             return compiled, [index[n] for n in reads]
 
-        metrics = [(None if m.formula is None else bound(m.formula), None, None, False) for m in cat.metrics.values()]
+        metrics = [(None if m.formula is None else bound(m.formula), False, False) for m in cat.metrics.values()]
         levels = [[(None if s.scan_dim is None else self._dim(cat, s.scan_dim), [index[n] for n in s.names])
                    for s in level] for level in plan.levels]
         rplan = self.core.make_plan(metrics, levels)
@@ -352,7 +339,8 @@ class RustEngine:
         return None if r is None else self._to_names(cat, r)
 
     def _plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
-        """Model の計算計画（CompiledPlan）を Rust の計算計画にする。計画を作り直すまで使い回す。"""
+        """Model の計算計画（CompiledPlan）を Rust の計算計画にする。計画を作り直すまで使い回す。
+        差分集計する Metric の件数の式と差分の式は Rust が作る。"""
         if self._plan is not None and self._plan[0] is plan.steps:
             return self._plan[1], self._plan[2]
         names = list(cat.metrics)
@@ -362,37 +350,22 @@ class RustEngine:
             compiled, reads = self._compile(expr, cat)
             return compiled, [index[n] for n in reads]
 
-        metrics = []
-        for n in names:
-            m = cat.metrics[n]
-            count = delta = None
-            dp = plan.delta.get(n)
-            if dp is not None:
-                count = None if dp.count is None else bound(dp.count)
-                delta = self._delta_parts(plan, cat, m, dp, index)
-            metrics.append((None if m.formula is None else bound(m.formula), count, delta, n in plan.sources))
+        metrics = [(None if m.formula is None else bound(m.formula), n in plan.delta, n in plan.sources)
+                   for n, m in cat.metrics.items()]
         levels = [[(None if s.scan_dim is None else self._dim(cat, s.scan_dim), [index[n] for n in s.names])
                    for s in level] for level in plan.levels]
         rplan = self.core.make_plan(metrics, levels)
         self._plan = (plan.steps, rplan, names)
         return rplan, names
 
-    def _delta_parts(self, plan, cat: Catalog, m, dp, index: dict) -> tuple:
-        """差分集計の ([集計元, 対応表...], 件数の差分の式, 値の差分の式)。差分の式が読む __new{i} と
-        __old{i}（plan.delta_exprs の作業データ）は、作業データの番号 2i と 2i + 1 にする。"""
-        inputs = (dp.source, *dp.aux)
-        d_count, d_value = plan.delta_exprs(m, dp)
-        types = {}
-        for i, n in enumerate(inputs):
-            types[f"__new{i}"] = types[f"__old{i}"] = cat.metric_type(n)
-        typed = _Typed(cat, types)  # 作業データの型を足した Catalog で変換する（cat は書き換えない）
-
-        def slots(expr):
-            compiled, reads = self._compile(expr, typed)
-            return compiled, [2 * int(r[5:]) + (r.startswith("__old")) for r in reads]
-        count = slots(d_count)
-        value = None if dp.count is None else slots(d_value)
-        return [index[n] for n in inputs], count, value
+    def delta_plan(self, expr: Expr, cat: Catalog):
+        """式が差分集計の対象なら、その計画（集計元、件数が要るかの印、対応表）。対象でなければ None。"""
+        compiled, names = self._compile(expr, cat)
+        found = self.core.delta_plan(compiled)
+        if found is None:
+            return None
+        source, aux, needs_count = found
+        return DeltaPlan(names[source], COUNTED if needs_count else None, tuple(names[a] for a in aux))
 
     # ------------------------------------------------ Engine
 
@@ -467,6 +440,13 @@ class RustEngine:
         return self.core.evaluate_many(jobs)
 
     def evaluate_with_count(self, expr, count_expr, cat, restrict):
+        if count_expr is COUNTED:  # 件数の式は Rust が式から作る
+            compiled, names = self._compile(expr, cat)
+            sources = [cat.source(n) for n in names]
+            region = self._region(cat, restrict)
+            value, count = self.core.evaluate_many([(compiled, sources, region),
+                                                    (self.core.count_formula(compiled), sources, region)])
+            return value, count
         return self.evaluate_many([(expr, restrict), (count_expr, restrict)], cat)
 
     def filter(self, store, restrict, cat):

@@ -67,7 +67,7 @@ fn collect_refs(node: &Node, refs: &[usize], lags: &[(DimId, i64)], broken: &[Di
         Node::ByAgg { child, src, dst, .. } | Node::ByLookup { child, src, dst, .. } => {
             collect_refs(child, refs, lags, &with(broken, &[*src, *dst]), out)
         }
-        Node::By { .. } => unreachable!("型を決めた式だけを使う"),
+        Node::By { .. } | Node::ByMetric { .. } => unreachable!("型を決めた式だけを使う"),
     }
 }
 

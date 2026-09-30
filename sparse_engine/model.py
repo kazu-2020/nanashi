@@ -995,11 +995,12 @@ class Model:
 
     def _checked(self, m: Metric) -> tuple[Expr, list[str]]:
         """m の式を評価できる形に直して型を検査し、(評価に使う式, 警告) を返す。"""
-        formula = resolve(m.written, self)  # 軸の名前、Metric を使った BY を評価できる形に
         check = getattr(self.engine, "check", None)
         if check is not None:  # エンジンが型検査を持つなら（Rust）それに任せる。文言は参照実装と同じ
+            formula = resolve(m.written, self, by_metric=False)  # Metric を使った BY もエンジンが書き換える
             t, w = check(formula, self)
         else:
+            formula = resolve(m.written, self)  # 軸の名前、Metric を使った BY を評価できる形に
             w: list[str] = []
             t = infer(formula, self, w)
         if set(t.dims) != set(m.dims):
@@ -1034,7 +1035,7 @@ class Model:
             for step in self._plan:
                 m = self.metrics[step.names[0]]
                 if step.scan_dim is None and m.formula is not None:
-                    if (plan := plan_for(m.formula, self)) is not None:
+                    if (plan := self._delta_plan(m.formula)) is not None:
                         self._delta[m.name] = plan
         self._counts = {n: self.engine.empty(self.metrics[n].dims, "number", self.layout[n], cat=self)
                         for n, plan in self._delta.items() if plan.count is not None}
@@ -1072,13 +1073,21 @@ class Model:
             self._counts.pop(n, None)
             m = self.metrics[n]
             if self.delta_aggregation and m.formula is not None and n not in in_scan:
-                if (dp := plan_for(m.formula, self)) is not None:
+                if (dp := self._delta_plan(m.formula)) is not None:
                     self._delta[n] = dp
                     if dp.count is not None:
                         self._counts[n] = self.engine.empty(m.dims, "number", self.layout[n], cat=self)
             if m.formula is not None:
                 self._pending.forced[n] = {}  # 件数も含めて、全体を計算し直す
         self._pending.dirty.clear()
+
+    def _delta_plan(self, formula: Expr) -> DeltaPlan | None:
+        """差分集計の対象なら、その計画。エンジンが判定できるなら（Rust）それに任せる
+        （そのときは件数の式と差分の式もエンジンが作る）。"""
+        fast = getattr(self.engine, "delta_plan", None)
+        if fast is not None:
+            return fast(formula, self)
+        return plan_for(formula, self)
 
     def _delta_sources(self) -> set[str]:
         """差分集計で、変更前の値が要る Metric（集計元と対応表）。"""
@@ -1313,7 +1322,16 @@ class Model:
         return self._replace(m, region, self.engine.evaluate(m.formula, self, region), diff)
 
     def _recalc_all(self) -> None:
-        """全体を計算し直す。同じ段の Metric はまとめて評価し、差分集計する SUM は件数も同時に求める。"""
+        """全体を計算し直す。同じ段の Metric はまとめて評価し、差分集計する SUM は件数も同時に求める。
+        差分再計算の段取りを持つエンジン（Rust）では、すべての計算 Metric を全体について計算し直す指示で
+        同じ段取りを使う（段ごとに並列に評価し、件数も一緒に求め、scan は空から 1 時点ずつ書く）。"""
+        fast = getattr(self.engine, "recalc_changes", None)
+        if fast is not None:
+            forced = {n: {} for n, m in self.metrics.items() if m.formula is not None}
+            done, named = fast(self.compiled(), self._values, self._counts, self, {}, {}, {}, forced, full=True)
+            self.eval_log.extend(n for n, _ in done)
+            self.slice_log.extend_later(named)
+            return
         for level in self._levels:
             batch = [self.metrics[s.names[0]] for s in level
                      if s.scan_dim is None and self.metrics[s.names[0]].formula is not None]

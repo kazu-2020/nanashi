@@ -8,7 +8,7 @@ mod plan;
 
 use crate::check::{Env, TKind, Ty};
 use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
-use crate::plan::{Delta, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
+use crate::plan::{Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -186,6 +186,18 @@ impl Core {
             "remove" => Node::Remove { child: child(1)?, dim: t.get_item(2)?.extract()?, agg: agg(t.get_item(3)?.extract()?)? },
             "shift" => Node::Shift { child: child(1)?, dim: t.get_item(2)?.extract()?, n: t.get_item(3)?.extract()? },
             "asaxis" => Node::AsAxis { child: child(1)?, dim: t.get_item(2)?.extract()? },
+            "bymetric" => {
+                let a = t.get_item(4)?;
+                let agg = if a.is_none() { None } else { Some(agg(a.extract()?)?) };
+                Node::ByMetric {
+                    child: child(1)?,
+                    src: t.get_item(2)?.extract()?,
+                    metric: t.get_item(3)?.extract()?,
+                    agg,
+                    dim: t.get_item(5)?.extract()?,
+                    prop: t.get_item(6)?.extract()?,
+                }
+            }
             "select" => Node::Select {
                 child: child(1)?,
                 dim: t.get_item(2)?.extract()?,
@@ -466,32 +478,34 @@ impl Core {
         cube.get().cube.cells.len()
     }
 
+    /// 式が差分集計の対象なら (集計元の Ref の番号, 対応表の Ref の番号の列, 件数が要るか)。対象でなければ None。
+    fn delta_plan(&self, expr: &Expr) -> Option<(usize, Vec<usize>, bool)> {
+        plan::delta_pattern(&expr.node)
+    }
+
+    /// 差分集計する SUM の、各グループの件数を求める式（一番内側の集計を COUNT にしたもの）。読み出し元は同じ。
+    fn count_formula(&self, expr: &Expr) -> Expr {
+        Expr { node: Arc::new(plan::inner_count(&expr.node)) }
+    }
+
     /// 差分再計算の計算計画を作る。
     ///
-    /// metrics は Metric ごとの (式, 件数の式, 差分集計, 集計元か)。式は (Expr, 読み出す Metric の番号)、
-    /// 差分集計は ([集計元, 対応表...], 件数の差分の式, 値の差分の式または None) で、差分の式の読み出し元は
-    /// 作業データの番号（i 番目の変更後が 2i、変更前が 2i + 1）。levels は依存の段ごとの
+    /// metrics は Metric ごとの (式, 差分集計するか, 集計元か)。式は (Expr, 読み出す Metric の番号) で、
+    /// 差分集計する Metric は、件数の式と差分の式をここで作る。levels は依存の段ごとの
     /// (scan の軸または None, Metric の番号) の並び。
     fn make_plan(&self, metrics: Vec<Bound<'_, PyTuple>>, levels: Vec<Vec<(Option<DimId>, Vec<usize>)>>) -> PyResult<PlanHandle> {
         let mut out = Vec::with_capacity(metrics.len());
         for t in &metrics {
-            let delta = t.get_item(2)?;
-            let delta = if delta.is_none() {
-                None
-            } else {
-                let d = delta.cast::<PyTuple>()?;
-                Some(Delta {
-                    inputs: d.get_item(0)?.extract()?,
-                    d_count: formula(&d.get_item(1)?)?.ok_or_else(|| err("件数の差分の式がない".into()))?,
-                    d_value: formula(&d.get_item(2)?)?,
-                })
+            let f = formula(&t.get_item(0)?)?;
+            let wants_delta: bool = t.get_item(1)?.extract()?;
+            let (delta, count) = match (&f, wants_delta) {
+                (Some(f), true) => match plan::derive_delta(f) {
+                    Some((d, c)) => (Some(d), c),
+                    None => return Err(err("差分集計の対象でない式に差分集計を指定した".into())),
+                },
+                _ => (None, None),
             };
-            out.push(Metric {
-                formula: formula(&t.get_item(0)?)?,
-                count: formula(&t.get_item(1)?)?,
-                delta,
-                source: t.get_item(3)?.extract()?,
-            });
+            out.push(Metric { formula: f, count, delta, source: t.get_item(2)?.extract()? });
         }
         let levels = levels
             .into_iter()
@@ -546,8 +560,9 @@ impl Core {
     /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
     /// 格納データで、その場で書き換える。changed は入力の変更範囲、added は軸ごとの追加したメンバー、
     /// olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
-    /// 再計算した (Metric, 差分集計か, 範囲) を返す。
+    /// 再計算した (Metric, 差分集計か, 範囲) を返す。full なら全体の再計算で、段を必ず並列に計算する。
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (plan, stores, counts, changed, added, olds, forced, full = false))]
     fn recalc_changes(
         &self,
         py: Python<'_>,
@@ -558,6 +573,7 @@ impl Core {
         added: Vec<(DimId, Vec<u32>)>,
         olds: Vec<(usize, Bound<'_, PyAny>)>,
         forced: Vec<(usize, Region)>,
+        full: bool,
     ) -> PyResult<Vec<(usize, bool, Region)>> {
         let olds: Vec<(usize, Src)> = olds.iter().map(|(m, o)| Ok((*m, Core::source(o)?))).collect::<PyResult<_>>()?;
         let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
@@ -570,7 +586,7 @@ impl Core {
             .map(|h| h.as_ref().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())))
             .collect();
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
-        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds, forced));
+        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds, forced, full));
         for (h, s) in stores.iter().zip(own) {
             h.borrow_mut().store = s;
         }

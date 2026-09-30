@@ -306,7 +306,61 @@ pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Resu
             *node = resolved;
             Ok(ty)
         }
-        Node::ByAgg { .. } | Node::ByLookup { .. } => Err("型を決めた式をもう一度検査した".into()),
+        Node::ByAgg { child, src, dst, agg, .. } => {
+            // 型を決めた式をもう一度検査したとき（誤りはないので、型を決め直すだけ）
+            let t = infer(child, env, warnings)?;
+            let (src, dst, agg) = (*src, *dst, *agg);
+            let kind = agg_kind(agg, &t, "BY", cat)?;
+            Ok(Ty { dims: replace(&t.dims, src, dst), kind })
+        }
+        Node::ByLookup { child, src, dst, .. } => {
+            let t = infer(child, env, warnings)?;
+            let (src, dst) = (*src, *dst);
+            Ok(Ty { dims: replace(&t.dims, dst, src), kind: t.kind })
+        }
+
+        Node::ByMetric { child, src, metric, agg, dim, prop } => {
+            // `child[BY agg: D.V]`（V はメンバー型の Metric）を、既存の演算の組み合わせにする。
+            // V の各セル（例: 社員 e・月 m）は、そのときの D のメンバー e の所属先 t を持つ。
+            // AsAxis(V, T) はそれを「(e, m, t) の位置に 1 がある表」にしたもので、
+            //   集約:     child ⋈ 対応表 を D について集計する   -> D が T に置き換わる
+            //   引き下ろし: child ⋈ 対応表 から T を外す（各行の T は 1 つ） -> T が D（と V の軸）に置き換わる
+            let (src, metric, agg) = (*src, *metric, *agg);
+            let what = format!("BY {dim}.{prop}");
+            let vt = env.types[metric].clone();
+            let TKind::Member(target) = vt.kind else {
+                return Err(format!("{what}: {prop} はメンバー型の Metric ではない（{}）", kind_name(&vt.kind, cat)));
+            };
+            if !vt.dims.contains(&src) {
+                return Err(format!("{what}: {prop} の軸 {} に {dim} がない", tuple_repr(&vt.dims, cat)));
+            }
+            let t = infer(child, env, warnings)?;
+            let edges_dims = [vt.dims.as_slice(), &[target]].concat();
+            let joined = merge(&t.dims, &edges_dims); // On(child, AsAxis(V)) の軸
+            let (remove, agg, ty) = if t.dims.contains(&src) {
+                if t.dims.contains(&target) {
+                    return Err(format!("{what}: 集約先の {} がすでに軸にある", cat.dims[target].name));
+                }
+                let missing: Vec<DimId> = vt.dims.iter().copied().filter(|d| !t.dims.contains(d)).collect();
+                if !missing.is_empty() {
+                    return Err(format!("{what}: 式が {prop} の軸 {} を持っていない", list_repr(&missing, cat)));
+                }
+                let agg = agg.unwrap_or(Agg::Sum);
+                let kind = agg_kind(agg, &Ty { dims: joined.clone(), kind: t.kind.clone() }, &format!("REMOVE {}", cat.dims[src].name), cat)?;
+                (src, agg, Ty { dims: joined.iter().copied().filter(|d| *d != src).collect(), kind })
+            } else if t.dims.contains(&target) {
+                if agg.is_some() {
+                    return Err(format!("{what}: 引き下ろし（lookup）に集計関数は指定できない"));
+                }
+                (target, Agg::First, Ty { dims: joined.iter().copied().filter(|d| *d != target).collect(), kind: t.kind.clone() })
+            } else {
+                return Err(format!("{what}: 式の軸 {} に {dim} も {} もない", tuple_repr(&t.dims, cat), cat.dims[target].name));
+            };
+            let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::core::Kind::Num)));
+            let edges = Box::new(Node::AsAxis { child: Box::new(Node::Ref(metric)), dim: target });
+            *node = Node::Remove { child: Box::new(Node::On(child, edges)), dim: remove, agg };
+            Ok(ty)
+        }
 
         Node::Remove { child, dim, agg } => {
             let t = infer(child, env, warnings)?;

@@ -268,13 +268,14 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
 
 # ---------------------------------------------------------------- 名前の解決
 
-def resolve(expr: Expr, cat) -> Expr:
+def resolve(expr: Expr, cat, by_metric: bool = True) -> Expr:
     """式を評価できる形に直す。変わらなければ同じオブジェクトを返す
     （エンジンが式の変換結果を同一性でキャッシュしているため）。
 
     - 軸の名前を指す Ref を DimRef（各セルのメンバー）にする
     - `X[BY agg: Employee.DeptOf]` で DeptOf がプロパティではなくメンバー型の Metric なら、
       対応表（AsAxis）との結合と集計に書き換える。月ごとに変わる所属のような、時間で変わる階層を扱える
+      （by_metric=False なら書き換えず、エンジンの型検査に任せる。Rust の check.rs が同じ書き換えをする）
     """
     if isinstance(expr, Ref):
         return DimRef(expr.name) if expr.name in cat.dimensions else expr
@@ -282,11 +283,11 @@ def resolve(expr: Expr, cat) -> Expr:
     for f in fields(expr):
         v = getattr(expr, f.name)
         if isinstance(v, Expr):
-            r = resolve(v, cat)
+            r = resolve(v, cat, by_metric)
             if r is not v:
                 changes[f.name] = r
     out = replace(expr, **changes) if changes else expr
-    if isinstance(out, By) and out.prop not in cat.dimension(out.dim).properties:
+    if by_metric and isinstance(out, By) and out.prop not in cat.dimension(out.dim).properties:
         return _by_metric(out, cat)
     return out
 
