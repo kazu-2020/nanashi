@@ -26,7 +26,7 @@ import threading
 from concurrent.futures import Future
 from typing import Any, Callable
 
-from .journal import FileJournal
+from .journal import FileJournal, Journal
 
 
 class Conflict(Exception):
@@ -68,7 +68,7 @@ class Workspace:
     write で書き込み、version で読む。journal を渡すと、確定したトランザクションを記録する。
     """
 
-    def __init__(self, model, journal: FileJournal | None = None, *, max_batch: int = 64,
+    def __init__(self, model, journal: Journal | None = None, *, max_batch: int = 64,
                  keep_recent: int = 10_000):
         model.journal = None  # 記録はライターがまとめて書く
         model.recalc()
@@ -83,15 +83,16 @@ class Workspace:
         # 読んだ書き込みは確かめられないので拒否する
         self._recent: collections.deque = collections.deque(maxlen=keep_recent)
         self._known_since = model.seq
-        self._ops: dict[str, int] = dict(journal._by_client_op) if journal is not None else {}
+        self._ops: dict[str, int] = {}  # このライターが確定した client_op_id（記録先にあるものは seq_of で引く）
         self._closed = False
         self._thread = threading.Thread(target=self._run, name="nanashi-writer", daemon=True)
         self._thread.start()
 
     @classmethod
-    def open(cls, path, engine=None, **kwargs) -> Workspace:
-        """記録のディレクトリ path から復元したモデルで Workspace を作る。"""
-        journal = FileJournal(path)
+    def open(cls, journal, engine=None, **kwargs) -> Workspace:
+        """記録先 journal（FileJournal など。ディレクトリのパスでもよい）から復元したモデルで Workspace を作る。"""
+        if not isinstance(journal, Journal):
+            journal = FileJournal(journal)
         return cls(journal.open(engine), journal, **kwargs)
 
     # ------------------------------------------------ 読み出し
@@ -180,8 +181,11 @@ class Workspace:
             if not req.future.set_running_or_notify_cancel():
                 continue
             if req.client_op_id is not None:
-                if req.client_op_id in self._ops:
-                    req.future.set_result(self._ops[req.client_op_id])
+                done = self._ops.get(req.client_op_id)
+                if done is None and self.journal is not None:
+                    done = self.journal.seq_of(req.client_op_id)
+                if done is not None:
+                    req.future.set_result(done)
                     continue
                 if req.client_op_id in firsts:
                     aliases.append((req, firsts[req.client_op_id]))

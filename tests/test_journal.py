@@ -249,11 +249,13 @@ def random_operation(rng: random.Random, models: list[Model], counters: list[lis
         redefine(rng, models, counters[2])
 
 
-def run_random(test, seed: int, rounds: int, engine, reopen_engines) -> None:
+def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) -> None:
+    """make(tmp) は記録先を作る関数（省けばファイル）。同じ記録を指す記録先を、開き直すたびに作り直す。"""
     rng = random.Random(seed)
+    make = make or (lambda tmp: FileJournal(tmp, fsync=False))
     with tempfile.TemporaryDirectory() as tmp:
         m = build_with(engine())
-        FileJournal(tmp, fsync=False).start(m)
+        make(tmp).start(m)
         counters = [[0], [0], [0]]
         for round_ in range(rounds):
             if rng.random() < 0.3:  # いくつかの操作を 1 つのトランザクションにまとめる（ときどき取り消す）
@@ -274,7 +276,7 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines) -> None:
             if rng.random() < 0.25:
                 for e in reopen_engines:
                     with test.subTest(round=round_, engine=e.__name__):
-                        check_same_state(test, m, FileJournal(tmp, fsync=False).open(e()))
+                        check_same_state(test, m, make(tmp).open(e()))
 
 
 @unittest.skipIf(numpy is None, "numpy が必要")

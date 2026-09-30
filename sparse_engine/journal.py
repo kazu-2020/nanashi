@@ -294,7 +294,108 @@ def _define(model, spec: dict) -> None:
 
 # ---------------------------------------------------------------- ファイルへの記録
 
-class FileJournal:
+class Journal:
+    """記録先の共通部分。記録の追記と読み出し、スナップショットの保存と一覧は、記録先ごとに実装する。
+
+        head                       最後の記録の通し番号
+        append_many(records)       記録を追記して確定し、通し番号の列を返す（まとめて 1 回で確定する）
+        seq_of(client_op_id)       その ID の記録の通し番号（なければ None）
+        records(after)             通し番号が after より後の記録（古い順）
+        save_snapshot(model)       model（通し番号 model.seq の時点）のスナップショットを置く
+        snapshots()                使えるスナップショットの (通し番号, 置き場所) を新しい順に
+    """
+
+    head: int = 0
+
+    def append(self, record: dict) -> int:
+        """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
+        return self.append_many([record])[0]
+
+    def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
+        """セルの変更の履歴（古い順）。メンバー型の値は今の名前に直す（消したメンバーは ID のまま）。"""
+        m = model.metrics[metric]
+        key = [model.dimension(d).id_of(coords[d]) for d in m.dims]
+        out = []
+        for rec in self.records():
+            for c in rec["changes"].get("cells", []):
+                if c["metric"] != m.id:
+                    continue
+                for ids, old, new in c["rows"]:
+                    if list(ids) == key:
+                        out.append({"seq": rec["seq"], "at": rec["at"], "user": rec["user"],
+                                    "reason": rec["reason"], "old": old, "new": new})
+        return _shown(model, m, out)
+
+    def open(self, engine=None):
+        """最新のスナップショットを読み、その後の記録を再生したモデル（記録先はこの Journal）。"""
+        from .engine import default_engine
+        from .model import Model
+        from .storage import load
+        engine = engine if engine is not None else default_engine()
+        snaps = self.snapshots()
+        if snaps:
+            base, path = snaps[0]
+            model = load(path, engine)
+        else:
+            base, model = 0, Model(engine=engine)
+        for rec in self.records(after=base):
+            apply(model, rec)
+        model.seq = self.head
+        model.journal = self
+        return model
+
+    def start(self, model) -> None:
+        """記録のない新しい記録先に、model の今の状態を最初のスナップショットとして置き、
+        以後の変更を記録する。"""
+        if self.head != 0 or self.snapshots():
+            raise ValueError("この記録先にはすでに記録がある（open で開く）")
+        model.recalc()
+        model.seq = 0
+        self.save_snapshot(model)
+        model.journal = self
+
+
+def _shown(model, m, history: list[dict]) -> list[dict]:
+    """履歴の値を見せる形にする（メンバー型は今の名前、真偽値は bool）。"""
+    vdim = _value_dim(model, m)
+    for h in history:
+        for k in ("old", "new"):
+            v = h[k]
+            if v is None:
+                continue
+            if vdim is not None:
+                h[k] = vdim.member_of(int(v)) if int(v) in vdim._by_id else int(v)
+            elif m.kind == "boolean":
+                h[k] = bool(v)
+    return history
+
+
+def write_snapshot(model, final: Path, *, fsync: bool) -> dict:
+    """model のスナップショット（Model.save の形式と、ファイルのハッシュを持つ meta.json）を、
+    一時ディレクトリに書いてから名前を変えて final に置く（途中のものは見えない）。meta を返す。"""
+    tmp = final.parent / f".tmp-{final.name}-{os.getpid()}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    from .storage import save
+    save(model, tmp)
+    meta = {"seq": model.seq, "files": {p.name: _sha256(p) for p in sorted(tmp.iterdir())}}
+    (tmp / "meta.json").write_text(json.dumps(meta))
+    if fsync:
+        for p in tmp.iterdir():
+            with open(p, "rb") as f:
+                _sync(f.fileno())
+    shutil.rmtree(final, ignore_errors=True)
+    os.rename(tmp, final)
+    if fsync:
+        _fsync_dir(final.parent)
+    return meta
+
+
+def snapshot_ok(path: Path, meta: dict) -> bool:
+    """スナップショットのファイルがそろっていて、ハッシュが合うか。"""
+    return all((path / name).exists() and _sha256(path / name) == h for name, h in meta["files"].items())
+
+
+class FileJournal(Journal):
     """ディレクトリに記録とスナップショットを置く。
 
         path/log.jsonl                 1 行 1 トランザクションの記録。追記して fsync する
@@ -340,10 +441,6 @@ class FileJournal:
             with open(self.log_path, "r+b") as f:
                 f.truncate(good)
 
-    def append(self, record: dict) -> int:
-        """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
-        return self.append_many([record])[0]
-
     def append_many(self, records: list[dict]) -> list[int]:
         """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。"""
         seqs = list(range(self.head + 1, self.head + 1 + len(records)))
@@ -373,42 +470,12 @@ class FileJournal:
                 if rec["seq"] > after:
                     yield rec
 
-    def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
-        """セルの変更の履歴（古い順）。メンバー型の値は今の名前に直す（消したメンバーは ID のまま）。"""
-        m = model.metrics[metric]
-        key = [model.dimension(d).id_of(coords[d]) for d in m.dims]
-        vdim = _value_dim(model, m)
-        show = (lambda v: v) if vdim is None else (lambda v: vdim.member_of(v) if v in vdim._by_id else v)
-        out = []
-        for rec in self.records():
-            for c in rec["changes"].get("cells", []):
-                if c["metric"] != m.id:
-                    continue
-                for ids, old, new in c["rows"]:
-                    if ids == key:
-                        out.append({"seq": rec["seq"], "at": rec["at"], "user": rec["user"],
-                                    "reason": rec["reason"], "old": show(old), "new": show(new)})
-        return out
-
     # ------------------------------------------------ スナップショット
 
     def save_snapshot(self, model) -> Path:
         """model（通し番号 model.seq の時点）のスナップショットを原子的に置く。"""
         final = self.path / "snapshots" / f"{model.seq:020d}"
-        tmp = self.path / "snapshots" / f".tmp-{model.seq:020d}-{os.getpid()}"
-        shutil.rmtree(tmp, ignore_errors=True)
-        from .storage import save
-        save(model, tmp)
-        meta = {"seq": model.seq, "files": {p.name: _sha256(p) for p in sorted(tmp.iterdir())}}
-        (tmp / "meta.json").write_text(json.dumps(meta))
-        if self.fsync:
-            for p in tmp.iterdir():
-                with open(p, "rb") as f:
-                    _sync(f.fileno())
-        shutil.rmtree(final, ignore_errors=True)
-        os.rename(tmp, final)
-        if self.fsync:
-            _fsync_dir(self.path / "snapshots")
+        write_snapshot(model, final, fsync=self.fsync)
         return final
 
     def snapshots(self) -> list[tuple[int, Path]]:
@@ -420,39 +487,9 @@ class FileJournal:
             meta = json.loads((p / "meta.json").read_text())
             if meta["seq"] > self.head:
                 continue  # 記録より新しい（記録を過去に戻したとき）ものは使わない
-            if all((p / name).exists() and _sha256(p / name) == h for name, h in meta["files"].items()):
+            if snapshot_ok(p, meta):
                 out.append((meta["seq"], p))
         return sorted(out, reverse=True)
-
-    # ------------------------------------------------ 開く
-
-    def open(self, engine=None):
-        """最新のスナップショットを読み、その後の記録を再生したモデル（記録先はこの FileJournal）。"""
-        from .engine import default_engine
-        from .model import Model
-        from .storage import load
-        engine = engine if engine is not None else default_engine()
-        snaps = self.snapshots()
-        if snaps:
-            base, path = snaps[0]
-            model = load(path, engine)
-        else:
-            base, model = 0, Model(engine=engine)
-        for rec in self.records(after=base):
-            apply(model, rec)
-        model.seq = self.head
-        model.journal = self
-        return model
-
-    def start(self, model) -> None:
-        """記録のない新しい FileJournal に、model の今の状態を最初のスナップショットとして置き、
-        以後の変更を記録する。"""
-        if self.head != 0 or self.snapshots():
-            raise ValueError(f"{self.path} にはすでに記録がある（open で開く）")
-        model.recalc()
-        model.seq = 0
-        self.save_snapshot(model)
-        model.journal = self
 
 
 def _sha256(path: Path) -> str:
