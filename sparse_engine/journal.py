@@ -21,6 +21,7 @@ Metric の格納データは複製前と同じものを指しているので比�
 """
 from __future__ import annotations
 
+import collections
 import dataclasses
 import datetime
 import fcntl
@@ -539,9 +540,14 @@ def read_snapshot(blobs, place: Snapshot, engine):
 class FileJournal(Journal):
     """ディレクトリに記録とスナップショットを置く。
 
-        path/log.jsonl                 1 行 1 トランザクションの記録。追記して fsync する
+        path/log/<最初の通し番号>.jsonl   1 行 1 トランザクションの記録（区切り）。追記して fsync する
         path/cells/<乱数>-<Metric>.parquet   bulk_cells を超えるセルを書き換えた記録の、セルの変更
         path/snapshots/<通し番号>-<乱数>/   その時点のモデル（Model.save の形式）と manifest.json（通し番号、ハッシュ）
+
+    記録はスナップショットを置いたあと（か、区切りが segment_bytes を超えたら）、次の追記から新しい区切りに
+    書く。開くときは最後の区切りと、client_op_id を覚えておく範囲（最後の op_window 件）だけを読み、
+    記録の再生はスナップショットより後の区切りだけを読む。prune で、古いスナップショットと、それより前の
+    区切りと大量の変更のファイルを消せる。以前の版の path/log.jsonl は、最初の区切りとして読む。
 
     書き込むプロセスは 1 つに限る。最初に追記するときに path/lock の排他ロックを取り、release まで持つ。
     最後の行が途中で切れていれば（書いている途中で落ちた）、読むときは無視し、ロックを取ったときに捨てる。
@@ -552,18 +558,28 @@ class FileJournal(Journal):
     大量のセルの変更は、JSON の行にせず Metric ごとの Parquet に書き（PgJournal と同じ形式）、記録の行には
     ファイルの名前とハッシュだけを入れる。ファイルを書き出してから行を追記するので、確定した記録の
     ファイルは必ずそろっている（行を書く前に落ちれば、参照されないファイルが残るだけ）。
+
+    client_op_id は最後の op_window 件の記録の分だけ覚える（再送しても二重に確定しないと保証する範囲）。
     """
 
-    def __init__(self, path, *, fsync: bool = True, bulk_cells: int = 10_000):
+    def __init__(self, path, *, fsync: bool = True, bulk_cells: int = 10_000, op_window: int = 100_000,
+                 segment_bytes: int = 256 << 20):
         self.path = Path(path)
         self.fsync = fsync
         self.bulk_cells = bulk_cells
+        self.op_window = op_window
+        self.segment_bytes = segment_bytes
         self.path.mkdir(parents=True, exist_ok=True)
         self.objects = LocalObjects(self.path, fsync=fsync)
-        self.log_path = self.path / "log.jsonl"
         self._lock_file = None  # 書き込みの権利（path/lock の排他ロック）。最初に書くときに取る
         self._broken: BaseException | None = None  # 追記の失敗を取り消せなかった（以後は書かない）
+        self._rotate = False  # 次の追記から新しい区切りに書く（スナップショットを置いた）
         self._scan()
+
+    @property
+    def log_path(self) -> Path:
+        """今追記している区切りのファイル。"""
+        return self._segments[-1][1]
 
     # ------------------------------------------------ 書き込みの権利
 
@@ -595,55 +611,92 @@ class FileJournal(Journal):
 
     # ------------------------------------------------ 記録
 
-    def _scan(self, repair: bool = False) -> None:
-        """記録を 1 行ずつ読んで、最後の通し番号と client_op_id の表を作る（ログ全体をメモリに置かない）。
-        最後の行が途中で切れていれば、書いている途中で落ちたか、別のプロセスが書いている途中なので読まない。
-        repair（書き込みの権利を持っているとき）なら、その行をファイルから切り捨てる。"""
-        self.head = 0  # 最後の記録の通し番号
-        self._size = 0  # 最後の記録までのバイト数
-        self._by_client_op: dict[str, int] = {}
-        if not self.log_path.exists():
+    def _list_segments(self) -> list[tuple[int, Path]]:
+        """記録の区切り（最初の通し番号, ファイル）を古い順に。まだなければ最初の区切りを 1 つ返す。"""
+        segs = [(int(p.stem), p) for p in (self.path / "log").glob("*.jsonl") if p.stem.isdigit()]
+        legacy = self.path / "log.jsonl"
+        if legacy.exists():
+            segs.append((1, legacy))
+        segs.sort()
+        return segs or [(1, self.path / "log" / f"{1:020d}.jsonl")]
+
+    def _read_segment(self, first: int, path: Path, start: int = 0, *, strict: bool = False):
+        """区切りの start バイト目からの完全な記録を読み、(記録, 行のバイト数) を順に返す。最後の行が途中で
+        切れていれば読まない。strict なら、途中の壊れた行を ValueError にする。"""
+        try:
+            f = open(path, "rb")
+        except FileNotFoundError:
             return
-        size = self.log_path.stat().st_size
-        with open(self.log_path, "rb") as f:
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            f.seek(start)
+            pos = start
             for line in f:
                 try:
                     if not line.endswith(b"\n"):
                         raise ValueError("途中で切れた行")
                     rec = json.loads(line)
                 except ValueError:
-                    if self._size + len(line) < size:
-                        raise ValueError(f"{self.log_path}: {self._size} バイト目の記録が壊れている") from None
-                    break
-                if rec["seq"] != self.head + 1:
-                    raise ValueError(f"{self.log_path}: 通し番号が {self.head} の次でなく {rec['seq']}")
-                self.head = rec["seq"]
-                if rec.get("client_op_id") is not None:
+                    if strict and pos + len(line) < size:
+                        raise ValueError(f"{path}: {pos} バイト目の記録が壊れている") from None
+                    return
+                pos += len(line)
+                yield rec, len(line)
+
+    def _remember(self, client_op_id: str | None, seq: int) -> None:
+        if client_op_id is not None:
+            self._by_client_op[client_op_id] = seq
+        oldest = self.head - self.op_window
+        while self._by_client_op:  # 覚えておく範囲より古い client_op_id は捨てる（古い順に並んでいる）
+            k, q = next(iter(self._by_client_op.items()))
+            if q > oldest:
+                break
+            del self._by_client_op[k]
+
+    def _scan(self, repair: bool = False) -> None:
+        """最後の区切りを読んで最後の通し番号を求め、client_op_id を覚えておく範囲の記録を読む（ログ全体を
+        読まない）。最後の行が途中で切れていれば、書いている途中で落ちたか、別のプロセスが書いている途中なので
+        読まない。repair（書き込みの権利を持っているとき）なら、その行をファイルから切り捨てる。"""
+        self._segments = self._list_segments()
+        self._by_client_op: collections.OrderedDict[str, int] = collections.OrderedDict()
+        first, path = self._segments[-1]
+        self.head, self._size = first - 1, 0
+        for rec, n in self._read_segment(first, path, strict=True):
+            if rec["seq"] != self.head + 1:
+                raise ValueError(f"{path}: 通し番号が {self.head} の次でなく {rec['seq']}")
+            self.head = rec["seq"]
+            self._size += n
+        # client_op_id を覚えておく範囲が前の区切りにかかれば、そこから読む
+        oldest = self.head - self.op_window
+        start = len(self._segments) - 1
+        while start > 0 and self._segments[start][0] > oldest + 1:
+            start -= 1
+        for i in range(start, len(self._segments)):
+            for rec, _ in self._read_segment(*self._segments[i]):
+                if rec["seq"] > oldest and rec.get("client_op_id") is not None:
                     self._by_client_op[rec["client_op_id"]] = rec["seq"]
-                self._size += len(line)
-        if repair and self._size < size:
-            with open(self.log_path, "r+b") as f:
+        if repair and path.exists() and path.stat().st_size > self._size:
+            with open(path, "r+b") as f:
                 f.truncate(self._size)
                 if self.fsync:
                     _sync(f.fileno())
 
     def refresh(self) -> int:
-        """最後に読んだところより後に追記された記録を読む（全体を読み直さない）。"""
-        if not self.log_path.exists():
-            return self.head
-        with open(self.log_path, "rb") as f:
-            f.seek(self._size)
-            for line in f:
-                if not line.endswith(b"\n"):
-                    break  # 書き手が書いている途中の行
-                rec = json.loads(line)
+        """最後に読んだところより後に追記された記録を読む（全体を読み直さない）。別のプロセスが新しい区切りに
+        書き始めていれば、そちらも読む。"""
+        while True:
+            first, path = self._segments[-1]
+            for rec, n in self._read_segment(first, path, self._size):
                 if rec["seq"] != self.head + 1:
-                    raise ValueError(f"{self.log_path}: 通し番号が {self.head} の次でなく {rec['seq']}")
+                    raise ValueError(f"{path}: 通し番号が {self.head} の次でなく {rec['seq']}")
                 self.head = rec["seq"]
-                if rec.get("client_op_id") is not None:
-                    self._by_client_op[rec["client_op_id"]] = rec["seq"]
-                self._size += len(line)
-        return self.head
+                self._size += n
+                self._remember(rec.get("client_op_id"), rec["seq"])
+            nxt = self.path / "log" / f"{self.head + 1:020d}.jsonl"
+            if self.head + 1 == first or not nxt.exists():
+                return self.head
+            self._segments.append((self.head + 1, nxt))
+            self._size = 0
 
     def wait(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
@@ -653,6 +706,8 @@ class FileJournal(Journal):
                     return
             except FileNotFoundError:
                 pass
+            if (self.path / "log" / f"{self.head + 1:020d}.jsonl").exists() and self.head + 1 != self._segments[-1][0]:
+                return
             time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
 
     def append_many(self, records: list[dict]) -> list[int]:
@@ -665,6 +720,10 @@ class FileJournal(Journal):
         if not records:
             return []
         self.acquire()
+        if self._size > 0 and (self._rotate or self._size >= self.segment_bytes):
+            self._segments.append((self.head + 1, self.path / "log" / f"{self.head + 1:020d}.jsonl"))
+            self._size = 0
+        self._rotate = False
         seqs = list(range(self.head + 1, self.head + 1 + len(records)))
         lines = []
         for r, q in zip(records, seqs):
@@ -674,12 +733,17 @@ class FileJournal(Journal):
                 line["cells_blob"] = self._write_cells(r)
             lines.append(json.dumps(line, ensure_ascii=False, separators=(",", ":"), default=_json_rows) + "\n")
         data = "".join(lines).encode("utf-8")
-        fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        path = self.log_path
+        new = not path.exists()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         try:
             try:
                 _write_all(fd, data)
                 if self.fsync:
                     _sync(fd)
+                    if new:
+                        _fsync_dir(path.parent)  # 新しい区切りのファイルの名前もディスクへ
             except BaseException as e:
                 try:
                     os.ftruncate(fd, self._size)
@@ -687,15 +751,14 @@ class FileJournal(Journal):
                         _sync(fd)
                 except BaseException as undo:
                     self._broken = undo
-                    log.critical("%s: 追記の失敗を取り消せなかった", self.log_path, exc_info=True)
+                    log.critical("%s: 追記の失敗を取り消せなかった", path, exc_info=True)
                 raise e
         finally:
             os.close(fd)
         self._size += len(data)
         self.head = seqs[-1]
         for r, q in zip(records, seqs):
-            if r.get("client_op_id") is not None:
-                self._by_client_op[r["client_op_id"]] = q
+            self._remember(r.get("client_op_id"), q)
         return seqs
 
     def seq_of(self, client_op_id: str) -> int | None:
@@ -714,13 +777,13 @@ class FileJournal(Journal):
         return {"format": "parquet", "files": write_cell_files(record, put), "cells": cell_count(record)}
 
     def records(self, after: int = 0) -> Iterator[dict]:
-        if not self.log_path.exists():
-            return
-        with open(self.log_path, "rb") as f:
-            for line in f:
-                if not line.endswith(b"\n"):
-                    return  # 別のプロセスが書いている途中の行
-                rec = json.loads(line)
+        segs = self._list_segments()
+        for i, (first, path) in enumerate(segs):
+            if i + 1 < len(segs) and segs[i + 1][0] <= after + 1:
+                continue  # この区切りの記録は、すべて after 以前
+            if first > after + 1 and i == 0 and first > 1:
+                raise ValueError(f"{self.path}: 通し番号 {after + 1} からの記録は prune で消した")
+            for rec, _ in self._read_segment(first, path):
                 if rec["seq"] > self.head:
                     return  # 読み込んだあとに別のプロセスが書いた記録（開き直すまで見ない）
                 if rec["seq"] > after:
@@ -729,13 +792,40 @@ class FileJournal(Journal):
                                                                    self.objects.get)
                     yield rec
 
+    def prune(self, keep: int = 2) -> dict:
+        """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットと、残す一番古い
+        スナップショットより前の記録の区切りと、その記録の大量の変更のファイルを消す。消した数を返す。
+        記録を消すので、残すスナップショットより前へは戻れなくなる（セルの履歴もそこから後だけになる）。"""
+        self.acquire()
+        snaps = self.snapshots()
+        if len(snaps) <= keep:
+            return {"snapshots": 0, "segments": 0, "cells": 0}
+        oldest = snaps[keep - 1][0]
+        out = {"snapshots": 0, "segments": 0, "cells": 0}
+        for _, place in snaps[keep:]:
+            for key in self.objects.list(place.uri + "/"):
+                self.objects.delete(key)
+            out["snapshots"] += 1
+        segs = self._list_segments()
+        for i, (first, path) in enumerate(segs[:-1]):
+            if segs[i + 1][0] > oldest + 1:
+                break  # この区切りには、残すスナップショットより後の記録がある
+            for rec, _ in self._read_segment(first, path):
+                for f in rec.get("cells_blob", {}).get("files", []):
+                    self.objects.delete(f["uri"])
+                    out["cells"] += 1
+            path.unlink()
+            out["segments"] += 1
+        return out
+
     # ------------------------------------------------ スナップショット
 
     def save_snapshot(self, model) -> str:
         """model（通し番号 model.seq の時点）のスナップショットを置く。同じ通し番号で取り直しても、置いた
-        ファイルを書き換えないよう、置き場所ごとに乱数を付ける。"""
+        ファイルを書き換えないよう、置き場所ごとに乱数を付ける。次の追記から、記録を新しい区切りに書く。"""
         prefix = f"snapshots/{model.seq:020d}-{uuid.uuid4().hex[:8]}"
         put_snapshot(self.objects, prefix, model)
+        self._rotate = True
         return prefix
 
     def snapshots(self) -> list[tuple[int, Snapshot]]:

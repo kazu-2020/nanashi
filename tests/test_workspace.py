@@ -156,6 +156,15 @@ class Basics(unittest.TestCase):
         self.assertEqual(first, again)
         self.assertEqual(self.ws.version.get("Stock", Product="p1", Month="Jan"), 101)
 
+    def test_remembered_client_op_ids_are_bounded(self):
+        ws = Workspace(model(self.engine()), keep_recent=3)
+        try:
+            for i in range(10):
+                ws.write(move("p0", "p1", "Jan", 1), client_op_id=f"op-{i}")
+            self.assertEqual(list(ws._ops), ["op-7", "op-8", "op-9"])  # 増え続けない
+        finally:
+            ws.close()
+
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class RustBasics(Basics):

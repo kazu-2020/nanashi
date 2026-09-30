@@ -222,7 +222,8 @@ class Workspace:
         # 排他の確認に使う、最近の書き込み (通し番号, 利用者, 書き換えたセル)。これより古い版を
         # 読んだ書き込みは確かめられないので拒否する
         self._recent: collections.deque = collections.deque(maxlen=keep_recent)
-        self._ops: dict[str, int] = {}  # このライターが確定した client_op_id（記録先にあるものは seq_of で引く）
+        # このライターが最近確定した client_op_id（keep_recent 件まで。記録先にあるものは seq_of で引く）
+        self._ops: collections.OrderedDict[str, int] = collections.OrderedDict()
         self._closed = False
         if (checkpoint_every is not None or checkpoint_interval is not None) and journal is None:
             raise ValueError("スナップショットを取るには記録先（journal）が要る")
@@ -430,6 +431,8 @@ class Workspace:
             self._recent.append((seq, req.user, written_cells(rec)))
             if req.client_op_id is not None:
                 self._ops[req.client_op_id] = seq
+                if len(self._ops) > self._recent.maxlen:
+                    self._ops.popitem(last=False)
         if seqs:
             working.seq = seqs[-1]
         working._frozen = True
