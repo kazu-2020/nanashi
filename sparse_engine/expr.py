@@ -9,6 +9,7 @@ AGGREGATORS = {
     "min": min,
     "max": max,
     "count": lambda vs: float(len(vs)),
+    "first": lambda vs: vs[0],  # 値が 1 つしかないグループ用（引き下ろしの内部で使う）
 }
 
 ARITH = {"+", "-", "*", "/"}
@@ -102,6 +103,16 @@ def ref(name: str) -> Ref:
     return Ref(name)
 
 
+def dim(name: str) -> DimRef:
+    """軸そのもの。各セルで、そのセルのメンバーを値として持つ（`IF(Month <= Month."Mar", ...)`）。"""
+    return DimRef(name)
+
+
+def member(dim: str, name: str) -> Member:
+    """軸のメンバーの定数（`Month."Mar"`）。"""
+    return Member(dim, name)
+
+
 def if_(cond, then, else_=None) -> If:
     """条件が TRUE なら then、FALSE なら else_、空なら空。else_ 省略時は FALSE も空。"""
     return If(lift(cond), lift(then), None if else_ is None else lift(else_))
@@ -115,6 +126,19 @@ class Ref(Expr):
 @dataclass(eq=False)
 class Const(Expr):
     value: Value
+
+
+@dataclass(eq=False)
+class DimRef(Expr):
+    """軸そのもの。値は各セルのメンバー（式の中では軸の名前で書く）。"""
+    dim: str
+
+
+@dataclass(eq=False)
+class Member(Expr):
+    """軸のメンバーの定数。"""
+    dim: str
+    member: str
 
 
 @dataclass(eq=False)
@@ -179,6 +203,23 @@ class Shift(Expr):
     child: Expr
     dim: str
     n: int
+
+
+@dataclass(eq=False)
+class Coalesce(Expr):
+    """first に値があればそれ、なければ second（計算 Metric の手入力の上書きに使う）。"""
+    first: Expr
+    second: Expr
+
+
+@dataclass(eq=False)
+class AsAxis(Expr):
+    """メンバー型の式を、そのメンバーを dim の座標に持つ表（値は 1）に変える。
+
+    Metric を使った BY（`Salary[BY SUM: Employee.DeptOf]`）を既存の演算に書き換えるときに使う。
+    """
+    child: Expr
+    dim: str
 
 
 @dataclass(eq=False)

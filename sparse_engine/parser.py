@@ -19,7 +19,7 @@
     mul      := unary (("*" | "/") unary)*
     unary    := "-" unary | postfix
     postfix  := primary ("[" modifier "]")*
-    primary  := NUMBER | "TRUE" | "FALSE" | name | "(" expr ")" | call
+    primary  := NUMBER | "TRUE" | "FALSE" | name | name "." MEMBER | "(" expr ")" | call
     modifier := "BY" [agg] ":" name "." name ("," name "." name)*
               | "REMOVE" [agg] ":" name ("," name)*
               | "FILTER" ":" expr
@@ -46,8 +46,8 @@ from dataclasses import dataclass
 from typing import Callable, TypeVar
 
 from .evaluate import FormulaError
-from .expr import (AGGREGATORS, BinOp, By, Const, Expand, Expr, Filter, If, IfBlank, IsBlank,
-                   Not, On, Ref, Remove, Select, Shift)
+from .expr import (AGGREGATORS, BinOp, By, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
+                   IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
 KEYWORDS = {"AND", "OR", "NOT", "TRUE", "FALSE"}
 FUNCTIONS = {"IF", "IFBLANK", "ISBLANK", "PREVIOUS"}
@@ -240,7 +240,11 @@ class _Parser:
             if nxt.kind == "op" and nxt.text == "(":
                 return self.call()
         if t.kind in ("ident", "quoted"):
-            return Ref(self.name())
+            name = self.name()
+            if self.at_op(".") and self.tokens[self.i + 1].kind == "member":
+                self.advance()
+                return Member(name, self.advance().text[1:-1].replace('""', '"'))
+            return Ref(name)  # 軸の名前なら、Model が DimRef に置き換える
         self.error(f"値が必要だが {t.describe()} がある")
 
     def name(self) -> str:
@@ -378,8 +382,10 @@ def _wrap(e: Expr, min_prec: int) -> str:
 
 def _fmt(e: Expr) -> tuple[str, int]:
     match e:
-        case Ref(name):
+        case Ref(name) | DimRef(name):
             return _name(name), _ATOM
+        case Member(dim, member):
+            return f'{_name(dim)}."{member.replace(chr(34), chr(34) * 2)}"', _ATOM
         case Const(value):
             if isinstance(value, bool):
                 return ("TRUE" if value else "FALSE"), _ATOM

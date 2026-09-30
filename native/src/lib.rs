@@ -92,11 +92,13 @@ impl Core {
                 "min" => Agg::Min,
                 "max" => Agg::Max,
                 "count" => Agg::Count,
+                "first" => Agg::First,
                 _ => return Err(err(format!("未知の集計関数 {s}"))),
             })
         };
         Ok(match tag.as_str() {
             "ref" => Node::Ref(t.get_item(1)?.extract()?),
+            "dimref" => Node::DimRef(t.get_item(1)?.extract()?),
             "const" => Node::Const(t.get_item(1)?.extract()?, kind_of(t.get_item(2)?.extract()?)),
             "bin" => {
                 let op: String = t.get_item(1)?.extract()?;
@@ -124,6 +126,7 @@ impl Core {
             }
             "filter" => Node::Filter(child(1)?, child(2)?),
             "on" => Node::On(child(1)?, child(2)?),
+            "coalesce" => Node::Coalesce(child(1)?, child(2)?),
             "expand" => Node::Expand(child(1)?, t.get_item(2)?.extract()?),
             "isblank" => Node::IsBlank(child(1)?),
             "ifblank" => Node::IfBlank(child(1)?, t.get_item(2)?.extract()?),
@@ -142,6 +145,7 @@ impl Core {
             },
             "remove" => Node::Remove { child: child(1)?, dim: t.get_item(2)?.extract()?, agg: agg(t.get_item(3)?.extract()?)? },
             "shift" => Node::Shift { child: child(1)?, dim: t.get_item(2)?.extract()?, n: t.get_item(3)?.extract()? },
+            "asaxis" => Node::AsAxis { child: child(1)?, dim: t.get_item(2)?.extract()? },
             "select" => Node::Select { child: child(1)?, dim: t.get_item(2)?.extract()?, member: t.get_item(3)?.extract()? },
             _ => return Err(err(format!("未知のノード {tag}"))),
         })
@@ -153,6 +157,16 @@ impl Core {
     #[new]
     fn new() -> Core {
         Core { cat: Arc::new(Catalog::default()) }
+    }
+
+    /// 同じ軸と対応表を持つ Core（モデルの複製用）。以後の変更は互いに影響しない（書き込み時に複製）。
+    fn fork(&self) -> Core {
+        Core { cat: self.cat.clone() }
+    }
+
+    /// 同じ中身を指す別のハンドル。どちらかに書き込むと、そのときに中身が複製される。
+    fn share(&self, store: &Bound<'_, StoreHandle>) -> StoreHandle {
+        StoreHandle { store: store.borrow().store.clone() }
     }
 
     fn add_dim(&mut self, size: u32, ordered: bool) -> usize {
@@ -197,12 +211,14 @@ impl Core {
         Ok(StoreHandle { store: Arc::new(store) })
     }
 
+    #[allow(clippy::wrong_self_convention)] // Python から呼ぶ名前を保つ
     fn from_rows(&self, dims: Vec<DimId>, index: Option<DimId>, is_bool: bool, cols: Vec<Vec<u32>>, values: Vec<f64>) -> PyResult<StoreHandle> {
         let store = Store::new(&dims, index, kind_of(is_bool), &self.cat).map_err(err)?;
         let cols: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
-        Ok(StoreHandle { store: Arc::new(store.from_rows(&cols, &values).map_err(err)?) })
+        Ok(StoreHandle { store: Arc::new(store.with_rows(&cols, &values).map_err(err)?) })
     }
 
+    #[allow(clippy::wrong_self_convention)] // Python から呼ぶ名前を保つ
     fn from_arrays(
         &self,
         dims: Vec<DimId>,
@@ -213,7 +229,7 @@ impl Core {
     ) -> PyResult<StoreHandle> {
         let store = Store::new(&dims, index, kind_of(is_bool), &self.cat).map_err(err)?;
         let slices: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect::<Result<_, _>>()?;
-        Ok(StoreHandle { store: Arc::new(store.from_rows(&slices, values.as_slice()?).map_err(err)?) })
+        Ok(StoreHandle { store: Arc::new(store.with_rows(&slices, values.as_slice()?).map_err(err)?) })
     }
 
     fn write(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>, value: Option<f64>) {
@@ -249,6 +265,21 @@ impl Core {
         let mut handle = store.borrow_mut();
         let target = Arc::make_mut(&mut handle.store);
         py.detach(|| target.replace(&r, &new)).map_err(err)
+    }
+
+    /// replace と同じだが、値が実際に変わったセルの範囲（軸ごとのメンバー番号）を返す。変化なしなら None。
+    fn replace_diff(
+        &self,
+        py: Python<'_>,
+        store: &Bound<'_, StoreHandle>,
+        region: Region,
+        new: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Vec<Vec<u32>>>> {
+        let new = Core::as_cube(new)?;
+        let r = self.restrict(&region);
+        let mut handle = store.borrow_mut();
+        let target = Arc::make_mut(&mut handle.store);
+        py.detach(|| target.replace_diff(&r, &new)).map_err(err)
     }
 
     /// 評価結果から新しい格納データを作る。
@@ -301,10 +332,24 @@ fn set_par_min(n: usize) {
     core::PAR_MIN.store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 準結合で絞り込む片側の件数の上限を変える（テスト用。0 にすると絞り込まない）。
+#[pyfunction]
+fn set_semi_max(n: usize) {
+    core::SEMI_MAX.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 分割軸以外の軸の索引を使う本体の行数の下限を変える（テスト用。0 にすると常に使う）。
+#[pyfunction]
+fn set_postings_min_rows(n: usize) {
+    core::POSTINGS_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[pymodule]
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_compact_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_par_min, m)?)?;
+    m.add_function(wrap_pyfunction!(set_semi_max, m)?)?;
+    m.add_function(wrap_pyfunction!(set_postings_min_rows, m)?)?;
     m.add_class::<Core>()?;
     m.add_class::<Expr>()?;
     m.add_class::<CubeHandle>()?;

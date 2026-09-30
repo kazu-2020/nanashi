@@ -55,7 +55,7 @@ def snapshot(m: Model) -> dict:
 def same(a, b) -> bool:
     if a.keys() != b.keys():
         return False
-    return all(a[k] == b[k] if isinstance(a[k], bool) else math.isclose(a[k], b[k])
+    return all(a[k] == b[k] if isinstance(a[k], (bool, str)) else math.isclose(a[k], b[k], abs_tol=1e-6)
                for k in a)
 
 

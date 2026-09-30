@@ -77,7 +77,7 @@ class ImplicitExpansion(unittest.TestCase):
 
     def test_metrics_with_different_dims_are_rejected(self):
         self.m.add_formula("Z", ["Product", "Month"], ref("Fixed") + ref("Variable"))
-        with self.assertRaisesRegex(FormulaError, r"\.expand\('Month'\)"):
+        with self.assertRaisesRegex(FormulaError, r"\[EXPAND: Month\]"):
             self.m.recalc()
 
     def test_explicit_expand(self):

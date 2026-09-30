@@ -180,7 +180,7 @@ class ModelWithText(unittest.TestCase):
     def test_type_errors_still_come_from_checker(self):
         m = model()
         m.add_formula("R", ["Product", "Month"], "X + Z")
-        with self.assertRaisesRegex(FormulaError, r"\.expand\('Month'\)"):
+        with self.assertRaisesRegex(FormulaError, r"\[EXPAND: Month\]"):
             m.recalc()
 
 

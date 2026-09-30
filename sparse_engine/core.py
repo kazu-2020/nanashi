@@ -28,6 +28,13 @@ class Dimension:
         # プロパティ名 -> (参照先の Dimension 名, {メンバー -> 参照先メンバー})
         self.properties: dict[str, tuple[str, dict[str, str]]] = {}
 
+    def copy(self) -> Dimension:
+        """同じメンバーとプロパティを持つ別の Dimension。対応表の dict は共有する
+        （プロパティの変更は set_property_value で新しい dict に置き換えるので、共有しても干渉しない）。"""
+        other = Dimension(self.name, self.members, ordered=self.ordered)
+        other.properties = dict(self.properties)
+        return other
+
     def __contains__(self, member: str) -> bool:
         return member in self._index
 

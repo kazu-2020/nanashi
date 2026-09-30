@@ -42,7 +42,13 @@ class Engine(Protocol):
     def reorder(self, storage: Any, dims: tuple[str, ...]) -> Any: ...
     def replace(self, storage: Any, region: Restrict, new: Any, cat: Catalog) -> Any:
         """storage の region 内のセルを new で置き換える。region 外はそのまま残す。"""
+    def replace_diff(self, storage: Any, region: Restrict, new: Any, cat: Catalog) -> tuple[Any, Restrict | None]:
+        """replace と同じだが、値が実際に変わったセルを囲む範囲も返す（変化なしなら None）。"""
     def to_cube(self, storage: Any, cat: Catalog) -> Cube: ...
+    def fork(self, cat: Catalog) -> Engine:
+        """複製したモデル cat 用のエンジン。"""
+    def share(self, storage: Any) -> Any:
+        """複製したモデルに渡す格納データ。以後の書き込みが互いに影響しないこと。"""
     def size(self, storage: Any) -> int: ...
 
 
@@ -63,6 +69,12 @@ class ReferenceEngine:
 
     def dimension_changed(self, cat, dim):
         pass  # Cube のキーはメンバー名なので、何もしなくてよい
+
+    def fork(self, cat):
+        return ReferenceEngine()
+
+    def share(self, storage: Cube) -> Cube:
+        return Cube(storage.dims, dict(storage.cells))  # dict は書き換えるので複製する
 
     def fit(self, storage, cat):
         return storage
@@ -99,6 +111,16 @@ class ReferenceEngine:
             del cells[k]
         cells.update(new.cells)
         return storage
+
+    def replace_diff(self, storage: Cube, region, new: Cube, cat):
+        dims = storage.dims
+        old = {k: v for k, v in storage.cells.items() if not region or inside(k, dims, region)}
+        cells = new.reorder(dims).cells
+        changed = [k for k in old.keys() | cells.keys() if old.get(k) != cells.get(k)]
+        storage = self.replace(storage, region, new, cat)
+        if not changed:
+            return storage, None
+        return storage, {d: frozenset(k[i] for k in changed) for i, d in enumerate(dims)}
 
     def to_cube(self, storage, cat):
         return storage

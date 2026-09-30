@@ -8,7 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// 差分がこの件数（と本体の 1/8）を超えたら本体にまとめ直す。テストでは小さくして、まとめ直しを頻繁に起こす。
 pub static COMPACT_MIN: AtomicUsize = AtomicUsize::new(4096);
@@ -296,6 +296,31 @@ pub struct Store {
     keys: Vec<u64>,                     // 本体（昇順・重複なし）
     vals: Vec<f64>,                     //
     delta: BTreeMap<u64, Option<f64>>, // 差分（Some = 値を置く、None = 消す）
+    postings: Vec<OnceLock<Arc<Postings>>>, // 分割軸以外の軸の索引（詰め方の位置ごと。必要になったら作る）
+}
+
+/// 分割軸以外の軸の索引。本体の行番号を、その軸のメンバーごとにまとめたもの（転置索引）。
+#[derive(Debug)]
+struct Postings {
+    offsets: Vec<u32>, // メンバー m の行は rows[offsets[m]..offsets[m + 1]]
+    rows: Vec<u32>,
+}
+
+impl Postings {
+    fn of(&self, m: u32) -> &[u32] {
+        let m = m as usize;
+        if m + 1 >= self.offsets.len() {
+            return &[];
+        }
+        &self.rows[self.offsets[m] as usize..self.offsets[m + 1] as usize]
+    }
+}
+
+/// 本体がこの行数以上なら、分割軸以外の軸で絞った読み出しに索引を使う。0 なら常に使う（テスト用）。
+pub static POSTINGS_MIN_ROWS: AtomicUsize = AtomicUsize::new(1024);
+
+fn fresh_postings(n: usize) -> Vec<OnceLock<Arc<Postings>>> {
+    (0..n).map(|_| OnceLock::new()).collect()
 }
 
 impl Store {
@@ -315,6 +340,7 @@ impl Store {
             keys: Vec::new(),
             vals: Vec::new(),
             delta: BTreeMap::new(),
+            postings: fresh_postings(order.len()),
         })
     }
 
@@ -372,6 +398,30 @@ impl Store {
                 return;
             }
         }
+        if let Some((sel, post)) = self.best_postings(r) {
+            // 索引でその軸のメンバーの行だけを集める。差分の B 木にある変更は別に突き合わせる
+            let mut cells = Vec::new();
+            for &m in &sel.members {
+                for &row in post.of(m) {
+                    let k = self.keys[row as usize];
+                    if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
+                        cells.push((k, self.vals[row as usize]));
+                    }
+                }
+            }
+            for (&k, &v) in &self.delta {
+                if let Some(v) = v {
+                    if pass(&self.pack, k, &cs) {
+                        cells.push((k, v));
+                    }
+                }
+            }
+            cells.sort_unstable_by_key(|c| c.0);
+            for (k, v) in cells {
+                f(k, v);
+            }
+            return;
+        }
         self.merged(0, None, |k, v| {
             if pass(&self.pack, k, &cs) {
                 f(k, v)
@@ -410,6 +460,7 @@ impl Store {
             keys: Vec::new(),
             vals: Vec::new(),
             delta: BTreeMap::new(),
+            postings: fresh_postings(self.pack.dims.len()),
         }
     }
 
@@ -419,6 +470,52 @@ impl Store {
         self.keys = keys;
         self.vals = vals;
         self.delta.clear();
+        self.postings = fresh_postings(self.pack.dims.len());
+    }
+
+    /// 詰め方の位置 pos の軸の索引。初めて使うときに計数ソートで作る（本体の行数に比例）。
+    fn postings(&self, pos: usize) -> &Postings {
+        self.postings[pos].get_or_init(|| {
+            let size = (self.pack.masks[pos] + 1) as usize;
+            let mut offsets = vec![0u32; size + 1];
+            for &k in &self.keys {
+                offsets[self.pack.get(k, pos) as usize + 1] += 1;
+            }
+            for i in 1..offsets.len() {
+                offsets[i] += offsets[i - 1];
+            }
+            let mut fill = offsets.clone();
+            let mut rows = vec![0u32; self.keys.len()];
+            for (row, &k) in self.keys.iter().enumerate() {
+                let m = self.pack.get(k, pos) as usize;
+                rows[fill[m] as usize] = row as u32;
+                fill[m] += 1;
+            }
+            Arc::new(Postings { offsets, rows })
+        })
+    }
+
+    /// 分割軸以外の軸で絞られていて、索引を使うと対象が十分減るなら、その軸の位置と索引を返す。
+    fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, &'a Postings)> {
+        let min_rows = POSTINGS_MIN_ROWS.load(Ordering::Relaxed);
+        let n = self.keys.len();
+        if n == 0 || n < min_rows {
+            return None;
+        }
+        let mut best: Option<(usize, &Arc<Sel>, &Postings)> = None;
+        for (pos, &d) in self.pack.dims.iter().enumerate().skip(1) {
+            let Some(sel) = r.get(d) else { continue };
+            if self.pack.masks[pos] >= (1 << 22) {
+                continue; // メンバー数が大きすぎる軸には索引を作らない
+            }
+            let post = self.postings(pos);
+            let cand: usize = sel.members.iter().map(|&m| post.of(m).len()).sum();
+            if best.is_none_or(|(c, _, _)| cand < c) {
+                best = Some((cand, sel, post));
+            }
+        }
+        let (cand, sel, post) = best?;
+        (min_rows == 0 || cand * 4 < n).then_some((sel, post))
     }
 
     /// r の範囲の行だけを持つ Store（同じ軸と分割軸）。
@@ -463,6 +560,49 @@ impl Store {
         Ok(())
     }
 
+    /// replace と同じだが、値が実際に変わったセルの範囲（宣言した軸の順の、軸ごとのメンバー番号）を
+    /// 返す。何も変わらなければ None。下流に伝える影響範囲を、値の変化で絞るために使う。
+    pub fn replace_diff(&mut self, r: &Restrict, new: &Cube) -> Result<Option<Vec<Vec<u32>>>> {
+        if !same_set(new.dims(), &self.metric_dims) {
+            return Err("書き戻す結果の軸が Metric の軸と一致しない".into());
+        }
+        // 変更前はキー順に読める。変更後も並べて、1 回の走査で突き合わせる
+        let mut old = Vec::new();
+        self.for_each_in(r, |k, v| old.push((k, v)));
+        let new = Cube { pack: self.pack.clone(), kind: new.kind, cells: sorted(new.repack(&self.pack).cells) };
+        let changed: Vec<u64> = merge_sorted(&old, &new.cells, true, |a, b| (a != b).then_some(0.0))
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        // 書き戻し。変更前のキーは上で集めたので、消すためにもう一度走査しない
+        if r.is_all() {
+            self.set_sorted(new.cells);
+        } else {
+            for &(k, _) in &old {
+                self.delta.insert(k, None);
+            }
+            for &(k, v) in &new.cells {
+                self.delta.insert(k, Some(v));
+            }
+            self.after_delta();
+        }
+        if changed.is_empty() {
+            return Ok(None);
+        }
+        let sets = self
+            .metric_dims
+            .iter()
+            .map(|d| {
+                let p = self.pack.pos(*d).unwrap();
+                let mut ms: Vec<u32> = changed.iter().map(|&k| self.pack.get(k, p)).collect();
+                ms.sort_unstable();
+                ms.dedup();
+                ms
+            })
+            .collect();
+        Ok(Some(sets))
+    }
+
     fn encode(&self, key: &[u32]) -> u64 {
         let mut out = 0;
         for (d, &m) in self.metric_dims.iter().zip(key) {
@@ -491,7 +631,7 @@ impl Store {
         (cols, values)
     }
 
-    pub fn from_rows(mut self, cols: &[&[u32]], values: &[f64]) -> Result<Store> {
+    pub fn with_rows(mut self, cols: &[&[u32]], values: &[f64]) -> Result<Store> {
         if cols.len() != self.metric_dims.len() {
             return Err("列の数が軸の数と合わない".into());
         }
@@ -553,11 +693,13 @@ pub enum Agg {
     Min,
     Max,
     Count,
+    First, // 値が 1 つしかないグループ用（引き下ろしの内部で使う）
 }
 
 #[derive(Debug)]
 pub enum Node {
     Ref(usize), // 評価時に渡す読み出し元の番号
+    DimRef(DimId), // 軸そのもの。値は各セルのメンバー番号
     Const(f64, Kind),
     Bin(Op, Box<Node>, Box<Node>),
     Not(Box<Node>),
@@ -572,6 +714,8 @@ pub enum Node {
     Remove { child: Box<Node>, dim: DimId, agg: Agg },
     Shift { child: Box<Node>, dim: DimId, n: i64 },
     Select { child: Box<Node>, dim: DimId, member: u32 },
+    AsAxis { child: Box<Node>, dim: DimId },
+    Coalesce(Box<Node>, Box<Node>), // 左に値があればそれ、なければ右
 }
 
 /// 式が読む Metric（格納データ、または評価の途中結果）。
@@ -803,13 +947,17 @@ struct Acc {
     cnt: u64,
     min: f64,
     max: f64,
+    first: f64,
 }
 
 impl Acc {
     fn new() -> Acc {
-        Acc { sum: 0.0, cnt: 0, min: f64::INFINITY, max: f64::NEG_INFINITY }
+        Acc { sum: 0.0, cnt: 0, min: f64::INFINITY, max: f64::NEG_INFINITY, first: 0.0 }
     }
     fn add(&mut self, v: f64) {
+        if self.cnt == 0 {
+            self.first = v;
+        }
         self.sum += v;
         self.cnt += 1;
         self.min = self.min.min(v);
@@ -822,6 +970,7 @@ impl Acc {
             Agg::Min => self.min,
             Agg::Max => self.max,
             Agg::Count => self.cnt as f64,
+            Agg::First => self.first,
         }
     }
 }
@@ -843,6 +992,25 @@ fn group(mut pairs: Vec<(u64, f64)>, pack: Packing, agg: Agg) -> Cube {
     Cube { pack, kind: Kind::Num, cells }
 }
 
+/// 片側がこれ以下の件数なら、もう片側の読み出しをその側に現れるメンバーに絞る（準結合）。
+pub static SEMI_MAX: AtomicUsize = AtomicUsize::new(4096);
+
+/// c に現れるメンバーだけに各軸を絞った範囲。c が大きければ None（絞っても得をしない）。
+///
+/// INNER JOIN の結果は c に値があるセルにしか残らないので、もう片側をこの範囲で評価しても
+/// 結果は変わらない。もう片側が持たない軸の絞り込みは、その軸を外す演算が捨てるので害がない。
+fn semi(r: &Restrict, c: &Cube, cat: &Catalog) -> Option<Restrict> {
+    if c.dims().is_empty() || c.cells.len() > SEMI_MAX.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut out = r.clone();
+    for (i, &d) in c.dims().iter().enumerate() {
+        let ms = c.cells.iter().map(|&(k, _)| c.pack.get(k, i)).collect();
+        out = out.with(d, Sel::new(ms, cat.dims[d].size));
+    }
+    Some(out)
+}
+
 fn replace_dim(dims: &[DimId], old: DimId, new: DimId) -> Vec<DimId> {
     dims.iter().map(|&d| if d == old { new } else { d }).collect()
 }
@@ -857,10 +1025,24 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
     match node {
         Node::Ref(i) => Ok(src[*i].read(r)),
 
+        Node::DimRef(d) => {
+            let pack = Packing::new(&[*d], cat)?;
+            let cells = members(cat, *d, r).into_iter().map(|m| (pack.put(0, m), m as f64)).collect();
+            Ok(Cube { pack, kind: Kind::Num, cells })
+        }
+
         Node::Const(v, kind) => Ok(Cube { pack: Packing::new(&[], cat)?, kind: *kind, cells: vec![(0, *v)] }),
 
         Node::Bin(op, l, rt) => {
-            let (a, b) = (ev(l)?, ev(rt)?);
+            let a = ev(l)?;
+            let b = match op {
+                // INNER JOIN の演算は、左が小さければ右を左のメンバーに絞って評価する
+                Op::Mul | Op::Div | Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => match semi(r, &a, cat) {
+                    Some(r2) => eval(rt, cat, src, &r2)?,
+                    None => ev(rt)?,
+                },
+                _ => ev(rt)?,
+            };
             match op {
                 Op::Mul | Op::Div => intersect(&a, &b, Kind::Num, cat, |x, y| scalar(*op, x, y)),
                 Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
@@ -897,11 +1079,17 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
                 kind: Kind::Bool,
                 cells: map_cells(&c.cells, |k, v| ((v != 0.0) == want).then_some((k, v))),
             };
-            let t = ev(then)?;
+            // 各分岐は、条件がその値になるセルのメンバーに絞って評価する
+            let branch = |n: &Node, part: &Cube| match semi(r, part, cat) {
+                Some(r2) => eval(n, cat, src, &r2),
+                None => eval(n, cat, src, r),
+            };
+            let (yes, no) = (pick(true), pick(false));
+            let t = branch(then, &yes)?;
             let kind = t.kind;
-            let mut parts = vec![intersect(&pick(true), &t, kind, cat, |_, y| Some(y))?];
+            let mut parts = vec![intersect(&yes, &t, kind, cat, |_, y| Some(y))?];
             if let Some(e) = else_ {
-                parts.push(intersect(&pick(false), &ev(e)?, kind, cat, |_, y| Some(y))?);
+                parts.push(intersect(&no, &branch(e, &no)?, kind, cat, |_, y| Some(y))?);
             }
             let dims = parts.iter().fold(Vec::new(), |acc, p| merge(&acc, p.dims()));
             let mut out = Cube { pack: Packing::new(&dims, cat)?, kind, cells: Vec::new() };
@@ -912,15 +1100,29 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
         }
 
         Node::Filter(child, cond) => {
-            let c = ev(cond)?;
-            let keep = Cube { pack: c.pack.clone(), kind: Kind::Bool, cells: map_cells(&c.cells, |k, v| (v != 0.0).then_some((k, v))) };
             let x = ev(child)?;
+            let c = match semi(r, &x, cat) {
+                Some(r2) => eval(cond, cat, src, &r2)?,
+                None => ev(cond)?,
+            };
+            let keep = Cube { pack: c.pack.clone(), kind: Kind::Bool, cells: map_cells(&c.cells, |k, v| (v != 0.0).then_some((k, v))) };
             intersect(&x, &keep, x.kind, cat, |a, _| Some(a))
+        }
+
+        Node::Coalesce(first, second) => {
+            let s = ev(second)?;
+            let f = ev(first)?.repack(&s.pack);
+            let kind = s.kind;
+            Ok(union(f, s, kind, |a, b| a.or(b)))
         }
 
         Node::On(child, other) => {
             let x = ev(child)?;
-            intersect(&x, &ev(other)?, x.kind, cat, |a, _| Some(a))
+            let o = match semi(r, &x, cat) {
+                Some(r2) => eval(other, cat, src, &r2)?,
+                None => ev(other)?,
+            };
+            intersect(&x, &o, x.kind, cat, |a, _| Some(a))
         }
 
         Node::Expand(child, dims) => {
@@ -967,7 +1169,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             let mut sub = r.without(&[*s, *dst]);
             let only = r.get(*s).cloned();
             if let Some(sel) = &only {
-                let ts = sel.members.iter().filter_map(|&m| (mp.fwd[m as usize] >= 0).then(|| mp.fwd[m as usize] as u32)).collect();
+                let ts = sel.members.iter().filter(|&&m| mp.fwd[m as usize] >= 0).map(|&m| mp.fwd[m as usize] as u32).collect();
                 sub = sub.with(*dst, Sel::new(ts, cat.dims[*dst].size));
             }
             let c = eval(child, cat, src, &sub)?;
@@ -978,7 +1180,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             for &(k, v) in &c.cells {
                 let base = rest.apply(&c.pack, &out, k);
                 for &m in &mp.inv[c.pack.get(k, pt) as usize] {
-                    if only.as_ref().map_or(true, |sel| sel.has(m)) {
+                    if only.as_ref().is_none_or(|sel| sel.has(m)) {
                         cells.push((base | out.put(ps, m), v));
                     }
                 }
@@ -993,6 +1195,18 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             let proj = Proj::new(&c.pack, &out);
             let pairs = map_cells(&c.cells, |k, v| Some((proj.apply(&c.pack, &out, k), v)));
             Ok(group(pairs, out, *agg))
+        }
+
+        Node::AsAxis { child, dim } => {
+            // メンバー番号を値に持つ Cube を、そのメンバーを dim の座標に持つ表（値は 1）にする
+            let c = eval(child, cat, src, &r.without(&[*dim]))?;
+            let out = Packing::new(&[c.dims(), &[*dim]].concat(), cat)?;
+            let proj = Proj::new(&c.pack, &out);
+            let (p, size) = (out.pos(*dim).unwrap(), cat.dims[*dim].size as f64);
+            let cells = map_cells(&c.cells, |k, v| {
+                (v >= 0.0 && v < size).then(|| (proj.apply(&c.pack, &out, k) | out.put(p, v as u32), 1.0))
+            });
+            Ok(Cube { pack: out, kind: Kind::Num, cells }.filter(r))
         }
 
         Node::Select { child, dim, member } => {

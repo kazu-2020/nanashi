@@ -1,0 +1,266 @@
+# nanashi
+
+nanashi は、Pigment のような計画ツールのための、疎な多次元計算エンジンである。
+名前付きの軸を持つ **Metric** を単位に値を持ち、式は Excel のようにセルごとではなく Metric 全体に適用する。
+値のあるセルだけを保持し、入力を 1 セル変えたときは影響する範囲だけを計算し直す。
+
+大規模なモデルでも対話的な速さで応答することを目標にしている。
+たとえば社員 2 万人、商品 5 千、36 か月の損益計画（約 490 万セル、計算 Metric 18 個）では、全体の再計算が約 170 ms、給与や所属の変更は 1 ms 未満で反映される。
+
+## 使い始める
+
+Python 3.12 以上と、Rust のツールチェーン（cargo）を使う。
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install numpy maturin
+VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
+```
+
+最後の行で、Rust のエンジン（`nanashi_core`）をビルドして `.venv` に入れる。
+Rust のエンジンがなくても、参照実装のエンジンだけで動く。
+
+テストは次のように実行する。
+`SPARSE_ENGINE` で既定のエンジンを選ぶ（`reference` または `rust`）。
+
+```bash
+SPARSE_ENGINE=rust .venv/bin/python -m unittest discover -s tests -t .
+```
+
+損益計画と人員計画のサンプル（`examples/fpa.py`）は、ベンチマークも兼ねている。
+
+```bash
+.venv/bin/python -m examples.fpa --size small --show   # 主要な Metric を表示する
+.venv/bin/python -m examples.fpa --engine rust         # 規模ごとの時間を測る
+```
+
+## 最小の例
+
+```python
+from sparse_engine import Model
+from sparse_engine.rust_engine import RustEngine
+
+m = Model(engine=RustEngine())
+m.add_dimension("Employee", ["alice", "bob", "carol"])
+m.add_dimension("Department", ["営業", "開発"])
+m.add_dimension("Month", ["Jan", "Feb", "Mar"], ordered=True)
+
+m.add_input("Salary", ["Employee"], {("alice",): 50, ("bob",): 40, ("carol",): 60})
+m.add_input("DeptOf", ["Employee", "Month"],
+            {(e, t): d for e, d in [("alice", "営業"), ("bob", "営業"), ("carol", "開発")]
+             for t in ["Jan", "Feb", "Mar"]},
+            kind="member:Department")
+m.add_formula("Cost", ["Department", "Month"], "Salary[EXPAND: Month][BY SUM: Employee.DeptOf]")
+m.add_formula("Cash", ["Month"], "PREVIOUS(Month) + 500 - Cost[REMOVE SUM: Department]")
+
+m.set_cell("DeptOf", "開発", Employee="bob", Month="Mar")   # bob が 3 月に異動
+print(m.value("Cost").format(m.dimensions))
+```
+
+入力の Metric は `add_input`、式で決まる Metric は `add_formula` で登録する。
+Metric の軸と値の種類は登録時に決め、あとから変えない。
+値を読むと（`value`、`get`）、変更のあった範囲だけが計算し直される。
+
+## 式の言語
+
+式は Pigment に似た構文の文字列で書く。
+Python の DSL（`ref("Salary").by("Employee.Department")` など）でも同じ式を組み立てられる。
+
+| 分類 | 書き方 |
+|---|---|
+| 演算子 | `+ - * /`、比較 `= <> < <= > >=`、論理 `AND OR NOT`、単項の `-` |
+| 集計 | `X[BY SUM: Employee.Department]`、`X[REMOVE SUM: Product, Month]`（SUM、AVG、MIN、MAX、COUNT） |
+| 引き下ろし | `Rate[BY: Employee.Department]`（部署の値を社員へ配る） |
+| 切り口と絞り込み | `X[SELECT: Version."実績"]`、`X[SELECT: Month - 1]`、`X[FILTER: 条件]` |
+| 軸の追加 | `X[EXPAND: Month]`（全メンバーへ複製）、`X[ON: Y]`（Y に値があるセルへ配る） |
+| 関数 | `IF(条件, a[, b])`、`IFBLANK(x, 定数)`、`ISBLANK(x)`、`PREVIOUS(Month[, n])` |
+| メンバー | `Month`（各セルのメンバー）、`Month."Mar"`（メンバーの定数） |
+| 名前 | `Revenue`、`売上`、`'Unit Price'`（空白を含む名前） |
+
+`PREVIOUS(Month)` はその式を持つ Metric 自身の前月の値を指し、在庫や資金残高のような時間方向の積み上げを書ける。
+`Month <= Month."Mar"` のように軸をメンバーとして比べる式は、順序付きの軸では並び順で比べる。
+
+`BY` のプロパティには、軸の固定のプロパティのほかに、メンバー型の Metric も指定できる。
+`Salary[BY SUM: Employee.DeptOf]` は、社員ごと月ごとの所属（`DeptOf[Employee, Month]`）に従って部署別に集計する。
+これで異動のような時間で変わる階層を、入力の変更として扱える。
+
+### 型の検査
+
+各式の軸と値の種類は、実行前に検査する。
+値の種類は **number**、**boolean**、**member:<軸名>**（その軸のメンバー）の 3 種類である。
+存在しないメンバーの指定、順序のない軸での大小比較、軸の食い違いは、登録後の最初の計算でエラーになる。
+
+軸の違う Metric どうしを `+` でつなぐと、足りない軸へ値が暗黙に展開され、セル数が爆発しうる。
+そのため定数との演算を除き、`[EXPAND: 軸]` か `[ON: 相手]` で意図を明示しないとエラーにする。
+エラーメッセージは、直し方を式の構文で示す。
+
+## 空の扱い
+
+空のセル（値がないセル）は 0 と区別し、演算ごとに結果の範囲を決めている。
+
+| 演算 | 値が入るセル |
+|---|---|
+| `+ -` | どちらかに値があるセル（空は 0 として扱う） |
+| `* /` と比較 | 両方に値があるセル（0 除算は空） |
+| `AND OR` | 三値論理（`FALSE AND 空 = FALSE`、`TRUE AND 空 = 空`） |
+| `IF(c, a, b)` | c に値があるセルだけ（c が空なら空） |
+| `FILTER(x, c)` | x のうち c が TRUE のセル |
+| `IFBLANK`、`ISBLANK`、`EXPAND` | 対象の軸の全メンバー（密になる） |
+
+`IF` の条件が空のとき結果を空にしているのは、`IF` が条件より密にならないようにするためである。
+空を FALSE とみなしたいときは、`IF(IFBLANK(x > 0, FALSE), ...)` のように明示する。
+
+## 軸とメンバー
+
+軸のメンバーは、実行中に `add_member` で末尾に追加できる。
+新しいメンバーはどの Metric でも空で始まり、全メンバーへ値を広げる演算（定数との足し算、`IFBLANK`、引き下ろし、前月参照など）だけが新しいメンバーに値を作る。
+追加も入力の変更と同じく、影響する範囲だけを計算し直す。
+
+```python
+m.add_member("Employee", "dave")                         # どの Metric でも空で始まる
+m.set_cell("DeptOf", "開発", Employee="dave", Month="Mar")
+m.add_member("Month", "Apr")                             # 順序付きの軸は最後の時点の次に入る
+```
+
+軸にプロパティがあれば、`m.add_member("Product", "p9", Category="ハード")` のように追加と同時に値を設定できる。
+
+## 計画の入力
+
+計算 Metric を `add_formula(..., overridable=True)` で登録すると、`set_cell` で式の結果を手入力で上書きできる。
+上書きした値は式より優先され、下流の集計にもそのまま伝わる。
+`set_cell` で `None` を入れたセルは、式の結果に戻る。
+
+```python
+m.add_formula("Bonus", ["Employee"], "Salary * 0.1", overridable=True)
+m.set_cell("Bonus", 8, Employee="alice")   # alice だけ手入力
+```
+
+`spread` は、上位の合計値を入力 Metric の範囲へ配る。
+範囲は軸のメンバーと、「軸.プロパティ」の絞り込みで指定する。
+既定では今の値の比率で配り、値がなければ均等に配る（`how="even"` で常に均等）。
+
+```python
+m.spread("Budget", 12_000, Version="予算", Month="m01", where={"Product.Category": "ハード"})
+```
+
+## ホワットイフ分析
+
+`fork` はモデルを複製する。
+複製での入力、上書き、メンバーの追加は元のモデルに影響せず、元の変更も複製に影響しない。
+元の計画を壊さずに「値上げしたら利益はどうなるか」を試し、比べてから捨てられる。
+
+```python
+what_if = m.fork()
+what_if.set_cell("Salary", 70, Employee="alice")
+print(what_if.value("Cash").cells, m.value("Cash").cells)
+```
+
+Rust のエンジンでは格納データを共有し、書き換えた Metric だけを最初の書き込みのときに複製する。
+490 万セルのモデルの複製は 1 ms 未満で、複製側の最初の変更も 2 ms 程度で終わる。
+
+## 再計算の仕組み
+
+式を登録すると、Metric 単位の依存グラフから **計算計画** を作る。
+`PREVIOUS` による自己参照は依存グラフでは循環になるが、循環が必ず前の時点を通るときに限り、時間軸に沿って 1 時点ずつ計算する **scan** として扱う。
+それ以外の循環はエラーにする。
+
+入力を変えたときは、次の順で影響範囲だけを計算し直す。
+
+1. 変わったセルを **影響範囲**（軸ごとのメンバーの集合の直積）として記録する。
+2. 計算計画の順に、各 Metric の式から、値が変わりうる範囲を求める（集計なら所属先へ付け替え、前月参照なら 1 か月後ろへずらす）。
+3. その範囲だけを評価し、書き戻すときに新旧の値を比べる。実際に値が変わったセルだけを、下流への影響範囲にする。
+4. 値が変わらなければ、下流は計算し直さない。
+
+SUM と COUNT の集計は **差分集計** で更新する。
+集計元の変わった行について「変更前の寄与」を引き、「変更後の寄与」を足すので、集計元全体を読み直さずに済む。
+時間で変わる階層の BY でも、所属が変わった社員について古い所属での寄与を引き、新しい所属での寄与を足す。
+SUM が 0 なのか空なのかを区別するため、各グループの件数を裏で持つ。
+
+### エンジン
+
+格納と評価は **エンジン** に任せ、計算計画と影響範囲の伝搬は Python の Model が受け持つ。
+エンジンは 2 つある。
+
+- **参照実装**（`ReferenceEngine`）：Python の dict で持つ。正しさの基準で、テストで他のエンジンの結果と突き合わせる。
+- **Rust**（`RustEngine`、`native/`）：本番用。以下の工夫で、小さな変更を固定コストほぼなしで処理し、大きな再計算は並列に処理する。
+
+Rust のエンジンは、1 セルのキーを各軸のメンバー番号を詰めた 64 ビット整数で持つ。
+格納は、キー順に並んだ配列（本体）に、小さな書き換えを受ける B 木（差分）を重ねた形である。
+差分が本体の 1/8 を超えたら、本体にまとめ直す。
+キーの上位ビットには **分割軸** を置き、分割軸で絞った範囲は二分探索で読み書きできる。
+分割軸以外の軸で絞るときは、必要になったときに作る転置索引を使う。
+
+分割軸は Metric ごとに自動で選ぶ。
+各入力の 1 セルを変えたときの影響範囲を伝え、書き換えで触れる割合が最も小さい軸を選ぶ。
+`add_formula(..., partition="Month")` のように明示もできる。
+
+結合（`*`、比較、`ON`、`FILTER`、`IF` の分岐）では、先に評価した側が小さければ、もう片側の読み出しをその側に現れるメンバーに絞る（準結合による絞り込み）。
+全体の再計算では、互いに独立な Metric を並列に評価する。
+
+## 保存と読み込み
+
+```python
+m.save("plan/")                    # 定義は model.json、入力データは inputs.npz
+m2 = Model.load("plan/", RustEngine())
+```
+
+計算 Metric の値は保存せず、読み込み後の最初の再計算で求め直す。
+式は利用者が書いた元の文字列で保存する。
+
+## 性能
+
+Apple M4（10 コア、メモリ 16 GB）での、Rust エンジンの測定値である（5 回の中央値）。
+データは乱数で作ったもので、実行ごとに 2 割程度ばらつく。
+
+損益計画と人員計画（`examples/fpa.py`、計算 Metric 18 個）：
+
+| 規模 | 全セル数 | 全体の再計算 | 給与を 1 人変更 | 1 人を異動 | 社員を 1 人追加 | 締め月を 1 か月進める |
+|---|---|---|---|---|---|---|
+| 社員 2 千、商品 500 | 49 万 | 25 ms | 0.7 ms | 0.1 ms | 0.8 ms | 6.8 ms |
+| 社員 2 万、商品 5 千 | 490 万 | 168 ms | 0.7 ms | 0.2 ms | 0.7 ms | 66 ms |
+
+締め月を進めると、その月の全社員と全商品の見込みが実績に置き換わる。
+計算し直す量が変わる値の量（約 6 万セル）に比例するので、他の変更より時間がかかる。
+
+計算 Metric の数を増やしたモデル（`bench_metrics.py`）：
+
+| 計算 Metric 数 | 全セル数 | 全体の再計算 | 1 セルの変更（計算し直した Metric 数） |
+|---|---|---|---|
+| 300 | 2522 万 | 477 ms | 4.6 ms（95 個） |
+| 1000 | 7699 万 | 1,356 ms | 14.9 ms（394 個） |
+
+セル数を増やした小売モデル（`bench.py`、1756 万セル）では、全体の再計算が約 1.8 秒、1 セルの変更が 1 ms 未満、1 商品の価格の変更が約 17 ms（カテゴリの集計が全店舗と全月で変わる）である。
+
+## テストの方針
+
+テストは参照実装と Rust の両方で同じものを回す。
+中心になるのは、ランダムな変更（入力の変更、メンバーの追加、締め月の移動、異動）を数百回加えたあとに、次の 3 つが一致することを確かめるテストである。
+
+- 差分再計算の結果
+- 同じ入力から全体を計算し直した結果
+- 参照実装の結果（Rust のエンジンのとき）
+
+テスト自体がバグを検出できることは、影響範囲の伝搬や差分集計をわざと壊した実装でテストが失敗することで確かめている。
+Rust のエンジンは、並列化、差分のまとめ直し、準結合、転置索引の閾値を変えた設定でもテストを通す（`nanashi_core.set_par_min` などで変えられる）。
+
+## 構成
+
+| 場所 | 役割 |
+|---|---|
+| `sparse_engine/model.py` | Model。定義、計算計画、影響範囲の伝搬、差分集計、scan |
+| `sparse_engine/evaluate.py` | 型の検査、影響範囲、参照実装の評価器 |
+| `sparse_engine/parser.py` | 式の文字列の解析と、構文木から文字列への変換 |
+| `sparse_engine/delta.py` | 差分集計の対象になる式の判定 |
+| `sparse_engine/engine.py`、`rust_engine.py` | エンジンの差し替え口と、参照実装、Rust の橋渡し |
+| `sparse_engine/storage.py` | 保存と読み込み |
+| `native/` | Rust のエンジン（PyO3） |
+| `examples/fpa.py` | 損益計画と人員計画のサンプル |
+| `bench.py`、`bench_metrics.py` | ベンチマーク |
+
+## 制約と今後
+
+- メンバーの削除と名前の変更、順序付きの軸の途中への挿入には対応していない。
+- 同時編集とトランザクションはない（保存と読み込みだけがある）。
+- 影響範囲は軸ごとの集合の直積で持つので、離れた 2 セルの変更はそれらを囲む範囲に広がる。
+- 差分集計を続けると浮動小数点の誤差が積み上がる。`refresh()` で全体を計算し直すと誤差はなくなる。
+- 1000 Metric 規模の 1 セルの変更にかかる時間は、大半が Python 側の段取りである。これを Rust に移せば、さらに短くできる見込みがある。

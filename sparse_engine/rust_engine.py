@@ -15,8 +15,8 @@ import nanashi_core
 
 from .core import Cube
 from .evaluate import Catalog, infer
-from .expr import (BinOp, By, Const, Expand, Expr, Filter, If, IfBlank, IsBlank, Not, On, Ref,
-                   Remove, Select, Shift)
+from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
+                   IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
 
 class RustEngine:
@@ -29,6 +29,19 @@ class RustEngine:
         self._names: dict[int, str] = {}
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
         self._exprs: dict[int, tuple[Expr, Any, list[str]]] = {}  # id(式) -> (式, 変換結果, 読む名前)
+
+    def fork(self, cat: Catalog) -> RustEngine:
+        """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
+        other = RustEngine.__new__(RustEngine)
+        other.core = self.core.fork()
+        other._dims = {name: (cat.dimension(name), i) for name, (_, i) in self._dims.items()}
+        other._names = dict(self._names)
+        other._maps = dict(self._maps)
+        other._exprs = dict(self._exprs)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
+        return other
+
+    def share(self, store):
+        return self.core.share(store)
 
     # ------------------------------------------------ 名前 -> 番号
 
@@ -95,6 +108,10 @@ class RustEngine:
                 return ("ref", names.index(name))
             case Const(value):
                 return ("const", float(value), isinstance(value, bool))
+            case DimRef(dim):
+                return ("dimref", self._dim(cat, dim))
+            case Member(dim, member):  # 値はメンバーの番号（順序付きの軸では並び順で比べられる）
+                return ("const", float(cat.dimension(dim)._index[member]), False)
             case BinOp(op, left, right):
                 return ("bin", op, t(left), t(right))
             case Not(child):
@@ -105,6 +122,8 @@ class RustEngine:
                 return ("filter", t(child), t(cond))
             case On(child, other):
                 return ("on", t(child), t(other))
+            case Coalesce(first, second):
+                return ("coalesce", t(first), t(second))
             case Expand(child, dims):
                 return ("expand", t(child), [self._dim(cat, d) for d in dims])
             case IsBlank(child):
@@ -121,6 +140,8 @@ class RustEngine:
                 return ("remove", t(child), self._dim(cat, dim), agg)
             case Shift(child, dim, n):
                 return ("shift", t(child), self._dim(cat, dim), n)
+            case AsAxis(child, dim):
+                return ("asaxis", t(child), self._dim(cat, dim))
             case Select(child, dim, member):
                 return ("select", t(child), self._dim(cat, dim), cat.dimension(dim)._index[member])
         raise TypeError(e)
@@ -203,6 +224,13 @@ class RustEngine:
             return self.core.store_from(new, self._index(cat, dims, None))
         self.core.replace(store, self._region(cat, region), new)
         return store
+
+    def replace_diff(self, store, region, new, cat):
+        sets = self.core.replace_diff(store, self._region(cat, region), new)
+        if sets is None:
+            return store, None
+        dims = [self._names[i] for i in self.core.metric_dims(store)]
+        return store, {d: frozenset(cat.dimension(d).members[j] for j in ms) for d, ms in zip(dims, sets)}
 
     def _dims_of(self, handle) -> list[int]:
         if isinstance(handle, nanashi_core.StoreHandle):

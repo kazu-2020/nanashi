@@ -23,16 +23,22 @@ from __future__ import annotations
 
 import operator
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from itertools import product
-from typing import Iterator, Literal, Protocol
+from typing import Iterator, Protocol
 
 from .core import Cube, Dimension
-from .expr import (AGGREGATORS, ARITH, COMPARE, LOGIC, BinOp, By, Const, Expand, Expr, Filter,
-                   If, IfBlank, IsBlank, Not, On, Ref, Remove, Select, Shift)
+from .expr import (AGGREGATORS, ARITH, COMPARE, LOGIC, AsAxis, BinOp, By, Coalesce, Const, DimRef,
+                   Expand, Expr, Filter, If, IfBlank, IsBlank, Member, Not, On, Ref, Remove, Select,
+                   Shift)
 
 Restrict = dict[str, frozenset[str]]
-Kind = Literal["number", "boolean"]
+# "number" / "boolean"、または軸のメンバー "member:<軸名>"（式の途中だけで使い、Metric には格納しない）
+Kind = str
+
+
+def member_kind(dim: str) -> Kind:
+    return f"member:{dim}"
 
 
 class FormulaError(Exception):
@@ -80,6 +86,8 @@ def _need(t: Type, kind: Kind, what: str) -> None:
 def _agg_kind(agg: str, t: Type, what: str) -> Kind:
     if agg not in AGGREGATORS:
         raise FormulaError(f"未知の集計関数 {agg}")
+    if agg == "first":
+        return t.kind
     if agg != "count":
         _need(t, "number", f"{what} の {agg}")
     return "number"
@@ -96,10 +104,10 @@ def _check_expand(warnings: list[str], what: str, dims: tuple[str, ...],
     if not missing:
         return
     if own:
-        args = ", ".join(repr(d) for d in missing)
+        names = ", ".join(missing)
         raise FormulaError(
-            f"{what}（軸 {list(own)}）に {missing} 軸がない。全メンバーへ展開するなら "
-            f".expand({args})、相手に値があるセルだけなら .on(相手) を使う")
+            f"{what}（軸 {list(own)}）に {missing} 軸がない。全メンバーへ展開するなら [EXPAND: {names}]、"
+            f"相手に値があるセルだけなら [ON: 相手] を付ける（Python の DSL では .expand / .on）")
     warnings.append(f"{what}が {missing} 方向に全メンバーへ展開される（密化）")
 
 
@@ -112,6 +120,15 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
         case Const(value):
             return Type((), "boolean" if isinstance(value, bool) else "number")
 
+        case DimRef(dim):
+            cat.dimension(dim)
+            return Type((dim,), member_kind(dim))
+
+        case Member(dim, member):
+            if member not in cat.dimension(dim):
+                raise FormulaError(f'{dim}."{member}": {dim} にメンバー {member!r} がない')
+            return Type((), member_kind(dim))
+
         case BinOp(op, left, right):
             lt, rt = infer(left, cat, warnings), infer(right, cat, warnings)
             dims = _merge(lt.dims, rt.dims)
@@ -123,6 +140,13 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
                 if op in ("=", "<>"):
                     if lt.kind != rt.kind:
                         raise FormulaError(f"'{op}' の両辺の種類が違う: {lt.kind} と {rt.kind}")
+                elif lt.kind.startswith("member:") or rt.kind.startswith("member:"):
+                    # メンバーの大小は、順序付きの軸（時間など）で、並び順で比べる
+                    if lt.kind != rt.kind:
+                        raise FormulaError(f"'{op}' の両辺の種類が違う: {lt.kind} と {rt.kind}")
+                    d = lt.kind.removeprefix("member:")
+                    if not cat.dimension(d).ordered:
+                        raise FormulaError(f"'{op}': {d} は順序付きの軸ではないので大小を比べられない（= と <> は使える）")
                 else:
                     _need(lt, "number", f"'{op}' の左辺")
                     _need(rt, "number", f"'{op}' の右辺")
@@ -177,6 +201,12 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
             t, ot = infer(child, cat, warnings), infer(other, cat, warnings)
             return Type(_merge(t.dims, ot.dims), t.kind)
 
+        case Coalesce(first, second):
+            ft, st = infer(first, cat, warnings), infer(second, cat, warnings)
+            if set(ft.dims) != set(st.dims) or ft.kind != st.kind:
+                raise FormulaError(f"上書きの軸と種類が式と一致しない: {ft} と {st}")
+            return st
+
         case IsBlank(child):
             t = infer(child, cat, warnings)
             if t.dims:
@@ -212,6 +242,11 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
                 raise FormulaError(f"PREVIOUS {dim}: 順序付きの軸ではない")
             return t
 
+        case AsAxis(child, dim):
+            t = infer(child, cat, warnings)
+            _need(t, member_kind(dim), "対応表")
+            return Type(t.dims + (dim,), "number")
+
         case Select(child, dim, member):
             t = infer(child, cat, warnings)
             if dim not in t.dims:
@@ -229,6 +264,62 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
                 warnings.append(f"IFBLANK が {list(t.dims)} の全組み合わせに展開される（密化）")
             return t
     raise TypeError(expr)
+
+
+# ---------------------------------------------------------------- 名前の解決
+
+def resolve(expr: Expr, cat) -> Expr:
+    """式を評価できる形に直す。変わらなければ同じオブジェクトを返す
+    （エンジンが式の変換結果を同一性でキャッシュしているため）。
+
+    - 軸の名前を指す Ref を DimRef（各セルのメンバー）にする
+    - `X[BY agg: Employee.DeptOf]` で DeptOf がプロパティではなくメンバー型の Metric なら、
+      対応表（AsAxis）との結合と集計に書き換える。月ごとに変わる所属のような、時間で変わる階層を扱える
+    """
+    if isinstance(expr, Ref):
+        return DimRef(expr.name) if expr.name in cat.dimensions else expr
+    changes = {}
+    for f in fields(expr):
+        v = getattr(expr, f.name)
+        if isinstance(v, Expr):
+            r = resolve(v, cat)
+            if r is not v:
+                changes[f.name] = r
+    out = replace(expr, **changes) if changes else expr
+    if isinstance(out, By) and out.prop not in cat.dimension(out.dim).properties:
+        return _by_metric(out, cat)
+    return out
+
+
+def _by_metric(e: By, cat) -> Expr:
+    """`child[BY agg: D.V]`（V はメンバー型の Metric）を、既存の演算の組み合わせにする。
+
+    V の各セル（例: 社員 e・月 m）は、そのときの D のメンバー e の所属先 t を持つ。
+    AsAxis(V, T) はそれを「(e, m, t) の位置に 1 がある表」にしたもので、
+      集約:     child ⋈ 対応表 を D について集計する   -> D が T に置き換わる
+      引き下ろし: child ⋈ 対応表 から T を外す（各行の T は 1 つ） -> T が D（と V の軸）に置き換わる
+    """
+    if e.prop not in getattr(cat, "metrics", {}):
+        raise FormulaError(f"{e.dim} にプロパティ {e.prop} がなく、同じ名前の Metric もない")
+    vt = cat.metric_type(e.prop)
+    if not vt.kind.startswith("member:"):
+        raise FormulaError(f"BY {e.dim}.{e.prop}: {e.prop} はメンバー型の Metric ではない（{vt.kind}）")
+    target = vt.kind.removeprefix("member:")
+    if e.dim not in vt.dims:
+        raise FormulaError(f"BY {e.dim}.{e.prop}: {e.prop} の軸 {vt.dims} に {e.dim} がない")
+    ct = infer(e.child, cat, [])
+    edges = AsAxis(Ref(e.prop), target)
+    if e.dim in ct.dims:
+        if target in ct.dims:
+            raise FormulaError(f"BY {e.dim}.{e.prop}: 集約先の {target} がすでに軸にある")
+        if missing := [d for d in vt.dims if d not in ct.dims]:
+            raise FormulaError(f"BY {e.dim}.{e.prop}: 式が {e.prop} の軸 {missing} を持っていない")
+        return Remove(On(e.child, edges), e.dim, e.agg or "sum")
+    if target in ct.dims:
+        if e.agg is not None:
+            raise FormulaError(f"BY {e.dim}.{e.prop}: 引き下ろし（lookup）に集計関数は指定できない")
+        return Remove(On(e.child, edges), target, "first")
+    raise FormulaError(f"BY {e.dim}.{e.prop}: 式の軸 {ct.dims} に {e.dim} も {target} もない")
 
 
 # ---------------------------------------------------------------- 依存関係
@@ -251,7 +342,7 @@ def collect_refs(expr: Expr, cat: Catalog,
     match expr:
         case Ref(name):
             yield Edge(name, tuple(sorted(lags.items())), broken)
-        case Const():
+        case Const() | DimRef() | Member():
             return
         case BinOp(_, left, right):
             yield from collect_refs(left, cat, lags, broken)
@@ -260,10 +351,10 @@ def collect_refs(expr: Expr, cat: Catalog,
             for e in (cond, then, else_):
                 if e is not None:
                     yield from collect_refs(e, cat, lags, broken)
-        case Filter(child, cond) | On(child, cond):
+        case Filter(child, cond) | On(child, cond) | Coalesce(child, cond):
             yield from collect_refs(child, cat, lags, broken)
             yield from collect_refs(cond, cat, lags, broken)
-        case Not(child) | IsBlank(child) | IfBlank(child, _) | Expand(child, _):
+        case Not(child) | IsBlank(child) | IfBlank(child, _) | Expand(child, _) | AsAxis(child, _):
             yield from collect_refs(child, cat, lags, broken)
         case Shift(child, dim, n):
             yield from collect_refs(child, cat, {**lags, dim: lags.get(dim, 0) + n}, broken)
@@ -313,15 +404,17 @@ def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict],
     match expr:
         case Ref(name):
             return changed.get(name)
-        case Const():
+        case Const() | Member():
             return None
+        case DimRef(dim):
+            return grow(None, [dim])  # 追加したメンバーのセルが増える
         case BinOp(op, left, right):
             r = union_region(af(left), af(right))
             if added and op in ("+", "-", "and", "or"):
                 ld, rd = infer(left, cat, []).dims, infer(right, cat, []).dims
                 r = grow(r, [d for d in _merge(ld, rd) if d not in ld or d not in rd])
             return r
-        case Filter(left, right) | On(left, right):
+        case Filter(left, right) | On(left, right) | Coalesce(left, right):
             return union_region(af(left), af(right))
         case If(cond, then, else_):
             r = union_region(af(cond), af(then))
@@ -333,7 +426,7 @@ def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict],
                 dims = _merge(cd, *branches)
                 r = grow(r, [d for d in dims if any(d not in _merge(cd, b) for b in branches)])
             return r
-        case Not(child):
+        case Not(child) | AsAxis(child, _):
             return af(child)
         case IsBlank(child) | IfBlank(child, _):
             r = af(child)
@@ -475,6 +568,13 @@ def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube
         case Const(value):
             return Cube((), {(): value})
 
+        case DimRef(dim):
+            index = cat.dimension(dim)._index
+            return Cube((dim,), {(m,): float(index[m]) for m in _members(cat, dim, restrict)})
+
+        case Member(dim, member):
+            return Cube((), {(): float(cat.dimension(dim)._index[member])})
+
         case BinOp(op, left, right):
             l = evaluate(left, cat, restrict)
             r = evaluate(right, cat, restrict)
@@ -514,6 +614,10 @@ def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube
             return _intersect(evaluate(child, cat, restrict), evaluate(other, cat, restrict),
                               lambda v, _: v)
 
+        case Coalesce(first, second):
+            f, sc = evaluate(first, cat, restrict), evaluate(second, cat, restrict)
+            return Cube(sc.dims, sc.cells | f.reorder(sc.dims).cells)
+
         case IsBlank(child):
             c = evaluate(child, cat, restrict)
             return Cube(c.dims, {k: k not in c.cells for k in _dense(c.dims, cat, restrict)})
@@ -551,6 +655,12 @@ def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube
             cells = {k[:i] + (s,) + k[i + 1:]: v
                      for k, v in c.cells.items() for s in fanout.get(k[i], ())}
             return Cube(_replace(c.dims, target, dim), cells)
+
+        case AsAxis(child, dim):
+            c = evaluate(child, cat, _without(restrict, dim))
+            members = cat.dimension(dim).members
+            cells = {k + (members[int(v)],): 1.0 for k, v in c.cells.items()}
+            return _filter(Cube(c.dims + (dim,), cells), restrict)
 
         case Select(child, dim, member):
             c = evaluate(child, cat, {**(restrict or {}), dim: frozenset([member])})
