@@ -17,6 +17,23 @@ pub(crate) fn b2f(x: bool) -> f64 {
     }
 }
 
+/// 同じ詰め方で差分のない格納データどうしの INNER JOIN（A * B、A > B など）。どちらの本体も
+/// Cube に写さずに、キーの順に突き合わせる。当てはまらなければ None。
+fn join_stores(op: Op, l: &Node, rt: &Node, src: &[Src], r: &Restrict) -> Option<Cube> {
+    let kind = match op {
+        Op::Mul | Op::Div => Kind::Num,
+        Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => Kind::Bool,
+        _ => return None,
+    };
+    let (Node::Ref(i), Node::Ref(j)) = (l, rt) else { return None };
+    let (Src::Store(a), Src::Store(b)) = (&src[*i], &src[*j]) else { return None };
+    if !r.is_all() || a.pack != b.pack || a.base_rows().is_none() || b.base_rows().is_none() {
+        return None;
+    }
+    let cells = merge_sorted(&**a, &**b, false, |x, y| scalar(op, x.unwrap(), y.unwrap()));
+    Some(Cube { pack: a.pack.clone(), kind, cells })
+}
+
 pub(crate) fn scalar(op: Op, a: f64, b: f64) -> Option<f64> {
     match op {
         Op::Add => Some(a + b),
@@ -89,6 +106,9 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         Node::By { .. } | Node::ByMetric { .. } => Err("型を決めていない式は評価できない".into()),
 
         Node::Bin(op, l, rt, _) => {
+            if let Some(c) = join_stores(*op, l, rt, src, r) {
+                return Ok(c);
+            }
             let a = ev(l)?;
             let b = match op {
                 // INNER JOIN の演算は、左が小さければ右を左のメンバーに絞って評価する

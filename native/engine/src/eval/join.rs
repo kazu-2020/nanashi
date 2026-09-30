@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use std::borrow::Cow;
 
 pub(crate) fn merge(a: &[DimId], b: &[DimId]) -> Vec<DimId> {
     let mut out = a.to_vec();
@@ -9,43 +10,74 @@ pub(crate) fn merge(a: &[DimId], b: &[DimId]) -> Vec<DimId> {
     out
 }
 
+/// キーの昇順に並び、番号で読めるセルの列。Cube のセルのほか、差分のない格納データの本体を写さずに読む。
+pub(crate) trait Cells {
+    fn n(&self) -> usize;
+    fn at(&self, i: usize) -> (u64, f64);
+}
+
+impl Cells for [(u64, f64)] {
+    #[inline]
+    fn n(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn at(&self, i: usize) -> (u64, f64) {
+        self[i]
+    }
+}
+
+impl Cells for Store {
+    #[inline]
+    fn n(&self) -> usize {
+        self.base_rows().expect("差分のある格納データは番号で読めない")
+    }
+
+    #[inline]
+    fn at(&self, i: usize) -> (u64, f64) {
+        self.base_cell(i)
+    }
+}
+
 /// 並んだ 2 つのセル列を突き合わせる（sort-merge）。outer なら片側だけのキーも f に None を渡して残す。
-pub(crate) fn merge_sorted(
-    a: &[(u64, f64)],
-    b: &[(u64, f64)],
+pub(crate) fn merge_sorted<A: Cells + ?Sized, B: Cells + ?Sized>(
+    a: &A,
+    b: &B,
     outer: bool,
     f: impl Fn(Option<f64>, Option<f64>) -> Option<f64>,
 ) -> Vec<(u64, f64)> {
-    let mut out = Vec::with_capacity(if outer { a.len() + b.len() } else { a.len().min(b.len()) });
+    let (an, bn) = (a.n(), b.n());
+    let mut out = Vec::with_capacity(if outer { an + bn } else { an.min(bn) });
     let mut push = |k: u64, x: Option<f64>| {
         if let Some(x) = x {
             out.push((k, x));
         }
     };
     let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        let (x, y) = (a[i].0, b[j].0);
+    while i < an && j < bn {
+        let ((x, xv), (y, yv)) = (a.at(i), b.at(j));
         if x == y {
-            push(x, f(Some(a[i].1), Some(b[j].1)));
+            push(x, f(Some(xv), Some(yv)));
             i += 1;
             j += 1;
         } else if x < y {
             if outer {
-                push(x, f(Some(a[i].1), None));
+                push(x, f(Some(xv), None));
             }
             i += 1;
         } else {
             if outer {
-                push(y, f(None, Some(b[j].1)));
+                push(y, f(None, Some(yv)));
             }
             j += 1;
         }
     }
     if outer {
-        for &(k, v) in &a[i..] {
+        for (k, v) in (i..an).map(|i| a.at(i)) {
             push(k, f(Some(v), None));
         }
-        for &(k, v) in &b[j..] {
+        for (k, v) in (j..bn).map(|j| b.at(j)) {
             push(k, f(None, Some(v)));
         }
     }
@@ -55,6 +87,15 @@ pub(crate) fn merge_sorted(
 pub(crate) fn sorted(cfg: &Config, mut cells: Vec<(u64, f64)>) -> Vec<(u64, f64)> {
     sort_cells(cfg, &mut cells);
     cells
+}
+
+/// セルをキーの昇順に。すでに並んでいれば（格納データから読んだセルなど）写さずに借りる。
+pub(crate) fn in_order<'a>(cfg: &Config, cells: &'a [(u64, f64)]) -> Cow<'a, [(u64, f64)]> {
+    if cells.windows(2).all(|w| w[0].0 < w[1].0) {
+        Cow::Borrowed(cells)
+    } else {
+        Cow::Owned(sorted(cfg, cells.to_vec()))
+    }
 }
 
 /// INNER JOIN。両側に値があるセルだけ結果を持つ。f が None を返したセルは空。
@@ -73,8 +114,9 @@ pub(crate) fn intersect(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, f: impl F
     }
     // 同じ軸どうしなら、並べて突き合わせる
     if same_set(a.dims(), b.dims()) {
-        let (x, y) = (sorted(cfg, a.cells.clone()), sorted(cfg, b.repack(cfg, &a.pack).cells));
-        let cells = merge_sorted(&x, &y, false, |p, q| f(p.unwrap(), q.unwrap()));
+        let x = in_order(cfg, &a.cells);
+        let y = if b.pack == a.pack { in_order(cfg, &b.cells) } else { Cow::Owned(sorted(cfg, b.repack(cfg, &a.pack).cells)) };
+        let cells = merge_sorted(&*x, &*y, false, |p, q| f(p.unwrap(), q.unwrap()));
         return Ok(Cube { pack: a.pack.clone(), kind, cells });
     }
 
@@ -159,7 +201,7 @@ pub(crate) fn product(pack: &Packing, spans: &[(usize, Vec<u32>)]) -> Vec<u64> {
 /// FULL OUTER JOIN（両側とも同じ詰め方）。片側だけのセルは f に None を渡す。
 pub(crate) fn union(cfg: &Config, a: Cube, b: Cube, kind: Kind, f: impl Fn(Option<f64>, Option<f64>) -> Option<f64>) -> Cube {
     let (x, y) = (sorted(cfg, a.cells), sorted(cfg, b.cells));
-    Cube { pack: a.pack, kind, cells: merge_sorted(&x, &y, true, f) }
+    Cube { pack: a.pack, kind, cells: merge_sorted(&x[..], &y[..], true, f) }
 }
 
 /// c に現れるメンバーだけに各軸を絞った範囲。c が大きければ None（絞っても得をしない）。

@@ -354,7 +354,7 @@ impl Store {
                     kept.push((k, v))
                 }
             });
-            self.set_sorted(merge_sorted(&kept, &new, true, |a, b| b.or(a)));
+            self.set_sorted(merge_sorted(&kept[..], &new[..], true, |a, b| b.or(a)));
             return;
         }
         for &k in old {
@@ -375,10 +375,7 @@ impl Store {
         let mut old = Vec::new();
         self.for_each_in(r, |k, v| old.push((k, v)));
         let new = Cube { pack: self.pack.clone(), kind: new.kind, cells: sorted(&self.cfg, new.repack(&self.cfg, &self.pack).cells) };
-        let changed: Vec<u64> = merge_sorted(&old, &new.cells, true, |a, b| (a != b).then_some(0.0))
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect();
+        let changed = changed_keys(&old[..], &new.cells);
         // 書き戻し。変更前のキーは上で集めたので、消すためにもう一度走査しない
         if r.is_all() {
             self.set_sorted(new.cells);
@@ -395,11 +392,14 @@ impl Store {
         if !same_set(new.dims(), &self.metric_dims) {
             return Err("書き戻す結果の軸が Metric の軸と一致しない".into());
         }
-        let mut old = Vec::with_capacity(self.base.keys.len() + self.delta.len());
-        self.merged(0, None, |k, v| old.push((k, v)));
         let cells = sorted(&self.cfg, new.repack(&self.cfg, &self.pack).cells);
-        let changed: Vec<u64> =
-            merge_sorted(&old, &cells, true, |a, b| (a != b).then_some(0.0)).into_iter().map(|(k, _)| k).collect();
+        let changed = if self.base_rows().is_some() {
+            changed_keys(self, &cells) // 差分がなければ、本体を写さずに突き合わせる
+        } else {
+            let mut old = Vec::with_capacity(self.base.keys.len() + self.delta.len());
+            self.merged(0, None, |k, v| old.push((k, v)));
+            changed_keys(&old[..], &cells)
+        };
         let mut out = self.empty_like();
         out.set_sorted(cells);
         let sets = self.region_of(&changed);
@@ -702,4 +702,9 @@ impl Store {
 
 pub(crate) fn same_set(a: &[DimId], b: &[DimId]) -> bool {
     a.len() == b.len() && a.iter().all(|d| b.contains(d))
+}
+
+/// 並んだ 2 つのセル列で、値が違うか片側にしかないキー。
+fn changed_keys<A: Cells + ?Sized>(old: &A, new: &[(u64, f64)]) -> Vec<u64> {
+    merge_sorted(old, new, true, |a, b| (a != b).then_some(0.0)).into_iter().map(|(k, _)| k).collect()
 }
