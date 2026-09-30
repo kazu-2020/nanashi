@@ -344,6 +344,28 @@ impl Core {
         Arc::make_mut(&mut store.borrow_mut().store).write(&key, value);
     }
 
+    /// まとめて書き込む。cols は宣言した軸の順の、軸ごとのメンバー番号の列、values の None は消す。
+    /// 同じセルが複数あれば後のものが勝つ。GIL を外して行う。
+    fn write_many(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, cols: Vec<Vec<u32>>, values: Vec<Option<f64>>) -> PyResult<()> {
+        let mut s = store.borrow().store.clone();
+        if cols.len() != s.metric_dims.len() || cols.iter().any(|c| c.len() != values.len()) {
+            return Err(PyValueError::new_err("列の数か長さが格納データの軸と合わない"));
+        }
+        for (c, &d) in cols.iter().zip(&s.metric_dims) {
+            let size = self.cat.dims[d].size;
+            if let Some(&m) = c.iter().find(|&&m| m >= size) {
+                return Err(PyValueError::new_err(format!("メンバー番号 {m} が軸の大きさ {size} を超える")));
+            }
+        }
+        let s = py.detach(move || {
+            let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
+            Arc::make_mut(&mut s).write_many(&slices, &values);
+            s
+        });
+        store.borrow_mut().store = s;
+        Ok(())
+    }
+
     /// 1 セルの値（宣言した軸の順のメンバー番号）。空なら None。格納データ全体を読まない。
     fn get(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>) -> Option<f64> {
         store.borrow().store.get(&key)

@@ -841,9 +841,11 @@ impl Store {
     }
 
     /// まとめて書き込む。cols は宣言した軸の順のメンバー番号の列、values の None は消す。
-    /// 同じセルが複数あれば後のものが勝つ。件数が多ければ、差分に 1 件ずつ入れずに本体を作り直す。
+    /// 同じセルが複数あれば後のものが勝つ。差分に入れると本体にまとめ直すことになる量なら
+    /// （write_back と同じ基準）、差分に 1 件ずつ入れずに本体を作り直す。
     pub fn write_many(&mut self, cols: &[&[u32]], values: &[Option<f64>]) {
-        if values.len() < 1024 {
+        let limit = COMPACT_MIN.load(Ordering::Relaxed).max(self.base.keys.len() / 8);
+        if self.delta.len() + values.len() <= limit {
             let mut key = vec![0; cols.len()];
             for (i, v) in values.iter().enumerate() {
                 for (k, c) in key.iter_mut().zip(cols) {
