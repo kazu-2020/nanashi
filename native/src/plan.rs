@@ -7,7 +7,7 @@
 
 use crate::core::{eval, Agg, Catalog, Cube, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store, PAR_MIN};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // ------------------------------------------------------------------ 影響範囲
@@ -533,6 +533,9 @@ struct Run<'a> {
     log: Log,
 }
 
+/// テスト用に、この番号の Metric を書き戻すところで失敗させる（-1 は失敗させない、-2 - m は panic させる）。
+pub static FAIL_AT: AtomicIsize = AtomicIsize::new(-1);
+
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
 /// forced は定義を変えたので必ず計算し直す計算 Metric の範囲。stores と counts（Metric の番号順）は
 /// その場で書き換える。
@@ -703,6 +706,11 @@ impl<'a> Run<'a> {
     /// 計算した値を書き戻し、値が実際に変わったセルの範囲を下流への影響範囲にする。
     fn apply(&mut self, done: Done) -> Result<()> {
         let Done { m, region, delta, value, count, old } = done;
+        match FAIL_AT.load(Ordering::Relaxed) {
+            f if f == m as isize => return Err(format!("書き戻しの失敗（テスト用、Metric {m}）")),
+            f if f == -2 - m as isize => panic!("書き戻しの panic（テスト用、Metric {m}）"),
+            _ => {}
+        }
         let r = region.restrict(self.cat);
         let sets = match value {
             Write::Whole(store, sets) => {

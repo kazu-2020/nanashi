@@ -1401,9 +1401,18 @@ class Model:
     # ------------------------------------------------ 再計算
 
     def recalc(self) -> None:
+        """ためている変更を計算に反映する。途中で失敗したら（式のエラー、エンジンの内部エラー）、
+        途中まで書き換えた計算 Metric が残るので、次の recalc で全体を計算し直す（入力は書き換えない）。"""
         self._compile()
         if self._pending.empty():
             return
+        try:
+            self._recalc_pending()
+        except BaseException:
+            self._pending.full = True
+            raise
+
+    def _recalc_pending(self) -> None:
         full, self._pending.full = self._pending.full, False
         added = {d: frozenset(ms) for d, ms in self._pending.added.items()}
         self._pending.added.clear()

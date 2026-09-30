@@ -12,7 +12,7 @@ use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node,
 use crate::plan::{Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBool, PyBytes, PyInt, PyIterator, PyList, PyTuple};
@@ -50,19 +50,34 @@ fn kind_to(kind: &TKind) -> (String, i64) {
     }
 }
 
-fn mapping(dst_size: u32, fwd: Vec<i64>) -> Mapping {
+fn mapping(dst_size: u32, fwd: Vec<i64>) -> PyResult<Mapping> {
     let mut inv = vec![Vec::new(); dst_size as usize];
     for (s, &t) in fwd.iter().enumerate() {
+        if t >= dst_size as i64 || t < -1 {
+            return Err(err(format!("対応先のメンバー番号 {t} が軸の大きさ {dst_size} の範囲にない")));
+        }
         if t >= 0 {
             inv[t as usize].push(s as u32);
         }
     }
-    Mapping { fwd, inv }
+    Ok(Mapping { fwd, inv })
+}
+
+/// ハンドルの格納データ（参照を 1 つ増やす）。別のスレッドが書き換えている途中なら RuntimeError。
+fn read(h: &Bound<'_, StoreHandle>) -> PyResult<Arc<Store>> {
+    Ok(h.try_borrow().map_err(busy)?.store.clone())
+}
+
+/// ハンドルの格納データを差し替える。別のスレッドが使っている途中なら RuntimeError。
+fn put(h: &Bound<'_, StoreHandle>, s: Arc<Store>) -> PyResult<()> {
+    h.try_borrow_mut().map_err(busy)?.store = s;
+    Ok(())
 }
 
 #[pyclass(frozen)]
 struct Expr {
     node: Arc<Node>,
+    refs: usize, // 読み出し元の数（Ref の番号はこれより小さい）
 }
 
 #[pyclass(frozen)]
@@ -93,24 +108,99 @@ fn formula(obj: &Bound<'_, PyAny>) -> PyResult<Option<Formula>> {
     }
     let t = obj.cast::<PyTuple>()?;
     let e = t.get_item(0)?;
-    let node = e.cast::<Expr>()?.get().node.clone();
-    Ok(Some(Formula { node, refs: t.get_item(1)?.extract()? }))
+    let e = e.cast::<Expr>()?.get();
+    let refs: Vec<usize> = t.get_item(1)?.extract()?;
+    if refs.len() != e.refs {
+        return Err(err(format!("読み出す Metric の数 {} が式の読み出し元の数 {} と合わない", refs.len(), e.refs)));
+    }
+    Ok(Some(Formula { node: e.node.clone(), refs }))
+}
+
+/// 計算計画の式が読む Metric の番号が、どれも n より小さいか。
+fn check_refs<'a>(formulas: impl Iterator<Item = &'a Option<Formula>>, n: usize) -> PyResult<()> {
+    match formulas.flatten().flat_map(|f| &f.refs).find(|&&i| i >= n) {
+        Some(i) => Err(err(format!("式が読む Metric の番号 {i} がない（Metric は {n} 個）"))),
+        None => Ok(()),
+    }
 }
 
 type Region = Vec<(DimId, Vec<u32>)>;
 
+/// rows_in の結果（軸ごとのメンバー番号の列、値の列、真偽値か、範囲の全行数）。
+type Page = (Vec<Vec<u32>>, Vec<f64>, bool, usize);
+
+impl Expr {
+    fn sources(&self, n: usize) -> PyResult<()> {
+        if n != self.refs {
+            return Err(err(format!("読み出し元の数 {n} が式の読み出し元の数 {} と合わない", self.refs)));
+        }
+        Ok(())
+    }
+}
+
 impl Core {
-    fn restrict(&self, region: &Region) -> Restrict {
+    fn restrict(&self, region: &Region) -> PyResult<Restrict> {
         let mut r = Restrict::all(self.cat.dims.len());
         for (d, ms) in region {
+            self.members(*d, ms)?;
             r = r.with(*d, Sel::new(ms.clone(), self.cat.dims[*d].size));
         }
-        r
+        Ok(r)
+    }
+
+    fn dim(&self, d: DimId) -> PyResult<()> {
+        if d >= self.cat.dims.len() {
+            return Err(err(format!("軸の番号 {d} がない（軸は {} 個）", self.cat.dims.len())));
+        }
+        Ok(())
+    }
+
+    fn dims(&self, ds: &[DimId]) -> PyResult<()> {
+        ds.iter().try_for_each(|&d| self.dim(d))
+    }
+
+    /// 軸 d のメンバー番号の列 ms が、どれも軸の大きさより小さいか。
+    fn members(&self, d: DimId, ms: &[u32]) -> PyResult<()> {
+        self.dim(d)?;
+        let size = self.cat.dims[d].size;
+        match ms.iter().find(|&&m| m >= size) {
+            Some(m) => Err(err(format!("軸 {} のメンバー番号 {m} が軸の大きさ {size} を超える", self.cat.dims[d].name))),
+            None => Ok(()),
+        }
+    }
+
+    /// 宣言した軸 dims の順の、軸ごとのメンバー番号の列 cols が、長さ n でそろい、範囲に収まるか。
+    fn columns(&self, dims: &[DimId], cols: &[&[u32]], n: usize) -> PyResult<()> {
+        if cols.len() != dims.len() || cols.iter().any(|c| c.len() != n) {
+            return Err(err(format!("列の数（{}）か長さが、軸の数（{}）と値の数（{n}）に合わない", cols.len(), dims.len())));
+        }
+        dims.iter().zip(cols).try_for_each(|(&d, c)| self.members(d, c))
+    }
+
+    /// 格納データの 1 セルのキー（宣言した軸の順のメンバー番号）が、軸の数と大きさに合うか。
+    fn key(&self, s: &Store, key: &[u32]) -> PyResult<()> {
+        if key.len() != s.metric_dims.len() {
+            return Err(err(format!("キーの長さ {} が軸の数 {} と合わない", key.len(), s.metric_dims.len())));
+        }
+        s.metric_dims.iter().zip(key).try_for_each(|(&d, &m)| self.members(d, &[m]))
+    }
+
+    fn added(&self, added: &[(DimId, Vec<u32>)]) -> PyResult<()> {
+        added.iter().try_for_each(|(d, ms)| self.members(*d, ms))
+    }
+
+    /// 計算計画の Metric の番号 m の範囲。
+    fn reg(&self, plan: &Plan, m: usize, r: Region) -> PyResult<(usize, Reg)> {
+        if m >= plan.metrics.len() {
+            return Err(err(format!("Metric の番号 {m} が計算計画にない")));
+        }
+        r.iter().try_for_each(|(d, ms)| self.members(*d, ms))?;
+        Ok((m, Reg::new(r)))
     }
 
     fn source(obj: &Bound<'_, PyAny>) -> PyResult<Src> {
         if let Ok(s) = obj.cast::<StoreHandle>() {
-            return Ok(Src::Store(s.borrow().store.clone()));
+            return Ok(Src::Store(s.try_borrow().map_err(busy)?.store.clone()));
         }
         if let Ok(c) = obj.cast::<CubeHandle>() {
             return Ok(Src::Cube(c.get().cube.clone()));
@@ -123,6 +213,57 @@ impl Core {
             Src::Store(s) => Ok(Arc::new(s.as_cube())),
             Src::Cube(c) => Ok(c),
         }
+    }
+
+    /// Python から受け取った式の軸、対応表、読み出し元の番号が、どれも範囲にあるか。
+    fn check_node(&self, n: &Node, refs: usize) -> PyResult<()> {
+        let map = |m: usize| if m < self.cat.maps.len() { Ok(()) } else { Err(err(format!("対応表の番号 {m} がない"))) };
+        match n {
+            Node::Ref(i) | Node::ByMetric { metric: i, .. } if *i >= refs => {
+                return Err(err(format!("読み出し元の番号 {i} がない（読み出し元は {refs} 個）")))
+            }
+            Node::Ref(_) | Node::Const(..) => {}
+            Node::DimRef(d) => self.dim(*d)?,
+            Node::MemberConst(d, m) => self.members(*d, &[*m])?,
+            Node::Bin(_, a, b, ds) | Node::If(a, b, None, ds) => {
+                self.dims(ds)?;
+                self.check_node(a, refs)?;
+                self.check_node(b, refs)?;
+            }
+            Node::If(a, b, Some(c), ds) => {
+                self.dims(ds)?;
+                self.check_node(a, refs)?;
+                self.check_node(b, refs)?;
+                self.check_node(c, refs)?;
+            }
+            Node::Filter(a, b) | Node::On(a, b) | Node::Coalesce(a, b) => {
+                self.check_node(a, refs)?;
+                self.check_node(b, refs)?;
+            }
+            Node::Not(c) => self.check_node(c, refs)?,
+            Node::Expand(c, ds) | Node::IsBlank(c, ds) | Node::IfBlank(c, _, _, ds) => {
+                self.dims(ds)?;
+                self.check_node(c, refs)?;
+            }
+            Node::By { child, src, dst, map: m, .. } | Node::ByAgg { child, src, dst, map: m, .. } | Node::ByLookup { child, src, dst, map: m } => {
+                self.dims(&[*src, *dst])?;
+                map(*m)?;
+                self.check_node(child, refs)?;
+            }
+            Node::ByMetric { child, src, .. } => {
+                self.dim(*src)?;
+                self.check_node(child, refs)?;
+            }
+            Node::Remove { child, dim, .. } | Node::Shift { child, dim, .. } | Node::AsAxis { child, dim } => {
+                self.dim(*dim)?;
+                self.check_node(child, refs)?;
+            }
+            Node::Select { child, dim, member, .. } => {
+                self.members(*dim, &[*member])?;
+                self.check_node(child, refs)?;
+            }
+        }
+        Ok(())
     }
 
     fn node(&self, t: &Bound<'_, PyAny>) -> PyResult<Node> {
@@ -228,8 +369,8 @@ impl Core {
     }
 
     /// 同じ中身を指す別のハンドル。どちらかに書き込むと、そのときに中身が複製される。
-    fn share(&self, store: &Bound<'_, StoreHandle>) -> StoreHandle {
-        StoreHandle { store: store.borrow().store.clone() }
+    fn share(&self, store: &Bound<'_, StoreHandle>) -> PyResult<StoreHandle> {
+        Ok(StoreHandle { store: read(store)? })
     }
 
     fn add_dim(&mut self, size: u32, ordered: bool, name: String) -> usize {
@@ -239,45 +380,56 @@ impl Core {
     }
 
     /// 軸のメンバー数を変える（メンバーの追加と削除）。
-    fn resize_dim(&mut self, dim: DimId, size: u32) {
+    fn resize_dim(&mut self, dim: DimId, size: u32) -> PyResult<()> {
+        self.dim(dim)?;
         Arc::make_mut(&mut self.cat).dims[dim].size = size;
+        Ok(())
     }
 
     /// 格納データから軸 dim のメンバー m を消し、後ろの番号を詰める（values なら値の番号も）。
-    fn remove_member(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, dim: DimId, m: u32, values: bool) {
-        let mut handle = store.borrow_mut();
+    fn remove_member(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, dim: DimId, m: u32, values: bool) -> PyResult<()> {
+        self.dim(dim)?; // 軸は先に縮めてあるので、m は今の大きさと等しくてよい（範囲の外は何も消さない）
+        let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
         py.detach(|| target.remove_member(dim, m, values));
+        Ok(())
     }
 
     /// 値が value のセルを消す。
-    fn drop_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) {
-        let mut handle = store.borrow_mut();
+    fn drop_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) -> PyResult<()> {
+        let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
         py.detach(|| target.drop_value(value));
+        Ok(())
     }
 
     /// 値が value のセルを囲む範囲（軸ごとのメンバー番号）。なければ None。
-    fn region_of_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) -> Option<Vec<Vec<u32>>> {
-        let s = store.borrow().store.clone();
-        py.detach(move || s.region_of_value(value))
+    fn region_of_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) -> PyResult<Option<Vec<Vec<u32>>>> {
+        let s = read(store)?;
+        Ok(py.detach(move || s.region_of_value(value)))
     }
 
     /// src のメンバー番号 -> dst のメンバー番号（なければ -1）の対応を登録する。
-    fn add_mapping(&mut self, dst_size: u32, fwd: Vec<i64>) -> usize {
+    fn add_mapping(&mut self, dst_size: u32, fwd: Vec<i64>) -> PyResult<usize> {
+        let m = mapping(dst_size, fwd)?;
         let cat = Arc::make_mut(&mut self.cat);
-        cat.maps.push(Arc::new(mapping(dst_size, fwd)));
-        cat.maps.len() - 1
+        cat.maps.push(Arc::new(m));
+        Ok(cat.maps.len() - 1)
     }
 
     /// 登録済みの対応を置き換える（メンバーの追加やプロパティの設定のあと）。番号は変わらない。
-    fn set_mapping(&mut self, id: usize, dst_size: u32, fwd: Vec<i64>) {
-        Arc::make_mut(&mut self.cat).maps[id] = Arc::new(mapping(dst_size, fwd));
+    fn set_mapping(&mut self, id: usize, dst_size: u32, fwd: Vec<i64>) -> PyResult<()> {
+        if id >= self.cat.maps.len() {
+            return Err(err(format!("対応表の番号 {id} がない")));
+        }
+        let m = mapping(dst_size, fwd)?;
+        Arc::make_mut(&mut self.cat).maps[id] = Arc::new(m);
+        Ok(())
     }
 
     /// メンバーが増えてキーのビット幅に収まらなくなった格納データを詰め直す。収まるなら None。
     fn fit(&self, store: &Bound<'_, StoreHandle>) -> PyResult<Option<StoreHandle>> {
-        let s = &store.borrow().store;
+        let s = &read(store)?;
         if s.pack.fits(&self.cat) {
             return Ok(None);
         }
@@ -296,6 +448,15 @@ impl Core {
         types: Vec<(Vec<DimId>, String, i64)>,
     ) -> PyResult<(Expr, Vec<DimId>, String, i64, Vec<String>)> {
         let mut node = self.node(tree)?;
+        self.check_node(&node, types.len())?;
+        types.iter().try_for_each(|(dims, _, d)| {
+            self.dims(dims)?;
+            if *d >= 0 {
+                self.dim(*d as usize)?;
+            }
+            Ok::<(), PyErr>(())
+        })?;
+        let refs = types.len();
         let types: Vec<Ty> = types
             .into_iter()
             .map(|(dims, kind, d)| Ty { dims, kind: kind_from(&kind, d) })
@@ -305,24 +466,29 @@ impl Core {
         let mut warnings = Vec::new();
         let ty = check::infer(&mut node, &env, &mut warnings).map_err(err)?;
         let (kind, d) = kind_to(&ty.kind);
-        Ok((Expr { node: Arc::new(node) }, ty.dims, kind, d, warnings))
+        Ok((Expr { node: Arc::new(node), refs }, ty.dims, kind, d, warnings))
     }
 
     /// 型を決めた式の結果のセル数の見積もり（上限）。refs は Ref の番号ごとの (軸, セル数)。
     fn estimate(&self, expr: &Expr, refs: Vec<(Vec<DimId>, f64)>) -> PyResult<f64> {
+        expr.sources(refs.len())?;
+        refs.iter().try_for_each(|(ds, _)| self.dims(ds))?;
         Ok(check::estimate(&expr.node, &self.cat, &refs).map_err(err)?.1)
     }
 
     #[pyo3(signature = (dims, index, is_bool))]
     fn empty(&self, dims: Vec<DimId>, index: Option<DimId>, is_bool: bool) -> PyResult<StoreHandle> {
+        self.dims(&dims)?;
         let store = Store::new(&dims, index, kind_of(is_bool), &self.cat).map_err(err)?;
         Ok(StoreHandle { store: Arc::new(store) })
     }
 
     #[allow(clippy::wrong_self_convention)] // Python から呼ぶ名前を保つ
     fn from_rows(&self, dims: Vec<DimId>, index: Option<DimId>, is_bool: bool, cols: Vec<Vec<u32>>, values: Vec<f64>) -> PyResult<StoreHandle> {
+        self.dims(&dims)?;
         let store = Store::new(&dims, index, kind_of(is_bool), &self.cat).map_err(err)?;
         let cols: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
+        self.columns(&dims, &cols, values.len())?;
         Ok(StoreHandle { store: Arc::new(store.with_rows(&cols, &values).map_err(err)?) })
     }
 
@@ -335,45 +501,46 @@ impl Core {
         cols: Vec<PyReadonlyArray1<u32>>,
         values: PyReadonlyArray1<f64>,
     ) -> PyResult<StoreHandle> {
+        self.dims(&dims)?;
         let store = Store::new(&dims, index, kind_of(is_bool), &self.cat).map_err(err)?;
         let slices: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect::<Result<_, _>>()?;
-        Ok(StoreHandle { store: Arc::new(store.with_rows(&slices, values.as_slice()?).map_err(err)?) })
+        let values = values.as_slice()?;
+        self.columns(&dims, &slices, values.len())?;
+        Ok(StoreHandle { store: Arc::new(store.with_rows(&slices, values).map_err(err)?) })
     }
 
-    fn write(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>, value: Option<f64>) {
-        Arc::make_mut(&mut store.borrow_mut().store).write(&key, value);
+    fn write(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>, value: Option<f64>) -> PyResult<()> {
+        let mut handle = store.try_borrow_mut().map_err(busy)?;
+        self.key(&handle.store, &key)?;
+        Arc::make_mut(&mut handle.store).write(&key, value);
+        Ok(())
     }
 
     /// まとめて書き込む。cols は宣言した軸の順の、軸ごとのメンバー番号の列、values の None は消す。
     /// 同じセルが複数あれば後のものが勝つ。GIL を外して行う。
     fn write_many(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, cols: Vec<Vec<u32>>, values: Vec<Option<f64>>) -> PyResult<()> {
-        let mut s = store.borrow().store.clone();
-        if cols.len() != s.metric_dims.len() || cols.iter().any(|c| c.len() != values.len()) {
-            return Err(PyValueError::new_err("列の数か長さが格納データの軸と合わない"));
-        }
-        for (c, &d) in cols.iter().zip(&s.metric_dims) {
-            let size = self.cat.dims[d].size;
-            if let Some(&m) = c.iter().find(|&&m| m >= size) {
-                return Err(PyValueError::new_err(format!("メンバー番号 {m} が軸の大きさ {size} を超える")));
-            }
-        }
+        let mut s = read(store)?;
+        let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
+        self.columns(&s.metric_dims, &slices, values.len())?;
         let s = py.detach(move || {
             let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
             Arc::make_mut(&mut s).write_many(&slices, &values);
             s
         });
-        store.borrow_mut().store = s;
-        Ok(())
+        put(store, s)
     }
 
     /// 1 セルの値（宣言した軸の順のメンバー番号）。空なら None。格納データ全体を読まない。
-    fn get(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>) -> Option<f64> {
-        store.borrow().store.get(&key)
+    fn get(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>) -> PyResult<Option<f64>> {
+        let s = read(store)?;
+        self.key(&s, &key)?;
+        Ok(s.get(&key))
     }
 
     fn evaluate(&self, py: Python<'_>, expr: &Expr, sources: Vec<Bound<'_, PyAny>>, region: Region) -> PyResult<CubeHandle> {
+        expr.sources(sources.len())?;
         let src: Vec<Src> = sources.iter().map(Core::source).collect::<PyResult<_>>()?;
-        let (node, cat, r) = (expr.node.clone(), self.cat.clone(), self.restrict(&region));
+        let (node, cat, r) = (expr.node.clone(), self.cat.clone(), self.restrict(&region)?);
         let cube = py.detach(move || eval(&node, &cat, &src, &r)).map_err(err)?;
         Ok(CubeHandle { cube: Arc::new(cube) })
     }
@@ -382,24 +549,26 @@ impl Core {
     fn evaluate_many(&self, py: Python<'_>, items: Vec<(PyRef<'_, Expr>, Vec<Bound<'_, PyAny>>, Region)>) -> PyResult<Vec<CubeHandle>> {
         let jobs: Vec<(Arc<Node>, Vec<Src>, Restrict)> = items
             .iter()
-            .map(|(e, s, reg)| Ok((e.node.clone(), s.iter().map(Core::source).collect::<PyResult<_>>()?, self.restrict(reg))))
+            .map(|(e, s, reg)| {
+                e.sources(s.len())?;
+                Ok((e.node.clone(), s.iter().map(Core::source).collect::<PyResult<_>>()?, self.restrict(reg)?))
+            })
             .collect::<PyResult<_>>()?;
         let cat = self.cat.clone();
         let cubes: Vec<core::Result<Cube>> = py.detach(move || jobs.par_iter().map(|(n, s, r)| eval(n, &cat, s, r)).collect());
         cubes.into_iter().map(|c| Ok(CubeHandle { cube: Arc::new(c.map_err(err)?) })).collect()
     }
 
-    /// 格納データから region の範囲を切り出した、新しい格納データ。
     /// 格納データから region の範囲を切り出した、新しい格納データ（GIL を外して読む）。
-    fn filter(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region) -> StoreHandle {
-        let (s, r) = (store.borrow().store.clone(), self.restrict(&region));
-        StoreHandle { store: Arc::new(py.detach(move || s.slice(&r))) }
+    fn filter(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region) -> PyResult<StoreHandle> {
+        let (s, r) = (read(store)?, self.restrict(&region)?);
+        Ok(StoreHandle { store: Arc::new(py.detach(move || s.slice(&r))) })
     }
 
     fn replace(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region, new: &Bound<'_, PyAny>) -> PyResult<()> {
         let new = Core::as_cube(new)?;
-        let r = self.restrict(&region);
-        let mut handle = store.borrow_mut();
+        let r = self.restrict(&region)?;
+        let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
         py.detach(|| target.replace(&r, &new)).map_err(err)
     }
@@ -413,8 +582,8 @@ impl Core {
         new: &Bound<'_, PyAny>,
     ) -> PyResult<Option<Vec<Vec<u32>>>> {
         let new = Core::as_cube(new)?;
-        let r = self.restrict(&region);
-        let mut handle = store.borrow_mut();
+        let r = self.restrict(&region)?;
+        let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
         py.detach(|| target.replace_diff(&r, &new)).map_err(err)
     }
@@ -428,16 +597,17 @@ impl Core {
     }
 
     fn repartition(&self, store: &Bound<'_, StoreHandle>, index: Option<DimId>) -> PyResult<StoreHandle> {
-        let s = &store.borrow().store;
+        let s = &read(store)?;
         let mut out = Store::new(&s.metric_dims, index, s.kind, &self.cat).map_err(err)?;
         out.replace(&Restrict::all(self.cat.dims.len()), &s.as_cube()).map_err(err)?;
         Ok(StoreHandle { store: Arc::new(out) })
     }
 
-    fn rows(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>) -> (Vec<Vec<u32>>, Vec<f64>, bool) {
-        let s = store.borrow().store.clone();
+    fn rows(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>) -> PyResult<(Vec<Vec<u32>>, Vec<f64>, bool)> {
+        let s = read(store)?;
+        let is_bool = s.kind == Kind::Bool;
         let (cols, values) = py.detach(move || s.rows());
-        (cols, values, store.borrow().store.kind == Kind::Bool)
+        Ok((cols, values, is_bool))
     }
 
     /// region の範囲の行を宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す
@@ -450,11 +620,11 @@ impl Core {
         region: Region,
         offset: usize,
         limit: Option<usize>,
-    ) -> (Vec<Vec<u32>>, Vec<f64>, bool, usize) {
-        let (s, r) = (store.borrow().store.clone(), self.restrict(&region));
+    ) -> PyResult<Page> {
+        let (s, r) = (read(store)?, self.restrict(&region)?);
         let is_bool = s.kind == Kind::Bool;
         let (cols, values, total) = py.detach(move || s.rows_in(&r, offset, limit));
-        (cols, values, is_bool, total)
+        Ok((cols, values, is_bool, total))
     }
 
     /// 格納データを Parquet のバイト列にする（列は宣言した軸の順に names、値の列 v）。GIL を外して行う。
@@ -467,7 +637,7 @@ impl Core {
         value: &str,
         meta: Vec<(String, String)>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let s = store.borrow().store.clone();
+        let s = read(store)?;
         let value = pq::Value::parse(value).map_err(err)?;
         let buf = py
             .detach(move || {
@@ -491,6 +661,7 @@ impl Core {
         names: Vec<String>,
     ) -> PyResult<StoreHandle> {
         let value = pq::Value::parse(value).map_err(err)?;
+        self.dims(&dims)?;
         let cat = self.cat.clone();
         let store = py
             .detach(move || {
@@ -504,17 +675,18 @@ impl Core {
     }
 
     /// 2 つのハンドルが同じ格納データ（複製しただけで、どちらにも書き込んでいない）を指すか。
-    fn same_store(&self, a: &Bound<'_, StoreHandle>, b: &Bound<'_, StoreHandle>) -> bool {
-        a.borrow().store.same_as(&b.borrow().store)
+    fn same_store(&self, a: &Bound<'_, StoreHandle>, b: &Bound<'_, StoreHandle>) -> PyResult<bool> {
+        let (a, b) = (read(a)?, read(b)?);
+        Ok(a.same_as(&b))
     }
 
     /// old（変更前）と new（変更後）で値が違うセル。old が None なら new の全セル（変更前はすべて空）。
     /// キーの詰め方が違えば None（呼び出し側が別の方法で比べる）。GIL を外して行う。
     #[pyo3(signature = (old, new))]
-    fn diff_block(&self, py: Python<'_>, old: Option<&Bound<'_, StoreHandle>>, new: &Bound<'_, StoreHandle>) -> Option<Diff> {
-        let a = old.map(|o| o.borrow().store.clone());
-        let b = new.borrow().store.clone();
-        py.detach(move || {
+    fn diff_block(&self, py: Python<'_>, old: Option<&Bound<'_, StoreHandle>>, new: &Bound<'_, StoreHandle>) -> PyResult<Option<Diff>> {
+        let a = old.map(read).transpose()?;
+        let b = read(new)?;
+        Ok(py.detach(move || {
             let Some(a) = a else {
                 let (cols, values) = b.rows();
                 let old = vec![None; values.len()];
@@ -531,7 +703,7 @@ impl Core {
                 new.push(y);
             }
             Some(Diff { cols, old, new })
-        })
+        }))
     }
 
     /// 変更の塊を格納データにまとめて書き込む（記録の再生）。dim_ids は宣言した軸の順に、軸ごとの
@@ -546,7 +718,7 @@ impl Core {
         dim_ids: Vec<Vec<i64>>,
         value_ids: Option<Vec<i64>>,
     ) -> PyResult<()> {
-        let mut s = store.borrow().store.clone();
+        let mut s = read(store)?;
         let c = &block.c;
         if c.ids.len() != s.metric_dims.len() || dim_ids.len() != c.ids.len() {
             return Ok(()); // 軸の数が違う（Metric を定義し直した）。名前で比べる経路と同じく飛ばす
@@ -578,35 +750,34 @@ impl Core {
             Arc::make_mut(&mut s).write_many(&slices, &values);
             Ok(s)
         });
-        store.borrow_mut().store = s.map_err(err)?;
-        Ok(())
+        put(store, s.map_err(err)?)
     }
 
-    fn size(&self, store: &Bound<'_, StoreHandle>) -> usize {
-        store.borrow().store.len()
+    fn size(&self, store: &Bound<'_, StoreHandle>) -> PyResult<usize> {
+        Ok(read(store)?.len())
     }
 
     /// 行数の上限（本体と差分の件数の和。差分の上書きや削除を数え直さないので、差分があっても O(1)）。
-    fn size_hint(&self, store: &Bound<'_, StoreHandle>) -> usize {
-        store.borrow().store.rows_hint()
+    fn size_hint(&self, store: &Bound<'_, StoreHandle>) -> PyResult<usize> {
+        Ok(read(store)?.rows_hint())
     }
 
     /// 格納データが確保しているメモリ（本体の行数、本体、差分の件数、差分、索引。単位はバイト）。
-    fn memory(&self, store: &Bound<'_, StoreHandle>) -> (usize, usize, usize, usize, usize) {
-        let m = store.borrow().store.memory();
-        (m.rows, m.base, m.delta_rows, m.delta, m.index)
+    fn memory(&self, store: &Bound<'_, StoreHandle>) -> PyResult<(usize, usize, usize, usize, usize)> {
+        let m = read(store)?.memory();
+        Ok((m.rows, m.base, m.delta_rows, m.delta, m.index))
     }
 
-    fn is_bool(&self, store: &Bound<'_, StoreHandle>) -> bool {
-        store.borrow().store.kind == Kind::Bool
+    fn is_bool(&self, store: &Bound<'_, StoreHandle>) -> PyResult<bool> {
+        Ok(read(store)?.kind == Kind::Bool)
     }
 
-    fn index_dim(&self, store: &Bound<'_, StoreHandle>) -> Option<DimId> {
-        store.borrow().store.index_dim()
+    fn index_dim(&self, store: &Bound<'_, StoreHandle>) -> PyResult<Option<DimId>> {
+        Ok(read(store)?.index_dim())
     }
 
-    fn metric_dims(&self, store: &Bound<'_, StoreHandle>) -> Vec<DimId> {
-        store.borrow().store.metric_dims.clone()
+    fn metric_dims(&self, store: &Bound<'_, StoreHandle>) -> PyResult<Vec<DimId>> {
+        Ok(read(store)?.metric_dims.clone())
     }
 
     fn cube_len(&self, cube: &Bound<'_, CubeHandle>) -> usize {
@@ -620,7 +791,7 @@ impl Core {
 
     /// 差分集計する SUM の、各グループの件数を求める式（一番内側の集計を COUNT にしたもの）。読み出し元は同じ。
     fn count_formula(&self, expr: &Expr) -> Expr {
-        Expr { node: Arc::new(plan::inner_count(&expr.node)) }
+        Expr { node: Arc::new(plan::inner_count(&expr.node)), refs: expr.refs }
     }
 
     /// 差分再計算の計算計画を作る。
@@ -642,18 +813,25 @@ impl Core {
             };
             out.push(Metric { formula: f, count, delta, source: t.get_item(2)?.extract()? });
         }
+        let n = out.len();
+        check_refs(out.iter().map(|m| &m.formula), n)?;
         let levels = levels
             .into_iter()
             .map(|level| {
                 level
                     .into_iter()
-                    .map(|(dim, names)| match dim {
-                        Some(d) => Step::Scan(d, names),
-                        None => Step::One(names[0]),
+                    .map(|(dim, names)| {
+                        if names.is_empty() || names.iter().any(|&m| m >= n) {
+                            return Err(err(format!("段の Metric の番号 {names:?} が計算計画にない")));
+                        }
+                        match dim {
+                            Some(d) => self.dim(d).map(|_| Step::Scan(d, names)),
+                            None => Ok(Step::One(names[0])),
+                        }
                     })
-                    .collect()
+                    .collect::<PyResult<_>>()
             })
-            .collect();
+            .collect::<PyResult<_>>()?;
         Ok(PlanHandle { plan: Arc::new(Plan { metrics: out, levels }) })
     }
 
@@ -663,33 +841,50 @@ impl Core {
     #[allow(clippy::type_complexity)]
     fn plan(&self, formulas: Vec<Bound<'_, PyAny>>, names: Vec<String>, dims: Vec<Vec<DimId>>) -> PyResult<(Vec<(Vec<usize>, Option<DimId>)>, Vec<Vec<usize>>, graph::Edges)> {
         let formulas: Vec<Option<Formula>> = formulas.iter().map(formula).collect::<PyResult<_>>()?;
+        check_refs(formulas.iter(), formulas.len())?;
+        if names.len() != formulas.len() || dims.len() != formulas.len() {
+            return Err(err("名前と軸の数が式の数と合わない".into()));
+        }
+        dims.iter().try_for_each(|ds| self.dims(ds))?;
         graph::plan(&self.cat, &formulas, &names, &dims).map_err(err)
     }
 
     /// 入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲を返す。
-    fn propagate(&self, py: Python<'_>, plan: &PlanHandle, changed: Vec<(usize, Region)>, added: Vec<(DimId, Vec<u32>)>) -> Vec<(usize, Region)> {
-        let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
+    fn propagate(&self, py: Python<'_>, plan: &PlanHandle, changed: Vec<(usize, Region)>, added: Vec<(DimId, Vec<u32>)>) -> PyResult<Vec<(usize, Region)>> {
+        let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
+        self.added(&added)?;
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
         let regions = py.detach(move || plan::propagate(&cat, &plan, changed, &added));
-        regions.into_iter().enumerate().filter_map(|(m, r)| r.map(|r| (m, r.into_parts()))).collect()
+        Ok(regions.into_iter().enumerate().filter_map(|(m, r)| r.map(|r| (m, r.into_parts()))).collect())
     }
 
     /// 軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric ごと）。stores は Metric の番号順の格納データ。
-    fn removal_regions(&self, py: Python<'_>, plan: &PlanHandle, stores: Vec<Bound<'_, StoreHandle>>, dim: DimId, member: u32) -> Vec<(usize, Region)> {
-        let stores: Vec<Arc<Store>> = stores.iter().map(|h| h.borrow().store.clone()).collect();
+    fn removal_regions(&self, py: Python<'_>, plan: &PlanHandle, stores: Vec<Bound<'_, StoreHandle>>, dim: DimId, member: u32) -> PyResult<Vec<(usize, Region)>> {
+        self.members(dim, &[member])?;
+        if stores.len() != plan.plan.metrics.len() {
+            return Err(err(format!("格納データの数 {} が計算計画の Metric の数 {} と合わない", stores.len(), plan.plan.metrics.len())));
+        }
+        let stores: Vec<Arc<Store>> = stores.iter().map(read).collect::<PyResult<_>>()?;
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
         let todo = py.detach(move || plan::removal_regions(&cat, &plan, &stores, dim, member));
-        todo.into_iter().map(|(m, r)| (m, r.into_parts())).collect()
+        Ok(todo.into_iter().map(|(m, r)| (m, r.into_parts())).collect())
     }
 
     /// 1 つの式の影響範囲。regions は式の Ref の番号ごとの変更範囲（None は変わっていない）。
     #[pyo3(signature = (expr, regions, added, removed = None))]
-    fn affected(&self, expr: &Expr, regions: Vec<Option<Region>>, added: Vec<(DimId, Vec<u32>)>, removed: Option<(DimId, u32)>) -> Option<Region> {
+    fn affected(&self, expr: &Expr, regions: Vec<Option<Region>>, added: Vec<(DimId, Vec<u32>)>, removed: Option<(DimId, u32)>) -> PyResult<Option<Region>> {
+        for r in regions.iter().flatten() {
+            r.iter().try_for_each(|(d, ms)| self.members(*d, ms))?;
+        }
+        self.added(&added)?;
+        if let Some((d, m)) = removed {
+            self.members(d, &[m])?;
+        }
         let regions: Vec<Option<Reg>> = regions.into_iter().map(|r| r.map(Reg::new)).collect();
         let refs: Vec<usize> = (0..regions.len()).collect();
         let added: Vec<(DimId, Vec<u32>)> = added.into_iter().map(|(d, mut ms)| { ms.sort_unstable(); ms.dedup(); (d, ms) }).collect();
         let env = RangeEnv { cat: &self.cat, regions: &regions, added: &added, removed };
-        env.affected(&expr.node, &refs).map(|r| r.into_parts())
+        Ok(env.affected(&expr.node, &refs).map(|r| r.into_parts()))
     }
 
     /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
@@ -710,29 +905,74 @@ impl Core {
         forced: Vec<(usize, Region)>,
         full: bool,
     ) -> PyResult<Vec<(usize, bool, Region)>> {
-        let olds: Vec<(usize, Src)> = olds.iter().map(|(m, o)| Ok((*m, Core::source(o)?))).collect::<PyResult<_>>()?;
-        let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
-        let forced: Vec<(usize, Reg)> = forced.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
-        // 格納データをハンドルから取り出して渡し、終わったら戻す（参照を増やすと書き込み時に複製されるため）
-        let empty = Arc::new(Store::new(&[], None, Kind::Num, &self.cat).map_err(err)?);
-        let mut own: Vec<Arc<Store>> = stores.iter().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())).collect();
-        let mut own_counts: Vec<Option<Arc<Store>>> = counts
+        let n = plan.plan.metrics.len();
+        let olds: Vec<(usize, Src)> = olds
             .iter()
-            .map(|h| h.as_ref().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())))
-            .collect();
+            .map(|(m, o)| if *m < n { Ok((*m, Core::source(o)?)) } else { Err(err(format!("Metric の番号 {m} が計算計画にない"))) })
+            .collect::<PyResult<_>>()?;
+        let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
+        let forced: Vec<(usize, Reg)> = forced.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
+        self.added(&added)?;
+        if stores.len() != n || counts.len() != n {
+            return Err(err(format!("格納データの数 {} が計算計画の Metric の数 {n} と合わない", stores.len())));
+        }
+        // 格納データをハンドルから取り出して渡し、終わったら戻す（参照を増やすと書き込み時に複製されるため）。
+        // 失敗しても panic しても必ず戻す（途中まで書いた計算 Metric が残るので、呼び出し側は次に全体を
+        // 計算し直す）。入力の格納データは書き換えないので取り出さずに渡す。終わるまでハンドルを借りたままに
+        // して、ほかのスレッドが途中で触れないようにする
+        let empty = Arc::new(Store::new(&[], None, Kind::Num, &self.cat).map_err(err)?);
+        let mut guard = Returned { stores: Vec::new(), counts: Vec::new(), own: Vec::new(), own_counts: Vec::new() };
+        for (h, m) in stores.iter().zip(&plan.plan.metrics) {
+            let mut h = h.try_borrow_mut().map_err(busy)?;
+            guard.own.push(if m.formula.is_some() { std::mem::replace(&mut h.store, empty.clone()) } else { h.store.clone() });
+            guard.stores.push(h);
+        }
+        for h in &counts {
+            let mut h = h.as_ref().map(|h| h.try_borrow_mut().map_err(busy)).transpose()?;
+            guard.own_counts.push(h.as_mut().map(|h| std::mem::replace(&mut h.store, empty.clone())));
+            guard.counts.push(h);
+        }
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
-        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds, forced, full));
-        for (h, s) in stores.iter().zip(own) {
-            h.borrow_mut().store = s;
-        }
-        for (h, s) in counts.iter().zip(own_counts) {
-            if let (Some(h), Some(s)) = (h, s) {
-                h.borrow_mut().store = s;
-            }
-        }
+        let (own, own_counts) = (&mut guard.own, &mut guard.own_counts);
+        let result = py.detach(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plan::recalc(&cat, &plan, own, own_counts, changed, &added, olds, forced, full)
+            }))
+        });
+        drop(guard);
+        let result = result.map_err(|p| PyRuntimeError::new_err(format!("再計算の内部エラー: {}", panic_message(&p))))?;
         let log = result.map_err(err)?;
         Ok(log.into_iter().map(|(m, delta, r)| (m, delta, r.into_parts())).collect())
     }
+}
+
+/// recalc_changes が取り出した格納データを、抜けるときに（panic でも）借りたままのハンドルへ戻す。
+struct Returned<'py> {
+    stores: Vec<PyRefMut<'py, StoreHandle>>,
+    counts: Vec<Option<PyRefMut<'py, StoreHandle>>>,
+    own: Vec<Arc<Store>>,
+    own_counts: Vec<Option<Arc<Store>>>,
+}
+
+impl Drop for Returned<'_> {
+    fn drop(&mut self) {
+        for (h, s) in self.stores.iter_mut().zip(self.own.drain(..)) {
+            h.store = s;
+        }
+        for (h, s) in self.counts.iter_mut().zip(self.own_counts.drain(..)) {
+            if let (Some(h), Some(s)) = (h, s) {
+                h.store = s;
+            }
+        }
+    }
+}
+
+fn busy<E>(_: E) -> PyErr {
+    PyRuntimeError::new_err("格納データを別のスレッドが使用中（同じモデルを複数のスレッドから書き換えない）")
+}
+
+fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "不明".into())
 }
 
 // ------------------------------------------------------------------ ヒープの計測
@@ -811,6 +1051,18 @@ fn heap() -> (usize, usize) {
 #[pyfunction]
 fn reset_heap_peak() {
     HEAP_PEAK.store(HEAP_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
+}
+
+/// 再計算で、Metric の番号 metric を書き戻すところで失敗させる（テスト用。None で戻す）。panic なら panic させる。
+#[pyfunction]
+#[pyo3(signature = (metric, panic = false))]
+fn set_fail_at(metric: Option<usize>, panic: bool) {
+    let v = match metric {
+        None => -1,
+        Some(m) if panic => -2 - m as isize,
+        Some(m) => m as isize,
+    };
+    plan::FAIL_AT.store(v, Ordering::Relaxed);
 }
 
 /// 差分を本体にまとめ直す件数の下限を変える（テスト用）。
@@ -1135,6 +1387,7 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(heap, m)?)?;
     m.add_function(wrap_pyfunction!(reset_heap_peak, m)?)?;
     m.add_function(wrap_pyfunction!(set_compact_min, m)?)?;
+    m.add_function(wrap_pyfunction!(set_fail_at, m)?)?;
     m.add_function(wrap_pyfunction!(set_par_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_stream_always, m)?)?;
     m.add_function(wrap_pyfunction!(set_semi_max, m)?)?;

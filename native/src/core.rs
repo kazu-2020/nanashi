@@ -133,6 +133,7 @@ impl Packing {
 
     #[inline]
     pub fn put(&self, i: usize, m: u32) -> u64 {
+        debug_assert!(m as u64 <= self.masks[i], "メンバー番号 {m} が軸のビット幅に収まらない");
         (m as u64) << self.shifts[i]
     }
 
@@ -827,6 +828,7 @@ impl Store {
     }
 
     fn encode(&self, key: &[u32]) -> u64 {
+        debug_assert_eq!(key.len(), self.metric_dims.len(), "キーの長さが軸の数と合わない");
         let mut out = 0;
         for (d, &m) in self.metric_dims.iter().zip(key) {
             out |= self.pack.put(self.pack.pos(*d).unwrap(), m);
