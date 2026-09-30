@@ -103,3 +103,66 @@ class EveryNodeEverywhere(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+BAD_FORMULAS = [  # (Metric の軸, 式) 型検査で失敗するもの。文言が両方の実装で一致すること
+    (["Product", "Month"], "Price + Volume"),                       # 暗黙の展開
+    (["Product", "Month"], "Volume + Flag[EXPAND: Month]"),         # 種類の違い
+    (["Product"], "Flag AND Price"),
+    (["Product", "Month"], "IF(Price > 1, Volume, Flag[EXPAND: Month])"),
+    (["Product", "Month"], "Volume[FILTER: Rate > 0]"),                   # 対象にない軸
+    (["Product", "Month"], "IF(Volume, 1)"),
+    (["Product", "Month"], "Volume[EXPAND: Month]"),
+    (["Product", "Month"], "Price[EXPAND: Month, Month]"),
+    (["Month"], "Volume[BY SUM: Product.Category][REMOVE SUM: Product]"),
+    (["Category", "Month"], "Volume[BY SUM: Product.Nope]"),
+    (["Category", "Month"], "Rate[BY SUM: Product.Category]"),
+    (["Product", "Month"], "Rate[BY MAX: Product.Category]"),
+    (["Product", "Month"], "PREVIOUS(Product) + Volume"),
+    (["Product", "Month"], "Volume[SELECT: Category.\"X\"]"),
+    (["Product", "Month"], 'Volume[SELECT: Month."Nope"]'),
+    (["Product", "Month"], 'IF(Month = Month."Nope", 1)'),
+    (["Product", "Month"], "Product < Product"),
+    (["Product", "Month"], "IFBLANK(Flag, 0)[EXPAND: Month]"),
+    (["Product", "Month"], "NOT Volume"),
+    (["Product", "Month"], "Flag[REMOVE SUM: Product][EXPAND: Product, Month]"),
+    (["Product", "Month"], "Volume = Flag[EXPAND: Month]"),
+    (["Department", "Month"], "Salary[BY SUM: Employee.DeptOf]"),
+    (["Employee", "Month"], "Volume[BY: Employee.DeptOf]"),
+]
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustTypeCheckMatchesPython(unittest.TestCase):
+    """Rust の型検査は、型、警告、エラーの文言が Python の参照実装と一致する。"""
+
+    def test_types_and_warnings(self):
+        from sparse_engine.evaluate import infer, resolve
+        m = model(RustEngine())
+        m.recalc()
+        for x in m.metrics.values():
+            if x.written is None:
+                continue
+            formula = resolve(x.written, m)
+            w: list = []
+            want = infer(formula, m, w)
+            got, warnings = m.engine.check(formula, m)
+            self.assertEqual((got.dims, got.kind, warnings), (want.dims, want.kind, w), x.name)
+
+    def test_error_messages(self):
+        from sparse_engine.evaluate import FormulaError as FE, infer, resolve
+        for dims, text in BAD_FORMULAS:
+            ref, rust = model(ReferenceEngine()), model(RustEngine())
+            messages = []
+            for m in (ref, rust):
+                with self.subTest(formula=text, engine=m.engine.name):
+                    with self.assertRaises(FE) as cm:
+                        m.add_formula("Bad", dims, text)
+                        m.recalc()
+                    messages.append(str(cm.exception))
+            self.assertEqual(messages[0], messages[1], text)
+        # 参照実装の型推論そのものも、同じ式で同じ文言を出す（add_formula の経路と食い違わない）
+        m = model(ReferenceEngine())
+        for dims, text in BAD_FORMULAS:
+            with self.assertRaises(FE):
+                infer(resolve(parse(text, self_name="Bad"), m), m, [])

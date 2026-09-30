@@ -270,6 +270,8 @@ Metric の軸か値の種類を変えたときは、それを参照する式の�
 ### エンジン
 
 格納と評価は **エンジン** に任せ、計算計画は Python の Model が作る。
+式の型検査（軸と値の種類、密になる演算の警告、エラーの文言）は、Rust のエンジンでは Rust（`check.rs`）が行い、参照実装では Python（`evaluate.infer`）が行う。
+両方の型と文言が一致することをテストで確かめている（`tests/test_expr_coverage.py`）。
 エンジンは 2 つある。
 
 - **参照実装**（`ReferenceEngine`）：Python の dict で持つ。正しさの基準で、テストで他のエンジンの結果と突き合わせる。
@@ -440,6 +442,31 @@ except Conflict as e:
 損益計画（490 万セル）で、8 人が 50 件ずつ給与を書き込むと、毎秒約 500 件を確定する（1 件ずつトランザクションで確定すると毎秒約 190 件）。
 応答の時間は中央値 15 ms、95 パーセンタイル 21 ms で、1 回の書き出しで平均 4 件を確定した（手元の macOS、ディスクまで書き出す設定）。
 
+## HTTP サーバー
+
+`Workspace` を JSON の API で公開する薄いサーバーがある（標準ライブラリだけで動く）。
+
+```bash
+.venv/bin/python -m sparse_engine.server plan/ --port 8080 --checkpoint-every 1000   # FileJournal
+.venv/bin/python -m sparse_engine.server snapshots/ --pg postgresql://... --model-id plan-2027
+```
+
+| 要求 | 内容 |
+|---|---|
+| `GET /` | 軸と Metric の定義、公開中の版の通し番号 |
+| `GET /metrics/<name>/cell?<軸>=<メンバー>` | 1 セル |
+| `GET /metrics/<name>/slice?<軸>=a,b` | 範囲のセル |
+| `GET /metrics/<name>/rows?<軸>=a&offset=0&limit=50` | 行の列と全行数 |
+| `GET /metrics/<name>/summary?keep=Month&agg=sum&<軸>=a,b` | 集計 |
+| `POST /writes` | `{"client_op_id", "user", "reason", "expect", "ops": [{"op": "set_cell", "args": [...], "kwargs": {...}}, ...]}` |
+
+書き込みは 1 要求 1 トランザクションで、`client_op_id` が必須（再送しても二重に確定しない。再起動をまたいでも同じ）。
+`expect` に読んだ版の通し番号を付けると、その後に同じセルを変えた書き込みがあれば 409 で拒否する。
+列が溢れれば 429、確定を待ちきれなければ 504、式や引数の誤りは 400 で、いずれも `{"error", "message"}` を返す。
+
+損益計画（大）で、HTTP 経由の 1 セルの読み出しは 0.24 ms、給与を 1 人変える書き込みは 0.9 ms、8 人が休みなく読み続ける中での書き込みは 2.2 ms（`bench_http.py`、手元の loopback、読み出しは毎秒約 2,800 件）。
+サーバーは起動時に Python のスレッド切り替えの間隔を 0.5 ms にする（`--switch-interval`）。
+
 ## 性能
 
 Apple M4（10 コア、メモリ 16 GB）での、Rust エンジンの測定値である（5 回の中央値）。
@@ -563,12 +590,14 @@ Rust のエンジンは、並列化、差分のまとめ直し、準結合、転
 | `sparse_engine/journal.py` | トランザクションの記録、記録先（ファイル）、スナップショットと記録の再生による復元 |
 | `sparse_engine/workspace.py` | 版の公開と単一ライター（同時の読み書き、グループコミット、楽観的な排他） |
 | `sparse_engine/pg_journal.py` | PostgreSQL の記録先（リースと締め出し、大量の変更の後からの反映） |
-| `native/` | Rust のエンジン（PyO3） |
+| `sparse_engine/server.py` | HTTP サーバー（Workspace を JSON の API で公開する） |
+| `native/` | Rust のエンジン（PyO3）。`check.rs` が型検査、`core.rs` が格納と評価、`plan.rs` が差分再計算の段取り |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
-| `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py` | ベンチマーク |
+| `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py`、`bench_http.py` | ベンチマーク |
 | `tests/test_expr_coverage.py` | すべての種類の式のノードを、すべての実装の場所（構文、型推論、影響範囲、評価、依存、Rust）に通す |
 
-式の意味は、Python の参照実装と Rust の両方に実装している（`expr.py`、`parser.py`、`evaluate.py`、`rust_engine.py`、`lib.rs`、`core.rs`、`plan.rs`）。
+式の意味は、Python の参照実装と Rust の両方に実装している。
+Rust のエンジンを使うときの本番の経路は、構文（`expr.py`、`parser.py`）、名前の解決（`evaluate.resolve`、`rust_engine._tree`）、型検査（`check.rs`）、影響範囲（`plan.rs`）、評価（`core.rs`）で、Python の `evaluate.py` は参照実装と、分割軸の選択・メンバーの削除の影響範囲にだけ使う。
 ノードを 1 種類足すときはこれらをすべて直し、`tests/test_expr_coverage.py` のモデルにそのノードを使う式を足す。
 足し忘れた場所があれば、このテストが失敗する。
 

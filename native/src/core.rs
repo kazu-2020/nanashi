@@ -62,8 +62,8 @@ pub type Result<T> = std::result::Result<T, String>;
 #[derive(Clone, Debug)]
 pub struct DimInfo {
     pub size: u32,
-    #[allow(dead_code)] // 順序付きかどうかの検査は Python 側の型検査で済ませている
     pub ordered: bool,
+    pub name: String, // 型検査の文言に使う
 }
 
 /// 軸のプロパティ（例: Employee.Department）。src のメンバー -> dst のメンバー。
@@ -913,12 +913,14 @@ pub enum Agg {
 }
 
 /// 式の構文木。Bin、If、IsBlank、IfBlank の Vec<DimId> は、軸にメンバーを追加したときに
-/// 新しいメンバーへ値が広がる軸（影響範囲の計算に使う。評価には使わない）。
+/// 新しいメンバーへ値が広がる軸（影響範囲の計算に使う。評価には使わない）で、型検査（check.rs）が埋める。
+/// By は型検査が式の軸を見て ByAgg か ByLookup に決めるので、評価には現れない。
 #[derive(Debug)]
 pub enum Node {
     Ref(usize), // 評価時に渡す読み出し元の番号
     DimRef(DimId), // 軸そのもの。値は各セルのメンバー番号
     Const(f64, Kind),
+    MemberConst(DimId, u32), // 軸のメンバーの定数（Month."Mar"）。値はメンバー番号
     Bin(Op, Box<Node>, Box<Node>, Vec<DimId>),
     Not(Box<Node>),
     If(Box<Node>, Box<Node>, Option<Box<Node>>, Vec<DimId>),
@@ -926,12 +928,13 @@ pub enum Node {
     On(Box<Node>, Box<Node>),
     Expand(Box<Node>, Vec<DimId>),
     IsBlank(Box<Node>, Vec<DimId>),
-    IfBlank(Box<Node>, f64, Vec<DimId>),
+    IfBlank(Box<Node>, f64, bool, Vec<DimId>), // 既定値と、それが真偽値か
+    By { child: Box<Node>, src: DimId, dst: DimId, map: usize, agg: Option<Agg>, dim: String, prop: String },
     ByAgg { child: Box<Node>, src: DimId, dst: DimId, map: usize, agg: Agg },
     ByLookup { child: Box<Node>, src: DimId, dst: DimId, map: usize },
     Remove { child: Box<Node>, dim: DimId, agg: Agg },
     Shift { child: Box<Node>, dim: DimId, n: i64 },
-    Select { child: Box<Node>, dim: DimId, member: u32 },
+    Select { child: Box<Node>, dim: DimId, member: u32, name: String },
     AsAxis { child: Box<Node>, dim: DimId },
     Coalesce(Box<Node>, Box<Node>), // 左に値があればそれ、なければ右
 }
@@ -1251,6 +1254,8 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
         }
 
         Node::Const(v, kind) => Ok(Cube { pack: Packing::new(&[], cat)?, kind: *kind, cells: vec![(0, *v)] }),
+        Node::MemberConst(_, m) => Ok(Cube { pack: Packing::new(&[], cat)?, kind: Kind::Num, cells: vec![(0, *m as f64)] }),
+        Node::By { .. } => Err("型を決めていない式は評価できない".into()),
 
         Node::Bin(op, l, rt, _) => {
             let a = ev(l)?;
@@ -1356,7 +1361,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             Ok(Cube { pack: c.pack, kind: Kind::Bool, cells })
         }
 
-        Node::IfBlank(child, value, _) => {
+        Node::IfBlank(child, value, _, _) => {
             let c = ev(child)?;
             let present: FxHashMap<u64, f64> = c.cells.iter().copied().collect();
             let cells = dense(&c, cat, r).into_iter().map(|k| (k, *present.get(&k).unwrap_or(value))).collect();
@@ -1428,7 +1433,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             Ok(Cube { pack: out, kind: Kind::Num, cells }.filter(r))
         }
 
-        Node::Select { child, dim, member } => {
+        Node::Select { child, dim, member, .. } => {
             // member の切り口を取り出し、dim を外す
             let c = eval(child, cat, src, &r.with(*dim, Sel::new(vec![*member], cat.dims[*dim].size)))?;
             let p = c.pack.pos(*dim).unwrap();

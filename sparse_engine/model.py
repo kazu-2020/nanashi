@@ -988,8 +988,12 @@ class Model:
     def _checked(self, m: Metric) -> tuple[Expr, list[str]]:
         """m の式を評価できる形に直して型を検査し、(評価に使う式, 警告) を返す。"""
         formula = resolve(m.written, self)  # 軸の名前、Metric を使った BY を評価できる形に
-        w: list[str] = []
-        t = infer(formula, self, w)
+        check = getattr(self.engine, "check", None)
+        if check is not None:  # エンジンが型検査を持つなら（Rust）それに任せる。文言は参照実装と同じ
+            t, w = check(formula, self)
+        else:
+            w: list[str] = []
+            t = infer(formula, self, w)
         if set(t.dims) != set(m.dims):
             raise FormulaError(f"{m.name}: 式の軸 {t.dims} が宣言した軸 {m.dims} と一致しない")
         if t.kind != m.kind:

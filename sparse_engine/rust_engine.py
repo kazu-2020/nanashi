@@ -14,7 +14,7 @@ from typing import Any
 import nanashi_core
 
 from .core import Cube
-from .evaluate import Catalog, _merge, infer
+from .evaluate import Catalog, FormulaError, Type, member_kind
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
@@ -47,7 +47,7 @@ class RustEngine:
         self._dims: dict[str, tuple[Any, int]] = {}  # 軸名 -> (Dimension, 番号)
         self._names: dict[int, str] = {}
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
-        self._exprs: dict[int, tuple[Expr, Any, list[str]]] = {}  # id(式) -> (式, 変換結果, 読む名前)
+        self._exprs: dict[int, tuple] = {}  # id(式) -> (式, 変換結果, 読む名前, 型, 警告)
         self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
 
     def fork(self, cat: Catalog) -> RustEngine:
@@ -71,7 +71,7 @@ class RustEngine:
         cached = self._dims.get(name)
         if cached is not None and cached[0] is d:
             return cached[1]
-        i = self.core.add_dim(len(d.members), d.ordered)
+        i = self.core.add_dim(len(d.members), d.ordered, name)
         self._dims[name] = (d, i)
         self._names[i] = name
         return i
@@ -109,23 +109,44 @@ class RustEngine:
             partition = max(dims, key=lambda d: len(cat.dimension(d).members))
         return self._dim(cat, partition)
 
-    # ------------------------------------------------ 式の変換
+    # ------------------------------------------------ 式の変換と型検査
+
+    def check(self, expr: Expr, cat: Catalog) -> tuple[Type, list[str]]:
+        """式の型（軸と値の種類）と警告。型の誤りは FormulaError（文言は Python の参照実装と同じ）。
+        変換した式は取っておき、評価に使い回す。"""
+        _, _, t, warnings = self._compile_full(expr, cat)
+        return t, list(warnings)
 
     def _compile(self, expr: Expr, cat: Catalog) -> tuple[Any, list[str]]:
-        cached = self._exprs.get(id(expr))
-        if cached is not None and cached[0] is expr:
-            return cached[1], cached[2]
-        names: list[str] = []
-        compiled = self.core.compile(self._tree(expr, cat, names))
-        self._exprs[id(expr)] = (expr, compiled, names)
+        compiled, names, _, _ = self._compile_full(expr, cat)
         return compiled, names
 
+    def _compile_full(self, expr: Expr, cat: Catalog) -> tuple[Any, list[str], Type, list[str]]:
+        cached = self._exprs.get(id(expr))
+        if cached is not None and cached[0] is expr:
+            return cached[1:]
+        names: list[str] = []
+        tree = self._tree(expr, cat, names)
+        types = [self._type(cat, cat.metric_type(n)) for n in names]
+        try:
+            compiled, dims, kind, d, warnings = self.core.compile(tree, names, types)
+        except ValueError as e:
+            raise FormulaError(str(e)) from None
+        t = Type(tuple(self._names[i] for i in dims), member_kind(self._names[d]) if kind == "member" else kind)
+        self._exprs[id(expr)] = (expr, compiled, names, t, warnings)
+        return compiled, names, t, warnings
+
+    def _type(self, cat: Catalog, t: Type) -> tuple[list[int], str, int]:
+        """Python の型を Rust に渡す形（軸の番号、種類、メンバー型なら軸の番号）にする。"""
+        dims = [self._dim(cat, d) for d in t.dims]
+        if t.kind.startswith("member:"):
+            return dims, "member", self._dim(cat, t.kind.removeprefix("member:"))
+        return dims, t.kind, -1
+
     def _tree(self, e: Expr, cat: Catalog, names: list[str]) -> tuple:
-        """式を Rust の構文木（タプル）にする。Bin、If、IsBlank、IfBlank には、メンバーを追加したときに
-        値が広がる軸を添える（evaluate.affected の grow と同じ規則）。"""
+        """式を Rust の構文木（タプル）にする。名前を番号に直すだけで、型の検査は Rust が行う
+        （メンバーの名前の検査だけはここで行い、文言は参照実装の型推論と同じにする）。"""
         t = lambda x: self._tree(x, cat, names)
-        ids = lambda dims: [self._dim(cat, d) for d in dims]
-        dims_of = lambda x: infer(x, cat, []).dims
         match e:
             case Ref(name):
                 if name not in names:
@@ -135,21 +156,17 @@ class RustEngine:
                 return ("const", float(value), isinstance(value, bool))
             case DimRef(dim):
                 return ("dimref", self._dim(cat, dim))
-            case Member(dim, member):  # 値はメンバーの番号（順序付きの軸では並び順で比べられる）
-                return ("const", float(cat.dimension(dim)._index[member]), False)
+            case Member(dim, member):
+                d = cat.dimension(dim)
+                if member not in d:
+                    raise FormulaError(f'{dim}."{member}": {dim} にメンバー {member!r} がない')
+                return ("member", self._dim(cat, dim), d._index[member])
             case BinOp(op, left, right):
-                grow = []
-                if op in ("+", "-", "and", "or"):
-                    ld, rd = dims_of(left), dims_of(right)
-                    grow = [d for d in _merge(ld, rd) if d not in ld or d not in rd]
-                return ("bin", op, t(left), t(right), ids(grow))
+                return ("bin", op, t(left), t(right))
             case Not(child):
                 return ("not", t(child))
             case If(cond, then, else_):
-                cd = dims_of(cond)
-                branches = [dims_of(b) for b in (then, else_) if b is not None]
-                grow = [d for d in _merge(cd, *branches) if any(d not in _merge(cd, b) for b in branches)]
-                return ("if", t(cond), t(then), None if else_ is None else t(else_), ids(grow))
+                return ("if", t(cond), t(then), None if else_ is None else t(else_))
             case Filter(child, cond):
                 return ("filter", t(child), t(cond))
             case On(child, other):
@@ -159,15 +176,16 @@ class RustEngine:
             case Expand(child, dims):
                 return ("expand", t(child), [self._dim(cat, d) for d in dims])
             case IsBlank(child):
-                return ("isblank", t(child), ids(dims_of(child)))
+                return ("isblank", t(child))
             case IfBlank(child, value):
-                return ("ifblank", t(child), float(value), ids(dims_of(child)))
+                return ("ifblank", t(child), float(value), isinstance(value, bool))
             case By(child, dim, prop, agg):
-                target, _ = cat.dimension(dim).properties[prop]
-                ids = (self._dim(cat, dim), self._dim(cat, target), self._map(cat, dim, prop))
-                if dim in infer(child, cat, []).dims:
-                    return ("byagg", t(child), *ids, agg or "sum")
-                return ("bylookup", t(child), *ids)
+                props = cat.dimension(dim).properties
+                if prop not in props:
+                    raise FormulaError(f"{dim} にプロパティ {prop} がない")
+                target, _ = props[prop]
+                return ("by", t(child), self._dim(cat, dim), self._dim(cat, target), self._map(cat, dim, prop),
+                        agg, dim, prop)
             case Remove(child, dim, agg):
                 return ("remove", t(child), self._dim(cat, dim), agg)
             case Shift(child, dim, n):
@@ -175,7 +193,10 @@ class RustEngine:
             case AsAxis(child, dim):
                 return ("asaxis", t(child), self._dim(cat, dim))
             case Select(child, dim, member):
-                return ("select", t(child), self._dim(cat, dim), cat.dimension(dim)._index[member])
+                d = cat.dimension(dim)
+                if member not in d:
+                    raise FormulaError(f'SELECT {dim}."{member}": {dim} にメンバー {member!r} がない')
+                return ("select", t(child), self._dim(cat, dim), d._index[member], member)
         raise TypeError(e)
 
     # ------------------------------------------------ 差分再計算の段取り
@@ -399,11 +420,14 @@ class RustEngine:
             cube = self.to_cube(sliced, cat).reorder(order)
             return Cube(order, {k: 1.0 for k in cube.cells}) if agg == "count" else cube
 
+        source = ([self._dim(cat, d) for d in dims], "boolean" if self._is_bool(store) else "number", -1)
+
         def run(first: str, rest: str) -> Cube:
             tree = ("ref", 0)
             for i, d in enumerate(gone):
                 tree = ("remove", tree, d, first if i == 0 else rest)
-            cube = self.core.evaluate(self.core.compile(tree), [sliced], [])
+            compiled, *_ = self.core.compile(tree, ["__q"], [source])
+            cube = self.core.evaluate(compiled, [sliced], [])
             return self.to_cube(self.core.store_from(cube, None), cat).reorder(order)
 
         if agg == "avg":

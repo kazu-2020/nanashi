@@ -1,9 +1,11 @@
 //! Python から使う入口。Metric の格納データ（Store）と評価の途中結果（Cube）は Rust 側に置き、
 //! Python には中身を持たないハンドルだけを渡す。
 
+mod check;
 mod core;
 mod plan;
 
+use crate::check::{Env, TKind, Ty};
 use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
 use crate::plan::{Delta, Formula, Metric, Plan, Reg, Step};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
@@ -22,6 +24,22 @@ fn kind_of(is_bool: bool) -> Kind {
         Kind::Bool
     } else {
         Kind::Num
+    }
+}
+
+fn kind_from(kind: &str, d: i64) -> TKind {
+    match kind {
+        "boolean" => TKind::Bool,
+        "member" => TKind::Member(d as usize),
+        _ => TKind::Num,
+    }
+}
+
+fn kind_to(kind: &TKind) -> (String, i64) {
+    match kind {
+        TKind::Num => ("number".into(), -1),
+        TKind::Bool => ("boolean".into(), -1),
+        TKind::Member(d) => ("member".into(), *d as i64),
     }
 }
 
@@ -119,6 +137,7 @@ impl Core {
             "ref" => Node::Ref(t.get_item(1)?.extract()?),
             "dimref" => Node::DimRef(t.get_item(1)?.extract()?),
             "const" => Node::Const(t.get_item(1)?.extract()?, kind_of(t.get_item(2)?.extract()?)),
+            "member" => Node::MemberConst(t.get_item(1)?.extract()?, t.get_item(2)?.extract()?),
             "bin" => {
                 let op: String = t.get_item(1)?.extract()?;
                 let op = match op.as_str() {
@@ -136,37 +155,42 @@ impl Core {
                     "or" => Op::Or,
                     _ => return Err(err(format!("未知の演算子 {op}"))),
                 };
-                Node::Bin(op, child(2)?, child(3)?, t.get_item(4)?.extract()?)
+                Node::Bin(op, child(2)?, child(3)?, Vec::new())
             }
             "not" => Node::Not(child(1)?),
             "if" => {
                 let e = t.get_item(3)?;
                 let e = if e.is_none() { None } else { Some(Box::new(self.node(&e)?)) };
-                Node::If(child(1)?, child(2)?, e, t.get_item(4)?.extract()?)
+                Node::If(child(1)?, child(2)?, e, Vec::new())
             }
             "filter" => Node::Filter(child(1)?, child(2)?),
             "on" => Node::On(child(1)?, child(2)?),
             "coalesce" => Node::Coalesce(child(1)?, child(2)?),
             "expand" => Node::Expand(child(1)?, t.get_item(2)?.extract()?),
-            "isblank" => Node::IsBlank(child(1)?, t.get_item(2)?.extract()?),
-            "ifblank" => Node::IfBlank(child(1)?, t.get_item(2)?.extract()?, t.get_item(3)?.extract()?),
-            "byagg" => Node::ByAgg {
-                child: child(1)?,
-                src: t.get_item(2)?.extract()?,
-                dst: t.get_item(3)?.extract()?,
-                map: t.get_item(4)?.extract()?,
-                agg: agg(t.get_item(5)?.extract()?)?,
-            },
-            "bylookup" => Node::ByLookup {
-                child: child(1)?,
-                src: t.get_item(2)?.extract()?,
-                dst: t.get_item(3)?.extract()?,
-                map: t.get_item(4)?.extract()?,
-            },
+            "isblank" => Node::IsBlank(child(1)?, Vec::new()),
+            "ifblank" => Node::IfBlank(child(1)?, t.get_item(2)?.extract()?, t.get_item(3)?.extract()?, Vec::new()),
+            "by" => {
+                let a = t.get_item(5)?;
+                let agg = if a.is_none() { None } else { Some(agg(a.extract()?)?) };
+                Node::By {
+                    child: child(1)?,
+                    src: t.get_item(2)?.extract()?,
+                    dst: t.get_item(3)?.extract()?,
+                    map: t.get_item(4)?.extract()?,
+                    agg,
+                    dim: t.get_item(6)?.extract()?,
+                    prop: t.get_item(7)?.extract()?,
+                }
+            }
             "remove" => Node::Remove { child: child(1)?, dim: t.get_item(2)?.extract()?, agg: agg(t.get_item(3)?.extract()?)? },
             "shift" => Node::Shift { child: child(1)?, dim: t.get_item(2)?.extract()?, n: t.get_item(3)?.extract()? },
             "asaxis" => Node::AsAxis { child: child(1)?, dim: t.get_item(2)?.extract()? },
-            "select" => Node::Select { child: child(1)?, dim: t.get_item(2)?.extract()?, member: t.get_item(3)?.extract()? },
+            "select" => Node::Select {
+                child: child(1)?,
+                dim: t.get_item(2)?.extract()?,
+                member: t.get_item(3)?.extract()?,
+                name: t.get_item(4)?.extract()?,
+            },
             _ => return Err(err(format!("未知のノード {tag}"))),
         })
     }
@@ -189,9 +213,9 @@ impl Core {
         StoreHandle { store: store.borrow().store.clone() }
     }
 
-    fn add_dim(&mut self, size: u32, ordered: bool) -> usize {
+    fn add_dim(&mut self, size: u32, ordered: bool, name: String) -> usize {
         let cat = Arc::make_mut(&mut self.cat);
-        cat.dims.push(DimInfo { size, ordered });
+        cat.dims.push(DimInfo { size, ordered, name });
         cat.dims.len() - 1
     }
 
@@ -241,8 +265,28 @@ impl Core {
         Ok(Some(StoreHandle { store: Arc::new(s.repacked(&self.cat).map_err(err)?) }))
     }
 
-    fn compile(&self, tree: &Bound<'_, PyAny>) -> PyResult<Expr> {
-        Ok(Expr { node: Arc::new(self.node(tree)?) })
+    /// 式を変換して型を検査する。names は Ref の番号ごとの名前、types はその型
+    /// （軸の番号の列, "number" | "boolean" | "member", メンバー型なら軸の番号）。
+    /// 返すのは (変換した式, 軸の番号の列, 種類, メンバー型の軸の番号, 警告)。型の誤りは ValueError
+    /// （文言は Python の参照実装と同じ）。
+    #[allow(clippy::type_complexity)]
+    fn compile(
+        &self,
+        tree: &Bound<'_, PyAny>,
+        names: Vec<String>,
+        types: Vec<(Vec<DimId>, String, i64)>,
+    ) -> PyResult<(Expr, Vec<DimId>, String, i64, Vec<String>)> {
+        let mut node = self.node(tree)?;
+        let types: Vec<Ty> = types
+            .into_iter()
+            .map(|(dims, kind, d)| Ty { dims, kind: kind_from(&kind, d) })
+            .collect();
+        let _ = &names; // 名前は Python 側の文言にだけ使う
+        let env = Env { cat: &self.cat, types: &types };
+        let mut warnings = Vec::new();
+        let ty = check::infer(&mut node, &env, &mut warnings).map_err(err)?;
+        let (kind, d) = kind_to(&ty.kind);
+        Ok((Expr { node: Arc::new(node) }, ty.dims, kind, d, warnings))
     }
 
     #[pyo3(signature = (dims, index, is_bool))]

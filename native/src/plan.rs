@@ -133,7 +133,8 @@ impl Env<'_> {
         let af = |n: &Node| self.affected(n, refs);
         match node {
             Node::Ref(i) => self.regions[refs[*i]].clone(),
-            Node::Const(..) => None,
+            Node::Const(..) | Node::MemberConst(..) => None,
+            Node::By { .. } => unreachable!("型を決めた式だけを使う"),
             Node::DimRef(d) => self.grow(None, &[*d]),
             Node::Bin(_, l, r, grow) => self.grow(union(af(l), af(r)), grow),
             Node::Filter(l, r) | Node::On(l, r) | Node::Coalesce(l, r) => union(af(l), af(r)),
@@ -145,10 +146,10 @@ impl Env<'_> {
                 self.grow(r, grow)
             }
             Node::Not(c) | Node::AsAxis { child: c, .. } => af(c),
-            Node::IsBlank(c, grow) | Node::IfBlank(c, _, grow) => self.grow(af(c), grow),
+            Node::IsBlank(c, grow) | Node::IfBlank(c, _, _, grow) => self.grow(af(c), grow),
             Node::Expand(c, dims) => self.grow(af(c), dims),
             Node::Remove { child, dim, .. } => af(child).map(|r| r.without(&[*dim])),
-            Node::Select { child, dim, member } => {
+            Node::Select { child, dim, member, .. } => {
                 let r = af(child)?;
                 // 変更が選んだメンバーに届かなければ影響なし
                 r.has(*dim, *member).then(|| r.without(&[*dim]))
