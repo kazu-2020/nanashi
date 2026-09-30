@@ -5,7 +5,7 @@
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeMap;
+use imbl::OrdMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -285,18 +285,34 @@ impl Cube {
 /// Metric の格納。分割軸（index）を先頭（最上位ビット）に詰めた整数キーで持つ。
 ///
 /// 本体はキー順に並んだ配列で、全体の再計算の結果は並べ替えるだけで格納できる。
-/// 小さな書き換えは差分の B 木（delta）に入れ、読むときに本体と突き合わせる。
+/// 小さな書き換えは差分の木（delta）に入れ、読むときに本体と突き合わせる。
 /// 差分が大きくなったら本体にまとめ直す。分割軸で絞った範囲は、本体の二分探索と
 /// 差分の範囲検索で、その範囲の行数だけ読めばよい。
+///
+/// 本体は作ったら変えず、Arc で版どうし（複製したモデルどうし）で共有する。差分は書き換えても
+/// 古い版を壊さない永続的な木で持つ。そのため Store の複製は本体の配列も差分も写さず O(1) で済み、
+/// 公開済みの版を読み手が持っていても、書き込みの費用は変わらない。
 #[derive(Clone, Debug)]
 pub struct Store {
     pub metric_dims: Vec<DimId>, // Metric として宣言した軸の順
     pub pack: Packing,           // 分割軸が先頭
     pub kind: Kind,
-    keys: Vec<u64>,                     // 本体（昇順・重複なし）
-    vals: Vec<f64>,                     //
-    delta: BTreeMap<u64, Option<f64>>, // 差分（Some = 値を置く、None = 消す）
+    base: Arc<Base>,
+    delta: OrdMap<u64, Option<f64>>, // 差分（Some = 値を置く、None = 消す）
+}
+
+/// Store の本体。作ったら変えない。
+#[derive(Debug)]
+struct Base {
+    keys: Vec<u64>, // 昇順・重複なし
+    vals: Vec<f64>,
     postings: Vec<OnceLock<Arc<Postings>>>, // 分割軸以外の軸の索引（詰め方の位置ごと。必要になったら作る）
+}
+
+impl Base {
+    fn empty(n_dims: usize) -> Arc<Base> {
+        Arc::new(Base { keys: Vec::new(), vals: Vec::new(), postings: fresh_postings(n_dims) })
+    }
 }
 
 /// 分割軸以外の軸の索引。本体の行番号を、その軸のメンバーごとにまとめたもの（転置索引）。
@@ -337,10 +353,8 @@ impl Store {
             metric_dims: metric_dims.to_vec(),
             pack: Packing::new(&order, cat)?,
             kind,
-            keys: Vec::new(),
-            vals: Vec::new(),
-            delta: BTreeMap::new(),
-            postings: fresh_postings(order.len()),
+            base: Base::empty(order.len()),
+            delta: OrdMap::new(),
         })
     }
 
@@ -350,13 +364,13 @@ impl Store {
 
     /// [lo, hi) のセルを、本体と差分を突き合わせながらキー順に渡す。
     fn merged(&self, lo: u64, hi: Option<u64>, mut f: impl FnMut(u64, f64)) {
-        let start = self.keys.partition_point(|&k| k < lo);
-        let end = hi.map_or(self.keys.len(), |h| self.keys.partition_point(|&k| k < h));
+        let start = self.base.keys.partition_point(|&k| k < lo);
+        let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|&k| k < h));
         let upper = hi.map_or(Bound::Unbounded, Bound::Excluded);
         let mut delta = self.delta.range((Bound::Included(lo), upper)).peekable();
         let mut i = start;
         loop {
-            let b = (i < end).then(|| self.keys[i]);
+            let b = (i < end).then(|| self.base.keys[i]);
             match (b, delta.peek().map(|(&k, &v)| (k, v))) {
                 (None, None) => break,
                 (Some(bk), Some((dk, dv))) if dk <= bk => {
@@ -369,7 +383,7 @@ impl Store {
                     }
                 }
                 (Some(bk), _) => {
-                    f(bk, self.vals[i]);
+                    f(bk, self.base.vals[i]);
                     i += 1;
                 }
                 (None, Some((dk, dv))) => {
@@ -403,9 +417,9 @@ impl Store {
             let mut cells = Vec::new();
             for &m in &sel.members {
                 for &row in post.of(m) {
-                    let k = self.keys[row as usize];
+                    let k = self.base.keys[row as usize];
                     if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
-                        cells.push((k, self.vals[row as usize]));
+                        cells.push((k, self.base.vals[row as usize]));
                     }
                 }
             }
@@ -431,7 +445,7 @@ impl Store {
 
     pub fn len(&self) -> usize {
         if self.delta.is_empty() {
-            return self.keys.len();
+            return self.base.keys.len();
         }
         let mut n = 0;
         self.merged(0, None, |_, _| n += 1);
@@ -440,10 +454,10 @@ impl Store {
 
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
-            let cells = if par(self.keys.len()) {
-                self.keys.par_iter().copied().zip(self.vals.par_iter().copied()).collect()
+            let cells = if par(self.base.keys.len()) {
+                self.base.keys.par_iter().copied().zip(self.base.vals.par_iter().copied()).collect()
             } else {
-                self.keys.iter().copied().zip(self.vals.iter().copied()).collect()
+                self.base.keys.iter().copied().zip(self.base.vals.iter().copied()).collect()
             };
             return Cube { pack: self.pack.clone(), kind: self.kind, cells };
         }
@@ -454,7 +468,7 @@ impl Store {
 
     /// 行数のおおよその値（本体と差分の件数の和。差分の上書きや削除を数え直さない）。
     pub fn rows_hint(&self) -> usize {
-        self.keys.len() + self.delta.len()
+        self.base.keys.len() + self.delta.len()
     }
 
     /// 同じ軸と分割軸の空の Store。
@@ -467,36 +481,33 @@ impl Store {
             metric_dims: self.metric_dims.clone(),
             pack: self.pack.clone(),
             kind: self.kind,
-            keys: Vec::new(),
-            vals: Vec::new(),
-            delta: BTreeMap::new(),
-            postings: fresh_postings(self.pack.dims.len()),
+            base: Base::empty(self.pack.dims.len()),
+            delta: OrdMap::new(),
         }
     }
 
     /// 並んだセルを本体にする（差分は捨てる）。
     fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let (keys, vals) = if par(cells.len()) { cells.into_par_iter().unzip() } else { cells.into_iter().unzip() };
-        self.keys = keys;
-        self.vals = vals;
-        self.delta.clear();
-        self.postings = fresh_postings(self.pack.dims.len());
+        self.base = Arc::new(Base { keys, vals, postings: fresh_postings(self.pack.dims.len()) });
+        self.delta = OrdMap::new();
     }
 
     /// 詰め方の位置 pos の軸の索引。初めて使うときに計数ソートで作る（本体の行数に比例）。
     fn postings(&self, pos: usize) -> &Postings {
-        self.postings[pos].get_or_init(|| {
+        let base = &*self.base;
+        base.postings[pos].get_or_init(|| {
             let size = (self.pack.masks[pos] + 1) as usize;
             let mut offsets = vec![0u32; size + 1];
-            for &k in &self.keys {
+            for &k in &self.base.keys {
                 offsets[self.pack.get(k, pos) as usize + 1] += 1;
             }
             for i in 1..offsets.len() {
                 offsets[i] += offsets[i - 1];
             }
             let mut fill = offsets.clone();
-            let mut rows = vec![0u32; self.keys.len()];
-            for (row, &k) in self.keys.iter().enumerate() {
+            let mut rows = vec![0u32; self.base.keys.len()];
+            for (row, &k) in self.base.keys.iter().enumerate() {
                 let m = self.pack.get(k, pos) as usize;
                 rows[fill[m] as usize] = row as u32;
                 fill[m] += 1;
@@ -508,7 +519,7 @@ impl Store {
     /// 分割軸以外の軸で絞られていて、索引を使うと対象が十分減るなら、その軸の位置と索引を返す。
     fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, &'a Postings)> {
         let min_rows = POSTINGS_MIN_ROWS.load(Ordering::Relaxed);
-        let n = self.keys.len();
+        let n = self.base.keys.len();
         if n == 0 || n < min_rows {
             return None;
         }
@@ -537,13 +548,13 @@ impl Store {
 
     /// 差分を本体にまとめ直す。
     fn compact(&mut self) {
-        let mut cells = Vec::with_capacity(self.keys.len() + self.delta.len());
+        let mut cells = Vec::with_capacity(self.base.keys.len() + self.delta.len());
         self.merged(0, None, |k, v| cells.push((k, v)));
         self.set_sorted(cells);
     }
 
     fn after_delta(&mut self) {
-        if self.delta.len() > COMPACT_MIN.load(Ordering::Relaxed).max(self.keys.len() / 8) {
+        if self.delta.len() > COMPACT_MIN.load(Ordering::Relaxed).max(self.base.keys.len() / 8) {
             self.compact();
         }
     }
@@ -560,14 +571,33 @@ impl Store {
         }
         let mut old = Vec::new();
         self.for_each_in(r, |k, _| old.push(k));
-        for k in old {
+        sort_cells(&mut new);
+        self.write_back(r, &old, new);
+        Ok(())
+    }
+
+    /// r の範囲の古いセル（old のキー）を消し、new（キー順）を置く。差分の木に入れると本体に
+    /// まとめ直すことになる量なら、差分の木を通さずに、新しい本体を直接作る（差分の木への
+    /// 挿入は 1 件ずつなので、大量に入れてからまとめ直すより速い）。
+    fn write_back(&mut self, r: &Restrict, old: &[u64], new: Vec<(u64, f64)>) {
+        let limit = COMPACT_MIN.load(Ordering::Relaxed).max(self.base.keys.len() / 8);
+        if self.delta.len() + old.len() + new.len() > limit {
+            let cs = checks(&self.pack, r);
+            let mut kept = Vec::with_capacity(self.base.keys.len() + self.delta.len());
+            self.merged(0, None, |k, v| {
+                if !pass(&self.pack, k, &cs) {
+                    kept.push((k, v))
+                }
+            });
+            self.set_sorted(merge_sorted(&kept, &new, true, |a, b| b.or(a)));
+            return;
+        }
+        for &k in old {
             self.delta.insert(k, None);
         }
         for (k, v) in new {
             self.delta.insert(k, Some(v));
         }
-        self.after_delta();
-        Ok(())
     }
 
     /// replace と同じだが、値が実際に変わったセルの範囲（宣言した軸の順の、軸ごとのメンバー番号）を
@@ -588,13 +618,8 @@ impl Store {
         if r.is_all() {
             self.set_sorted(new.cells);
         } else {
-            for &(k, _) in &old {
-                self.delta.insert(k, None);
-            }
-            for &(k, v) in &new.cells {
-                self.delta.insert(k, Some(v));
-            }
-            self.after_delta();
+            let old: Vec<u64> = old.iter().map(|c| c.0).collect();
+            self.write_back(r, &old, new.cells);
         }
         Ok(self.region_of(&changed))
     }
@@ -605,7 +630,7 @@ impl Store {
         if !same_set(new.dims(), &self.metric_dims) {
             return Err("書き戻す結果の軸が Metric の軸と一致しない".into());
         }
-        let mut old = Vec::with_capacity(self.keys.len() + self.delta.len());
+        let mut old = Vec::with_capacity(self.base.keys.len() + self.delta.len());
         self.merged(0, None, |k, v| old.push((k, v)));
         let cells = sorted(new.repack(&self.pack).cells);
         let changed: Vec<u64> =
@@ -637,7 +662,7 @@ impl Store {
 
     /// 値が v のセルを消す（メンバー型の Metric で、消すメンバーを指す値を空にする）。
     pub fn drop_value(&mut self, v: f64) {
-        let mut cells = Vec::with_capacity(self.keys.len() + self.delta.len());
+        let mut cells = Vec::with_capacity(self.base.keys.len() + self.delta.len());
         self.merged(0, None, |k, x| {
             if x != v {
                 cells.push((k, x))
@@ -718,7 +743,7 @@ impl Store {
         let pos = self.pack.pos(dim);
         let pack = &self.pack;
         let target = m as f64;
-        let mut cells = Vec::with_capacity(self.keys.len() + self.delta.len());
+        let mut cells = Vec::with_capacity(self.base.keys.len() + self.delta.len());
         self.merged(0, None, |mut k, mut v| {
             if let Some(p) = pos {
                 let c = pack.get(k, p);
