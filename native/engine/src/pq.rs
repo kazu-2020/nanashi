@@ -9,7 +9,7 @@ use arrow_array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, Recor
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
@@ -78,25 +78,42 @@ pub fn write(names: &[String], cols: Vec<Vec<u32>>, values: Vec<f64>, value: Val
     Ok(buf)
 }
 
-/// Parquet のバイト列を列に戻す。列の名前と型が names と value に合い、メンバー番号が
-/// 軸の大きさ（sizes）未満でなければエラーにする。
+/// 列を名前で選んで読む。expected の各列（名前と型）がファイルのどこにあってもよく、ほかの列は読まない
+/// （あとの版が列を足しても、前の版が読める）。見つからないか型が違えばエラー。返すのは、読んだ組の
+/// 列の中での、expected の各列の位置。
+fn project(builder: ParquetRecordBatchReaderBuilder<Bytes>, expected: &[(&str, DataType)]) -> Result<(ParquetRecordBatchReaderBuilder<Bytes>, Vec<usize>)> {
+    let schema = builder.schema().clone();
+    let mut roots = Vec::with_capacity(expected.len());
+    for (name, t) in expected {
+        match schema.fields().iter().position(|f| f.name() == name) {
+            Some(i) if schema.field(i).data_type() == t => roots.push(i),
+            _ => {
+                let show = |xs: Vec<String>| xs.join(", ");
+                return Err(format!(
+                    "Parquet の列が合わない。期待: [{}]、実際: [{}]",
+                    show(expected.iter().map(|(n, t)| format!("{n}: {t}")).collect()),
+                    show(schema.fields().iter().map(|f| format!("{}: {}", f.name(), f.data_type())).collect()),
+                ));
+            }
+        }
+    }
+    let mut sorted = roots.clone();
+    sorted.sort_unstable();
+    let at = roots.iter().map(|r| sorted.binary_search(r).unwrap()).collect();
+    let mask = ProjectionMask::roots(builder.parquet_schema(), sorted);
+    Ok((builder.with_projection(mask), at))
+}
+
+/// Parquet のバイト列を列に戻す。列は名前で選ぶ（並び順は問わず、ほかの列は読まない）。
+/// 列の型が names と value に合い、メンバー番号が軸の大きさ（sizes）未満でなければエラーにする。
 pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Result<(Vec<Vec<u32>>, Vec<f64>)> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(pq_err)?;
-    let schema = builder.schema().clone();
-    let found: Vec<(&str, &DataType)> = schema.fields().iter().map(|f| (f.name().as_str(), f.data_type())).collect();
     let expected: Vec<(&str, DataType)> = names
         .iter()
         .map(|n| (n.as_str(), DataType::UInt32))
         .chain(std::iter::once((VALUE, value.data_type())))
         .collect();
-    if found.len() != expected.len() || found.iter().zip(&expected).any(|(a, b)| a.0 != b.0 || *a.1 != b.1) {
-        let show = |xs: Vec<String>| xs.join(", ");
-        return Err(format!(
-            "Parquet の列が合わない。期待: [{}]、実際: [{}]",
-            show(expected.iter().map(|(n, t)| format!("{n}: {t}")).collect()),
-            show(found.iter().map(|(n, t)| format!("{n}: {t}")).collect()),
-        ));
-    }
+    let (builder, at) = project(builder, &expected)?;
     let rows = builder.metadata().file_metadata().num_rows() as usize;
     let mut cols: Vec<Vec<u32>> = names.iter().map(|_| Vec::with_capacity(rows)).collect();
     let mut values = Vec::with_capacity(rows);
@@ -106,13 +123,13 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
             return Err("Parquet の列に空の値がある".into());
         }
         for (j, col) in cols.iter_mut().enumerate() {
-            let a = batch.column(j).as_any().downcast_ref::<UInt32Array>().unwrap();
+            let a = batch.column(at[j]).as_any().downcast_ref::<UInt32Array>().unwrap();
             if let Some(&m) = a.values().iter().find(|&&m| m >= sizes[j]) {
                 return Err(format!("{} のメンバー番号 {m} が軸の大きさ {} を超える", names[j], sizes[j]));
             }
             col.extend_from_slice(a.values());
         }
-        let v = batch.column(names.len());
+        let v = batch.column(at[names.len()]);
         match value {
             Value::Num => values.extend_from_slice(v.as_any().downcast_ref::<Float64Array>().unwrap().values()),
             Value::Bool => {
@@ -222,20 +239,30 @@ pub fn write_changes(names: &[String], c: &Changes, meta: &[(String, String)]) -
     Ok(buf)
 }
 
-/// write_changes で書いたバイト列を、軸の列の名前と変更に戻す。
+/// 軸の ID の列の名前か（d<軸の ID>、軸の ID を持たない記録は c<位置>）。
+fn is_axis_column(name: &str) -> bool {
+    let rest = name.strip_prefix('d').or_else(|| name.strip_prefix('c'));
+    rest.is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// write_changes で書いたバイト列を、軸の列の名前と変更に戻す。列は名前で選ぶ（軸の列、old、new。
+/// ほかの列は読まない）。
 pub fn read_changes(data: Bytes) -> Result<(Vec<String>, Changes)> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(pq_err)?;
     let fields = builder.schema().fields().clone();
-    let n = fields.len();
     let bad = || format!("Parquet の列が変更の形でない: [{}]", fields.iter().map(|f| format!("{}: {}", f.name(), f.data_type())).collect::<Vec<_>>().join(", "));
-    if n < 2 || fields[n - 2].name() != "old" || fields[n - 1].name() != "new" || fields[n - 2].data_type() != fields[n - 1].data_type() {
+    let find = |n: &str| fields.iter().find(|f| f.name() == n).map(|f| f.data_type().clone());
+    let (Some(old_t), Some(new_t)) = (find("old"), find("new")) else { return Err(bad()) };
+    if old_t != new_t {
         return Err(bad());
     }
-    let kind = Change::of(fields[n - 1].data_type()).ok_or_else(bad)?;
-    if fields[..n - 2].iter().any(|f| *f.data_type() != DataType::Int64) {
-        return Err(bad());
-    }
-    let names: Vec<String> = fields[..n - 2].iter().map(|f| f.name().clone()).collect();
+    let kind = Change::of(&new_t).ok_or_else(bad)?;
+    let names: Vec<String> = fields.iter().filter(|f| is_axis_column(f.name())).map(|f| f.name().clone()).collect();
+    let mut expected: Vec<(&str, DataType)> = names.iter().map(|n| (n.as_str(), DataType::Int64)).collect();
+    expected.push(("old", old_t.clone()));
+    expected.push(("new", new_t.clone()));
+    let (builder, at) = project(builder, &expected)?;
+    let n = names.len();
     let rows = builder.metadata().file_metadata().num_rows() as usize;
     let mut c = Changes {
         ids: names.iter().map(|_| Vec::with_capacity(rows)).collect(),
@@ -246,14 +273,14 @@ pub fn read_changes(data: Bytes) -> Result<(Vec<String>, Changes)> {
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
         for (j, col) in c.ids.iter_mut().enumerate() {
-            let a = batch.column(j);
+            let a = batch.column(at[j]);
             if a.null_count() > 0 {
                 return Err("Parquet の軸の列に空の値がある".into());
             }
             col.extend_from_slice(a.as_any().downcast_ref::<Int64Array>().unwrap().values());
         }
-        change_values(batch.column(n - 2).as_ref(), &mut c.old);
-        change_values(batch.column(n - 1).as_ref(), &mut c.new);
+        change_values(batch.column(at[n]).as_ref(), &mut c.old);
+        change_values(batch.column(at[n + 1]).as_ref(), &mut c.new);
     }
     Ok((names, c))
 }
@@ -294,6 +321,32 @@ mod tests {
             assert_eq!((c, v), (cols.clone(), vals));
             assert_eq!(metadata(Bytes::from(buf)).unwrap(), meta);
         }
+    }
+
+    #[test]
+    fn columns_are_chosen_by_name() {
+        // あとの版が列を足したり、並びを変えたりしても読める
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("note", DataType::Int64, false),
+            Field::new(VALUE, DataType::Float64, false),
+            Field::new("d1", DataType::UInt32, false),
+            Field::new("d0", DataType::UInt32, false),
+        ]));
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![7, 8])),
+            Arc::new(Float64Array::from(vec![1.5, 2.5])),
+            Arc::new(UInt32Array::from(vec![3, 2])),
+            Arc::new(UInt32Array::from(vec![0, 1])),
+        ];
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let mut buf = Vec::new();
+        let mut w = ArrowWriter::try_new(&mut buf, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        let (cols, vals) = read(Bytes::from(buf.clone()), &names(2), Value::Num, &[2, 4]).unwrap();
+        assert_eq!((cols, vals), (vec![vec![0, 1], vec![3, 2]], vec![1.5, 2.5]));
+        let err = read(Bytes::from(buf), &names(3), Value::Num, &[2, 4, 4]).unwrap_err();
+        assert!(err.contains("列が合わない"), "{err}");
     }
 
     #[test]

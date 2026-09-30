@@ -31,6 +31,7 @@ cell_change への書き込み（と索引の更新）は確定の後で行う�
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
 import logging
@@ -51,7 +52,10 @@ from .objects import open_objects
 
 log = logging.getLogger(__name__)
 
-SCHEMA = """
+# スキーマの版ごとの変更（migrate が順に流す）。版は nanashi_schema に持つ。接続のたびには流さない
+# （DDL は表のロックを取るので、書き込み中の別のプロセスと競り合う）
+MIGRATIONS: list[tuple[int, str]] = [
+    (1, """
 create table if not exists nanashi_model (
     model_id      text primary key,
     head_seq      bigint not null default 0,
@@ -91,7 +95,44 @@ create table if not exists nanashi_snapshot (
     meta     jsonb not null,
     primary key (model_id, seq)
 );
-"""
+"""),
+    (2, """
+alter table nanashi_operation alter column at type timestamptz using at::timestamptz;
+delete from nanashi_cell_change a using nanashi_cell_change b
+    where a.ctid < b.ctid and a.model_id = b.model_id and a.seq = b.seq and a.metric_id = b.metric_id
+      and a.coords = b.coords;
+drop index if exists nanashi_cell_change_by_cell;
+create unique index nanashi_cell_change_by_cell on nanashi_cell_change (model_id, metric_id, coords, seq);
+"""),
+]
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+
+class SchemaError(Exception):
+    """データベースのスキーマの版が、このプログラムの版と合わない（migrate を流す）。"""
+
+
+def schema_version(conn) -> int:
+    """データベースのスキーマの版。版の表がなければ 0（以前の版が作った表があっても）。"""
+    if conn.execute("select to_regclass('nanashi_schema')").fetchone()[0] is None:
+        return 0
+    row = conn.execute("select version from nanashi_schema").fetchone()
+    return 0 if row is None else row[0]
+
+
+def migrate(dsn: str) -> tuple[int, int]:
+    """スキーマを最新の版にする（(前の版, 今の版) を返す）。複数のプロセスが同時に流しても 1 回だけ流す。
+    書き込み中のプロセスがあれば、表のロックを待つ。"""
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.transaction():
+        conn.execute("select pg_advisory_xact_lock(hashtextextended('nanashi_schema', 0))")
+        conn.execute("create table if not exists nanashi_schema (version integer not null)")
+        before = schema_version(conn)
+        for version, sql in MIGRATIONS:
+            if version > before:
+                conn.execute(sql)
+        conn.execute("delete from nanashi_schema")
+        conn.execute("insert into nanashi_schema (version) values (%s)", (SCHEMA_VERSION,))
+    return before, SCHEMA_VERSION
 
 
 # 確定の後の反映でこの行数より多く入れたら、セルの履歴の表の統計を取り直す
@@ -125,9 +166,12 @@ class PgJournal(Journal):
         self.lease_until: float | None = None  # リースの期限（time.monotonic の値。延長できた時点から数える）
         self.lease_error: BaseException | None = None  # 最後に延長できなかった理由（延長できたら None）
         self.conn = psycopg.connect(dsn, autocommit=True)  # 複数の文は transaction() で囲む
-        with self.conn.transaction():
-            self.conn.execute(SCHEMA)
-            self.conn.execute("insert into nanashi_model (model_id) values (%s) on conflict do nothing", (model_id,))
+        version = schema_version(self.conn)
+        if version != SCHEMA_VERSION:
+            self.conn.close()
+            raise SchemaError(f"データベースのスキーマの版が {version} で、このプログラムは {SCHEMA_VERSION} を使う。"
+                              f"python -m sparse_engine.pg_journal migrate <DSN> で最新にする")
+        self.conn.execute("insert into nanashi_model (model_id) values (%s) on conflict do nothing", (model_id,))
         self.head = self._db_head()
         self._stop = threading.Event()
         self._heartbeat: threading.Thread | None = None
@@ -397,7 +441,7 @@ class PgJournal(Journal):
             " from nanashi_cell_change c join nanashi_operation o on o.model_id = c.model_id and o.seq = c.seq"
                 " where c.model_id = %s and c.metric_id = %s and c.coords = %s::bigint[] order by c.seq",
                 (self.model_id, m.id, key)).fetchall()
-        return _shown(model, m, [{"seq": s, "at": a, "user": u, "reason": r, "old": o, "new": n}
+        return _shown(model, m, [{"seq": s, "at": _iso(a), "user": u, "reason": r, "old": o, "new": n}
                                  for s, a, u, r, o, n in rows])
 
     # ------------------------------------------------ スナップショット
@@ -422,6 +466,42 @@ class PgJournal(Journal):
 
     def load_snapshot(self, place: Snapshot, engine):
         return read_snapshot(self.objects, place, engine)
+
+    def prune(self, keep: int = 2, op_window: int = 100_000) -> dict:
+        """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットを消す。残す一番古い
+        スナップショットより前の記録の、大量の変更のファイルも消す（セルの履歴の表に反映してから消すので、
+        記録の再生とセルの履歴はその表から読める）。最後の op_window 件より古い記録の client_op_id は忘れる
+        （再送しても二重に確定しないと保証する範囲を決める）。消した数を返す。"""
+        self.index_pending()  # 消すファイルの分は、先にセルの履歴に反映しておく
+        out = {"snapshots": 0, "cells": 0, "client_op_ids": 0}
+        snaps = self.snapshots()
+        if len(snaps) > keep:
+            oldest = snaps[keep - 1][0]
+            for seq, place in snaps[keep:]:
+                with self._lock:
+                    self.conn.execute("delete from nanashi_snapshot where model_id = %s and seq = %s",
+                                      (self.model_id, seq))
+                for name in (*place.files, "manifest.json"):
+                    self.objects.delete(f"{place.uri}/{name}")
+                out["snapshots"] += 1
+            with self._lock:
+                rows = self.conn.execute("select seq, record from nanashi_operation where model_id = %s"
+                                         " and seq <= %s and cells_uri is not null and indexed",
+                                         (self.model_id, oldest)).fetchall()
+            for seq, rec in rows:
+                blob = rec.pop("cells_blob")
+                for f in blob.get("files", [blob] if "uri" in blob else []):
+                    if not os.path.isabs(f["uri"]) and not f["uri"].startswith("s3://"):
+                        self.objects.delete(f["uri"])
+                    out["cells"] += 1
+                with self._lock:
+                    self.conn.execute("update nanashi_operation set record = %s, cells_uri = null"
+                                      " where model_id = %s and seq = %s", (Jsonb(rec), self.model_id, seq))
+        with self._lock:
+            out["client_op_ids"] = self.conn.execute(
+                "update nanashi_operation set client_op_id = null where model_id = %s and seq <= %s"
+                " and client_op_id is not null", (self.model_id, self._db_head() - op_window)).rowcount
+        return out
 
     def drop(self) -> None:
         """このモデルの記録をすべて消す（テスト用）。"""
@@ -453,3 +533,24 @@ def _read_npz(raw: bytes) -> list[dict]:
         cells.append({"metric": data[f"metric{i}"][0], "rows": [list(r) for r in zip(data[f"coords{i}"], old, new)]})
         i += 1
     return cells
+
+
+def _iso(at) -> str:
+    """記録の時刻（timestamptz）を、記録の JSON と同じ形の文字列（UTC、ミリ秒まで）にする。"""
+    return at.astimezone(datetime.timezone.utc).isoformat(timespec="milliseconds")
+
+
+def main(argv=None) -> None:
+    import argparse
+    ap = argparse.ArgumentParser(description="PostgreSQL の記録先の管理")
+    sub = ap.add_subparsers(dest="command", required=True)
+    m = sub.add_parser("migrate", help="スキーマを最新の版にする")
+    m.add_argument("dsn")
+    args = ap.parse_args(argv)
+    if args.command == "migrate":
+        before, after = migrate(args.dsn)
+        print(f"スキーマの版: {before} → {after}")
+
+
+if __name__ == "__main__":
+    main()

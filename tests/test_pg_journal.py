@@ -235,6 +235,30 @@ class PgJournalTests(unittest.TestCase):
         with self.assertRaises(Fenced):  # 通し番号は合っていても、世代番号が古いので締め出される
             m.set_cell("Price", 13, Product="A")
 
+    def test_prune_removes_old_snapshots_and_bulk_files(self):
+        m = build_with(ReferenceEngine())
+        j = self.journal(bulk_cells=3)
+        j.start(m)
+        with m.transaction(user="etl", client_op_id="bulk"):
+            m.spread("Cost", 100, Product="C")  # 大量の変更のファイル
+        m.checkpoint()
+        m.set_cell("Price", 12, Product="A")
+        m.checkpoint()
+        files = lambda: sorted(self.objects.list(f"{self.model_id}/"))
+        before = files()
+        out = j.prune(keep=1, op_window=0)
+        self.assertEqual(out, {"snapshots": 2, "cells": 1, "client_op_ids": 1})
+        after = files()
+        self.assertEqual(len([k for k in after if k.endswith("/manifest.json")]), 1)
+        self.assertFalse(any("/cells/" in k for k in after))
+        self.assertLess(len(after), len(before))
+        check_same_state(self, m, self.journal().open(ReferenceEngine()))
+        # 消したファイルの記録も、セルの履歴の表から再生できる
+        self.assertEqual([r["seq"] for r in self.journal().records()], [1, 2])
+        history = self.journal().cell_history(m, "Cost", Product="C", Month="Feb")
+        self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
+        self.assertIsNone(self.journal().seq_of("bulk"))  # 覚えておく範囲の外
+
     def test_heartbeat_keeps_the_lease_while_idle(self):
         m = build_with(ReferenceEngine())
         first = self.journal(lease_ttl=0.6)  # 書き込みがなくても延長する
@@ -370,3 +394,51 @@ class PgJournalS3Tests(PgJournalTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(AVAILABLE, "PostgreSQL（NANASHI_PG_DSN）と psycopg、nanashi_core が必要")
+class Schema(unittest.TestCase):
+    """スキーマの版。接続のたびに DDL を流さず、migrate で上げる。"""
+
+    def setUp(self):
+        import psycopg
+        self.db = f"nanashi_schema_{uuid.uuid4().hex[:8]}"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(f"create database {self.db}")
+        self.dsn = DSN.rsplit("/", 1)[0] + "/" + self.db
+        self.addCleanup(self.drop)
+
+    def drop(self):
+        import psycopg
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(f"drop database if exists {self.db} with (force)")
+
+    def test_old_schema_is_refused_until_migrated(self):
+        import psycopg
+        from sparse_engine.pg_journal import MIGRATIONS, SchemaError, migrate
+        with psycopg.connect(self.dsn, autocommit=True) as conn:  # 以前の版が作った表（版の表はない）
+            conn.execute(MIGRATIONS[0][1])
+            conn.execute("insert into nanashi_model (model_id) values ('old')")
+            conn.execute("insert into nanashi_operation (model_id, seq, at, record) values"
+                         " ('old', 1, '2026-01-02T03:04:05.678+00:00', '{}')")
+            for _ in range(2):  # 以前の版は、同じセルの履歴を二重に書くことがあった
+                conn.execute("insert into nanashi_cell_change values ('old', 1, 5, '{1,2}', null, 3)")
+        with self.assertRaisesRegex(SchemaError, "migrate"):
+            PgJournal(self.dsn, "old", tempfile.mkdtemp())
+        self.assertEqual(migrate(self.dsn), (0, 2))
+        self.assertEqual(migrate(self.dsn), (2, 2))  # 何度流してもよい
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            self.assertEqual(conn.execute("select data_type from information_schema.columns"
+                                          " where table_name = 'nanashi_operation' and column_name = 'at'").fetchone()[0],
+                             "timestamp with time zone")
+            self.assertEqual(conn.execute("select count(*) from nanashi_cell_change").fetchone()[0], 1)
+            with self.assertRaises(psycopg.errors.UniqueViolation):
+                conn.execute("insert into nanashi_cell_change values ('old', 1, 5, '{1,2}', null, 3)")
+        j = PgJournal(self.dsn, "new", tempfile.mkdtemp(), heartbeat=False)
+        m = build_with(ReferenceEngine())
+        j.start(m)
+        with m.transaction(user="alice"):
+            m.set_cell("Price", 12, Product="A")
+        (h,) = j.cell_history(m, "Price", Product="A")
+        self.assertEqual(h["at"], m.last_record["at"])  # 時刻は記録の JSON と同じ形の文字列で返す
+        j.close()

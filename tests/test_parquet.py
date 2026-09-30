@@ -85,7 +85,11 @@ class ParquetRoundTrip(unittest.TestCase):
                     m.engine.from_parquet(data, ("Employee", "Month"), "boolean", m)
             with self.subTest(engine=engine.name, case="軸"):
                 with self.assertRaisesRegex(ValueError, "列が合わない"):
-                    m.engine.from_parquet(data, ("Month", "Employee"), "number", m)
+                    m.engine.from_parquet(data, ("Department", "Month"), "number", m)
+            with self.subTest(engine=engine.name, case="軸の並びが違う"):  # 列は名前で選ぶ
+                store = m.engine.from_parquet(data, ("Month", "Employee"), "number", m)
+                want = {(t, e): v for (e, t), v in cells(m, "Salary").items()}
+                self.assertEqual(m.engine.to_cube(store, m).cells, want)
             with self.subTest(engine=engine.name, case="壊れたバイト列"):
                 with self.assertRaisesRegex(ValueError, "Parquet"):
                     m.engine.from_parquet(data[:-20], ("Employee", "Month"), "number", m)

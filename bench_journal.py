@@ -40,7 +40,8 @@ class Target:
     def make(self):
         if self.kind == "file":
             return FileJournal(self.tmp.name)
-        from sparse_engine.pg_journal import PgJournal
+        from sparse_engine.pg_journal import PgJournal, migrate
+        migrate(DSN)
         j = PgJournal(DSN, self.model_id, self.tmp.name)
         self.made.append(j)
         return j

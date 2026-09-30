@@ -418,6 +418,7 @@ def main(argv=None) -> None:
     ap.add_argument("--engine", choices=["rust", "reference"], default="rust")
     ap.add_argument("--pg", metavar="DSN", help="PostgreSQL の記録先を使う")
     ap.add_argument("--model-id", default="default", help="--pg のときのモデルの ID")
+    ap.add_argument("--migrate", action="store_true", help="--pg のとき、開く前にスキーマを最新の版にする")
     ap.add_argument("--checkpoint-every", type=int, default=1000, help="この件数の記録ごとにスナップショットを取る")
     ap.add_argument("--max-queue", type=int, default=1000, help="書き込みの列の上限（溢れたら 429）")
     ap.add_argument("--switch-interval", type=float, default=0.0005,
@@ -448,7 +449,9 @@ def main(argv=None) -> None:
         from .engine import ReferenceEngine
         engine = ReferenceEngine()
     if args.pg:
-        from .pg_journal import PgJournal
+        from .pg_journal import PgJournal, migrate
+        if args.migrate:
+            migrate(args.pg)
         journal = PgJournal(args.pg, args.model_id, args.path, heartbeat=not args.follow)
     else:
         from .journal import FileJournal
