@@ -25,10 +25,21 @@ class Engine(Protocol):
     def repartition(self, storage: Any, partition: str | None, cat: Catalog) -> Any:
         """分割軸を変えて持ち直す。"""
     def write(self, storage: Any, key: Key, value: Any, cat: Catalog) -> Any: ...
-    def dimension_changed(self, cat: Catalog, dim: str) -> None:
-        """軸 dim にメンバーが追加された（プロパティの対応表も変わりうる）ことを知らせる。"""
+    def dimension_changed(self, cat: Catalog, dim: str, renumbered: bool = False) -> None:
+        """軸 dim のメンバーが変わった（プロパティの対応表も変わりうる）ことを知らせる。
+        renumbered なら、メンバーを消して後ろのメンバーの番号が詰まった。"""
     def fit(self, storage: Any, cat: Catalog) -> Any:
         """メンバーが増えたあとも格納データが使えるようにする（必要なら詰め直す）。"""
+    def region_of_value(self, storage: Any, value: float, cat: Catalog) -> Restrict | None:
+        """値が value のセルを囲む範囲。そういうセルがなければ None。"""
+    def drop_value(self, storage: Any, value: float, cat: Catalog) -> Any:
+        """値が value のセルを消した格納データ。"""
+    def rename_member(self, storage: Any, dim: str, old: str, new: str, cat: Catalog) -> Any:
+        """軸 dim のメンバー old を new と呼ぶようにした格納データ（番号は変わらない）。"""
+    def remove_member(self, storage: Any, dim: str, index: int, member: str, values: bool,
+                      cat: Catalog) -> Any:
+        """軸 dim のメンバー member（番号 index）のセルを消し、後ろのメンバーの番号を詰めた格納データ。
+        values なら値も dim のメンバー番号なので、member を指す値は空にし、後ろの番号を詰める。"""
     def evaluate(self, expr: Expr, cat: Catalog, restrict: Restrict) -> Any: ...
     def evaluate_many(self, items: list[tuple[Expr, Restrict]], cat: Catalog) -> list[Any]:
         """互いに独立な式をまとめて評価する。並列に実行できるエンジンはそうしてよい。"""
@@ -67,8 +78,33 @@ class ReferenceEngine:
     def repartition(self, storage, partition, cat):
         return storage
 
-    def dimension_changed(self, cat, dim):
+    def dimension_changed(self, cat, dim, renumbered=False):
         pass  # Cube のキーはメンバー名なので、何もしなくてよい
+
+    def rename_member(self, storage: Cube, dim, old, new, cat):
+        if dim not in storage.dims:
+            return storage
+        i = storage.dims.index(dim)
+        return Cube(storage.dims, {(k[:i] + (new,) + k[i + 1:] if k[i] == old else k): v
+                                   for k, v in storage.cells.items()})
+
+    def region_of_value(self, storage: Cube, value, cat):
+        keys = [k for k, v in storage.cells.items() if v == value]
+        if not keys:
+            return None
+        return {d: frozenset(k[i] for k in keys) for i, d in enumerate(storage.dims)}
+
+    def drop_value(self, storage: Cube, value, cat):
+        return Cube(storage.dims, {k: v for k, v in storage.cells.items() if v != value})
+
+    def remove_member(self, storage: Cube, dim, index, member, values, cat):
+        cells = storage.cells
+        if dim in storage.dims:
+            i = storage.dims.index(dim)
+            cells = {k: v for k, v in cells.items() if k[i] != member}
+        if values:
+            cells = {k: v - 1.0 if v > index else v for k, v in cells.items() if v != index}
+        return Cube(storage.dims, dict(cells))
 
     def fork(self, cat):
         return ReferenceEngine()

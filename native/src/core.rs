@@ -586,21 +586,48 @@ impl Store {
             }
             self.after_delta();
         }
-        if changed.is_empty() {
-            return Ok(None);
+        Ok(self.region_of(&changed))
+    }
+
+    /// keys を囲む範囲（宣言した軸の順の、軸ごとのメンバー番号）。keys が空なら None。
+    fn region_of(&self, keys: &[u64]) -> Option<Vec<Vec<u32>>> {
+        if keys.is_empty() {
+            return None;
         }
         let sets = self
             .metric_dims
             .iter()
             .map(|d| {
                 let p = self.pack.pos(*d).unwrap();
-                let mut ms: Vec<u32> = changed.iter().map(|&k| self.pack.get(k, p)).collect();
+                let mut ms: Vec<u32> = keys.iter().map(|&k| self.pack.get(k, p)).collect();
                 ms.sort_unstable();
                 ms.dedup();
                 ms
             })
             .collect();
-        Ok(Some(sets))
+        Some(sets)
+    }
+
+    /// 値が v のセルを消す（メンバー型の Metric で、消すメンバーを指す値を空にする）。
+    pub fn drop_value(&mut self, v: f64) {
+        let mut cells = Vec::with_capacity(self.keys.len() + self.delta.len());
+        self.merged(0, None, |k, x| {
+            if x != v {
+                cells.push((k, x))
+            }
+        });
+        self.set_sorted(cells);
+    }
+
+    /// 値が v のセルを囲む範囲。なければ None（メンバー型の Metric で、消すメンバーを指すセルを探す）。
+    pub fn region_of_value(&self, v: f64) -> Option<Vec<Vec<u32>>> {
+        let mut keys = Vec::new();
+        self.merged(0, None, |k, x| {
+            if x == v {
+                keys.push(k)
+            }
+        });
+        self.region_of(&keys)
     }
 
     fn encode(&self, key: &[u32]) -> u64 {
@@ -654,6 +681,39 @@ impl Store {
 
     pub fn as_cube(&self) -> Cube {
         self.read(&Restrict::all(0))
+    }
+
+    /// 軸 dim のメンバー m のセルを消し、後ろのメンバーの番号を 1 つずつ詰める。values なら値も
+    /// dim のメンバー番号として扱い、m を指す値は消し、後ろの番号を詰める。
+    ///
+    /// 番号の詰め方は残るメンバーの順序を保つので、キーの順序も保たれ、並べ直さずに済む。
+    pub fn remove_member(&mut self, dim: DimId, m: u32, values: bool) {
+        let pos = self.pack.pos(dim);
+        let pack = &self.pack;
+        let target = m as f64;
+        let mut cells = Vec::with_capacity(self.keys.len() + self.delta.len());
+        self.merged(0, None, |mut k, mut v| {
+            if let Some(p) = pos {
+                let c = pack.get(k, p);
+                if c == m {
+                    return;
+                }
+                if c > m {
+                    k = pack.clear(k, p) | pack.put(p, c - 1);
+                }
+            }
+            if values {
+                if v == target {
+                    return;
+                }
+                if v > target {
+                    v -= 1.0;
+                }
+            }
+            cells.push((k, v));
+        });
+        debug_assert!(cells.windows(2).all(|w| w[0].0 < w[1].0));
+        self.set_sorted(cells);
     }
 
     /// 同じ軸・分割軸で、今のメンバー数に合わせて詰め直した Store。

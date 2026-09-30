@@ -1,7 +1,7 @@
 """式の AST。Metric 全体（ブロック）に対する演算だけを表現し、セル単位の式は持たない。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 
 AGGREGATORS = {
     "sum": sum,
@@ -116,6 +116,30 @@ def member(dim: str, name: str) -> Member:
 def if_(cond, then, else_=None) -> If:
     """条件が TRUE なら then、FALSE なら else_、空なら空。else_ 省略時は FALSE も空。"""
     return If(lift(cond), lift(then), None if else_ is None else lift(else_))
+
+
+def _children(e: Expr):
+    for f in fields(e):
+        v = getattr(e, f.name)
+        if isinstance(v, Expr):
+            yield f.name, v
+
+
+def _names_member(e: Expr, dim: str, member: str) -> bool:
+    return isinstance(e, (Member, Select)) and e.dim == dim and e.member == member
+
+
+def mentions_member(e: Expr, dim: str, member: str) -> bool:
+    """式が `dim."member"`（定数か SELECT）を書いているか。"""
+    return _names_member(e, dim, member) or any(mentions_member(c, dim, member) for _, c in _children(e))
+
+
+def rename_member(e: Expr, dim: str, old: str, new: str) -> Expr:
+    """式の中の `dim."old"` を `dim."new"` にする。変わらなければ同じオブジェクトを返す。"""
+    changes: dict = {n: r for n, c in _children(e) if (r := rename_member(c, dim, old, new)) is not c}
+    if _names_member(e, dim, old):
+        changes["member"] = new
+    return replace(e, **changes) if changes else e
 
 
 @dataclass(eq=False)

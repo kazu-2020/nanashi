@@ -385,14 +385,19 @@ def _nonempty(region: Restrict) -> Restrict | None:
 
 
 def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict],
-             added: dict[str, frozenset[str]] | None = None) -> Restrict | None:
+             added: dict[str, frozenset[str]] | None = None,
+             removed: dict[str, str] | None = None) -> Restrict | None:
     """changed（Metric 名 -> 変更範囲）のもとで、式の結果のうち値が変わりうる範囲を返す。
 
     added（軸名 -> 追加したメンバー）を渡すと、全メンバーへ値を広げる演算（+ - AND OR の展開、
     IF の分岐の展開、EXPAND、IFBLANK / ISBLANK、引き下ろし、前月参照）が新しいメンバーに
     作るセルの範囲も含める。新しいメンバーはどの Metric でも空なので、それ以外の演算は影響しない。
+
+    removed（軸名 -> これから消すメンバー）を渡すと、前月参照の読み先が変わる時点も含める
+    （Feb を消すと、Mar の前月は Feb から Jan になる）。消すメンバーそのもののセルは、
+    changed と added に入れて伝える。
     """
-    af = lambda e: affected(e, cat, changed, added)
+    af = lambda e: affected(e, cat, changed, added, removed)
 
     def grow(r: Restrict | None, dims) -> Restrict | None:
         """dims のうちメンバーを追加した軸について、新しいメンバーの範囲を足す。"""
@@ -446,7 +451,15 @@ def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict],
             if r is not None and dim in r:
                 d = cat.dimension(dim)
                 r = _nonempty({**r, dim: frozenset(t for m in r[dim] if (t := d.offset(m, n)) is not None)})
-            return grow(r, [dim])  # 末尾に足した時点には、ずらした値が入りうる
+            r = grow(r, [dim])  # 末尾に足した時点には、ずらした値が入りうる
+            if removed and dim in removed:  # 消すメンバーを読み飛ばすようになる時点
+                d = cat.dimension(dim)
+                p = d._index[removed[dim]]
+                span = range(p + 1, p + n + 1) if n > 0 else range(p + n, p)
+                shifted = frozenset(d.members[q] for q in span if 0 <= q < len(d.members))
+                if shifted:
+                    r = union_region(r, {dim: shifted})
+            return r
         case By(child, dim, prop, _):
             r = af(child)
             aggregate = dim in infer(child, cat, []).dims

@@ -16,7 +16,7 @@ def _show(v: float | bool) -> str:
 
 
 class Dimension:
-    """名前付きの軸。メンバーは後から増えてよいが、Metric が持つ軸の組は固定。"""
+    """名前付きの軸。メンバーは後から増やす、消す、名前を変えることができるが、Metric が持つ軸の組は固定。"""
 
     def __init__(self, name: str, members: Iterable[str], *, ordered: bool = False):
         self.name = name
@@ -52,6 +52,31 @@ class Dimension:
             raise ValueError(f"{self.name}: メンバー {member!r} はすでにある")
         self._index[member] = len(self.members)
         self.members.append(member)
+
+    def rename_member(self, old: str, new: str) -> None:
+        """メンバーの名前を変える。番号（並び順）はそのまま。自分のプロパティの対応表も新しい dict にする。"""
+        if old not in self._index:
+            raise ValueError(f"{self.name}: メンバー {old!r} がない")
+        if not isinstance(new, str) or not new:
+            raise ValueError(f"{self.name}: メンバー名は空でない文字列: {new!r}")
+        if new in self._index:
+            raise ValueError(f"{self.name}: メンバー {new!r} はすでにある")
+        i = self._index.pop(old)
+        self._index[new] = i
+        self.members[i] = new
+        for prop, (target, mapping) in list(self.properties.items()):
+            if old in mapping:
+                self.properties[prop] = (target, {(new if k == old else k): v for k, v in mapping.items()})
+
+    def remove_member(self, member: str) -> None:
+        """メンバーを消す。後ろのメンバーの番号は 1 つずつ詰まる。自分のプロパティの対応表からも消す。"""
+        if member not in self._index:
+            raise ValueError(f"{self.name}: メンバー {member!r} がない")
+        del self.members[self._index[member]]
+        self._index = {m: i for i, m in enumerate(self.members)}
+        for prop, (target, mapping) in list(self.properties.items()):
+            if member in mapping:
+                self.properties[prop] = (target, {k: v for k, v in mapping.items() if k != member})
 
     def set_property_value(self, prop: str, member: str, value: str, target: Dimension) -> None:
         """member のプロパティ prop を value にする。対応表は新しい dict に置き換える

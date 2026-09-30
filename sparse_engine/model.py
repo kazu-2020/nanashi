@@ -26,8 +26,8 @@ from .core import Cube, Dimension, Key
 from .delta import DeltaPlan, plan_for, rename
 from .engine import Engine, default_engine
 from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, collect_refs, infer,
-                       resolve, union_region)
-from .expr import BinOp, Coalesce, Const, Expr, Filter, Ref
+                       member_kind, resolve, union_region)
+from .expr import BinOp, Coalesce, Const, Expr, Filter, Ref, mentions_member, rename_member
 from .parser import parse
 
 
@@ -74,6 +74,7 @@ class Model:
     _delta: dict[str, DeltaPlan] = field(default_factory=dict)  # 差分集計する Metric -> 計画
     _counts: dict[str, Any] = field(default_factory=dict)  # 差分集計する SUM の各グループの件数
     _old_cells: dict[str, dict[Key, Any]] = field(default_factory=dict)  # 入力の変更前の値
+    _old_slices: dict[str, Any] = field(default_factory=dict)  # 範囲ごと空にした入力の、変更前の値
     _added: dict[str, set[str]] = field(default_factory=dict)  # 前回の再計算以降に追加したメンバー
     _temp_types: dict[str, Type] = field(default_factory=dict)  # 差分計算中の一時的な名前の型
     _delta_cache: dict[str, tuple] = field(default_factory=dict)  # Metric -> (計画, 件数の差分の式, 値の差分の式)
@@ -284,6 +285,152 @@ class Model:
                 store[name] = self.engine.fit(store[name], self)
         self._added.setdefault(dim, set()).add(member)
 
+    # ------------------------------------------------ メンバーの名前の変更と削除
+
+    def rename_member(self, dim: str, old: str, new: str) -> None:
+        """軸 dim のメンバー old の名前を new にする。
+
+        値も計算結果も変わらない（エンジンの中ではメンバーを番号で持つ）ので、計算し直さない。
+        プロパティの対応表、メンバー型の Metric、式の中の `dim."old"` もすべて新しい名前になる。
+        """
+        d = self.dimension(dim)
+        self.recalc()  # 変更範囲はメンバー名で持つので、ためている変更を先に片付ける
+        d.rename_member(old, new)
+        for other in self.dimensions.values():
+            for prop, (target, mapping) in list(other.properties.items()):
+                if target == dim and old in mapping.values():
+                    other.properties[prop] = (target, {k: new if v == old else v for k, v in mapping.items()})
+        self.engine.dimension_changed(self, dim)
+        for name, m in self.metrics.items():
+            if dim in m.dims:
+                self._values[name] = self.engine.rename_member(self._values[name], dim, old, new, self)
+                if name in self._counts:
+                    self._counts[name] = self.engine.rename_member(self._counts[name], dim, old, new, self)
+            if m.written is not None:
+                m.written = rename_member(m.written, dim, old, new)
+                m.formula = rename_member(m.formula, dim, old, new)
+        for name, plan in self._delta.items():
+            if plan.count is not None:
+                self._delta[name] = dataclasses.replace(plan, count=rename_member(plan.count, dim, old, new))
+        self._delta_cache.clear()
+
+    def remove_member(self, dim: str, member: str) -> None:
+        """軸 dim からメンバーを消す。
+
+        そのメンバーのセルはすべての Metric から消え、プロパティの対応表からも外れる
+        （そのメンバーを参照先にしていたメンバーは、参照先なしになる）。メンバー型の Metric で
+        そのメンバーを指していた値は空になる。式が `dim."member"` を書いていれば消せない。
+
+        2 段階で計算し直す。まず、入力のうちそのメンバーのセルと、そのメンバーを指す値を空にして、
+        普通の入力の変更として計算し直す（差分集計と、値の変化による絞り込みが効く）。
+        次にメンバーそのものを消し、それでも変わるところだけを計算し直す。空になったメンバーを
+        消して変わるのは、全メンバーへ値を広げる演算がそのメンバーに作っていたセル（を集計した値）と、
+        そのメンバーをまたぐ前月参照だけである。
+        """
+        d = self.dimension(dim)
+        if member not in d:
+            raise ValueError(f"{dim}: メンバー {member!r} がない")
+        for m in self.metrics.values():
+            if m.written is not None and mentions_member(m.written, dim, member):
+                raise ValueError(f'{m.name} の式が {dim}."{member}" を参照しているので消せない')
+        self.recalc()
+        index = d._index[member]
+        point = {dim: frozenset([member])}
+        values_kind = member_kind(dim)
+        eng = self.engine
+
+        def pointing(name: str) -> Restrict | None:
+            """name（メンバー型の Metric）で、消すメンバーを指すセルを囲む範囲。"""
+            if self.metrics[name].kind != values_kind:
+                return None
+            return eng.region_of_value(self._values[name], index, self)
+
+        def has_cells(name: str) -> bool:
+            return dim in self.metrics[name].dims and eng.size(eng.filter(self._values[name], point, self)) > 0
+
+        # 1. 入力を空にして、普通の変更として計算し直す
+        sources = self._delta_sources()
+        for name, m in self.metrics.items():
+            if m.formula is not None:
+                continue
+            here, there = has_cells(name), pointing(name)
+            r = union_region(point if here else None, there)
+            if r is None:
+                continue
+            if name in sources:
+                self._old_slices[name] = eng.filter(self._values[name], r or None, self)
+            if here:
+                empty = eng.empty(m.dims, m.kind, self.layout.get(name), cat=self)
+                self._values[name] = eng.replace(self._values[name], point, empty, self)
+            if there is not None:
+                self._values[name] = eng.drop_value(self._values[name], index, self)
+            self._changed[name] = r
+        self.recalc()
+
+        # 2. メンバーを消して変わる範囲を、消す前の軸と対応表のもとで求める。下流に伝えるのは、
+        #    そのメンバーのセルが実際にある Metric の消えるセルと、計算し直す範囲だけにする
+        todo = self._removal_regions(dim, member, has_cells)
+        d.remove_member(member)
+        for other in self.dimensions.values():
+            for prop, (target, mapping) in list(other.properties.items()):
+                if target == dim and member in mapping.values():
+                    other.properties[prop] = (target, {k: v for k, v in mapping.items() if v != member})
+        eng.dimension_changed(self, dim, renumbered=True)
+        for name, m in self.metrics.items():
+            values = m.kind == values_kind
+            if dim in m.dims or values:
+                self._values[name] = eng.remove_member(self._values[name], dim, index, member, values, self)
+            if dim in m.dims and name in self._counts:
+                self._counts[name] = eng.remove_member(self._counts[name], dim, index, member, False, self)
+        for step in self._plan:
+            if step.scan_dim is not None:
+                active = {n: todo[n] for n in step.names if n in todo}
+                if active:
+                    self._scan(step, active, False)
+            elif step.names[0] in todo:
+                self._recompute(self.metrics[step.names[0]], todo[step.names[0]])
+
+    def _removal_regions(self, dim: str, member: str, has_cells) -> dict[str, Restrict]:
+        """入力を空にしたあと、メンバーを消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。
+
+        計算 Metric がそのメンバーを指す値を持つのは、そのメンバーのセル自身（軸の値）か、
+        それを前月参照や引き下ろしで運んだセルだけなので、消えるセルからの伝搬で足りる。
+        """
+        point = frozenset([member])
+        added, removed = {dim: point}, {dim: member}
+
+        def surviving(r: Restrict | None) -> Restrict | None:
+            if r is None or dim not in r:
+                return r
+            rest = r[dim] - point
+            return {**r, dim: rest} if rest else None
+
+        changes: dict[str, Restrict] = {}  # 下流から見て変わる範囲（消えるセルと、計算し直す範囲）
+        todo: dict[str, Restrict] = {}
+
+        def settle(name: str, r: Restrict | None) -> None:
+            r = surviving(r)
+            if r is not None:
+                todo[name] = r
+            c = union_region({dim: point} if has_cells(name) else None, r)
+            if c is not None:
+                changes[name] = c
+
+        for step in self._plan:
+            if step.scan_dim is None:
+                m = self.metrics[step.names[0]]
+                if m.formula is not None:
+                    settle(m.name, affected(m.formula, self, changes, added, removed))
+                continue
+            for n in step.names:  # scan の中の前月参照は、消えるセルからも伝わる
+                if has_cells(n):
+                    changes[n] = {dim: point}
+            scanned = self._scan_regions(step, changes, added, removed)
+            for n in step.names:
+                changes.pop(n, None)
+                settle(n, scanned.get(n))
+        return todo
+
     # ------------------------------------------------ 入力
 
     def set_cell(self, name: str, value: float | bool | None, **coords: str) -> None:
@@ -484,15 +631,17 @@ class Model:
         return regions
 
     def _scan_regions(self, step: Step, regions: dict[str, Restrict],
-                      added: dict[str, frozenset[str]] | None) -> dict[str, Restrict]:
+                      added: dict[str, frozenset[str]] | None,
+                      removed: dict[str, str] | None = None) -> dict[str, Restrict]:
         """scan に含まれる Metric の影響範囲。互いを参照し合うので、範囲が増えなくなるまで
-        伝搬を繰り返す（範囲は単調に広がるだけで有限なので必ず止まる）。"""
-        local: dict[str, Restrict | None] = {n: None for n in step.names}
+        伝搬を繰り返す（範囲は単調に広がるだけで有限なので必ず止まる）。regions に scan の
+        Metric 自身の範囲があれば、そこから始める。"""
+        local: dict[str, Restrict | None] = {n: regions.get(n) for n in step.names}
         while True:
             env = regions | {n: r for n, r in local.items() if r is not None}
             grown = False
             for n in step.names:
-                r = union_region(local[n], affected(self.metrics[n].formula, self, env, added))
+                r = union_region(local[n], affected(self.metrics[n].formula, self, env, added, removed))
                 if r != local[n]:
                     local[n] = env[n] = r
                     grown = True
@@ -511,6 +660,7 @@ class Model:
         if full:
             self._changed.clear()
             self._old_cells.clear()
+            self._old_slices.clear()
             self._recalc_all()
             return
         # 計画の順に、計算しながら影響範囲を伝える。各 Metric は書き戻すときに新旧の値を比べ、
@@ -521,6 +671,7 @@ class Model:
         olds = {n: self._old_input_slice(n, regions[n]) for n in self._changed if n in sources}
         self._changed.clear()
         self._old_cells.clear()
+        self._old_slices.clear()
         for step in self._plan:
             if step.scan_dim is not None:
                 active = {n: r for n, r in self._scan_regions(step, regions, added).items()
@@ -541,15 +692,21 @@ class Model:
             plan = self._delta.get(m.name)
             if plan is not None and self._delta_applicable(plan, regions, olds):
                 changed = self._apply_delta(m, plan, region, regions, olds)
-            elif plan is not None and plan.count is not None:
-                value, counts = self.engine.evaluate_with_count(m.formula, plan.count, self, region)
-                changed = self._replace(m, region, value, diff=True)
-                counts = self.engine.reorder(counts, m.dims)
-                self._counts[m.name] = self.engine.replace(self._counts[m.name], region, counts, self)
             else:
-                changed = self._replace(m, region, self.engine.evaluate(m.formula, self, region), diff=True)
+                changed = self._recompute(m, region, diff=True)
             if changed is not None:
                 regions[m.name] = changed
+
+    def _recompute(self, m: Metric, region: Restrict, diff: bool = False) -> Restrict | None:
+        """m の region を式から計算し直す。差分集計する SUM は、各グループの件数も求め直す。"""
+        plan = self._delta.get(m.name)
+        if plan is not None and plan.count is not None:
+            value, counts = self.engine.evaluate_with_count(m.formula, plan.count, self, region)
+            changed = self._replace(m, region, value, diff)
+            counts = self.engine.reorder(counts, m.dims)
+            self._counts[m.name] = self.engine.replace(self._counts[m.name], region, counts, self)
+            return changed
+        return self._replace(m, region, self.engine.evaluate(m.formula, self, region), diff)
 
     def _recalc_all(self) -> None:
         """全体を計算し直す。同じ段の Metric はまとめて評価し、差分集計する SUM は件数も同時に求める。"""
@@ -571,6 +728,8 @@ class Model:
 
     def _old_input_slice(self, name: str, region: Restrict) -> Any:
         """入力 Metric の region の、変更前の値。今の値から、触れたセルだけ覚えておいた値に戻す。"""
+        if name in self._old_slices:  # 範囲ごと空にした（メンバーの削除）。region はその範囲
+            return self._old_slices[name]
         old = self.engine.filter(self._values[name], region or None, self)
         for key, value in self._old_cells.get(name, {}).items():
             old = self.engine.write(old, key, value, self)

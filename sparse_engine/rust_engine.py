@@ -174,8 +174,10 @@ class RustEngine:
     def repartition(self, store, partition, cat):
         return self.core.repartition(store, None if partition is None else self._dim(cat, partition))
 
-    def dimension_changed(self, cat, dim):
+    def dimension_changed(self, cat, dim, renumbered=False):
         """メンバー数と、dim が関わる対応表を Rust 側に反映する。"""
+        if renumbered:  # 変換済みの式はメンバーの番号（定数、SELECT）を持っているので作り直す
+            self._exprs.clear()
         if dim in self._dims:
             d, i = self._dims[dim]
             if d is cat.dimension(dim):
@@ -185,6 +187,13 @@ class RustEngine:
             if dim in (src, target) or current is not mapping:
                 self._maps[(src, prop)] = (None, i)  # 次の _map で中身を置き換えさせる
                 self._map(cat, src, prop)
+
+    def rename_member(self, store, dim, old, new, cat):
+        return store  # キーはメンバーの番号なので、名前が変わっても何もしなくてよい
+
+    def remove_member(self, store, dim, index, member, values, cat):
+        self.core.remove_member(store, self._dim(cat, dim), index, values)
+        return store
 
     def fit(self, store, cat):
         repacked = self.core.fit(store)
@@ -226,11 +235,21 @@ class RustEngine:
         return store
 
     def replace_diff(self, store, region, new, cat):
-        sets = self.core.replace_diff(store, self._region(cat, region), new)
+        return store, self._named(store, self.core.replace_diff(store, self._region(cat, region), new), cat)
+
+    def drop_value(self, store, value, cat):
+        self.core.drop_value(store, float(value))
+        return store
+
+    def region_of_value(self, store, value, cat):
+        return self._named(store, self.core.region_of_value(store, float(value)), cat)
+
+    def _named(self, store, sets, cat):
+        """軸ごとのメンバー番号の集合を、メンバー名の範囲にする。"""
         if sets is None:
-            return store, None
+            return None
         dims = [self._names[i] for i in self.core.metric_dims(store)]
-        return store, {d: frozenset(cat.dimension(d).members[j] for j in ms) for d, ms in zip(dims, sets)}
+        return {d: frozenset(cat.dimension(d).members[j] for j in ms) for d, ms in zip(dims, sets)}
 
     def _dims_of(self, handle) -> list[int]:
         if isinstance(handle, nanashi_core.StoreHandle):

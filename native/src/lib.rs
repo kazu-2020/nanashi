@@ -175,9 +175,29 @@ impl Core {
         cat.dims.len() - 1
     }
 
-    /// 軸のメンバー数を変える（メンバーの追加）。
+    /// 軸のメンバー数を変える（メンバーの追加と削除）。
     fn resize_dim(&mut self, dim: DimId, size: u32) {
         Arc::make_mut(&mut self.cat).dims[dim].size = size;
+    }
+
+    /// 格納データから軸 dim のメンバー m を消し、後ろの番号を詰める（values なら値の番号も）。
+    fn remove_member(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, dim: DimId, m: u32, values: bool) {
+        let mut handle = store.borrow_mut();
+        let target = Arc::make_mut(&mut handle.store);
+        py.detach(|| target.remove_member(dim, m, values));
+    }
+
+    /// 値が value のセルを消す。
+    fn drop_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) {
+        let mut handle = store.borrow_mut();
+        let target = Arc::make_mut(&mut handle.store);
+        py.detach(|| target.drop_value(value));
+    }
+
+    /// 値が value のセルを囲む範囲（軸ごとのメンバー番号）。なければ None。
+    fn region_of_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) -> Option<Vec<Vec<u32>>> {
+        let s = store.borrow().store.clone();
+        py.detach(move || s.region_of_value(value))
     }
 
     /// src のメンバー番号 -> dst のメンバー番号（なければ -1）の対応を登録する。
