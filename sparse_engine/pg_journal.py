@@ -42,7 +42,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .engine import native
-from .journal import (BrokenSnapshot, Journal, Stale, _shown, as_block, cell_count, read_cell_files,
+from .journal import (BrokenSnapshot, Fenced, Journal, _shown, as_block, cell_count, read_cell_files,
                       write_cell_files)
 from .objects import open_objects
 from .storage import dump, read
@@ -92,10 +92,6 @@ create table if not exists nanashi_snapshot (
 
 # 確定の後の反映でこの行数より多く入れたら、セルの履歴の表の統計を取り直す
 ANALYZE_ROWS = 100_000
-
-
-class Fenced(Stale):
-    """書き込むためのリースを持っていないか、別のプロセスが先に書き込んでいた。"""
 
 
 class Snapshot(NamedTuple):

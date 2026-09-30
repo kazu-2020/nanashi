@@ -49,6 +49,10 @@ class Stale(Exception):
     """手元のモデルが記録先より古い（別のプロセスが書き込んだ）。開き直せば続けられる。"""
 
 
+class Fenced(Stale):
+    """書き込みの権利（FileJournal のロック、PgJournal のリース）を取れないか、失った。"""
+
+
 class BrokenSnapshot(Exception):
     """スナップショットのファイルが欠けているか、ハッシュが合わない。"""
 
@@ -339,13 +343,17 @@ class Journal:
         snapshots()                スナップショットの (通し番号, 置き場所) を新しい順に
         load_snapshot(place)       置き場所のスナップショットを読む。壊れていれば BrokenSnapshot
                                    （open は 1 つ前のスナップショットから記録を多く再生する）
-        release()                  書き込みの権利（PgJournal のリース）を手放す。次の書き手が待たずに済む
+        acquire()                  書き込みの権利（FileJournal のロック、PgJournal のリース）を取る
+        release()                  書き込みの権利を手放す。次の書き手が待たずに済む
     """
 
     head: int = 0
 
+    def acquire(self) -> None:
+        """書き込みの権利を取る。取れなければ Fenced。"""
+
     def release(self) -> None:
-        """書き込みの権利を手放す。権利を持たない記録先（FileJournal）では何もしない。"""
+        """書き込みの権利を手放す。"""
 
     def append(self, record: dict) -> int:
         """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
@@ -457,7 +465,9 @@ class FileJournal(Journal):
         path/cells/<乱数>-<Metric>.parquet   bulk_cells を超えるセルを書き換えた記録の、セルの変更
         path/snapshots/<通し番号>/     その時点のモデル（Model.save の形式）と meta.json（通し番号、ハッシュ）
 
-    最後の行が途中で切れていれば（書いている途中で落ちた）、開くときに捨てる。
+    書き込むプロセスは 1 つに限る。最初に追記するときに path/lock の排他ロックを取り、release まで持つ。
+    最後の行が途中で切れていれば（書いている途中で落ちた）、読むときは無視し、ロックを取ったときに捨てる。
+    追記に失敗すれば、ファイルを追記の前の長さに戻す。
     スナップショットは一時ディレクトリに書いてから名前を変えるので、途中のものは見えない。
     大量のセルの変更は、JSON の行にせず Metric ごとの Parquet に書き（PgJournal と同じ形式）、記録の行には
     ファイルの名前とハッシュだけを入れる。ファイルを書き出してから行を追記するので、確定した記録の
@@ -471,18 +481,47 @@ class FileJournal(Journal):
         (self.path / "snapshots").mkdir(parents=True, exist_ok=True)
         self.cells_dir = self.path / "cells"
         self.log_path = self.path / "log.jsonl"
-        self.head = 0  # 最後の記録の通し番号
-        self._by_client_op: dict[str, int] = {}
+        self._lock_file = None  # 書き込みの権利（path/lock の排他ロック）。最初に書くときに取る
+        self._broken: BaseException | None = None  # 追記の失敗を取り消せなかった（以後は書かない）
         self._scan()
+
+    # ------------------------------------------------ 書き込みの権利
+
+    def acquire(self) -> None:
+        """書き込みの権利（path/lock の排他ロック）を取る。別のプロセスが持っていれば Fenced。
+        読み込んだあとに別のプロセスが書き込んでいたら、手元が古いので Fenced（開き直せば続けられる）。"""
+        if self._lock_file is not None:
+            return
+        f = open(self.path / "lock", "a+b")
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            f.close()
+            raise Fenced(f"{self.path}: 別のプロセスが書き込み中") from None
+        head = self.head
+        self._scan(repair=True)  # ロックを取ってから読み直す（途中で切れた最後の行は、ここで捨てる）
+        if self.head != head:
+            f.close()
+            raise Fenced(f"{self.path}: 読み込んだあとに別のプロセスが書き込んだ（{head} → {self.head}）。開き直す")
+        self._lock_file = f
+
+    def release(self) -> None:
+        if self._lock_file is not None:
+            self._lock_file.close()  # 閉じればロックも外れる
+            self._lock_file = None
 
     # ------------------------------------------------ 記録
 
-    def _scan(self) -> None:
-        """記録を 1 行ずつ読んで、最後の通し番号と client_op_id の表を作る（ログ全体をメモリに置かない）。"""
+    def _scan(self, repair: bool = False) -> None:
+        """記録を 1 行ずつ読んで、最後の通し番号と client_op_id の表を作る（ログ全体をメモリに置かない）。
+        最後の行が途中で切れていれば、書いている途中で落ちたか、別のプロセスが書いている途中なので読まない。
+        repair（書き込みの権利を持っているとき）なら、その行をファイルから切り捨てる。"""
+        self.head = 0  # 最後の記録の通し番号
+        self._size = 0  # 最後の記録までのバイト数
+        self._by_client_op: dict[str, int] = {}
         if not self.log_path.exists():
             return
         size = self.log_path.stat().st_size
-        good = 0
         with open(self.log_path, "rb") as f:
             for line in f:
                 try:
@@ -490,21 +529,31 @@ class FileJournal(Journal):
                         raise ValueError("途中で切れた行")
                     rec = json.loads(line)
                 except ValueError:
-                    if good + len(line) < size:
-                        raise ValueError(f"{self.log_path}: {good} バイト目の記録が壊れている") from None
-                    break  # 最後の行だけが壊れているなら、書いている途中で落ちた。捨てる
+                    if self._size + len(line) < size:
+                        raise ValueError(f"{self.log_path}: {self._size} バイト目の記録が壊れている") from None
+                    break
                 if rec["seq"] != self.head + 1:
                     raise ValueError(f"{self.log_path}: 通し番号が {self.head} の次でなく {rec['seq']}")
                 self.head = rec["seq"]
                 if rec.get("client_op_id") is not None:
                     self._by_client_op[rec["client_op_id"]] = rec["seq"]
-                good += len(line)
-        if good < size:
+                self._size += len(line)
+        if repair and self._size < size:
             with open(self.log_path, "r+b") as f:
-                f.truncate(good)
+                f.truncate(self._size)
+                if self.fsync:
+                    _sync(f.fileno())
 
     def append_many(self, records: list[dict]) -> list[int]:
-        """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。"""
+        """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。
+        書き出しか fsync に失敗したら、ファイルを追記の前の長さに戻してから例外を投げる（書きかけの行が
+        残ると、次の記録と通し番号が重なって開けなくなる）。戻せなければ、以後の書き込みを拒否する。"""
+        if self._broken is not None:
+            raise OSError(f"{self.log_path}: 以前の追記の失敗を取り消せなかったので、書き込まない"
+                          "（ファイルを確かめてから開き直す）") from self._broken
+        if not records:
+            return []
+        self.acquire()
         seqs = list(range(self.head + 1, self.head + 1 + len(records)))
         lines = []
         for r, q in zip(records, seqs):
@@ -515,14 +564,26 @@ class FileJournal(Journal):
             lines.append(json.dumps(line, ensure_ascii=False, separators=(",", ":"), default=_json_rows) + "\n")
         if self.fsync and any("cells_blob" in line for line in lines):
             _fsync_dir(self.cells_dir)  # ファイルの名前の変更も、記録の行より先にディスクへ
-        lines = "".join(lines)
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(lines)
-            f.flush()
-            if self.fsync:
-                _sync(f.fileno())
-        if seqs:
-            self.head = seqs[-1]
+        data = "".join(lines).encode("utf-8")
+        fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            try:
+                _write_all(fd, data)
+                if self.fsync:
+                    _sync(fd)
+            except BaseException as e:
+                try:
+                    os.ftruncate(fd, self._size)
+                    if self.fsync:
+                        _sync(fd)
+                except BaseException as undo:
+                    self._broken = undo
+                    log.critical("%s: 追記の失敗を取り消せなかった", self.log_path, exc_info=True)
+                raise e
+        finally:
+            os.close(fd)
+        self._size += len(data)
+        self.head = seqs[-1]
         for r, q in zip(records, seqs):
             if r.get("client_op_id") is not None:
                 self._by_client_op[r["client_op_id"]] = q
@@ -554,9 +615,13 @@ class FileJournal(Journal):
     def records(self, after: int = 0) -> Iterator[dict]:
         if not self.log_path.exists():
             return
-        with open(self.log_path, encoding="utf-8") as f:
+        with open(self.log_path, "rb") as f:
             for line in f:
+                if not line.endswith(b"\n"):
+                    return  # 別のプロセスが書いている途中の行
                 rec = json.loads(line)
+                if rec["seq"] > self.head:
+                    return  # 読み込んだあとに別のプロセスが書いた記録（開き直すまで見ない）
                 if rec["seq"] > after:
                     if "cells_blob" in rec:  # 大量のセルはファイルから、変更の塊として読む
                         rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"],
@@ -635,6 +700,12 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 def _sync(fd: int) -> None:

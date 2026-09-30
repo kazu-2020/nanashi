@@ -1,12 +1,16 @@
 """トランザクションと操作ログ（記録）、スナップショットと記録の再生による復元。"""
+import errno
+import os
 import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sparse_engine import FormulaError, Model, to_formula
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.journal import AlreadyCommitted, FileJournal
+from sparse_engine import journal as journal_module
+from sparse_engine.journal import AlreadyCommitted, Fenced, FileJournal
 
 from .journals import FileStore, JournalCase, PgStore
 from .test_engines import build_with
@@ -203,11 +207,78 @@ class Journal(JournalCase, unittest.TestCase):
         self.m.set_cell("Price", 12, Product="A")
         with open(self.path / "log.jsonl", "a") as f:
             f.write('{"seq": 2, "changes"')  # 書いている途中で落ちた
+        self.m.journal.release()
         reopened = self.reopen()
         self.assertEqual(reopened.seq, 1)
         reopened.set_cell("Price", 14, Product="A")
         self.assertEqual(FileJournal(self.path).head, 2)
         self.assertEqual(self.reopen().get("Price", Product="A"), 14)
+
+    def test_failed_append_is_undone(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        size = (self.path / "log.jsonl").stat().st_size
+
+        def disk_full(fd, data):
+            os.write(fd, data[:len(data) // 2])  # 行の途中まで書けたところで満杯になった
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        failed = []
+
+        def fsync_fails(fd):  # Linux の fsync は、失敗を 1 回だけ知らせる
+            if not failed:
+                failed.append(fd)
+                raise OSError(errno.EIO, "Input/output error")
+        for name, broken in (("_write_all", disk_full), ("_sync", fsync_fails)):
+            with self.subTest(name), mock.patch.object(journal_module, name, broken):
+                with self.assertRaises(OSError):
+                    self.m.set_cell("Price", 99, Product="A")
+            self.assertEqual((self.path / "log.jsonl").stat().st_size, size)
+            self.assertEqual(self.m.get("Price", Product="A"), 12)
+        self.m.set_cell("Price", 13, Product="A")  # 同じ通し番号で書き直せる
+        self.assertEqual(self.m.seq, 2)
+        self.m.journal.release()
+        check_same_state(self, self.m, self.reopen())
+
+    def test_append_that_cannot_be_undone_stops_writes(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+
+        def disk_full(fd, data):
+            os.write(fd, data[:5])
+            raise OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(journal_module, "_write_all", disk_full), \
+                mock.patch.object(journal_module.os, "ftruncate", side_effect=OSError(errno.EIO, "EIO")):
+            with self.assertRaises(OSError):
+                self.m.set_cell("Price", 99, Product="A")
+        with self.assertRaisesRegex(OSError, "取り消せなかった"):
+            self.m.set_cell("Price", 13, Product="A")
+        self.assertEqual(self.m.get("Price", Product="A"), 12)
+        self.m.journal.release()
+        self.assertEqual(self.reopen().get("Price", Product="A"), 12)  # 書きかけの行は捨てて開ける
+
+    def test_second_writer_is_fenced(self):
+        self.file_only()
+        other = self.reopen()
+        self.m.set_cell("Price", 12, Product="A")  # self.m の記録先が書き込みの権利を持つ
+        with self.assertRaisesRegex(Fenced, "書き込み中"):
+            other.set_cell("Price", 20, Product="B")
+        self.m.journal.release()
+        with self.assertRaisesRegex(Fenced, "開き直す"):  # 権利は取れても、手元が古い
+            other.set_cell("Price", 20, Product="B")
+        other = self.reopen()
+        other.set_cell("Price", 20, Product="B")
+        self.assertEqual(self.reopen().get("Price", Product="A"), 12)
+        self.assertEqual(self.reopen().get("Price", Product="B"), 20)
+
+    def test_reader_leaves_the_writers_partial_line(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        with open(self.path / "log.jsonl", "a") as f:
+            f.write('{"seq": 2, "changes"')  # 書き手がまだ書いている途中
+        size = (self.path / "log.jsonl").stat().st_size
+        self.assertEqual(self.reopen().get("Price", Product="A"), 12)
+        self.assertEqual((self.path / "log.jsonl").stat().st_size, size)
 
     def test_corruption_in_the_middle_is_an_error(self):
         self.file_only()
