@@ -15,9 +15,9 @@ except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
 try:
-    import numpy  # noqa: F401  保存形式に使う
+    import nanashi_core  # noqa: F401  保存形式（Parquet）の読み書きに使う
 except ImportError:
-    numpy = None
+    nanashi_core = None
 
 MONTHS = ["Jan", "Feb", "Mar"]
 
@@ -72,7 +72,7 @@ class Overrides(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "number"):
             model().set_cell("Bonus", True, Employee="e1", Month="Jan")
 
-    @unittest.skipIf(numpy is None, "numpy が必要")
+    @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
     def test_overrides_are_saved(self):
         m = model()
         m.set_cell("Bonus", 50, Employee="e1", Month="Jan")

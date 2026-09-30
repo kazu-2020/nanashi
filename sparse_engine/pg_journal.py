@@ -10,11 +10,12 @@
     snapshot     スナップショットの置き場所とハッシュ（ファイルはオブジェクトストレージの代わりに
                  ローカルのディレクトリに置き、置き終えてから登録する）
 
-大量のセルを書き換えた記録（bulk_cells を超えるもの）は、変更前後の値をファイル（オブジェクト
-ストレージの代わり）に書いて確定し、operation にはその置き場所とハッシュだけを持つ。cell_change への
-書き込み（と索引の更新）は確定の後で行う（index_pending）。セルの索引の更新は 1 行あたりの費用が
-大きく、確定の経路に入れると大量の書き込みの確定が何倍も遅くなるため。セルの履歴を引くときは、
-先に未反映の分を反映する。
+大量のセルを書き換えた記録（bulk_cells を超えるもの）は、変更前後の値を Metric ごとに Parquet の
+ファイル（オブジェクトストレージの代わり）に書いて確定し、operation にはその置き場所とハッシュだけを
+持つ。Parquet の列は、座標のメンバーの ID（d<軸の ID>、Int64）と、変更前 old と変更後 new（空は null）。
+cell_change への書き込み（と索引の更新）は確定の後で行う（index_pending）。行を 1 件ずつ入れる費用が
+大きく、確定の経路に入れると大量の書き込みの確定が十数倍遅くなるため。セルの履歴を引くときは、
+先に未反映の分を反映する。以前の版が書いた npz のファイルも読める。
 
 書き込むプロセスは 1 つに限る。最初に追記するときにリースを取り、世代番号を 1 つ進める。確定は
 「通し番号が読んだとおりで、世代番号が自分のもの」のときだけ通る 1 回のトランザクションで行う。
@@ -26,6 +27,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import socket
 import threading
@@ -34,10 +37,10 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
-import numpy as np
 import psycopg
 from psycopg.types.json import Jsonb
 
+from .engine import native
 from .journal import Journal, Stale, _sha256, _shown, _sync, snapshot_ok, write_snapshot
 
 SCHEMA = """
@@ -238,7 +241,7 @@ class PgJournal(Journal):
                             stored["cells_blob"] = blob
                         copy.write_row((self.model_id, seq, rec["at"], rec["user"], rec["reason"],
                                         rec["client_op_id"], Jsonb(stored),
-                                        None if blob is None else blob["uri"], blob is None))
+                                        None if blob is None else blob["prefix"], blob is None))
                 with cur.copy("copy nanashi_cell_change (model_id, seq, metric_id, coords, old_value, new_value)"
                               " from stdin") as copy:
                     for rec, seq, blob in zip(records, seqs, blobs):
@@ -250,42 +253,38 @@ class PgJournal(Journal):
     # ------------------------------------------------ 大量のセル
 
     def _write_blob(self, record: dict) -> dict:
-        """記録のセルの変更をファイルに書き、置き場所、ハッシュ、件数を返す。"""
-        arrays = {}
-        for i, c in enumerate(record["changes"].get("cells", [])):
-            rows = c["rows"]
-            width = len(rows[0][0]) if rows else 0
-            arrays[f"metric{i}"] = np.array([c["metric"]], dtype=np.int64)
-            arrays[f"coords{i}"] = np.array([ids for ids, _, _ in rows], dtype=np.int64).reshape(len(rows), width)
-            for j, name in ((1, "old"), (2, "new")):
-                vals = [r[j] for r in rows]
-                arrays[f"{name}{i}"] = np.array([np.nan if v is None else float(v) for v in vals], dtype=np.float64)
-                arrays[f"{name}_null{i}"] = np.array([v is None for v in vals], dtype=bool)
-        final = self.blob_dir / f"{uuid.uuid4().hex}.npz"
-        tmp = final.with_suffix(".tmp")
-        with open(tmp, "wb") as f:
-            np.savez(f, **arrays)
-            f.flush()
-            _sync(f.fileno())
-        os.rename(tmp, final)
-        return {"uri": str(final), "sha256": _sha256(final), "cells": _cell_count(record)}
+        """記録のセルの変更を Metric ごとの Parquet に書き、置き場所、ハッシュ、件数を返す。"""
+        core = native()
+        prefix = self.blob_dir / uuid.uuid4().hex
+        files = []
+        for c in record["changes"].get("cells", []):
+            block = _block(core, c["rows"])
+            # 列の名前は軸の ID（記録に軸がなければ c0、c1、…）
+            names = [f"d{i}" for i in c["dims"]] if "dims" in c else [f"c{j}" for j in range(block.width)]
+            data = block.to_parquet(names, [("nanashi", json.dumps({"metric": c["metric"]}))])
+            final = Path(f"{prefix}-{c['metric']}.parquet")
+            tmp = final.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                _sync(f.fileno())
+            os.rename(tmp, final)
+            files.append({"metric": c["metric"], "uri": str(final), "sha256": hashlib.sha256(data).hexdigest(),
+                          "cells": len(block)})
+        return {"format": "parquet", "prefix": str(prefix), "files": files, "cells": _cell_count(record)}
 
     @staticmethod
     def _read_blob(blob: dict) -> list[dict]:
-        path = Path(blob["uri"])
-        if _sha256(path) != blob["sha256"]:
-            raise ValueError(f"{path}: セルの変更のファイルが壊れている")
+        """_write_blob で書いたセルの変更を読む（Metric ごとの変更の塊）。以前の版の npz も読む。"""
+        if blob.get("format") != "parquet":
+            return _read_npz(blob)
+        core = native()
         cells = []
-        with np.load(path) as data:
-            i = 0
-            while f"metric{i}" in data:
-                coords = data[f"coords{i}"].tolist()
-                old, new = data[f"old{i}"].tolist(), data[f"new{i}"].tolist()
-                old_null, new_null = data[f"old_null{i}"].tolist(), data[f"new_null{i}"].tolist()
-                rows = [[ids, None if on else o, None if nn else n]
-                        for ids, o, on, n, nn in zip(coords, old, old_null, new, new_null)]
-                cells.append({"metric": int(data[f"metric{i}"][0]), "rows": rows})
-                i += 1
+        for f in blob["files"]:
+            data = Path(f["uri"]).read_bytes()
+            if hashlib.sha256(data).hexdigest() != f["sha256"]:
+                raise ValueError(f"{f['uri']}: セルの変更のファイルが壊れている")
+            cells.append({"metric": f["metric"], "rows": core.CellBlock.from_parquet(data)})
         return cells
 
     def index_pending(self) -> int:
@@ -298,12 +297,14 @@ class PgJournal(Journal):
             pending = conn.execute("select seq, record->'cells_blob' from nanashi_operation"
                                    " where model_id = %s and not indexed order by seq", (self.model_id,)).fetchall()
             loaded = 0
+            core = native() if pending else None
             for seq, blob in pending:
                 cells = self._read_blob(blob)
                 with conn.transaction():
                     with conn.cursor().copy("copy nanashi_cell_change (model_id, seq, metric_id, coords,"
                                             " old_value, new_value) from stdin") as copy:
-                        _copy_cells(copy, self.model_id, seq, cells)
+                        for c in cells:  # COPY のテキストは Rust で作る（行ごとに Python を通さない）
+                            copy.write(_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
                     conn.execute("update nanashi_operation set indexed = true where model_id = %s and seq = %s",
                                  (self.model_id, seq))
                 loaded += blob["cells"]
@@ -389,8 +390,34 @@ def _cell_count(record: dict) -> int:
     return sum(len(c["rows"]) for c in record["changes"].get("cells", []))
 
 
+def _block(core, rows):
+    """行の列なら変更の塊にする（変更の塊ならそのまま）。"""
+    return core.CellBlock.from_rows(rows) if isinstance(rows, list) else rows
+
+
 def _copy_cells(copy, model_id: str, seq: int, cells: list[dict]) -> None:
     for c in cells:
-        for ids, old, new in c["rows"]:
+        rows = c["rows"]
+        if not isinstance(rows, list):
+            copy.write(rows.copy_text(model_id, seq, c["metric"]))
+            continue
+        for ids, old, new in rows:
             copy.write_row((model_id, seq, c["metric"], list(ids),
                             None if old is None else float(old), None if new is None else float(new)))
+
+
+def _read_npz(blob: dict) -> list[dict]:
+    """以前の版が書いたセルの変更（1 つの npz に、Metric ごとの配列を持つ）。値は float で返す。"""
+    from . import npz
+    path = Path(blob["uri"])
+    if _sha256(path) != blob["sha256"]:
+        raise ValueError(f"{path}: セルの変更のファイルが壊れている")
+    data = npz.load(path)
+    cells = []
+    i = 0
+    while f"metric{i}" in data:
+        old = [None if n else v for v, n in zip(data[f"old{i}"], data[f"old_null{i}"])]
+        new = [None if n else v for v, n in zip(data[f"new{i}"], data[f"new_null{i}"])]
+        cells.append({"metric": data[f"metric{i}"][0], "rows": [list(r) for r in zip(data[f"coords{i}"], old, new)]})
+        i += 1
+    return cells

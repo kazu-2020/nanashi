@@ -18,9 +18,9 @@ except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
 try:
-    import numpy  # noqa: F401  スナップショットの保存形式に使う
+    import nanashi_core  # noqa: F401  保存形式（Parquet）の読み書きに使う
 except ImportError:
-    numpy = None
+    nanashi_core = None
 
 PRODUCTS = [f"p{i}" for i in range(20)]
 MONTHS = ["Jan", "Feb", "Mar", "Apr"]
@@ -187,7 +187,7 @@ class RustConcurrency(Concurrency):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
 
-@unittest.skipIf(numpy is None, "numpy が必要")
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class WithJournal(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
@@ -232,9 +232,42 @@ class WithJournal(unittest.TestCase):
             ws.close()
 
 
-@unittest.skipIf(RustEngine is None or numpy is None, "nanashi_core と numpy が必要")
+@unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class RustWithJournal(WithJournal):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class LargeWriteConflicts(unittest.TestCase):
+    """多くのセルを書き換えた記録（変更の塊）とも、同じセルの書き込みを見分ける。"""
+
+    def setUp(self):
+        from .test_journal import many_cells
+        m = many_cells(RustEngine())
+        m.add_input("W", ["K"], {})
+        self.ws = Workspace(m)
+        self.addCleanup(self.ws.close)
+
+    def test_small_write_after_large_write(self):
+        read = self.ws.seq
+        self.ws.write(lambda m: m.spread("V", 3000.0, how="even"), user="etl")
+        with self.assertRaises(Conflict) as e:
+            self.ws.write(lambda m: m.set_cell("V", 9.0, K="k7", T="t0"), user="bob", expect=read)
+        self.assertEqual(e.exception.user, "etl")
+        self.ws.write(lambda m: m.set_cell("V", 9.0, K="k7", T="t1"), user="bob", expect=read)  # 違うセル
+
+    def test_large_write_after_small_write(self):
+        read = self.ws.seq
+        self.ws.write(lambda m: m.set_cell("V", 9.0, K="k7", T="t0"), user="bob")
+        with self.assertRaises(Conflict):
+            self.ws.write(lambda m: m.spread("V", 3000.0, how="even"), user="etl", expect=read)
+
+    def test_large_writes_on_both_sides(self):
+        read = self.ws.seq
+        self.ws.write(lambda m: m.spread("V", 3000.0, how="even"), user="etl")
+        self.ws.write(lambda m: m.spread("W", 1500.0, how="even"), user="etl2", expect=read)  # 違う Metric
+        with self.assertRaises(Conflict):
+            self.ws.write(lambda m: m.spread("V", 4500.0, how="even"), user="etl3", expect=read)
 
 
 if __name__ == "__main__":

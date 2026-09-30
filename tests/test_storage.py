@@ -28,17 +28,20 @@ def small(engine=None) -> Model:
 
 
 try:
-    import numpy  # noqa: F401  保存形式に使う
+    import nanashi_core  # noqa: F401  保存形式（Parquet）の読み書きに使う
 except ImportError:
-    numpy = None
+    nanashi_core = None
 
 
-@unittest.skipIf(numpy is None, "numpy が必要")
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class RoundTrip(unittest.TestCase):
-    def check(self, saving_engine, loading_engine):
+    def check(self, saving_engine, loading_engine, legacy=False):
         original = small(saving_engine)
         with tempfile.TemporaryDirectory() as tmp:
             original.save(tmp)
+            if legacy:
+                from .legacy import to_format2
+                to_format2(tmp, original)
             loaded = Model.load(tmp, loading_engine)
         self.assertEqual(loaded.dimensions["Employee"].members, original.dimensions["Employee"].members)
         a, b = snapshot(original), snapshot(loaded)
@@ -49,6 +52,22 @@ class RoundTrip(unittest.TestCase):
 
     def test_reference_to_reference(self):
         self.check(ReferenceEngine(), ReferenceEngine())
+
+    def test_saves_parquet_per_input_metric(self):
+        m = small(ReferenceEngine())
+        with tempfile.TemporaryDirectory() as tmp:
+            m.save(tmp)
+            names = sorted(p.name for p in Path(tmp).iterdir())
+        inputs = sorted(f"inputs.{x.id}.parquet" for x in m.metrics.values() if x.formula is None)
+        self.assertEqual(names, sorted(inputs + ["model.json"]))
+
+    def test_reads_format_2(self):
+        """以前の版の保存形式（inputs.npz）を、numpy なしで読める。"""
+        engines = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
+        for saving in engines:
+            for loading in engines:
+                with self.subTest(saving=saving.name, loading=loading.name):
+                    self.check(saving(), loading(), legacy=True)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_reference_to_rust(self):

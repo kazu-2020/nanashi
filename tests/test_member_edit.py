@@ -17,9 +17,9 @@ except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
 try:
-    import numpy  # noqa: F401  保存形式に使う
+    import nanashi_core  # noqa: F401  保存形式（Parquet）の読み書きに使う
 except ImportError:
-    numpy = None
+    nanashi_core = None
 
 
 def model(engine=None) -> Model:
@@ -210,7 +210,7 @@ class Remove(unittest.TestCase):
         self.assertEqual(self.m.dimensions["Month"].members, ["Jan", "Feb", "Mar", "Apr"])
         self.assertEqual(fork.get("Total", Month="Mar"), 100)
 
-    @unittest.skipIf(numpy is None, "numpy が必要")
+    @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
     def test_matches_model_saved_and_loaded(self):
         self.m.remove_member("Month", "Feb")
         self.m.remove_member("Category", "ソフト")

@@ -1,10 +1,13 @@
 """PostgreSQL の記録先（PgJournal）。NANASHI_PG_DSN（既定は手元の 55432 番）の PostgreSQL が必要。"""
+import hashlib
 import importlib
+import json
 import os
 import tempfile
 import time
 import unittest
 import uuid
+from pathlib import Path
 
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.workspace import Workspace
@@ -23,7 +26,7 @@ DSN = os.environ.get("NANASHI_PG_DSN", "postgresql://postgres@127.0.0.1:55432/na
 
 def available() -> bool:
     try:
-        importlib.import_module("numpy")  # スナップショットの保存形式に使う
+        importlib.import_module("nanashi_core")  # 保存形式（Parquet）の読み書きに使う
         import psycopg
         psycopg.connect(DSN, connect_timeout=2).close()
         return True
@@ -33,10 +36,13 @@ def available() -> bool:
 
 AVAILABLE = available()
 if AVAILABLE:
+    import nanashi_core
+    from psycopg.types.json import Jsonb
+
     from sparse_engine.pg_journal import Fenced, PgJournal
 
 
-@unittest.skipUnless(AVAILABLE, "PostgreSQL（NANASHI_PG_DSN）と psycopg、numpy が必要")
+@unittest.skipUnless(AVAILABLE, "PostgreSQL（NANASHI_PG_DSN）と psycopg、nanashi_core が必要")
 class PgJournalTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -64,6 +70,66 @@ class PgJournalTests(unittest.TestCase):
         # ほとんどの記録で、セルの変更をファイルに置く経路を通す
         run_random(self, seed=67, rounds=60, engine=ReferenceEngine, reopen_engines=[ReferenceEngine],
                    make=lambda tmp: self.journal(bulk_cells=3))
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_random_replay_with_blocks(self):
+        # すべての変更を変更の塊で持ち、ほとんどを Parquet のファイルに置いて、まとめて書き込んで再生する
+        import sparse_engine.journal as journal
+        saved, journal.BLOCK_MIN = journal.BLOCK_MIN, 1
+        self.addCleanup(setattr, journal, "BLOCK_MIN", saved)
+        run_random(self, seed=71, rounds=60, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine],
+                   make=lambda tmp: self.journal(bulk_cells=3))
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_large_write_goes_to_parquet(self):
+        from .test_journal import many_cells
+        m = many_cells(RustEngine(), n=12_000)
+        j = self.journal()
+        j.start(m)
+        with m.transaction(user="etl"):
+            m.spread("V", 24_000.0, how="even")
+        (f,) = (Path(self.tmp.name) / self.model_id / "cells").glob("*.parquet")
+        v = m.metrics["V"]
+        self.assertTrue(f.name.endswith(f"-{v.id}.parquet"))
+        meta = dict(nanashi_core.parquet_metadata(f.read_bytes()))
+        self.assertEqual(json.loads(meta["nanashi"]), {"metric": v.id})
+        block = nanashi_core.CellBlock.from_parquet(f.read_bytes())
+        self.assertEqual(len(block), 11_999)
+        for e in (ReferenceEngine, RustEngine):
+            check_same_state(self, m, self.journal().open(e()))
+        history = self.journal().cell_history(m, "V", K="k5", T="t0")  # COPY の行を Rust で作って反映する
+        self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
+
+    def test_reads_npz_written_by_earlier_versions(self):
+        from .legacy import npy, write_npz
+        m = build_with(ReferenceEngine())
+        j = self.journal(bulk_cells=3)
+        j.start(m)
+        with m.transaction(user="etl", reason="取り込み"):
+            m.spread("Cost", 100, Product="C")
+        # 記録を以前の版の形（1 つの npz、値はすべて float）に書き直す
+        seq, rec = j.conn.execute("select seq, record from nanashi_operation where model_id = %s and not indexed",
+                                  (self.model_id,)).fetchone()
+        arrays = {}
+        for i, f in enumerate(rec["cells_blob"]["files"]):
+            path = Path(f["uri"])
+            rows = nanashi_core.CellBlock.from_parquet(path.read_bytes()).rows()
+            path.unlink()
+            arrays[f"metric{i}"] = npy("<i8", [f["metric"]])
+            arrays[f"coords{i}"] = npy("<i8", [x for ids, _, _ in rows for x in ids], (len(rows), len(rows[0][0])))
+            for j_, name in ((1, "old"), (2, "new")):
+                arrays[f"{name}{i}"] = npy("<f8", [float("nan") if r[j_] is None else float(r[j_]) for r in rows])
+                arrays[f"{name}_null{i}"] = npy("|b1", [r[j_] is None for r in rows])
+        path = Path(self.tmp.name) / self.model_id / "cells" / "legacy.npz"
+        write_npz(path, arrays)
+        rec["cells_blob"] = {"uri": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                             "cells": rec["cells_blob"]["cells"]}
+        j.conn.execute("update nanashi_operation set record = %s, cells_uri = %s where model_id = %s and seq = %s",
+                       (Jsonb(rec), str(path), self.model_id, seq))
+        for e in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
+            check_same_state(self, m, self.journal().open(e()))
+        history = self.journal().cell_history(m, "Cost", Product="C", Month="Feb")
+        self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
 
     def test_bulk_history_is_indexed_later(self):
         m = build_with(ReferenceEngine())
@@ -175,7 +241,7 @@ class PgJournalTests(unittest.TestCase):
         m.checkpoint()
         m.set_cell("Price", 13, Product="A")
         path = dict(j.snapshots())[1]
-        (path / "inputs.npz").write_bytes(b"broken")
+        next(path.glob("inputs.*.parquet")).write_bytes(b"broken")
         self.assertEqual([s for s, _ in self.journal().snapshots()], [0])
         check_same_state(self, m, self.journal().open(ReferenceEngine()))
 

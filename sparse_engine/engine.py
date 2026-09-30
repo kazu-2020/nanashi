@@ -36,8 +36,15 @@ class Engine(Protocol):
     必須の口に加えて、次の任意の口を持つエンジンは Model がそれを使う。
     - recalc_changes(plan, stores, counts, cat, changed, added, olds, forced):
         差分再計算の段取りごと引き受ける（Rust）。意味は Model.recalc の Python の経路と同じ。
-    - from_arrays(dims, kind, cols, cat, partition) / to_arrays(storage, cat):
-        軸ごとのメンバー番号の配列と値の配列で、大量のセルを出し入れする（保存と読み込み）。
+    - from_arrays(dims, kind, cols, cat, partition):
+        軸ごとのメンバー番号の numpy の配列と値の配列から、大量のセルを入れる（numpy はこの口だけが使う）。
+    - to_parquet(storage, dims, kind, cat, meta) / from_parquet(data, dims, kind, cat, partition):
+        入力 Metric の値を Parquet のバイト列で出し入れする（保存と読み込み）。列は parquet_columns と
+        値の列 v（parquet_value の型）。meta はフッターに入れる文字列のキーと値。
+    - diff_block(old, new): diff の代わりに、Python のオブジェクトにしない差（長さ、rows()、
+        to_block(軸ごとの ID の表, 値の軸の ID の表, 値の種類) を持つ）。old が None なら new の全セル。
+    - apply_block(storage, block, dim_ids, value_ids): 記録の変更の塊をまとめて書き込み、格納データを返す。
+        今の軸にない ID のセルは飛ばす。
     - key_bits: 1 セルのキーの固定幅（ビット）。Model は軸の組み合わせがこれに収まるか検査する。
     - estimate(expr, cat, cells): 型を決めた式の結果のセル数の見積もり（意味は evaluate.estimate と同じ）。
     - size_hint(storage): 行数の上限。size が行を数え直すエンジン（Rust で差分があるとき）の代わりに、
@@ -220,14 +227,25 @@ class ReferenceEngine:
     def aggregate(self, storage: Cube, dims, keep, agg, restrict, cat):
         return aggregate_cube(_filter(storage, restrict or None), keep, agg)
 
-    def to_arrays(self, storage: Cube, cat) -> dict:
-        import numpy as np
-        index = [cat.dimension(d)._index for d in storage.dims]
+    def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
+        nanashi_core = native()
+        order = [storage.dims.index(d) for d in dims]
+        index = [cat.dimension(d)._index for d in dims]
         keys = list(storage.cells)
-        out = {d: np.fromiter((index[j][k[j]] for k in keys), dtype=np.uint32, count=len(keys))
-               for j, d in enumerate(storage.dims)}
-        out["__v"] = np.fromiter((float(v) for v in storage.cells.values()), dtype=np.float64, count=len(keys))
-        return out
+        cols = [[index[j][k[i]] for k in keys] for j, i in enumerate(order)]
+        values = [float(v) for v in storage.cells.values()]
+        return nanashi_core.write_parquet(parquet_columns(dims, cat), cols, values, parquet_value(kind),
+                                          list(meta.items()))
+
+    def from_parquet(self, data: bytes, dims, kind, cat, partition=None) -> Cube:
+        nanashi_core = native()
+        members = [cat.dimension(d).members for d in dims]
+        cols, values = nanashi_core.read_parquet(data, parquet_columns(dims, cat), parquet_value(kind),
+                                                 [len(ms) for ms in members])
+        if kind == "boolean":
+            values = [v != 0.0 for v in values]
+        return Cube(tuple(dims), {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]
+                                  for r in range(len(values))})
 
     def size(self, storage: Cube) -> int:
         return len(storage)
@@ -237,6 +255,25 @@ class ReferenceEngine:
 
     def diff(self, old, new):
         return None  # Cube はメンバー名で持つので、名前で比べてもらう
+
+
+def native():
+    """nanashi_core。保存と読み込み（Parquet）は、参照実装のエンジンでもこれを使う。"""
+    try:
+        import nanashi_core
+    except ImportError:
+        raise ImportError("保存と読み込みには nanashi_core が要る（README の「使い始める」の手順でビルドする）") from None
+    return nanashi_core
+
+
+def parquet_columns(dims, cat) -> list[str]:
+    """Parquet の軸の列の名前。名前を変えても変わらない軸の ID で付ける。"""
+    return [f"d{cat.dimension(d).id}" for d in dims]
+
+
+def parquet_value(kind: Kind) -> str:
+    """Parquet の値の列の種類（number、boolean、member）。"""
+    return "member" if kind.startswith("member:") else kind
 
 
 def aggregate_cube(cube: Cube, keep: Iterable[str], agg: str) -> Cube:
