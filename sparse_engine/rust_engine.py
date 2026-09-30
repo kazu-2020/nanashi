@@ -60,7 +60,7 @@ class RustEngine:
         self._dims: dict[str, tuple[Any, int]] = {}  # 軸名 -> (Dimension, 番号)
         self._names: dict[int, str] = {}
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
-        self._exprs: dict[int, tuple] = {}  # id(式) -> (式, 変換結果, 読む名前, 型, 警告)
+        self._exprs: dict[int, tuple] = {}  # id(式) -> (式, 変換結果, 読む名前, 型, 警告, 読む名前の型)
         self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
         self._prop_plan: tuple[Any, Any, list[str]] | None = None  # 影響範囲の伝搬だけに使う、式だけの計画
 
@@ -151,16 +151,20 @@ class RustEngine:
     def _compile_full(self, expr: Expr, cat: Catalog) -> tuple[Any, list[str], Type, list[str]]:
         cached = self._exprs.get(id(expr))
         if cached is not None and cached[0] is expr:
-            return cached[1:]
+            # 型検査の結果と変換結果は参照先の型に依存する。参照先の軸や値の種類が変わったら作り直す
+            # （Model は定義を変えても同じ式オブジェクトを渡してくる）
+            _, compiled, names, t, warnings, reads = cached
+            if all(cat.metric_type(n) == r for n, r in zip(names, reads)):
+                return compiled, names, t, warnings
         names: list[str] = []
         tree = self._tree(expr, cat, names)
-        types = [self._type(cat, cat.metric_type(n)) for n in names]
+        reads = [cat.metric_type(n) for n in names]
         try:
-            compiled, dims, kind, d, warnings = self.core.compile(tree, names, types)
+            compiled, dims, kind, d, warnings = self.core.compile(tree, names, [self._type(cat, r) for r in reads])
         except ValueError as e:
             raise FormulaError(str(e)) from None
         t = Type(tuple(self._names[i] for i in dims), member_kind(self._names[d]) if kind == "member" else kind)
-        self._exprs[id(expr)] = (expr, compiled, names, t, warnings)
+        self._exprs[id(expr)] = (expr, compiled, names, t, warnings, reads)
         return compiled, names, t, warnings
 
     def _type(self, cat: Catalog, t: Type) -> tuple[list[int], str, int]:

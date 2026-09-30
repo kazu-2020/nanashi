@@ -99,6 +99,36 @@ class Redefine(unittest.TestCase):
         with self.assertRaises(FormulaError):  # 下流の式の軸が合わなくなる
             self.m.recalc()
 
+    def small(self) -> Model:
+        m = Model(engine=self.engine())
+        m.add_dimension("P", ["a", "b"])
+        m.add_dimension("M", ["x", "y"])
+        m.add_input("X", ["P"], {("a",): 1.0})
+        m.add_formula("Y", ["P"], "X * 2")
+        m.recalc()
+        return m
+
+    def test_input_axes_change_rechecks_unchanged_formula(self):
+        # Y の式は変えていない（同じ式オブジェクトのまま検査し直す）。検査の結果を使い回さない
+        m = self.small()
+        m.add_input("X", ["P", "M"], {("a", "x"): 1.0})
+        with self.assertRaisesRegex(FormulaError, r"^Y: 式の軸 \('P', 'M'\) が宣言した軸 \('P',\) と一致しない$"):
+            m.recalc()
+        m.add_input("X", ["P"], {("a",): 3.0})  # 元の軸に戻せば計算できる
+        m.recalc()
+        self.assertEqual(m.get("Y", P="a"), 6.0)
+
+    def test_input_kind_change_rechecks_unchanged_formula(self):
+        m = self.small()
+        m.add_formula("Z", ["P"], "X")
+        m.recalc()
+        m.add_input("X", ["P"], {("a",): True}, kind="boolean")
+        with self.assertRaisesRegex(FormulaError, "^'\\*' の左辺 には number が必要だが boolean が渡された$"):
+            m.recalc()
+        m.remove_metric("Y")
+        with self.assertRaisesRegex(FormulaError, "^Z: 式の値は boolean だが number として宣言されている$"):
+            m.recalc()
+
     def test_replaced_input_uses_delta(self):
         self.m.add_input("Salary", ["Employee"], {("e1",): 100, ("e2",): 200, ("e3",): 300})
         self.m.recalc()
