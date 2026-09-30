@@ -103,8 +103,12 @@ fn bits_for(size: u32) -> u32 {
 }
 
 impl Packing {
+    /// 各軸に、今のメンバー数の 2 倍まで入るビット幅（1 ビットの余裕）を取る。メンバーを追加しても
+    /// その範囲なら詰め直さずに済む。余裕を足すと 64 ビットに収まらないときは、余裕なしで詰める。
     pub fn new(dims: &[DimId], cat: &Catalog) -> Result<Packing> {
-        let bits: Vec<u32> = dims.iter().map(|&d| bits_for(cat.dims[d].size)).collect();
+        let exact: Vec<u32> = dims.iter().map(|&d| bits_for(cat.dims[d].size)).collect();
+        let roomy: Vec<u32> = exact.iter().map(|b| b + 1).collect();
+        let bits = if roomy.iter().sum::<u32>() <= 64 { roomy } else { exact };
         let total: u32 = bits.iter().sum();
         if total > 64 {
             return Err(format!("軸の組み合わせが 64 ビットに収まらない（{total} ビット）"));
@@ -136,6 +140,11 @@ impl Packing {
 
     pub fn pos(&self, d: DimId) -> Option<usize> {
         self.dims.iter().position(|&x| x == d)
+    }
+
+    /// 今のメンバー数のメンバー番号が、すべてのビット幅に収まるか。
+    pub fn fits(&self, cat: &Catalog) -> bool {
+        self.dims.iter().zip(&self.masks).all(|(&d, &mask)| (cat.dims[d].size as u64).saturating_sub(1) <= mask)
     }
 }
 
@@ -505,6 +514,13 @@ impl Store {
 
     pub fn as_cube(&self) -> Cube {
         self.read(&Restrict::all(0))
+    }
+
+    /// 同じ軸・分割軸で、今のメンバー数に合わせて詰め直した Store。
+    pub fn repacked(&self, cat: &Catalog) -> Result<Store> {
+        let mut out = Store::new(&self.metric_dims, self.index_dim(), self.kind, cat)?;
+        out.replace(&Restrict::all(cat.dims.len()), &self.as_cube())?;
+        Ok(out)
     }
 }
 

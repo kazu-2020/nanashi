@@ -25,6 +25,10 @@ class Engine(Protocol):
     def repartition(self, storage: Any, partition: str | None, cat: Catalog) -> Any:
         """分割軸を変えて持ち直す。"""
     def write(self, storage: Any, key: Key, value: Any, cat: Catalog) -> Any: ...
+    def dimension_changed(self, cat: Catalog, dim: str) -> None:
+        """軸 dim にメンバーが追加された（プロパティの対応表も変わりうる）ことを知らせる。"""
+    def fit(self, storage: Any, cat: Catalog) -> Any:
+        """メンバーが増えたあとも格納データが使えるようにする（必要なら詰め直す）。"""
     def evaluate(self, expr: Expr, cat: Catalog, restrict: Restrict) -> Any: ...
     def evaluate_many(self, items: list[tuple[Expr, Restrict]], cat: Catalog) -> list[Any]:
         """互いに独立な式をまとめて評価する。並列に実行できるエンジンはそうしてよい。"""
@@ -55,6 +59,12 @@ class ReferenceEngine:
         return None
 
     def repartition(self, storage, partition, cat):
+        return storage
+
+    def dimension_changed(self, cat, dim):
+        pass  # Cube のキーはメンバー名なので、何もしなくてよい
+
+    def fit(self, storage, cat):
         return storage
 
     def write(self, storage: Cube, key, value, cat):

@@ -27,7 +27,7 @@ class RustEngine:
         self.core = nanashi_core.Core()
         self._dims: dict[str, tuple[Any, int]] = {}  # 軸名 -> (Dimension, 番号)
         self._names: dict[int, str] = {}
-        self._maps: dict[int, tuple[dict, int]] = {}  # id(mapping) -> (mapping, 番号)
+        self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
         self._exprs: dict[int, tuple[Expr, Any, list[str]]] = {}  # id(式) -> (式, 変換結果, 読む名前)
 
     # ------------------------------------------------ 名前 -> 番号
@@ -43,16 +43,22 @@ class RustEngine:
         return i
 
     def _map(self, cat: Catalog, dim: str, prop: str) -> int:
+        """プロパティの対応表の番号。対応表が変わったら、同じ番号のまま中身を置き換える
+        （コンパイル済みの式が番号を持っているので、番号は変えない）。"""
         target, mapping = cat.dimension(dim).properties[prop]
-        cached = self._maps.get(id(mapping))
+        cached = self._maps.get((dim, prop))
         if cached is not None and cached[0] is mapping:
             return cached[1]
         src, dst = cat.dimension(dim), cat.dimension(target)
         fwd = [-1] * len(src.members)
         for s, t in mapping.items():
             fwd[src._index[s]] = dst._index[t]
-        i = self.core.add_mapping(len(dst.members), fwd)
-        self._maps[id(mapping)] = (mapping, i)
+        if cached is None:
+            i = self.core.add_mapping(len(dst.members), fwd)
+        else:
+            i = cached[1]
+            self.core.set_mapping(i, len(dst.members), fwd)
+        self._maps[(dim, prop)] = (mapping, i)
         return i
 
     def _region(self, cat: Catalog, region) -> list[tuple[int, list[int]]]:
@@ -144,6 +150,22 @@ class RustEngine:
 
     def repartition(self, store, partition, cat):
         return self.core.repartition(store, None if partition is None else self._dim(cat, partition))
+
+    def dimension_changed(self, cat, dim):
+        """メンバー数と、dim が関わる対応表を Rust 側に反映する。"""
+        if dim in self._dims:
+            d, i = self._dims[dim]
+            if d is cat.dimension(dim):
+                self.core.resize_dim(i, len(d.members))
+        for (src, prop), (mapping, i) in list(self._maps.items()):
+            target, current = cat.dimension(src).properties[prop]
+            if dim in (src, target) or current is not mapping:
+                self._maps[(src, prop)] = (None, i)  # 次の _map で中身を置き換えさせる
+                self._map(cat, src, prop)
+
+    def fit(self, store, cat):
+        repacked = self.core.fit(store)
+        return store if repacked is None else repacked
 
     def write(self, store, key, value, cat):
         dims = [self._names[i] for i in self.core.metric_dims(store)]

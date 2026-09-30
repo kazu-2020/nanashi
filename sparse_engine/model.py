@@ -66,6 +66,7 @@ class Model:
     _delta: dict[str, DeltaPlan] = field(default_factory=dict)  # 差分集計する Metric -> 計画
     _counts: dict[str, Any] = field(default_factory=dict)  # 差分集計する SUM の各グループの件数
     _old_cells: dict[str, dict[Key, Any]] = field(default_factory=dict)  # 入力の変更前の値
+    _added: dict[str, set[str]] = field(default_factory=dict)  # 前回の再計算以降に追加したメンバー
     _temp_types: dict[str, Type] = field(default_factory=dict)  # 差分計算中の一時的な名前の型
     _delta_cache: dict[str, tuple] = field(default_factory=dict)  # Metric -> (計画, 件数の差分の式, 値の差分の式)
 
@@ -134,6 +135,32 @@ class Model:
         if partition is not None and partition not in dims:
             raise ValueError(f"{name}: 分割軸 {partition} が軸 {dims} にない")
         return partition
+
+    # ------------------------------------------------ メンバーの追加
+
+    def add_member(self, dim: str, member: str, **properties: str) -> None:
+        """軸 dim の末尾にメンバーを足す。properties でプロパティの値も設定できる。
+
+            m.add_member("Product", "p2000", Category="c03")
+
+        新しいメンバーはどの Metric でも空で始まる。全メンバーへ値を広げる演算（X + 1、IFBLANK、
+        引き下ろし、前月参照など）は新しいメンバーにも値を作るので、次の再計算でその範囲を計算する。
+        """
+        d = self.dimension(dim)
+        for prop, value in properties.items():
+            if prop not in d.properties:
+                raise ValueError(f"{dim} にプロパティ {prop} がない")
+            if value not in self.dimension(d.properties[prop][0]):
+                raise ValueError(f"{dim}.{prop}: {d.properties[prop][0]} に {value!r} がない")
+        d.add_member(member)
+        for prop, value in properties.items():
+            d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
+        self.engine.dimension_changed(self, dim)
+        # メンバーが増えて、格納データのキーに収まらなくなったら詰め直す
+        for store in (self._values, self._counts):
+            for name in store:
+                store[name] = self.engine.fit(store[name], self)
+        self._added.setdefault(dim, set()).add(member)
 
     # ------------------------------------------------ 入力
 
@@ -303,13 +330,15 @@ class Model:
 
     # ------------------------------------------------ 影響範囲
 
-    def _propagate(self, changed: dict[str, Restrict]) -> dict[str, Restrict]:
-        """入力の変更範囲を計画の順に伝え、影響を受ける全 Metric の範囲を返す（changed を含む）。"""
+    def _propagate(self, changed: dict[str, Restrict],
+                   added: dict[str, frozenset[str]] | None = None) -> dict[str, Restrict]:
+        """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲を返す
+        （changed を含む）。"""
         regions = dict(changed)
         for step in self._plan:
             if step.scan_dim is None:
                 m = self.metrics[step.names[0]]
-                if m.formula is not None and (r := affected(m.formula, self, regions)) is not None:
+                if m.formula is not None and (r := affected(m.formula, self, regions, added)) is not None:
                     regions[m.name] = r
                 continue
             # 互いを参照し合うので、影響範囲が増えなくなるまで伝搬を繰り返す。
@@ -319,7 +348,7 @@ class Model:
                 env = regions | {n: r for n, r in local.items() if r is not None}
                 grown = False
                 for n in step.names:
-                    r = union_region(local[n], affected(self.metrics[n].formula, self, env))
+                    r = union_region(local[n], affected(self.metrics[n].formula, self, env, added))
                     if r != local[n]:
                         local[n] = env[n] = r
                         grown = True
@@ -332,15 +361,17 @@ class Model:
 
     def recalc(self) -> None:
         self._compile()
-        if not self._full and not self._changed:
+        if not self._full and not self._changed and not self._added:
             return
         full, self._full = self._full, False
+        added = {d: frozenset(ms) for d, ms in self._added.items()}
+        self._added.clear()
         if full:
             self._changed.clear()
             self._old_cells.clear()
             self._recalc_all()
             return
-        regions = self._propagate(self._changed)
+        regions = self._propagate(self._changed, added)
         # 差分集計の集計元について、変更前の範囲を確保しておく
         sources = self._delta_sources()
         olds = {} if full else {n: self._old_input_slice(n, regions[n])

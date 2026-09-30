@@ -284,41 +284,75 @@ def _nonempty(region: Restrict) -> Restrict | None:
     return None if any(not ms for ms in region.values()) else region
 
 
-def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict]) -> Restrict | None:
-    """changed（Metric 名 -> 変更範囲）のもとで、式の結果のうち値が変わりうる範囲を返す。"""
+def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict],
+             added: dict[str, frozenset[str]] | None = None) -> Restrict | None:
+    """changed（Metric 名 -> 変更範囲）のもとで、式の結果のうち値が変わりうる範囲を返す。
+
+    added（軸名 -> 追加したメンバー）を渡すと、全メンバーへ値を広げる演算（+ - AND OR の展開、
+    IF の分岐の展開、EXPAND、IFBLANK / ISBLANK、引き下ろし、前月参照）が新しいメンバーに
+    作るセルの範囲も含める。新しいメンバーはどの Metric でも空なので、それ以外の演算は影響しない。
+    """
+    af = lambda e: affected(e, cat, changed, added)
+
+    def grow(r: Restrict | None, dims) -> Restrict | None:
+        """dims のうちメンバーを追加した軸について、新しいメンバーの範囲を足す。"""
+        for d in dims:
+            if added and d in added:
+                r = union_region(r, {d: added[d]})
+        return r
+
     match expr:
         case Ref(name):
             return changed.get(name)
         case Const():
             return None
-        case BinOp(_, left, right) | Filter(left, right) | On(left, right):
-            return union_region(affected(left, cat, changed), affected(right, cat, changed))
+        case BinOp(op, left, right):
+            r = union_region(af(left), af(right))
+            if added and op in ("+", "-", "and", "or"):
+                ld, rd = infer(left, cat, []).dims, infer(right, cat, []).dims
+                r = grow(r, [d for d in _merge(ld, rd) if d not in ld or d not in rd])
+            return r
+        case Filter(left, right) | On(left, right):
+            return union_region(af(left), af(right))
         case If(cond, then, else_):
-            r = union_region(affected(cond, cat, changed), affected(then, cat, changed))
-            return r if else_ is None else union_region(r, affected(else_, cat, changed))
-        case Not(child) | IsBlank(child) | IfBlank(child, _) | Expand(child, _):
-            return affected(child, cat, changed)
+            r = union_region(af(cond), af(then))
+            if else_ is not None:
+                r = union_region(r, af(else_))
+            if added:
+                cd = infer(cond, cat, []).dims
+                branches = [infer(b, cat, []).dims for b in (then, else_) if b is not None]
+                dims = _merge(cd, *branches)
+                r = grow(r, [d for d in dims if any(d not in _merge(cd, b) for b in branches)])
+            return r
+        case Not(child):
+            return af(child)
+        case IsBlank(child) | IfBlank(child, _):
+            r = af(child)
+            return grow(r, infer(child, cat, []).dims) if added else r
+        case Expand(child, dims):
+            return grow(af(child), dims)
         case Remove(child, dim, _):
-            r = affected(child, cat, changed)
+            r = af(child)
             return None if r is None else _without(r, dim)
         case Shift(child, dim, n):
-            r = affected(child, cat, changed)
-            if r is None or dim not in r:
-                return r
-            d = cat.dimension(dim)
-            return _nonempty({**r, dim: frozenset(t for m in r[dim] if (t := d.offset(m, n)) is not None)})
+            r = af(child)
+            if r is not None and dim in r:
+                d = cat.dimension(dim)
+                r = _nonempty({**r, dim: frozenset(t for m in r[dim] if (t := d.offset(m, n)) is not None)})
+            return grow(r, [dim])  # 末尾に足した時点には、ずらした値が入りうる
         case By(child, dim, prop, _):
-            r = affected(child, cat, changed)
-            if r is None:
-                return None
-            target, mapping = _property(cat, dim, prop)
-            out = _without(r, dim, target)
-            if dim in infer(child, cat, []).dims:  # 集約: 変わった社員の部署が変わる
-                if dim in r:
-                    out[target] = frozenset(mapping[m] for m in r[dim] if m in mapping)
-            elif target in r:  # 引き下ろし: 変わった部署に属する社員が変わる
-                out[dim] = frozenset(m for m, t in mapping.items() if t in r[target])
-            return _nonempty(out)
+            r = af(child)
+            aggregate = dim in infer(child, cat, []).dims
+            if r is not None:
+                target, mapping = _property(cat, dim, prop)
+                out = _without(r, dim, target)
+                if aggregate:  # 集約: 変わった社員の部署が変わる
+                    if dim in r:
+                        out[target] = frozenset(mapping[m] for m in r[dim] if m in mapping)
+                elif target in r:  # 引き下ろし: 変わった部署に属する社員が変わる
+                    out[dim] = frozenset(m for m, t in mapping.items() if t in r[target])
+                r = _nonempty(out)
+            return r if aggregate else grow(r, [dim])  # 新しい社員にも部署の値が配られる
     raise TypeError(expr)
 
 

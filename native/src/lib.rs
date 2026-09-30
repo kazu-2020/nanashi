@@ -23,6 +23,16 @@ fn kind_of(is_bool: bool) -> Kind {
     }
 }
 
+fn mapping(dst_size: u32, fwd: Vec<i64>) -> Mapping {
+    let mut inv = vec![Vec::new(); dst_size as usize];
+    for (s, &t) in fwd.iter().enumerate() {
+        if t >= 0 {
+            inv[t as usize].push(s as u32);
+        }
+    }
+    Mapping { fwd, inv }
+}
+
 #[pyclass(frozen)]
 struct Expr {
     node: Arc<Node>,
@@ -150,17 +160,30 @@ impl Core {
         cat.dims.len() - 1
     }
 
+    /// 軸のメンバー数を変える（メンバーの追加）。
+    fn resize_dim(&mut self, dim: DimId, size: u32) {
+        Arc::make_mut(&mut self.cat).dims[dim].size = size;
+    }
+
     /// src のメンバー番号 -> dst のメンバー番号（なければ -1）の対応を登録する。
     fn add_mapping(&mut self, dst_size: u32, fwd: Vec<i64>) -> usize {
-        let mut inv = vec![Vec::new(); dst_size as usize];
-        for (s, &t) in fwd.iter().enumerate() {
-            if t >= 0 {
-                inv[t as usize].push(s as u32);
-            }
-        }
         let cat = Arc::make_mut(&mut self.cat);
-        cat.maps.push(Mapping { fwd, inv });
+        cat.maps.push(mapping(dst_size, fwd));
         cat.maps.len() - 1
+    }
+
+    /// 登録済みの対応を置き換える（メンバーの追加やプロパティの設定のあと）。番号は変わらない。
+    fn set_mapping(&mut self, id: usize, dst_size: u32, fwd: Vec<i64>) {
+        Arc::make_mut(&mut self.cat).maps[id] = mapping(dst_size, fwd);
+    }
+
+    /// メンバーが増えてキーのビット幅に収まらなくなった格納データを詰め直す。収まるなら None。
+    fn fit(&self, store: &Bound<'_, StoreHandle>) -> PyResult<Option<StoreHandle>> {
+        let s = &store.borrow().store;
+        if s.pack.fits(&self.cat) {
+            return Ok(None);
+        }
+        Ok(Some(StoreHandle { store: Arc::new(s.repacked(&self.cat).map_err(err)?) }))
     }
 
     fn compile(&self, tree: &Bound<'_, PyAny>) -> PyResult<Expr> {
