@@ -397,7 +397,9 @@ impl Core {
 
     /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
     /// 格納データで、その場で書き換える。changed は入力の変更範囲、added は軸ごとの追加したメンバー、
-    /// olds は差分集計の集計元になる入力の変更前の値。再計算した (Metric, 差分集計か, 範囲) を返す。
+    /// olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲、
+    /// skip は飛ばす Metric（Python があとで全体を計算し直す）。
+    /// 再計算した (Metric, 差分集計か, 範囲) を返す。
     #[allow(clippy::too_many_arguments)]
     fn recalc_changes(
         &self,
@@ -408,9 +410,12 @@ impl Core {
         changed: Vec<(usize, Region)>,
         added: Vec<(DimId, Vec<u32>)>,
         olds: Vec<(usize, Bound<'_, PyAny>)>,
+        forced: Vec<(usize, Region)>,
+        skip: Vec<usize>,
     ) -> PyResult<Vec<(usize, bool, Region)>> {
         let olds: Vec<(usize, Src)> = olds.iter().map(|(m, o)| Ok((*m, Core::source(o)?))).collect::<PyResult<_>>()?;
         let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
+        let forced: Vec<(usize, Reg)> = forced.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
         // 格納データをハンドルから取り出して渡し、終わったら戻す（参照を増やすと書き込み時に複製されるため）
         let empty = Arc::new(Store::new(&[], None, Kind::Num, &self.cat).map_err(err)?);
         let mut own: Vec<Arc<Store>> = stores.iter().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())).collect();
@@ -419,7 +424,7 @@ impl Core {
             .map(|h| h.as_ref().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())))
             .collect();
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
-        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds));
+        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds, forced, &skip));
         for (h, s) in stores.iter().zip(own) {
             h.borrow_mut().store = s;
         }
@@ -457,12 +462,19 @@ fn set_postings_min_rows(n: usize) {
     core::POSTINGS_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 値が変わった範囲が大半を占めるとき全体に広げる、Metric の行数の下限を変える（テスト用。0 なら常に）。
+#[pyfunction]
+fn set_widen_min_rows(n: usize) {
+    plan::WIDEN_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[pymodule]
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_compact_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_par_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_semi_max, m)?)?;
     m.add_function(wrap_pyfunction!(set_postings_min_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(set_widen_min_rows, m)?)?;
     m.add_class::<Core>()?;
     m.add_class::<Expr>()?;
     m.add_class::<CubeHandle>()?;

@@ -134,6 +134,12 @@ def mentions_member(e: Expr, dim: str, member: str) -> bool:
     return _names_member(e, dim, member) or any(mentions_member(c, dim, member) for _, c in _children(e))
 
 
+def uses_property(e: Expr, dim: str, prop: str) -> bool:
+    """式が `[BY: dim.prop]` を書いているか。"""
+    here = isinstance(e, By) and e.dim == dim and e.prop == prop
+    return here or any(uses_property(c, dim, prop) for _, c in _children(e))
+
+
 def rename_member(e: Expr, dim: str, old: str, new: str) -> Expr:
     """式の中の `dim."old"` を `dim."new"` にする。変わらなければ同じオブジェクトを返す。"""
     changes: dict = {n: r for n, c in _children(e) if (r := rename_member(c, dim, old, new)) is not c}

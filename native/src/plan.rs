@@ -6,6 +6,7 @@
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
 use crate::core::{eval, Catalog, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // ------------------------------------------------------------------ 影響範囲
@@ -229,6 +230,11 @@ pub struct Plan {
     pub steps: Vec<Step>,
 }
 
+/// 値が変わった範囲がセル全体のこの割合以上なら、全体が変わったものとして下流へ伝える
+/// （この行数以上の Metric だけ。小さな Metric では範囲を細かく伝えても安い）。
+pub const WIDEN_SHARE: f64 = 0.5;
+pub static WIDEN_MIN_ROWS: AtomicUsize = AtomicUsize::new(4096);
+
 /// 再計算した Metric の記録: (Metric の番号, 差分集計なら true, 範囲)。
 pub type Log = Vec<(usize, bool, Reg)>;
 
@@ -255,13 +261,16 @@ struct Run<'a> {
     stores: &'a mut [Arc<Store>],
     counts: &'a mut [Option<Arc<Store>>],
     added: &'a [(DimId, Vec<u32>)],
+    forced: Vec<Option<Reg>>, // 定義を変えたので、影響範囲に関係なく計算し直す範囲
     regions: Vec<Option<Reg>>,
     olds: Vec<Option<Src>>,
     log: Log,
 }
 
-/// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値。
-/// stores と counts（Metric の番号順）はその場で書き換える。
+/// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
+/// forced は定義を変えたので必ず計算し直す計算 Metric の範囲、skip は飛ばす Metric（呼び出し側が
+/// あとで全体を計算し直す）。stores と counts（Metric の番号順）はその場で書き換える。
+#[allow(clippy::too_many_arguments)]
 pub fn recalc(
     cat: &Catalog,
     plan: &Plan,
@@ -270,17 +279,43 @@ pub fn recalc(
     changed: Vec<(usize, Reg)>,
     added: &[(DimId, Vec<u32>)],
     olds: Vec<(usize, Src)>,
+    forced: Vec<(usize, Reg)>,
+    skip: &[usize],
 ) -> Result<Log> {
     let n = plan.metrics.len();
     let added: Vec<(DimId, Vec<u32>)> = added.iter().map(|(d, ms)| (*d, sorted(ms.clone()))).collect();
-    let mut run = Run { cat, plan, stores, counts, added: &added, regions: vec![None; n], olds: vec![None; n], log: Vec::new() };
+    let mut run = Run {
+        cat,
+        plan,
+        stores,
+        counts,
+        added: &added,
+        forced: vec![None; n],
+        regions: vec![None; n],
+        olds: vec![None; n],
+        log: Vec::new(),
+    };
+    for (m, r) in forced {
+        run.forced[m] = Some(r);
+    }
     for (m, r) in changed {
         run.regions[m] = Some(r);
     }
     for (m, s) in olds {
         run.olds[m] = Some(s);
     }
+    let mut skipped = vec![false; n];
+    for &m in skip {
+        skipped[m] = true;
+    }
     for step in &plan.steps {
+        let first = match step {
+            Step::One(m) => *m,
+            Step::Scan(_, names) => names[0],
+        };
+        if skipped[first] {
+            continue;
+        }
         match step {
             Step::One(m) => run.one(*m)?,
             Step::Scan(dim, names) => run.scan_step(*dim, names)?,
@@ -315,18 +350,36 @@ impl<'a> Run<'a> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[m];
         let Some(f) = &metric.formula else { return Ok(()) };
-        let Some(region) = self.env().affected(&f.node, &f.refs) else { return Ok(()) };
+        let forced = self.forced[m].clone();
+        let redefined = forced.is_some();
+        let Some(region) = union(self.env().affected(&f.node, &f.refs), forced) else { return Ok(()) };
         if metric.source {
-            self.olds[m] = Some(self.slice(m, &region));
+            // 全体を計算し直すなら、置き換える前の格納データをそのまま変更前の値にする（複製しない）
+            self.olds[m] = Some(if region.is_all() { Src::Store(self.stores[m].clone()) } else { self.slice(m, &region) });
         }
         let changed = match &metric.delta {
-            Some(d) if self.delta_applicable(d) => self.apply_delta(m, d, &region)?,
+            Some(d) if !redefined && self.delta_applicable(d) => self.apply_delta(m, d, &region)?,
             _ => self.recompute(m, &region)?,
         };
         if changed.is_some() {
             self.regions[m] = changed;
         }
         Ok(())
+    }
+
+    /// 値が変わったセル（Metric の軸ごとのメンバー番号）を囲む範囲。全メンバーにわたる軸は範囲から外す
+    /// （Python の Model._widened と同じ）。さらに WIDEN_MIN_ROWS 行以上の Metric では、範囲がセル全体の
+    /// WIDEN_SHARE 以上を占めるなら全体にする。全体として扱えば、下流の書き戻しは並べ直すだけで済み、
+    /// 差分集計より計算し直しを選べる（範囲を広げても結果は変わらない）。
+    fn changed_region(&self, m: usize, sets: Vec<Vec<u32>>) -> Reg {
+        let store = &self.stores[m];
+        let dims = &store.metric_dims;
+        let size = |d: DimId| self.cat.dims[d].size as usize;
+        let share: f64 = dims.iter().zip(&sets).map(|(&d, ms)| ms.len() as f64 / size(d).max(1) as f64).product();
+        if share >= WIDEN_SHARE && store.rows_hint() >= WIDEN_MIN_ROWS.load(Ordering::Relaxed) {
+            return Reg::default();
+        }
+        Reg::new(dims.iter().copied().zip(sets).filter(|(d, ms)| ms.len() < size(*d)).collect())
     }
 
     /// region を式から計算し直して書き戻し、値が実際に変わったセルの範囲を返す。
@@ -339,12 +392,18 @@ impl<'a> Run<'a> {
             Some(c) => Some(self.eval(c, None, &r)?),
             None => None,
         };
-        let sets = Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?;
+        let sets = if region.is_all() {
+            let (store, sets) = self.stores[m].replaced_all(&value)?;
+            self.stores[m] = Arc::new(store);
+            sets
+        } else {
+            Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?
+        };
         if let Some(c) = count {
             Arc::make_mut(self.counts[m].as_mut().expect("件数の格納")).replace(&r, &c)?;
         }
         self.log.push((m, false, region.clone()));
-        Ok(sets.map(|sets| Reg::new(self.stores[m].metric_dims.iter().copied().zip(sets).collect())))
+        Ok(sets.map(|sets| self.changed_region(m, sets)))
     }
 
     /// 集計元と対応表の変更範囲を合わせた範囲。どれも変わっていなければ None。
@@ -404,11 +463,14 @@ impl<'a> Run<'a> {
             Arc::make_mut(self.counts[m].as_mut().expect("件数の格納")).replace(&r, &kept)?;
         }
         self.log.push((m, true, region.clone()));
-        Ok(sets.map(|sets| Reg::new(self.stores[m].metric_dims.iter().copied().zip(sets).collect())))
+        Ok(sets.map(|sets| self.changed_region(m, sets)))
     }
 
     /// scan の Metric の影響範囲を、増えなくなるまで伝えてから、時間軸に沿って 1 時点ずつ計算する。
     fn scan_step(&mut self, dim: DimId, names: &[usize]) -> Result<()> {
+        for &n in names {
+            self.regions[n] = union(self.regions[n].take(), self.forced[n].clone());
+        }
         loop {
             let mut grown = false;
             for &n in names {
@@ -426,7 +488,12 @@ impl<'a> Run<'a> {
         let active: Vec<(usize, Reg)> = names.iter().filter_map(|&n| self.regions[n].clone().map(|r| (n, r))).collect();
         for (n, r) in &active {
             if self.plan.metrics[*n].source {
-                self.olds[*n] = Some(self.slice(*n, r));
+                let old = if r.is_all() { Src::Store(self.stores[*n].clone()) } else { self.slice(*n, r) };
+                self.olds[*n] = Some(old);
+            }
+            if r.is_all() {
+                // 全時点を書き直すので、空から書き込む（既存のセルを時点ごとに消して書き直すより速い）
+                self.stores[*n] = Arc::new(self.stores[*n].emptied());
             }
         }
         // 格納データにその場で 1 時点ずつ書き込む。次の時点の前月参照は、書き込んだばかりの時点を読む

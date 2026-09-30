@@ -161,9 +161,11 @@ class RustEngine:
 
     # ------------------------------------------------ 差分再計算の段取り
 
-    def recalc_changes(self, model, changed: dict, added: dict, olds: dict) -> tuple[list, Any]:
+    def recalc_changes(self, model, changed: dict, added: dict, olds: dict, forced: dict,
+                       skip: set) -> tuple[list, Any]:
         """Model.recalc の差分の経路を Rust で行う。changed は入力の変更範囲、added は追加したメンバー、
-        olds は差分集計の集計元になる入力の変更前の値。格納データはその場で書き換わる。
+        olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲、
+        skip は飛ばす Metric（あとで全体を計算し直す）。格納データはその場で書き換わる。
 
         再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
         """
@@ -176,7 +178,9 @@ class RustEngine:
             [model._counts.get(n) for n in names],
             [(index[n], region(r)) for n, r in changed.items()],
             [(self._dim(model, d), [model.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
-            [(index[n], h) for n, h in olds.items()])
+            [(index[n], h) for n, h in olds.items()],
+            [(index[n], region(r)) for n, r in forced.items()],
+            [index[n] for n in skip])
 
         def named(entries):
             return [(names[i], {self._names[d]: frozenset(model.dimension(self._names[d]).members[j] for j in ms)

@@ -452,6 +452,16 @@ impl Store {
         Cube { pack: self.pack.clone(), kind: self.kind, cells }
     }
 
+    /// 行数のおおよその値（本体と差分の件数の和。差分の上書きや削除を数え直さない）。
+    pub fn rows_hint(&self) -> usize {
+        self.keys.len() + self.delta.len()
+    }
+
+    /// 同じ軸と分割軸の空の Store。
+    pub fn emptied(&self) -> Store {
+        self.empty_like()
+    }
+
     fn empty_like(&self) -> Store {
         Store {
             metric_dims: self.metric_dims.clone(),
@@ -587,6 +597,23 @@ impl Store {
             self.after_delta();
         }
         Ok(self.region_of(&changed))
+    }
+
+    /// 全体を new に置き換えた新しい Store と、値が変わったセルの範囲（replace_diff と同じ形）。
+    /// 自分は変えないので、置き換える前の Store を複製せずに取っておける。
+    pub fn replaced_all(&self, new: &Cube) -> Result<(Store, Option<Vec<Vec<u32>>>)> {
+        if !same_set(new.dims(), &self.metric_dims) {
+            return Err("書き戻す結果の軸が Metric の軸と一致しない".into());
+        }
+        let mut old = Vec::with_capacity(self.keys.len() + self.delta.len());
+        self.merged(0, None, |k, v| old.push((k, v)));
+        let cells = sorted(new.repack(&self.pack).cells);
+        let changed: Vec<u64> =
+            merge_sorted(&old, &cells, true, |a, b| (a != b).then_some(0.0)).into_iter().map(|(k, _)| k).collect();
+        let mut out = self.empty_like();
+        out.set_sorted(cells);
+        let sets = self.region_of(&changed);
+        Ok((out, sets))
     }
 
     /// keys を囲む範囲（宣言した軸の順の、軸ごとのメンバー番号）。keys が空なら None。
