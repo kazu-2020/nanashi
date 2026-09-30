@@ -15,8 +15,8 @@ dependencies = [
 
 [project.optional-dependencies]
 rust = ["nanashi_core"]            # native/ を maturin でビルドしたもの（README の手順）
-postgres = ["psycopg[binary]>=3.2,<4"]
-dev = ["maturin>=1.15,<2", "psycopg[binary]>=3.2,<4", "pyflakes>=3"]
+postgres = ["psycopg>=3.2,<4"]     # 手元では psycopg[binary] でもよい（3.14t には binary の配布がないので純 Python 版）
+dev = ["maturin>=1.15,<2", "psycopg>=3.2,<4", "pyflakes>=3"]
 
 [tool.setuptools]
 packages = ["sparse_engine"]

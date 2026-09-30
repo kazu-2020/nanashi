@@ -1,4 +1,6 @@
-name: test
+name: test      - name: 依存を入れて Rust のエンジンをビルドする
+        run: |
+          sudo apt-get install -y libpq5  # 純 Python 版の psycopg が使う
 
 on:
   push:
