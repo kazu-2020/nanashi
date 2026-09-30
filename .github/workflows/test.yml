@@ -1,5 +1,4 @@
-name: test      - name: 依存を入れて Rust のエンジンをビルドする
-        run: |
+name: test
 
 on:
   push:
