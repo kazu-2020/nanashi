@@ -8,6 +8,7 @@ from sparse_engine import FormulaError, Model, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.journal import AlreadyCommitted, FileJournal
 
+from .journals import FileStore, JournalCase, PgStore
 from .test_engines import build_with
 from .test_incremental import same, snapshot
 from .test_member_edit import structural
@@ -109,20 +110,22 @@ class Transactions(unittest.TestCase):
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
-class Journal(unittest.TestCase):
+class Journal(JournalCase, unittest.TestCase):
+    """記録先に共通の性質。ファイルと PostgreSQL の両方の記録先で回す。"""
     engine = staticmethod(ReferenceEngine)
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name)
+        super().setUp()
+        self.path = Path(self.journals.path)
         self.m = build_with(self.engine())
-        FileJournal(self.path).start(self.m)
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.journals.journal().start(self.m)
 
     def reopen(self, engine=None) -> Model:
-        return FileJournal(self.path).open(engine or self.engine())
+        return self.journals.journal().open(engine or self.engine())
+
+    def file_only(self) -> None:
+        if self.store is not FileStore:
+            self.skipTest("ファイルの記録先の形式を調べるテスト")
 
     def test_each_call_is_recorded(self):
         self.m.set_cell("Price", 12, Product="A")
@@ -150,7 +153,7 @@ class Journal(unittest.TestCase):
             with self.m.transaction():
                 self.m.set_cell("Price", 99, Product="A")
                 raise Abort
-        self.assertEqual(FileJournal(self.path).head, 0)
+        self.assertEqual(self.journals.journal().head, 0)
         check_same_state(self, self.m, self.reopen())
 
     def test_log_failure_rolls_back(self):
@@ -185,15 +188,17 @@ class Journal(unittest.TestCase):
         self.m.set_cell("Price", 12, Product="A")
         self.m.checkpoint()
         self.m.set_cell("Price", 13, Product="A")
-        self.assertEqual([s for s, _ in FileJournal(self.path).snapshots()], [1, 0])
+        snapshots = self.journals.journal().snapshots()
+        self.assertEqual([s for s, _ in snapshots], [1, 0])
         check_same_state(self, self.m, self.reopen())
         # 新しいスナップショットが壊れていたら、古いスナップショットから記録を多く再生する
-        broken = next((self.path / "snapshots" / f"{1:020d}").glob("inputs.*.parquet"))
+        broken = next(Path(dict(snapshots)[1]).glob("inputs.*.parquet"))
         broken.write_bytes(b"broken")
-        self.assertEqual([s for s, _ in FileJournal(self.path).snapshots()], [0])
+        self.assertEqual([s for s, _ in self.journals.journal().snapshots()], [0])
         check_same_state(self, self.m, self.reopen())
 
     def test_torn_last_line_is_dropped(self):
+        self.file_only()
         self.m.set_cell("Price", 12, Product="A")
         with open(self.path / "log.jsonl", "a") as f:
             f.write('{"seq": 2, "changes"')  # 書いている途中で落ちた
@@ -204,6 +209,7 @@ class Journal(unittest.TestCase):
         self.assertEqual(self.reopen().get("Price", Product="A"), 14)
 
     def test_corruption_in_the_middle_is_an_error(self):
+        self.file_only()
         self.m.set_cell("Price", 12, Product="A")
         self.m.set_cell("Price", 13, Product="A")
         lines = (self.path / "log.jsonl").read_text().splitlines(keepends=True)
@@ -229,6 +235,15 @@ class RustTransactions(Transactions):
 @unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class RustJournal(Journal):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
+
+
+class PgJournalContract(Journal):
+    store = PgStore
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core が必要")
+class PgRustJournal(RustJournal):
+    store = PgStore
 
 
 # ---------------------------------------------------------------- ランダムな操作
@@ -327,6 +342,63 @@ class Blocks(unittest.TestCase):
         saved, journal.BLOCK_MIN = journal.BLOCK_MIN, 1  # すべての変更を変更の塊で持つ
         self.addCleanup(setattr, journal, "BLOCK_MIN", saved)
         run_random(self, seed=57, rounds=80, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine])
+
+
+@unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
+class CellFiles(unittest.TestCase):
+    """bulk_cells を超えるセルを書き換えた記録は、セルの変更を JSON の行にせず Parquet のファイルに書く。"""
+
+    def test_random_replay_with_files(self):
+        # ほとんどの記録で、セルの変更をファイルに置く経路を通す（参照実装の行の列も、変更の塊にして書く）
+        run_random(self, seed=61, rounds=60, engine=ReferenceEngine, reopen_engines=[ReferenceEngine],
+                   make=lambda tmp: FileJournal(tmp, fsync=False, bulk_cells=3))
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_random_replay_with_blocks_in_files(self):
+        import sparse_engine.journal as journal
+        saved, journal.BLOCK_MIN = journal.BLOCK_MIN, 1  # すべての変更を変更の塊で持つ
+        self.addCleanup(setattr, journal, "BLOCK_MIN", saved)
+        run_random(self, seed=63, rounds=60, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine],
+                   make=lambda tmp: FileJournal(tmp, bulk_cells=3))
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_large_write_goes_to_parquet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = many_cells(RustEngine(), n=12_000)
+            FileJournal(tmp).start(m)
+            with m.transaction(user="etl"):
+                m.spread("V", 24_000.0, how="even")
+            m.set_cell("V", 1.0, K="k7", T="t1")  # 少ないセルは、これまでどおり行に書く
+            (f,) = (Path(tmp) / "cells").glob("*.parquet")
+            self.assertTrue(f.name.endswith(f"-{m.metrics['V'].id}.parquet"))
+            lines = (Path(tmp) / "log.jsonl").read_text().splitlines()
+            self.assertLess(len(lines[0]), 1000)  # 記録の行には、ファイルの名前とハッシュだけ
+            self.assertIn('"cells":[', lines[1])
+            for e in (ReferenceEngine, RustEngine):
+                check_same_state(self, m, FileJournal(tmp).open(e()))
+            history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")  # 変更の塊を Rust で探す
+            self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
+            history = FileJournal(tmp).cell_history(m, "V", K="k7", T="t1")
+            self.assertEqual([(h["old"], h["new"]) for h in history], [(None, 1.0)])
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_corrupted_cell_file_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = many_cells(RustEngine())
+            FileJournal(tmp, bulk_cells=1000).start(m)
+            m.spread("V", 3000.0, how="even")
+            (f,) = (Path(tmp) / "cells").glob("*.parquet")
+            f.write_bytes(f.read_bytes()[:-10])
+            with self.assertRaisesRegex(ValueError, "壊れている"):
+                FileJournal(tmp).open(RustEngine())
+
+    def test_moved_directory_still_opens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = build_with(ReferenceEngine())
+            FileJournal(Path(tmp) / "a", bulk_cells=3).start(m)
+            m.spread("Cost", 100, Product="C")
+            (Path(tmp) / "a").rename(Path(tmp) / "b")  # ファイルの名前は記録先のディレクトリからの相対
+            check_same_state(self, m, FileJournal(Path(tmp) / "b").open(ReferenceEngine()))
 
 
 if __name__ == "__main__":

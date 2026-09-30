@@ -37,6 +37,10 @@ def model(engine=None) -> Model:
     return m
 
 
+def engines() -> list:
+    return [ReferenceEngine()] + ([RustEngine()] if RustEngine is not None else [])
+
+
 class Overrides(unittest.TestCase):
     def test_override_reaches_downstream(self):
         m = model()
@@ -104,6 +108,62 @@ class Spread(unittest.TestCase):
         m = model()
         m.spread("Budget", 90, Employee="e3")
         self.assertEqual([m.get("Budget", Employee="e3", Month=t) for t in MONTHS], [30, 30, 30])
+
+    def test_metric_without_dimensions(self):
+        m = model()
+        m.add_input("Plan", [], {})
+        self.assertEqual(m.spread("Plan", 10), 1)  # 値がないので、ただ 1 つのセルへ
+        m.spread("Plan", 20)
+        self.assertEqual(m.get("Plan"), 20)
+
+    def test_aggregated_input_with_edits_before_and_after(self):
+        """差分集計の集計元を按分し、同じ再計算の前後で 1 セルずつも書き換える。"""
+        for engine in engines():
+            with self.subTest(engine=engine.name):
+                m = model(engine)
+                m.add_formula("DeptBudget", ["Department", "Month"], "Budget[BY SUM: Employee.Department]")
+                m.recalc()
+                m.set_cell("Budget", 5, Employee="e3", Month="Jan")  # 按分の前に 1 セル
+                m.spread("Budget", 90, Month="Jan")  # 10 : 30 : 5 で配る
+                m.set_cell("Budget", 7, Employee="e3", Month="Mar")  # 按分の範囲の外に 1 セル
+                m.delta_log.clear()
+                m.recalc()
+                self.assertIn("DeptBudget", m.delta_log)
+                self.assertAlmostEqual(m.get("DeptBudget", Department="営業", Month="Jan"), 80)
+                self.assertAlmostEqual(m.get("DeptBudget", Department="開発", Month="Jan"), 10)
+                self.assertEqual(m.get("DeptBudget", Department="開発", Month="Mar"), 7)
+
+    def test_random_spreads_of_aggregated_input(self):
+        ms = [model(e) for e in engines()]
+        for m in ms:
+            m.add_formula("DeptBudget", ["Department", "Month"], "Budget[BY SUM: Employee.Department]")
+            m.recalc()
+        for round_ in range(120):
+            for m in ms:  # 同じ種の乱数で、同じ操作を加える
+                rng = random.Random(round_)
+                for _ in range(rng.randint(1, 3)):  # 1 回の再計算の前に、按分と書き換えを混ぜる
+                    e, t = rng.choice(["e1", "e2", "e3"]), rng.choice(MONTHS)
+                    if rng.random() < 0.5:
+                        m.set_cell("Budget", None if rng.random() < 0.3 else float(rng.randint(1, 50)),
+                                   Employee=e, Month=t)
+                    else:
+                        coords = rng.choice([{"Month": t}, {"Employee": e}, {}])
+                        where = {"Employee.Department": "営業"} if rng.random() < 0.3 else None
+                        try:
+                            m.spread("Budget", float(rng.randint(10, 100)),
+                                     how=rng.choice(["proportional", "even"]), where=where, **coords)
+                        except ValueError as err:  # e3 は営業ではないので、範囲が空になりうる
+                            self.assertIn("按分先のセルがない", str(err))
+            for m in ms:
+                incremental = snapshot(m)
+                m._invalidate()
+                full = snapshot(m)
+                for name in m.metrics:
+                    with self.subTest(round=round_, engine=m.engine.name, metric=name):
+                        self.assertTrue(same(incremental[name], full[name]), name)
+            for name in ms[0].metrics:
+                with self.subTest(round=round_, metric=name):
+                    self.assertTrue(all(same(ms[0].value(name).cells, m.value(name).cells) for m in ms[1:]), name)
 
     def test_errors(self):
         m = model()

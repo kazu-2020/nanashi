@@ -63,6 +63,12 @@ class Engine(Protocol):
     def repartition(self, storage: Any, partition: str | None, cat: Catalog) -> Any:
         """分割軸を変えて持ち直す。"""
     def write(self, storage: Any, key: Key, value: Any, cat: Catalog) -> Any: ...
+    def write_many(self, storage: Any, cols: list[list[int]], values: list, cat: Catalog) -> Any:
+        """まとめて書き込み、格納データを返す。cols は宣言した軸の順の、軸ごとのメンバー番号の列、
+        values は write と同じ形の値（None は空にする）。同じセルが複数あれば後のものが勝つ。"""
+    def columns(self, storage: Any, restrict: Restrict | None, cat: Catalog) -> tuple[list[list[int]], list]:
+        """restrict の範囲の値のあるセルを、宣言した軸の順の軸ごとのメンバー番号の列と、値の列で返す
+        （並び順は決めない）。write_many と対になる。"""
     def dimension_changed(self, cat: Catalog, dim: str, renumbered: bool = False) -> None:
         """軸 dim のメンバーが変わった（プロパティの対応表も変わりうる）ことを知らせる。
         renumbered なら、メンバーを消して後ろのメンバーの番号が詰まった。"""
@@ -173,6 +179,27 @@ class ReferenceEngine:
         else:
             storage.cells[key] = value
         return storage
+
+    def write_many(self, storage: Cube, cols, values, cat):
+        members = [cat.dimension(d).members for d in storage.dims]
+        cells = storage.cells
+        for i, value in enumerate(values):
+            key = tuple(ms[c[i]] for ms, c in zip(members, cols))
+            if value is None:
+                cells.pop(key, None)
+            else:
+                cells[key] = value
+        return storage
+
+    def columns(self, storage: Cube, restrict, cat):
+        index = [cat.dimension(d)._index for d in storage.dims]
+        cols: list[list[int]] = [[] for _ in storage.dims]
+        values = []
+        for key, value in _filter(storage, restrict).cells.items():
+            for col, ix, member in zip(cols, index, key):
+                col.append(ix[member])
+            values.append(value)
+        return cols, values
 
     def evaluate(self, expr, cat, restrict):
         return evaluate(expr, cat, restrict or None)

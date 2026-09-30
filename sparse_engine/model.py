@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import functools
 import itertools
+import math
 from dataclasses import dataclass, field
 from statistics import mean
 from typing import Any, Mapping
@@ -467,11 +468,7 @@ class Model:
                                              self, partition)
         if old is not None and self._plan is not None and self._same_type(old, new) and name not in self._pending.forced:
             # 差分集計には変更前の値が要る。まだ再計算していない変更があれば、その前の値に戻して取っておく
-            if name not in self._pending.old_slices:
-                before = self.engine.share(self._values[name])
-                for key, value in self._pending.old_cells.pop(name, {}).items():
-                    before = self.engine.write(before, key, value, self)
-                self._pending.old_slices[name] = before
+            self._keep_old(name)
             # 変更前後で値が違うセルだけを変更範囲にする
             _, diff = self.engine.replace_diff(self.engine.share(self._pending.old_slices[name]), {}, storage, self)
             if diff is not None:
@@ -665,20 +662,23 @@ class Model:
             chosen = frozenset(x for x in self.dimension(d).members if mapping.get(x) == value)
             region[d] = region.get(d, chosen) & chosen
         self.recalc()
-        current = self.engine.to_cube(self.engine.filter(self._values[name], region or None, self), self)
-        cells = dict(current.cells)
-        weight = sum(cells.values())
-        if cells and how == "proportional" and weight != 0:
-            new = {k: total * v / weight for k, v in cells.items()}
+        # セルを名前の組にせず、軸ごとのメンバー番号の列のまま配って、まとめて書き込む
+        cols, values = self.engine.columns(self._values[name], region or None, self)
+        weight = math.fsum(values)  # 足す順（エンジンごとに違う）で結果が変わらないように
+        if values and how == "proportional" and weight != 0:
+            new = [float(total * v / weight) for v in values]
         else:
-            keys = list(cells) or list(itertools.product(
-                *(sorted(region[d], key=self.dimension(d)._index.get) if d in region
-                  else self.dimension(d).members for d in m.dims)))
-            if not keys:
-                raise ValueError(f"{name}: 按分先のセルがない")
-            new = {k: total / len(keys) for k in keys}
-        for k, v in new.items():
-            self.set_cell(name, v, **dict(zip(m.dims, k)))
+            n = len(values)
+            if not values:  # 値のあるセルがなければ、範囲の全組み合わせ
+                index = [self.dimension(d)._index for d in m.dims]
+                picks = [sorted(ix[x] for x in region[d]) if d in region else range(len(ix))
+                         for d, ix in zip(m.dims, index)]
+                combos = list(itertools.product(*picks))
+                if not combos:
+                    raise ValueError(f"{name}: 按分先のセルがない")
+                cols, n = [list(c) for c in zip(*combos)], len(combos)
+            new = [float(total / n)] * n
+        self._write_many(name, cols, new)
         return len(new)
 
     # ------------------------------------------------ メンバーの追加
@@ -900,6 +900,26 @@ class Model:
         self._values[name] = self.engine.write(self._values[name], key, value, self)
         point = {d: frozenset([member]) for d, member in zip(m.dims, key)}
         self._pending.changed[name] = union_region(self._pending.changed.get(name), point)
+
+    def _write_many(self, name: str, cols: list[list[int]], values: list) -> None:
+        """入力 Metric name に、軸ごとのメンバー番号の列 cols と検査済みの値 values をまとめて書き込む。
+        set_cell を 1 セルずつ呼ぶのと同じ状態になるが、変更範囲は 1 回で広げる。"""
+        m = self.metrics[name]
+        if self._plan is not None and name in self._delta_sources():
+            self._keep_old(name)  # 1 セルずつ覚える代わりに、前回の再計算の時点の値を丸ごと取っておく
+        self._values[name] = self.engine.write_many(self._values[name], cols, values, self)
+        members = [self.dimension(d).members for d in m.dims]
+        box = {d: frozenset(ms[i] for i in set(col)) for d, ms, col in zip(m.dims, members, cols)}
+        self._pending.changed[name] = union_region(self._pending.changed.get(name), box)
+
+    def _keep_old(self, name: str) -> None:
+        """差分集計に使う、入力 name の前回の再計算の時点の値を丸ごと取っておく（まだなければ）。
+        ためている 1 セルずつの変更前の値は、取っておく値に戻して捨てる。"""
+        if name not in self._pending.old_slices:
+            before = self.engine.share(self._values[name])
+            for key, value in self._pending.old_cells.pop(name, {}).items():
+                before = self.engine.write(before, key, value, self)
+            self._pending.old_slices[name] = before
 
     def _check(self, name: str, key: Key, value: float | bool | None) -> float | bool | None:
         """キーと値を検査し、格納する値（None は空）を返す。"""
