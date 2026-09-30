@@ -1,8 +1,6 @@
 """PostgreSQL の記録先（PgJournal）。NANASHI_PG_DSN（既定は手元の 55432 番）の PostgreSQL が必要。"""
 import hashlib
-import importlib
 import json
-import os
 import tempfile
 import time
 import unittest
@@ -12,6 +10,7 @@ from pathlib import Path
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.workspace import Workspace
 
+from .journals import DSN, PG_AVAILABLE
 from .test_engines import build_with
 from .test_journal import check_same_state, run_random
 from .test_workspace import model as stock_model, move
@@ -21,20 +20,7 @@ try:
 except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
-DSN = os.environ.get("NANASHI_PG_DSN", "postgresql://postgres@127.0.0.1:55432/nanashi")
-
-
-def available() -> bool:
-    try:
-        importlib.import_module("nanashi_core")  # 保存形式（Parquet）の読み書きに使う
-        import psycopg
-        psycopg.connect(DSN, connect_timeout=2).close()
-        return True
-    except Exception:
-        return False
-
-
-AVAILABLE = available()
+AVAILABLE = PG_AVAILABLE
 if AVAILABLE:
     import nanashi_core
     from psycopg.types.json import Jsonb

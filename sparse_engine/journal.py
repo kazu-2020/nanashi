@@ -329,9 +329,13 @@ class Journal:
         records(after)             通し番号が after より後の記録（古い順）
         save_snapshot(model)       model（通し番号 model.seq の時点）のスナップショットを置く
         snapshots()                使えるスナップショットの (通し番号, 置き場所) を新しい順に
+        release()                  書き込みの権利（PgJournal のリース）を手放す。次の書き手が待たずに済む
     """
 
     head: int = 0
+
+    def release(self) -> None:
+        """書き込みの権利を手放す。権利を持たない記録先（FileJournal）では何もしない。"""
 
     def append(self, record: dict) -> int:
         """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
