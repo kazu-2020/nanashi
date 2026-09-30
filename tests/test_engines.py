@@ -1,4 +1,4 @@
-"""Polars エンジンの結果が参照実装と一致する。"""
+"""Rust エンジンの結果が参照実装と一致する。"""
 import random
 import unittest
 
@@ -6,11 +6,6 @@ from sparse_engine import Model
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import model as build, same
-
-try:
-    from sparse_engine.polars_engine import PolarsEngine
-except ImportError:  # polars が入っていない環境
-    PolarsEngine = None
 
 try:
     from sparse_engine.rust_engine import RustEngine
@@ -57,12 +52,6 @@ class MatchesReference:
                 with self.subTest(round=round_, metric=name):
                     a, b = ref.value(name).cells, pol.value(name).cells
                     self.assertTrue(same(a, b), f"{name}\n参照: {a}\n比較先: {b}")
-
-
-@unittest.skipIf(PolarsEngine is None, "polars が必要")
-class PolarsMatchesReference(MatchesReference, unittest.TestCase):
-    def other(self):
-        return PolarsEngine()
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")

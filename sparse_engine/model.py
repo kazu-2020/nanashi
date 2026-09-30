@@ -8,8 +8,6 @@
 影響範囲だけを計算し直して差し替える。式や軸の定義を変えたときは全体を計算し直す。
 
 集計だけの Metric（SUM / COUNT）は、集計元の変わった行の差分を足し込んで更新する（delta.py）。
-scan の作業データが小さいときは、エンジンを通さず行単位で 1 時点ずつ計算する（クエリ 1 回あたりの
-固定コスト × 時点数を払わないため）。
 
 エンジンが Metric を分割して持つ場合、分割軸は Metric ごとに明示するか、自動で選ぶ。
 自動では、各入力 Metric の 1 セルを変えたときの影響範囲を伝え、触れるパーティションの
@@ -25,8 +23,8 @@ from typing import Any, Mapping
 from .core import Cube, Dimension, Key
 from .delta import DeltaPlan, plan_for, substitute
 from .engine import Engine, default_engine
-from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, _filter, affected, collect_refs,
-                       evaluate, infer, inside, union_region)
+from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, collect_refs, infer,
+                       union_region)
 from .expr import BinOp, Const, Expr, Filter, Ref
 from .parser import parse
 
@@ -44,43 +42,6 @@ class Metric:
 class Step:
     names: tuple[str, ...]
     scan_dim: str | None = None  # None なら通常の 1 Metric の計算
-
-
-# scan の作業データの合計行数がこれ以下なら、行単位の経路で計算する
-FAST_SCAN_ROWS = 20_000
-
-
-class _TimeSlices:
-    """scan の作業データを、時間軸のメンバーごとに分けた dict で持つ（行単位の経路用）。
-
-    1 時点分の読み書きは、その時点の行だけに触れる。時間軸を持たない Metric は 1 まとまりで持つ。
-    """
-
-    def __init__(self, cube: Cube, dim: str):
-        self.dims = cube.dims
-        self.i = cube.dims.index(dim) if dim in cube.dims else None
-        self.dim = dim
-        self.by: dict[str | None, dict[Key, Any]] = defaultdict(dict)
-        for k, v in cube.cells.items():
-            self.by[k[self.i] if self.i is not None else None][k] = v
-
-    def read(self, restrict: Restrict | None) -> Cube:
-        if self.i is not None and restrict and self.dim in restrict:
-            cells = {k: v for t in restrict[self.dim] for k, v in self.by.get(t, {}).items()}
-        else:
-            cells = {k: v for part in self.by.values() for k, v in part.items()}
-        return _filter(Cube(self.dims, cells), restrict)
-
-    def replace(self, region: Restrict, new: Cube) -> None:
-        """region（時間軸は 1 時点）のセルを new で置き換える。"""
-        for t in region[self.dim]:
-            part = self.by.get(t, {})
-            self.by[t] = {k: v for k, v in part.items() if not inside(k, self.dims, region)}
-        for k, v in new.reorder(self.dims).cells.items():
-            self.by[k[self.i]][k] = v
-
-    def cells(self) -> dict[Key, Any]:
-        return {k: v for part in self.by.values() for k, v in part.items()}
 
 
 @dataclass
@@ -107,8 +68,6 @@ class Model:
     _old_cells: dict[str, dict[Key, Any]] = field(default_factory=dict)  # 入力の変更前の値
     _temp_types: dict[str, Type] = field(default_factory=dict)  # 差分計算中の一時的な名前の型
     _delta_cache: dict[str, tuple] = field(default_factory=dict)  # Metric -> (計画, 件数の差分の式, 値の差分の式)
-    _fast: dict[str, _TimeSlices] | None = None  # 行単位の scan 中の読み出し元
-    fast_scan_log: list[str] = field(default_factory=list)  # 行単位で scan した Metric（観察用）
 
     # ------------------------------------------------ Catalog
 
@@ -126,19 +85,15 @@ class Model:
         return Type(m.dims, m.kind)
 
     def source(self, name: str) -> Any:
-        """name の読み出し元（scan や差分集計の作業データがあればそれ、なければ格納データ）。
+        """name の読み出し元（差分集計の作業データがあればそれ、なければ格納データ）。
 
         自分で範囲を絞り込めるエンジン（Rust）は、read ではなくこれで読み出し元を受け取る。
         """
         return self._work[name] if name in self._work else self._values[name]
 
     def read(self, name: str, restrict: Restrict | None) -> Any:
-        if self._fast is not None:
-            return self._fast[name].read(restrict)
-        if self._reads is not None:
-            self._reads[name] = union_region(self._reads.get(name), restrict or {})
-        source = self._work[name] if name in self._work else self._values[name]
-        return self.engine.view(source, restrict or None, self)
+        """name を restrict の範囲に絞って返す（参照実装の評価器が使う）。"""
+        return self.engine.view(self.source(name), restrict or None, self)
 
     # ------------------------------------------------ 定義
 
@@ -506,80 +461,19 @@ class Model:
                 m = self.metrics[n]
                 self._values[n] = self.engine.empty(m.dims, m.kind, self.layout.get(n), cat=self)
 
-        if getattr(self.engine, "native", False):
-            # 自分で範囲を絞り込めて、クエリの固定コストもないエンジンは、下見も作業データの切り出しも
-            # 要らない。格納データにその場で 1 時点ずつ書き込む（前の時点の値は範囲の外でも読める）
-            work = {n: self._values[n] for n in active}
-            self._scan_engine(dim, active, work)
+        # 格納データにその場で 1 時点ずつ書き込む。次の時点の PREVIOUS は、書き込んだばかりの
+        # 前の時点（範囲の外なら元のまま）を読む
+        for t in self.dimension(dim).members:
             for n, r in active.items():
-                self._values[n] = work[n]
-                self.eval_log.append(n)
-                self.slice_log.append((n, r))
-            return
-
-        # 下見: 時間方向の絞り込みを外して 1 回評価し、各 Metric をどの範囲で読むかを記録する。
-        # 1 時点分の範囲はこれより狭いので、記録した範囲だけ切り出しておけば各時点の読み出しが速い
-        self._reads = {}
-        try:
-            for n, r in active.items():
-                self.engine.evaluate(self.metrics[n].formula, self, _without_dim(r, dim))
-            reads = self._reads
-        finally:
-            self._reads = None
-        work = {name: self.engine.filter(self._values[name], region or None, self)
-                for name, region in reads.items()}
+                if dim in r and t not in r[dim]:
+                    continue
+                m = self.metrics[n]
+                sub = {**r, dim: frozenset([t])}
+                sliced = self.engine.reorder(self.engine.evaluate(m.formula, self, sub), m.dims)
+                self._values[n] = self.engine.replace(self._values[n], sub, sliced, self)
         for n, r in active.items():
-            work.setdefault(n, self.engine.filter(self._values[n], r or None, self))
-
-        if not full and sum(self.engine.size(w) for w in work.values()) <= FAST_SCAN_ROWS:
-            self._scan_rows(dim, active, work)
-        else:
-            self._scan_engine(dim, active, work)
-        self._finish_scan(active, work)
-
-    def _finish_scan(self, active: dict[str, Restrict], work: dict[str, Any]) -> None:
-        for n, r in active.items():
-            done = self.engine.filter(work[n], r or None, self)
-            self._values[n] = self.engine.replace(self._values[n], r, done, self)
             self.eval_log.append(n)
             self.slice_log.append((n, r))
-
-    def _scan_rows(self, dim: str, active: dict[str, Restrict], work: dict[str, Any]) -> None:
-        """作業データを Python の dict に移し、参照実装の評価器で 1 時点ずつ計算する。
-
-        各時点で読み書きするのは数十行なので、エンジンのクエリ 1 回あたりの固定コストより速い。
-        """
-        slices = {name: _TimeSlices(self.engine.to_cube(store, self), dim) for name, store in work.items()}
-        self._fast = slices
-        try:
-            for t in self.dimension(dim).members:
-                for n, r in active.items():
-                    if dim in r and t not in r[dim]:
-                        continue
-                    sub = {**r, dim: frozenset([t])}
-                    slices[n].replace(sub, evaluate(self.metrics[n].formula, self, sub))
-        finally:
-            self._fast = None
-        for n in active:
-            m = self.metrics[n]
-            work[n] = self.engine.from_cells(m.dims, m.kind, slices[n].cells(), self, self.layout.get(n))
-            self.fast_scan_log.append(n)
-
-    def _scan_engine(self, dim: str, active: dict[str, Restrict], work: dict[str, Any]) -> None:
-        """エンジンで 1 時点ずつ計算する（作業データが大きいとき）。"""
-        self._work = work
-        try:
-            for t in self.dimension(dim).members:
-                for n, r in active.items():
-                    if dim in r and t not in r[dim]:
-                        continue
-                    m = self.metrics[n]
-                    sub = {**r, dim: frozenset([t])}
-                    sliced = self.engine.reorder(self.engine.evaluate(m.formula, self, sub), m.dims)
-                    # 次の時点の PREVIOUS が読めるよう、この時点の結果をすぐ作業用データへ書き戻す
-                    work[n] = self.engine.replace(work[n], sub, sliced, self)
-        finally:
-            self._work = {}
 
 
 # 差分集計の後半で使う式（名前は _apply_delta の作業データ）
@@ -602,10 +496,6 @@ def _levels(plan: list[Step], edges: dict[str, list[Edge]]) -> list[list[Step]]:
             levels.append([])
         levels[level].append(step)
     return levels
-
-
-def _without_dim(region: Restrict, dim: str) -> Restrict:
-    return {d: ms for d, ms in region.items() if d != dim}
 
 
 def _tarjan(graph: dict[str, list[Edge] | set[str]]) -> list[list[str]]:

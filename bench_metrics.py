@@ -1,7 +1,7 @@
 """計算 Metric の数を増やしたときの速度を測る。セル数はほぼ固定し、Metric の数だけを変える。
 
     python bench_metrics.py                         # 全組み合わせを別プロセスで実行して表にする
-    python bench_metrics.py --engine polars --metrics 300   # 1 組み合わせだけ（JSON を出力）
+    python bench_metrics.py --engine rust --metrics 300     # 1 組み合わせだけ（JSON を出力）
 
 式は乱数で生成する。計画モデルでよく出る形（定数倍、同じ軸どうしの足し算、率の引き下ろし、
 集計、IF、前月参照、scan）を混ぜ、直前に作った Metric から派生させる「連鎖」と、
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import resource
 import statistics
@@ -79,9 +78,6 @@ def build(engine_name: str, n: int):
     if engine_name == "rust":
         from sparse_engine.rust_engine import RustEngine
         engine = RustEngine()
-    elif engine_name == "polars":
-        from sparse_engine.polars_engine import PolarsEngine
-        engine = PolarsEngine()
     else:
         engine = ReferenceEngine()
     m = Model(engine=engine)
@@ -110,9 +106,6 @@ def build(engine_name: str, n: int):
     for name, (dims, cols) in inputs.items():
         if engine_name == "rust":
             m.add_input(name, dims, storage=engine.from_arrays(tuple(dims), "number", cols, m))
-        elif engine_name == "polars":
-            import polars as pl
-            m.add_input(name, dims, storage=engine.from_frame(tuple(dims), "number", pl.DataFrame(cols), m))
         else:
             members = [m.dimensions[d].members for d in dims]
             codes = [cols[d].tolist() for d in dims]
@@ -172,7 +165,7 @@ def run(engine_name: str, n: int, repeats: int) -> dict:
 def driver(sizes: list[int], reference_up_to: int) -> None:
     results = []
     for n in sizes:
-        for engine in (["reference"] if n <= reference_up_to else []) + ["polars", "rust"]:
+        for engine in (["reference"] if n <= reference_up_to else []) + ["rust"]:
             print(f"running {engine} {n} ...", file=sys.stderr, flush=True)
             try:
                 out = subprocess.run([sys.executable, __file__, "--engine", engine, "--metrics", str(n)],
@@ -209,7 +202,7 @@ def report(results: list[dict]) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", choices=["reference", "polars", "rust"])
+    ap.add_argument("--engine", choices=["reference", "rust"])
     ap.add_argument("--metrics", type=int)
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--sizes", default="30,100,300,1000")

@@ -98,11 +98,8 @@ class ReferenceEngine:
 
 
 def default_engine() -> Engine:
-    """環境変数 SPARSE_ENGINE（reference / polars / rust）と POLARS_PARTITIONS で既定のエンジンを選ぶ。テストを両方で回すため。"""
+    """環境変数 SPARSE_ENGINE（reference / rust）で既定のエンジンを選ぶ。テストを両方で回すため。"""
     if os.environ.get("SPARSE_ENGINE") == "rust":
         from .rust_engine import RustEngine
         return RustEngine()
-    if os.environ.get("SPARSE_ENGINE", "reference") == "polars":
-        from .polars_engine import PolarsEngine
-        return PolarsEngine(partitions=int(os.environ.get("POLARS_PARTITIONS", "256")))
     return ReferenceEngine()

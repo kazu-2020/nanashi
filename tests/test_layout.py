@@ -8,9 +8,9 @@ from .test_engines import build_with
 from .test_incremental import same
 
 try:
-    from sparse_engine.polars_engine import PolarsEngine
-except ImportError:
-    PolarsEngine = None
+    from sparse_engine.rust_engine import RustEngine
+except ImportError:  # nanashi_core をビルドしていない環境
+    RustEngine = None
 
 
 class PartitionedStub(ReferenceEngine):
@@ -58,41 +58,26 @@ class AutoLayout(unittest.TestCase):
         self.assertEqual(m.layout["V"], "Month")  # メンバー数 5 が最多
 
 
-@unittest.skipIf(PolarsEngine is None, "polars が必要")
-class PolarsFollowsLayout(unittest.TestCase):
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustFollowsLayout(unittest.TestCase):
     def test_stores_are_split_by_chosen_dim(self):
-        m = build_with(PolarsEngine())
+        m = build_with(RustEngine())
         m.recalc()
         for name in m.metrics:
             with self.subTest(name):
-                self.assertEqual(m.raw(name).part_dim, m.layout[name])
-
-    def test_split_is_deferred_until_first_targeted_edit(self):
-        ref, pol = build_with(ReferenceEngine()), build_with(PolarsEngine())
-        ref.recalc()
-        pol.recalc()
-        # 全体の再計算の結果は分割を後回しにしている
-        self.assertTrue(pol.raw("Revenue").pending)
-        for model in (ref, pol):
-            model.set_cell("Volume", 9, Product="B", Region="N", Month="Feb")
-        for name in ref.metrics:
-            with self.subTest(name):
-                self.assertTrue(same(ref.value(name).cells, pol.value(name).cells))
-        # 商品で絞った書き換えが来たので、Revenue は分割済みになる
-        self.assertFalse(pol.raw("Revenue").pending)
-        self.assertGreater(len(pol.raw("Revenue").parts), 1)
+                self.assertEqual(m.engine.partition_of(m.raw(name)), m.layout[name])
 
     def test_explicit_input_partition_keeps_values(self):
         ref = build_with(ReferenceEngine())
-        pol = build_with(PolarsEngine())
-        for model in (ref, pol):
+        rs = build_with(RustEngine())
+        for model in (ref, rs):
             cells = model.value("Volume").cells
             model.add_input("Volume", ["Product", "Region", "Month"], cells, partition="Month")
             model.set_cell("Volume", 9, Product="D", Region="S", Month="Apr")
-        self.assertEqual(pol.raw("Volume").part_dim, "Month")
+        self.assertEqual(rs.engine.partition_of(rs.raw("Volume")), "Month")
         for name in ref.metrics:
             with self.subTest(name):
-                self.assertTrue(same(ref.value(name).cells, pol.value(name).cells))
+                self.assertTrue(same(ref.value(name).cells, rs.value(name).cells))
 
 
 if __name__ == "__main__":

@@ -2,8 +2,7 @@
 
 Metric の格納データと評価の途中結果は Rust 側に置き、Python にはハンドルだけを返す。
 式は初回に Rust 側の構文木へ変換してキャッシュし、評価は Rust で行う。
-Polars と違ってクエリ 1 回あたりの固定コストがほぼないので、小さな範囲の評価を
-Metric ごとに何百回繰り返しても速い。
+1 回の評価の固定コストがほぼないので、小さな範囲の評価を Metric ごとに何百回繰り返しても速い。
 
 格納データは分割軸を最上位ビットに詰めた整数キーの B 木で持つ。分割軸で絞った範囲の
 読み書きは、その範囲の行数だけで済む。
@@ -22,7 +21,6 @@ from .expr import (BinOp, By, Const, Expand, Expr, Filter, If, IfBlank, IsBlank,
 
 class RustEngine:
     name = "rust"
-    native = True  # Model に、scan の下見や行単位の経路が要らないことを伝える
     partitions = 1 << 20  # 分割軸のメンバーごとに範囲検索できる（分割軸の自動選択に使う）
 
     def __init__(self):

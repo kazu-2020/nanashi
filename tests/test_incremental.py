@@ -2,7 +2,6 @@ import math
 import random
 import unittest
 
-import sparse_engine.model as scan_rows
 from sparse_engine import Model
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May"]
@@ -89,10 +88,6 @@ class MatchesFullRecalc(unittest.TestCase):
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
-        # scan（Stock と Outflow）は影響範囲が小さいので、行単位の経路を通っていること
-        # （FAST_SCAN_ROWS = 0 でエンジン側の経路を強制したときと、その経路を持たない Rust のエンジンは除く）
-        if scan_rows.FAST_SCAN_ROWS > 0 and not getattr(m.engine, "native", False):
-            self.assertGreater(m.fast_scan_log.count("Stock"), 100)
 
 
 class RecomputesOnlyTheSlice(unittest.TestCase):

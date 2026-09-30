@@ -1,7 +1,7 @@
-"""小売の計画モデルで参照実装と Polars エンジンの速度を比べる。
+"""小売の計画モデルで参照実装と Rust エンジンの速度を比べる。
 
-    python bench.py                         # 全組み合わせを別プロセスで実行して表にする
-    python bench.py --engine polars --size large   # 1 組み合わせだけ（JSON を出力）
+    python bench.py                              # 全組み合わせを別プロセスで実行して表にする
+    python bench.py --engine rust --size large   # 1 組み合わせだけ（JSON を出力）
 """
 from __future__ import annotations
 
@@ -45,10 +45,7 @@ EDITS = [  # (説明, Metric, 座標)
 
 
 def build(engine_name: str, size: str):
-    import sparse_engine.model as model_module
     from sparse_engine import Model
-    if os.environ.get("BENCH_FAST_SCAN", "on") == "off":
-        model_module.FAST_SCAN_ROWS = 0
     from sparse_engine.engine import ReferenceEngine
 
     n_prod, n_store, density = SIZES[size]
@@ -60,9 +57,6 @@ def build(engine_name: str, size: str):
     if engine_name == "rust":
         from sparse_engine.rust_engine import RustEngine
         engine = RustEngine()
-    elif engine_name == "polars":
-        from sparse_engine.polars_engine import PolarsEngine
-        engine = PolarsEngine(partitions=int(os.environ.get("POLARS_PARTITIONS", "256")))
     else:
         engine = ReferenceEngine()
     m = Model(engine=engine, auto_layout=os.environ.get("BENCH_LAYOUT", "auto") == "auto",
@@ -92,10 +86,6 @@ def build(engine_name: str, size: str):
     for name, (dims, cols, kind) in inputs.items():
         if engine_name == "rust":
             storage = engine.from_arrays(tuple(dims), kind, cols, m)
-            m.add_input(name, dims, kind=kind, storage=storage)
-        elif engine_name == "polars":
-            import polars as pl
-            storage = engine.from_frame(tuple(dims), kind, pl.DataFrame(cols), m)
             m.add_input(name, dims, kind=kind, storage=storage)
         else:
             members = [m.dimensions[d].members for d in dims]
@@ -142,26 +132,17 @@ def run(engine_name: str, size: str, repeats: int) -> dict:
     return {"engine": engine_name, "size": size, "load": load, "full": full, "edits": edits,
             "first_edit": first_edit,
             "cells": cells, "total": total_value, "peak_mb": peak / 2**20,
-            "threads": os.environ.get("POLARS_MAX_THREADS", "all"),
-            "partitions": os.environ.get("POLARS_PARTITIONS", "256"),
             "layout": dict(m.layout), "layout_mode": os.environ.get("BENCH_LAYOUT", "auto"),
-            "delta": os.environ.get("BENCH_DELTA", "on"), "delta_metrics": sorted(m._delta),
-            "fast_scan": os.environ.get("BENCH_FAST_SCAN", "on")}
+            "delta": os.environ.get("BENCH_DELTA", "on"), "delta_metrics": sorted(m._delta)}
 
 
-def driver(only_polars: bool) -> None:
+def driver(skip_reference: bool) -> None:
     """(表示名, エンジン, 規模, 環境変数) の組み合わせを別プロセスで実行する。"""
     plan = []
     for size in SIZES:
-        if not only_polars and size != "xlarge":
+        if not skip_reference and size != "xlarge":  # 参照実装は遅いので 1756 万セルは省く
             plan.append(("reference", "reference", size, {}))
-        # 分割・分割軸の自動選択・差分集計・行単位の scan をすべて切った状態と、すべて有効な状態
-        plan.append(("polars 改善前", "polars", size,
-                     {"POLARS_PARTITIONS": "1", "BENCH_LAYOUT": "max", "BENCH_DELTA": "off",
-                      "BENCH_FAST_SCAN": "off"}))
-        plan.append(("polars 改善後", "polars", size,
-                     {"POLARS_PARTITIONS": "256", "BENCH_LAYOUT": "auto", "BENCH_DELTA": "on",
-                      "BENCH_FAST_SCAN": "on"}))
+        plan.append(("rust", "rust", size, {}))
     results = []
     for label, engine, size, extra in plan:
         print(f"running {label} {size} ...", file=sys.stderr, flush=True)
@@ -184,12 +165,12 @@ def driver(only_polars: bool) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", choices=["reference", "polars", "rust"])
+    ap.add_argument("--engine", choices=["reference", "rust"])
     ap.add_argument("--size", choices=list(SIZES))
     ap.add_argument("--repeats", type=int, default=5)
-    ap.add_argument("--only-polars", action="store_true", help="参照実装を省く（参照実装が変わっていないとき）")
+    ap.add_argument("--skip-reference", action="store_true", help="参照実装を省く（参照実装が変わっていないとき）")
     args = ap.parse_args()
     if args.engine:
         print(json.dumps(run(args.engine, args.size, args.repeats), ensure_ascii=False))
     else:
-        driver(args.only_polars)
+        driver(args.skip_reference)
