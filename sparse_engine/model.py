@@ -602,7 +602,7 @@ class Model:
         width = self.engine.key_bits
         if width is None or not dims:
             return
-        bits = {d: max(1, (len(self.dimension(d).members) - 1).bit_length()) for d in dims}
+        bits = {d: _bits(len(self.dimension(d).members)) for d in dims}
         if sum(bits.values()) > width:
             detail = ", ".join(f"{d} {b} ビット" for d, b in bits.items())
             raise ValueError(f"{name}: 軸の組み合わせが {width} ビットのキーに収まらない（{detail}）。"
@@ -680,11 +680,30 @@ class Model:
                 raise ValueError(f"{dim} にプロパティ {prop} がない")
             if value not in self.dimension(d.properties[prop][0]):
                 raise ValueError(f"{dim}.{prop}: {d.properties[prop][0]} に {value!r} がない")
+        bits = _bits(len(d.members))
         d.add_member(member, self._new_id())
+        if self.engine.key_bits is not None and _bits(len(d.members)) > bits:
+            try:  # 軸のビット幅が増えた。キーに収まらなくなる Metric や式があれば、足さずにエラーにする
+                self.engine.dimension_changed(self, dim)
+                self._check_widths(dim)
+            except Exception:
+                d.remove_member(member)
+                self.engine.dimension_changed(self, dim)
+                raise
         for prop, value in properties.items():
             d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
         self._member_added(dim)
         self._pending.added.setdefault(dim, set()).add(member)
+
+    def _check_widths(self, dim: str) -> None:
+        """軸 dim のビット幅が増えたあとも、dim を持つ Metric と、すべての式の途中の結果が、エンジンの
+        キーの幅に収まるか確かめる（式はエンジンの型検査が確かめる）。"""
+        for m in self.metrics.values():
+            if dim in m.dims:
+                self._check_key_width(m.name, m.dims)
+        for m in self.metrics.values():
+            if m.written is not None:
+                self.engine.planner.check(m.written, self)
 
     def _member_added(self, dim: str) -> None:
         """軸 dim にメンバーを足したことをエンジンと格納データに反映する。"""
@@ -1295,5 +1314,10 @@ class Model:
         for key, value in self._pending.old_cells.get(name, {}).items():
             old = self.engine.write(old, key, value, self)
         return old
+
+def _bits(size: int) -> int:
+    """size 個のメンバーの番号に要るビット数（Rust の key.rs の bits_for と同じ）。"""
+    return max(1, (size - 1).bit_length())
+
 
 _KEPT_ON_RESTORE = frozenset({"eval_log", "slice_log", "delta_log", "journal", "last_record"})

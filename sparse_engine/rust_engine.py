@@ -52,6 +52,9 @@ class LazyEdges(MutableMapping):
         return len(self._fill())
 
 
+EXPRS_MAX = 20_000  # 式の変換結果を覚えておく数の上限
+
+
 class RustEngine:
     name = "rust"
     partitions = 1 << 20  # 分割軸のメンバーごとに範囲検索できる（分割軸の自動選択に使う）
@@ -63,7 +66,8 @@ class RustEngine:
         self._dims: dict[str, tuple[Any, int]] = {}  # 軸名 -> (Dimension, 番号)
         self._names: dict[int, str] = {}
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
-        self._exprs: dict[int, tuple] = {}  # id(式) -> (式, 変換結果, 読む名前, 型, 警告, 読む名前の型)
+        self._exprs: dict[int, tuple] = {}
+        self._widths: dict[str, int] = {}  # 軸名 -> 型検査したときのビット幅  # id(式) -> (式, 変換結果, 読む名前, 型, 警告, 読む名前の型)
         self.planner = RustPlanner(self)
 
     def fork(self, cat: Catalog) -> RustEngine:
@@ -73,7 +77,8 @@ class RustEngine:
         other._dims = {name: (cat.dimension(name), i) for name, (_, i) in self._dims.items()}
         other._names = dict(self._names)
         other._maps = dict(self._maps)
-        other._exprs = dict(self._exprs)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
+        other._exprs = dict(self._exprs)
+        other._widths = dict(self._widths)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
         other.planner = self.planner.fork(other)
         return other
 
@@ -89,6 +94,7 @@ class RustEngine:
             return cached[1]
         i = self.core.add_dim(len(d.members), d.ordered, name)
         self._dims[name] = (d, i)
+        self._widths[name] = max(1, (len(d.members) - 1).bit_length())
         self._names[i] = name
         return i
 
@@ -159,6 +165,8 @@ class RustEngine:
         except ValueError as e:
             raise FormulaError(str(e)) from None
         t = Type(tuple(self._names[i] for i in dims), member_kind(self._names[d]) if kind == "member" else kind)
+        if len(self._exprs) >= EXPRS_MAX:  # 定義を何度も変えても増え続けないように、溢れたら作り直させる
+            self._exprs.clear()
         self._exprs[id(expr)] = (expr, compiled, names, t, warnings, reads)
         return compiled, names, t, warnings
 
@@ -280,6 +288,11 @@ class RustEngine:
             d, i = self._dims[dim]
             if d is cat.dimension(dim):
                 self.core.resize_dim(i, len(d.members))
+                # 型検査は途中の結果がキーに収まるかも確かめているので、軸のビット幅が変わったら検査し直す
+                width = max(1, (len(d.members) - 1).bit_length())
+                if self._widths.get(dim, width) != width:
+                    self._exprs.clear()
+                self._widths[dim] = width
         for (src, prop), (mapping, i) in list(self._maps.items()):
             target, current = cat.dimension(src).properties[prop]
             if dim in (src, target) or current is not mapping:

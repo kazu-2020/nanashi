@@ -30,6 +30,35 @@ class KeyWidth(unittest.TestCase):
         m.add_input("Ok", [f"D{i}" for i in range(4)])  # 52 ビットは入る
         self.assertNotIn("Ok", m.warnings)
 
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_intermediate_results_are_checked_when_the_formula_is_checked(self):
+        m = wide(RustEngine())
+        m.add_input("X", ["D0", "D1", "D2"], {("m1", "m2", "m3"): 1.0})
+        m.add_input("Y", ["D2", "D3", "D4"], {("m3", "m4", "m5"): 2.0})
+        # 結果の軸は 39 ビットだが、途中で 5 本の軸（65 ビット）を組み合わせる。評価の途中でなく、登録後の
+        # 型検査で、直し方を示して拒否する
+        m.add_formula("Z", ["D0", "D1", "D2"], "(X[EXPAND: D3, D4] * Y[EXPAND: D0, D1])[REMOVE SUM: D3, D4]")
+        with self.assertRaisesRegex(FormulaError, "途中の結果の軸 .*64 ビット.*D0 13 ビット.*先に集計して"):
+            m.recalc()
+        m.add_formula("Z", ["D0", "D1", "D2"], "X * Y[REMOVE SUM: D3, D4]")
+        self.assertEqual(m.get("Z", D0="m1", D1="m2", D2="m3"), 2.0)
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_member_that_would_widen_past_64_bits_is_refused(self):
+        m = Model(engine=RustEngine())
+        for i in range(4):
+            m.add_dimension(f"D{i}", [f"m{j}" for j in range(1 << 13)])  # 13 ビット × 4
+        m.add_dimension("E", [f"e{j}" for j in range(1 << 12)])          # 12 ビット（合わせて 64 ビット）
+        m.add_input("X", ["D0", "D1", "D2", "D3"], {("m1", "m1", "m1", "m1"): 1.0})
+        m.add_input("Y", ["E"], {("e1",): 2.0})
+        m.add_formula("Z", ["D0"], "(X[EXPAND: E] * Y)[REMOVE SUM: D1, D2, D3, E]")
+        self.assertEqual(m.get("Z", D0="m1"), 2.0)
+        with self.assertRaisesRegex(FormulaError, "途中の結果の軸"):  # E が 13 ビットになると収まらない
+            m.add_member("E", "e_new")
+        self.assertNotIn("e_new", m.dimensions["E"])
+        m.set_cell("Y", 3.0, E="e1")
+        self.assertEqual(m.get("Z", D0="m1"), 3.0)
+
     def test_reference_has_no_width_limit(self):
         m = wide(ReferenceEngine())
         m.add_input("Wide", [f"D{i}" for i in range(5)])

@@ -5,7 +5,7 @@
 //! - Bin、If、IsBlank、IfBlank の grow: 軸にメンバーを追加したとき、新しいメンバーへ値が広がる軸
 //! - By: 式が持つ軸から、集約（ByAgg）か引き下ろし（ByLookup）かを決める
 
-use crate::{Agg, Catalog, DimId, Node, Op, Result};
+use crate::{bits_for, Agg, Catalog, DimId, Node, Op, Result};
 
 /// 値の種類。number、boolean、または軸のメンバー（member:<軸>）。
 #[derive(Clone, Debug, PartialEq)]
@@ -136,7 +136,30 @@ fn check_expand(warnings: &mut Vec<String>, what: &str, dims: &[DimId], covered:
 }
 
 /// 式の型を決める。密になる演算は warnings に積む。grow と By の種類を式に書き込む。
+/// 式の型（軸と値の種類）を決める。途中の結果も含めて、各ノードの結果の軸の組み合わせが 64 ビットの
+/// キーに収まるかも確かめる（収まらなければ、評価の途中でなく、ここで直し方を示してエラーにする）。
 pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Result<Ty> {
+    let ty = infer_node(node, env, warnings)?;
+    key_fits(&ty.dims, env.cat)?;
+    Ok(ty)
+}
+
+/// 軸の組み合わせが、1 セルのキー（64 ビット）に収まるか。
+pub fn key_fits(dims: &[DimId], cat: &Catalog) -> Result<()> {
+    let bits: Vec<(String, u32)> = dims.iter().map(|&d| (cat.dims[d].name.clone(), bits_for(cat.dims[d].size))).collect();
+    let total: u32 = bits.iter().map(|b| b.1).sum();
+    if total <= 64 {
+        return Ok(());
+    }
+    let detail: Vec<String> = bits.iter().map(|(n, b)| format!("{n} {b} ビット")).collect();
+    Err(format!(
+        "式の途中の結果の軸 [{}] が 64 ビットのキーに収まらない（{}）。先に集計して軸を減らしてから組み合わせるか、メンバー数の多い軸を持つ Metric を分ける",
+        bits.iter().map(|b| b.0.clone()).collect::<Vec<_>>().join(", "),
+        detail.join(", ")
+    ))
+}
+
+fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Result<Ty> {
     let cat = env.cat;
     match node {
         Node::Ref(i) => Ok(env.types[*i].clone()),
