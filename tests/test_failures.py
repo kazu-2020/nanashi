@@ -20,7 +20,7 @@ class FailedRecalc(unittest.TestCase):
 
     def failing(self, metric: str, panic: bool) -> None:
         """metric を書き戻すところで Rust の再計算を失敗させる。"""
-        _, names = self.m.engine._plan_for(self.m.compiled(), self.m)
+        _, names = self.m.engine.planner._plan_for(self.m.compiled(), self.m)
         nanashi_core.set_fail_at(names.index(metric), panic)
 
     def check(self, panic: bool) -> None:
@@ -116,7 +116,7 @@ class RustBoundary(unittest.TestCase):
         m = build_with(RustEngine())
         m.recalc()
         engine, compiled = m.engine, m.compiled()
-        rplan, names = engine._plan_for(compiled, m)
+        rplan, names = engine.planner._plan_for(compiled, m)
         stores = [m._values[n] for n in names]
         stores[1] = stores[0]  # 同じハンドルを 2 回渡す（2 つ目は書き換えの途中で借りられない）
         with self.assertRaisesRegex(RuntimeError, "使用中"):

@@ -10,6 +10,7 @@ from sparse_engine import Model, parse, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.evaluate import affected, collect_refs, estimate, infer
 from sparse_engine.expr import Expr, _children
+from sparse_engine.planner import PyPlanner
 
 from .test_incremental import same
 
@@ -162,16 +163,13 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
     """Rust の型検査は、型、警告、エラーの文言が Python の参照実装と一致する。"""
 
     def test_types_and_warnings(self):
-        from sparse_engine.evaluate import infer, resolve
         m = model(RustEngine())
         m.recalc()
         for x in m.metrics.values():
             if x.written is None:
                 continue
-            formula = resolve(x.written, m)
-            w: list = []
-            want = infer(formula, m, w)
-            got, warnings = m.engine.check(formula, m)
+            _, want, w = PyPlanner(m.engine).check(x.written, m)
+            _, got, warnings = m.engine.planner.check(x.written, m)
             self.assertEqual((got.dims, got.kind, warnings), (want.dims, want.kind, w), x.name)
 
     def test_cell_estimates(self):
@@ -189,7 +187,7 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
             for x in ref.metrics.values():
                 if x.formula is not None:
                     want = estimate(x.formula, ref, cells)[1]
-                    self.assertAlmostEqual(rust.engine.estimate(rust.metrics[x.name].formula, rust, cells), want,
+                    self.assertAlmostEqual(rust.engine.planner.estimate(rust.metrics[x.name].formula, rust, cells), want,
                                            msg=x.name)
 
     def test_error_messages(self):
@@ -241,7 +239,7 @@ class RustAffectedMatchesPython(unittest.TestCase):
                 with self.subTest(changed=list(changed), added=added):
                     got = m._propagate(changed, added)
                     with python_resolved(m):
-                        want = m._propagate_py(changed, added)
+                        want = PyPlanner(m.engine).propagate(m.compiled(), m, changed, added)
                     self.assertEqual(got, want)
 
     def test_removal_regions(self):
@@ -249,14 +247,10 @@ class RustAffectedMatchesPython(unittest.TestCase):
             m.recalc()
             for dim in m.dimensions:
                 member = m.dimensions[dim].members[1]
-
-                def has_cells(name, dim=dim, member=member):
-                    point = {dim: frozenset([member])}
-                    return dim in m.metrics[name].dims and m.engine.size(m.engine.filter(m._values[name], point, m)) > 0
                 with self.subTest(dim=dim, member=member):
-                    got = m._removal_regions(dim, member, has_cells)
+                    got = m.engine.planner.removal_regions(m.compiled(), m._values, m, dim, member)
                     with python_resolved(m):
-                        want = m._removal_regions_py(dim, member, has_cells)
+                        want = PyPlanner(m.engine).removal_regions(m.compiled(), m._values, m, dim, member)
                     self.assertEqual(got, want)
 
     def test_single_formula(self):
@@ -268,7 +262,7 @@ class RustAffectedMatchesPython(unittest.TestCase):
             for x in m.metrics.values():
                 if x.formula is not None:
                     with self.subTest(metric=x.name):
-                        got = m.engine.affected(x.formula, m, regions)
+                        got = m.engine.planner.affected(x.formula, m, regions)
                         with python_resolved(m):
                             want = affected(m.metrics[x.name].formula, m, regions)
                         self.assertEqual(got, want)
@@ -306,12 +300,9 @@ class RustPlanMatchesPython(unittest.TestCase):
         for m in self.models():
             m.recalc()
             rust_plan, _, rust_levels = m._make_plan({n: x.formula for n, x in m.metrics.items()})
-            saved, m.engine.plan = m.engine.plan, None  # 参照実装の経路を通す
-            try:
-                with python_resolved(m):
-                    py_plan, _, py_levels = m._make_plan({n: x.formula for n, x in m.metrics.items()})
-            finally:
-                m.engine.plan = saved
+            with python_resolved(m):
+                formulas = {n: x.formula for n, x in m.metrics.items()}
+                py_plan, _, py_levels = PyPlanner(m.engine).plan(formulas, {n: x.dims for n, x in m.metrics.items()}, m)
             self.assertEqual([(s.names, s.scan_dim) for s in rust_plan], [(s.names, s.scan_dim) for s in py_plan])
             self.assertEqual([[s.names for s in level] for level in rust_levels],
                              [[s.names for s in level] for level in py_levels])
@@ -356,7 +347,7 @@ class RustDeltaPlanMatchesPython(unittest.TestCase):
             for x in m.metrics.values():
                 if x.written is None:
                     continue
-                got = m.engine.delta_plan(m.metrics[x.name].formula, m)
+                got = m.engine.planner.delta_plan(m.metrics[x.name].formula, m)
                 want = plan_for(resolve(x.written, m), m)
                 with self.subTest(metric=x.name):
                     if want is None:

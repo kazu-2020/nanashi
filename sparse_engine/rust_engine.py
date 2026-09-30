@@ -17,7 +17,8 @@ import nanashi_core
 from .core import Cube
 from .delta import COUNTED, DeltaPlan
 from .engine import parquet_columns, parquet_value
-from .evaluate import Catalog, Edge, FormulaError, Type, member_kind
+from .planner import Step
+from .evaluate import Catalog, Edge, FormulaError, Type, member_kind, resolve
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
@@ -62,8 +63,7 @@ class RustEngine:
         self._names: dict[int, str] = {}
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
         self._exprs: dict[int, tuple] = {}  # id(式) -> (式, 変換結果, 読む名前, 型, 警告, 読む名前の型)
-        self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
-        self._prop_plan: tuple[Any, Any, list[str]] | None = None  # 影響範囲の伝搬だけに使う、式だけの計画
+        self.planner = RustPlanner(self)
 
     def fork(self, cat: Catalog) -> RustEngine:
         """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
@@ -73,8 +73,7 @@ class RustEngine:
         other._names = dict(self._names)
         other._maps = dict(self._maps)
         other._exprs = dict(self._exprs)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
-        other._plan = self._plan  # 計算計画も Metric の番号と式だけに依存する（複製は同じ計画を持つ）
-        other._prop_plan = self._prop_plan
+        other.planner = self.planner.fork(other)
         return other
 
     def share(self, store):
@@ -138,19 +137,6 @@ class RustEngine:
         return self._dim(cat, partition)
 
     # ------------------------------------------------ 式の変換と型検査
-
-    def check(self, expr: Expr, cat: Catalog) -> tuple[Type, list[str]]:
-        """式の型（軸と値の種類）と警告。型の誤りは FormulaError（文言は Python の参照実装と同じ）。
-        変換した式は取っておき、評価に使い回す。"""
-        _, _, t, warnings = self._compile_full(expr, cat)
-        return t, list(warnings)
-
-    def estimate(self, expr: Expr, cat: Catalog, cells) -> float:
-        """型を決めた式の結果のセル数の見積もり（上限）。cells は Metric ごとのセル数。
-        意味は参照実装（evaluate.estimate）と同じ。"""
-        compiled, names = self._compile(expr, cat)
-        refs = [(self._type(cat, cat.metric_type(n))[0], float(cells[n])) for n in names]
-        return self.core.estimate(compiled, refs)
 
     def _compile(self, expr: Expr, cat: Catalog) -> tuple[Any, list[str]]:
         compiled, names, _, _ = self._compile_full(expr, cat)
@@ -242,144 +228,11 @@ class RustEngine:
                 return ("select", t(child), self._dim(cat, dim), d._index[member], member)
         raise TypeError(e)
 
-    # ------------------------------------------------ 差分再計算の段取り
-
-    def recalc_changes(self, plan, stores: dict, counts: dict, cat: Catalog, changed: dict, added: dict,
-                       olds: dict, forced: dict, full: bool = False) -> tuple[list, Any]:
-        """Model.recalc の差分の経路を Rust で行う。plan は Model.compiled()、stores と counts は
-        Metric ごとの格納データと差分集計の件数、changed は入力の変更範囲、added は追加したメンバー、
-        olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
-        格納データはその場で書き換わる。
-
-        再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
-        """
-        rplan, names = self._plan_for(plan, cat)
-        index = {n: i for i, n in enumerate(names)}
-        region = lambda r: self._region(cat, r)
-        log = self.core.recalc_changes(
-            rplan,
-            [stores[n] for n in names],
-            [counts.get(n) for n in names],
-            [(index[n], region(r)) for n, r in changed.items()],
-            [(self._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
-            [(index[n], h) for n, h in olds.items()],
-            [(index[n], region(r)) for n, r in forced.items()], full)
-
-        def named(entries):
-            return [(names[i], self._to_names(cat, r)) for i, _, r in entries]
-        return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
-
     def _to_names(self, cat: Catalog, region) -> dict:
         """Rust の範囲（軸の番号 -> メンバー番号の列）を、メンバー名の範囲にする。"""
         return {self._names[d]: frozenset(cat.dimension(self._names[d]).members[j] for j in ms) for d, ms in region}
 
-    # ------------------------------------------------ 計算計画
-
-    def plan(self, formulas: dict, dims: dict, cat: Catalog) -> tuple[list, list]:
-        """依存グラフから計算計画を作る。formulas は Metric 名 -> 評価する式（入力は None）、dims は軸。
-        返すのは、依存先が先の順の段階 (名前の組, scan の軸) と、段ごとの段階の番号の列と、
-        依存グラフ（Metric 名 -> Edge の列）。循環の誤りは FormulaError（文言は Python の参照実装と同じ）。"""
-        names = list(formulas)
-        index = {n: i for i, n in enumerate(names)}
-        items = []
-        for n in names:
-            f = formulas[n]
-            if f is None:
-                items.append(None)
-            else:
-                compiled, reads = self._compile(f, cat)
-                items.append((compiled, [index[r] for r in reads]))
-        try:
-            steps, levels, edges = self.core.plan(items, names, [[self._dim(cat, d) for d in dims[n]] for n in names])
-        except ValueError as e:
-            raise FormulaError(str(e)) from None
-        def graph():
-            return {n: [Edge(names[t], tuple(sorted((self._names[d], k) for d, k in lags)),
-                             frozenset(self._names[d] for d in broken)) for t, lags, broken in es]
-                    for n, es in zip(names, edges)}
-        return ([(tuple(names[i] for i in ms), None if d is None else self._names[d]) for ms, d in steps], levels,
-                LazyEdges(graph))
-
-    # ------------------------------------------------ 影響範囲
-
-    def _prop_plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
-        """影響範囲の伝搬に使う、式だけの Rust の計算計画（差分集計の計画は要らない。分割軸を選ぶ時点では
-        まだできていない）。計画を作り直すまで使い回す。"""
-        if self._prop_plan is not None and self._prop_plan[0] is plan.steps:
-            return self._prop_plan[1], self._prop_plan[2]
-        names = list(cat.metrics)
-        index = {n: i for i, n in enumerate(names)}
-
-        def bound(expr):
-            compiled, reads = self._compile(expr, cat)
-            return compiled, [index[n] for n in reads]
-
-        metrics = [(None if m.formula is None else bound(m.formula), False, False) for m in cat.metrics.values()]
-        levels = [[(None if s.scan_dim is None else self._dim(cat, s.scan_dim), [index[n] for n in s.names])
-                   for s in level] for level in plan.levels]
-        rplan = self.core.make_plan(metrics, levels)
-        self._prop_plan = (plan.steps, rplan, names)
-        return rplan, names
-
-    def _added(self, cat: Catalog, added) -> list:
-        return [(self._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in (added or {}).items()]
-
-    def propagate(self, plan, cat: Catalog, changed: dict, added=None) -> dict:
-        """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲（changed を含む）。"""
-        rplan, names = self._prop_plan_for(plan, cat)
-        index = {n: i for i, n in enumerate(names)}
-        out = self.core.propagate(rplan, [(index[n], self._region(cat, r)) for n, r in changed.items()],
-                                  self._added(cat, added))
-        return {names[i]: self._to_names(cat, r) for i, r in out}
-
-    def removal_regions(self, plan, stores: dict, cat: Catalog, dim: str, member: str) -> dict:
-        """軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。"""
-        rplan, names = self._prop_plan_for(plan, cat)
-        out = self.core.removal_regions(rplan, [stores[n] for n in names], self._dim(cat, dim),
-                                        cat.dimension(dim)._index[member])
-        return {names[i]: self._to_names(cat, r) for i, r in out}
-
-    def affected(self, expr: Expr, cat: Catalog, regions: dict, added=None, removed=None):
-        """1 つの式の影響範囲。regions は Metric 名 -> 変更範囲。"""
-        compiled, names = self._compile(expr, cat)
-        regs = [self._region_lenient(cat, regions[n]) if n in regions else None for n in names]
-        gone = None
-        if removed:
-            (d, m), = removed.items()
-            gone = (self._dim(cat, d), cat.dimension(d)._index[m])
-        r = self.core.affected(compiled, regs, self._added(cat, added), gone)
-        return None if r is None else self._to_names(cat, r)
-
-    def _plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
-        """Model の計算計画（CompiledPlan）を Rust の計算計画にする。計画を作り直すまで使い回す。
-        差分集計する Metric の件数の式と差分の式は Rust が作る。"""
-        if self._plan is not None and self._plan[0] is plan.steps:
-            return self._plan[1], self._plan[2]
-        names = list(cat.metrics)
-        index = {n: i for i, n in enumerate(names)}
-
-        def bound(expr):
-            compiled, reads = self._compile(expr, cat)
-            return compiled, [index[n] for n in reads]
-
-        metrics = [(None if m.formula is None else bound(m.formula), n in plan.delta, n in plan.sources)
-                   for n, m in cat.metrics.items()]
-        levels = [[(None if s.scan_dim is None else self._dim(cat, s.scan_dim), [index[n] for n in s.names])
-                   for s in level] for level in plan.levels]
-        rplan = self.core.make_plan(metrics, levels)
-        self._plan = (plan.steps, rplan, names)
-        return rplan, names
-
-    def delta_plan(self, expr: Expr, cat: Catalog):
-        """式が差分集計の対象なら、その計画（集計元、件数が要るかの印、対応表）。対象でなければ None。"""
-        compiled, names = self._compile(expr, cat)
-        found = self.core.delta_plan(compiled)
-        if found is None:
-            return None
-        source, aux, needs_count = found
-        return DeltaPlan(names[source], COUNTED if needs_count else None, tuple(names[a] for a in aux))
-
-    # ------------------------------------------------ Engine
+    # ------------------------------------------------ Store
 
     def empty(self, dims, kind, partition=None, cat=None):
         ids = [self._dim(cat, d) for d in dims]
@@ -421,8 +274,7 @@ class RustEngine:
         """メンバー数と、dim が関わる対応表を Rust 側に反映する。"""
         if renumbered:  # 変換済みの式はメンバーの番号（定数、SELECT）を持っているので作り直す
             self._exprs.clear()
-            self._plan = None
-            self._prop_plan = None
+            self.planner.forget()
         if dim in self._dims:
             d, i = self._dims[dim]
             if d is cat.dimension(dim):
@@ -582,13 +434,177 @@ class RustEngine:
     def same(self, a, b) -> bool:
         return self.core.same_store(a, b)
 
-    def diff(self, old, new):
-        d = self.core.diff_block(old, new)
-        return None if d is None else d.rows()
-
     def diff_block(self, old, new):
         return self.core.diff_block(old, new)
 
     def apply_block(self, store, block, dim_ids, value_ids):
         self.core.apply_block(store, block, dim_ids, value_ids)
         return store
+
+
+class RustPlanner:
+    """Planner（planner.py）を Rust で行う。式の変換と軸の番号は RustEngine のものを使う。"""
+
+    def __init__(self, engine: RustEngine):
+        self.e = engine
+        self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
+        self._prop_plan: tuple[Any, Any, list[str]] | None = None  # 影響範囲の伝搬だけに使う、式だけの計画
+
+    def fork(self, engine: RustEngine) -> RustPlanner:
+        other = RustPlanner(engine)
+        other._plan = self._plan  # 計算計画も Metric の番号と式だけに依存する（複製は同じ計画を持つ）
+        other._prop_plan = self._prop_plan
+        return other
+
+    def forget(self) -> None:
+        """Rust の計算計画を捨てる（メンバーの番号が詰まって、変換済みの式を作り直すとき）。"""
+        self._plan = None
+        self._prop_plan = None
+
+    def check(self, written: Expr, cat: Catalog) -> tuple[Expr, Type, list[str]]:
+        """式を評価できる形に直して型を検査する。Metric を使った BY は、Python でなく Rust の型検査が
+        書き換える（check.rs）。型の誤りは FormulaError（文言は Python の参照実装と同じ）。
+        変換した式は取っておき、評価に使い回す。"""
+        formula = resolve(written, cat, by_metric=False)
+        _, _, t, warnings = self.e._compile_full(formula, cat)
+        return formula, t, list(warnings)
+
+    def estimate(self, expr: Expr, cat: Catalog, cells) -> float:
+        """型を決めた式の結果のセル数の見積もり（上限）。cells は Metric ごとのセル数。
+        意味は参照実装（evaluate.estimate）と同じ。"""
+        compiled, names = self.e._compile(expr, cat)
+        refs = [(self.e._type(cat, cat.metric_type(n))[0], float(cells[n])) for n in names]
+        return self.e.core.estimate(compiled, refs)
+
+    # ------------------------------------------------ 差分再計算の段取り
+
+    def recalc(self, plan, stores: dict, counts: dict, cat: Catalog, changed: dict, added: dict,
+               olds: dict, forced: dict, full: bool = False) -> tuple[list, Any]:
+        """PyPlanner.recalc と同じ段取りを Rust で行う。plan は Model.compiled()、stores と counts は
+        Metric ごとの格納データと差分集計の件数、changed は入力の変更範囲、added は追加したメンバー、
+        olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
+        格納データはその場で書き換わる。
+
+        再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
+        """
+        rplan, names = self._plan_for(plan, cat)
+        index = {n: i for i, n in enumerate(names)}
+        region = lambda r: self.e._region(cat, r)
+        log = self.e.core.recalc_changes(
+            rplan,
+            [stores[n] for n in names],
+            [counts.get(n) for n in names],
+            [(index[n], region(r)) for n, r in changed.items()],
+            [(self.e._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
+            [(index[n], h) for n, h in olds.items()],
+            [(index[n], region(r)) for n, r in forced.items()], full)
+
+        def named(entries):
+            return [(names[i], self.e._to_names(cat, r)) for i, _, r in entries]
+        return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
+
+    # ------------------------------------------------ 計算計画
+
+    def plan(self, formulas: dict, dims: dict, cat: Catalog) -> tuple[list, Any, list]:
+        """依存グラフから計算計画を作る。循環の誤りは FormulaError（文言は Python の参照実装と同じ）。
+        依存グラフ（Metric 名 -> Edge の列）は、初めて使うときに Python のオブジェクトにする。"""
+        names = list(formulas)
+        index = {n: i for i, n in enumerate(names)}
+        items = []
+        for n in names:
+            f = formulas[n]
+            if f is None:
+                items.append(None)
+            else:
+                compiled, reads = self.e._compile(f, cat)
+                items.append((compiled, [index[r] for r in reads]))
+        try:
+            steps, levels, edges = self.e.core.plan(items, names, [[self.e._dim(cat, d) for d in dims[n]] for n in names])
+        except ValueError as e:
+            raise FormulaError(str(e)) from None
+
+        def graph():
+            return {n: [Edge(names[t], tuple(sorted((self.e._names[d], k) for d, k in lags)),
+                             frozenset(self.e._names[d] for d in broken)) for t, lags, broken in es]
+                    for n, es in zip(names, edges)}
+        plan = [Step(tuple(names[i] for i in ms), None if d is None else self.e._names[d]) for ms, d in steps]
+        return plan, LazyEdges(graph), [[plan[i] for i in level] for level in levels]
+
+    # ------------------------------------------------ 影響範囲
+
+    def _prop_plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
+        """影響範囲の伝搬に使う、式だけの Rust の計算計画（差分集計の計画は要らない。分割軸を選ぶ時点では
+        まだできていない）。計画を作り直すまで使い回す。"""
+        if self._prop_plan is not None and self._prop_plan[0] is plan.steps:
+            return self._prop_plan[1], self._prop_plan[2]
+        names = list(cat.metrics)
+        index = {n: i for i, n in enumerate(names)}
+
+        def bound(expr):
+            compiled, reads = self.e._compile(expr, cat)
+            return compiled, [index[n] for n in reads]
+
+        metrics = [(None if m.formula is None else bound(m.formula), False, False) for m in cat.metrics.values()]
+        levels = [[(None if s.scan_dim is None else self.e._dim(cat, s.scan_dim), [index[n] for n in s.names])
+                   for s in level] for level in plan.levels]
+        rplan = self.e.core.make_plan(metrics, levels)
+        self._prop_plan = (plan.steps, rplan, names)
+        return rplan, names
+
+    def _added(self, cat: Catalog, added) -> list:
+        return [(self.e._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in (added or {}).items()]
+
+    def propagate(self, plan, cat: Catalog, changed: dict, added=None) -> dict:
+        """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲（changed を含む）。"""
+        rplan, names = self._prop_plan_for(plan, cat)
+        index = {n: i for i, n in enumerate(names)}
+        out = self.e.core.propagate(rplan, [(index[n], self.e._region(cat, r)) for n, r in changed.items()],
+                                  self._added(cat, added))
+        return {names[i]: self.e._to_names(cat, r) for i, r in out}
+
+    def removal_regions(self, plan, stores: dict, cat: Catalog, dim: str, member: str) -> dict:
+        """軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。"""
+        rplan, names = self._prop_plan_for(plan, cat)
+        out = self.e.core.removal_regions(rplan, [stores[n] for n in names], self.e._dim(cat, dim),
+                                        cat.dimension(dim)._index[member])
+        return {names[i]: self.e._to_names(cat, r) for i, r in out}
+
+    def affected(self, expr: Expr, cat: Catalog, regions: dict, added=None, removed=None):
+        """1 つの式の影響範囲。regions は Metric 名 -> 変更範囲。"""
+        compiled, names = self.e._compile(expr, cat)
+        regs = [self.e._region_lenient(cat, regions[n]) if n in regions else None for n in names]
+        gone = None
+        if removed:
+            (d, m), = removed.items()
+            gone = (self.e._dim(cat, d), cat.dimension(d)._index[m])
+        r = self.e.core.affected(compiled, regs, self._added(cat, added), gone)
+        return None if r is None else self.e._to_names(cat, r)
+
+    def _plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
+        """Model の計算計画（CompiledPlan）を Rust の計算計画にする。計画を作り直すまで使い回す。
+        差分集計する Metric の件数の式と差分の式は Rust が作る。"""
+        if self._plan is not None and self._plan[0] is plan.steps:
+            return self._plan[1], self._plan[2]
+        names = list(cat.metrics)
+        index = {n: i for i, n in enumerate(names)}
+
+        def bound(expr):
+            compiled, reads = self.e._compile(expr, cat)
+            return compiled, [index[n] for n in reads]
+
+        metrics = [(None if m.formula is None else bound(m.formula), n in plan.delta, n in plan.sources)
+                   for n, m in cat.metrics.items()]
+        levels = [[(None if s.scan_dim is None else self.e._dim(cat, s.scan_dim), [index[n] for n in s.names])
+                   for s in level] for level in plan.levels]
+        rplan = self.e.core.make_plan(metrics, levels)
+        self._plan = (plan.steps, rplan, names)
+        return rplan, names
+
+    def delta_plan(self, expr: Expr, cat: Catalog):
+        """式が差分集計の対象なら、その計画（集計元、件数が要るかの印、対応表）。対象でなければ None。"""
+        compiled, names = self.e._compile(expr, cat)
+        found = self.e.core.delta_plan(compiled)
+        if found is None:
+            return None
+        source, aux, needs_count = found
+        return DeltaPlan(names[source], COUNTED if needs_count else None, tuple(names[a] for a in aux))

@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from .engine import Engine, default_engine, native, parquet_columns, parquet_value
+from .engine import Store, default_engine, native, parquet_columns, parquet_value
 from .parser import to_formula
 
 FORMAT_VERSION = 3
@@ -63,12 +63,12 @@ def input_file(metric_id: int) -> str:
     return f"inputs.{metric_id}.parquet"
 
 
-def load(path, engine: Engine | None = None):
+def load(path, engine: Store | None = None):
     path = Path(path)
     return read(lambda name: (path / name).read_bytes(), engine)
 
 
-def read(file: Callable[[str], bytes], engine: Engine | None = None):
+def read(file: Callable[[str], bytes], engine: Store | None = None):
     """save の形式を、ファイルの名前から中身を返す file で読む（ディレクトリ以外に置いたとき）。"""
     from .model import Model
 

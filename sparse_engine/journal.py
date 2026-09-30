@@ -198,17 +198,12 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
         olds = [before.dimension(d) for d in m.dims] + ([_value_dim(before, o)] if vdim is not None else [])
         news = dims + ([vdim] if vdim is not None else [])
         comparable = all(a.ids == b.ids[:len(a.ids)] for a, b in zip(olds, news))
-    if hasattr(eng, "diff_block") and (old_store is None or comparable):
-        diff = eng.diff_block(old_store, new_store)
-        if diff is not None:
-            if len(diff) >= BLOCK_MIN:
-                return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
-            return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
-    elif comparable:
-        diff = eng.diff(old_store, new_store)
-        if diff is not None:
-            return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff]
-    # 名前から ID に直して比べる（メンバーを消したときなど）
+    diff = eng.diff_block(old_store, new_store) if old_store is None or comparable else None
+    if diff is not None:
+        if len(diff) >= BLOCK_MIN:
+            return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
+        return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
+    # 名前から ID に直して比べる（メンバーを消したときや、位置で比べられないエンジン）
     new = _by_id(after, m, new_store)
     old = {} if old_store is None else _by_id(before, o, old_store)
     return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
@@ -281,10 +276,12 @@ def apply(model, record: dict) -> None:
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
         store = model._values[m.name]
-        if not isinstance(c["rows"], list) and hasattr(model.engine, "apply_block"):  # 変更の塊はまとめて書く
-            model._values[m.name] = model.engine.apply_block(store, c["rows"], [d.ids for d in dims],
-                                                             None if vdim is None else vdim.ids)
-            continue
+        if not isinstance(c["rows"], list):  # 変更の塊は、書けるエンジンならまとめて書く
+            written = model.engine.apply_block(store, c["rows"], [d.ids for d in dims],
+                                               None if vdim is None else vdim.ids)
+            if written is not None:
+                model._values[m.name] = written
+                continue
         for ids, _, new in c["rows"]:
             if len(ids) != len(dims) or not all(i in d._by_id for d, i in zip(dims, ids)):
                 continue  # このトランザクションで消したメンバーのセル（メンバーと一緒に消えている）
