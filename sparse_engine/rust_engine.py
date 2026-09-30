@@ -161,11 +161,10 @@ class RustEngine:
 
     # ------------------------------------------------ 差分再計算の段取り
 
-    def recalc_changes(self, model, changed: dict, added: dict, olds: dict, forced: dict,
-                       skip: set) -> tuple[list, Any]:
+    def recalc_changes(self, model, changed: dict, added: dict, olds: dict, forced: dict) -> tuple[list, Any]:
         """Model.recalc の差分の経路を Rust で行う。changed は入力の変更範囲、added は追加したメンバー、
-        olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲、
-        skip は飛ばす Metric（あとで全体を計算し直す）。格納データはその場で書き換わる。
+        olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
+        格納データはその場で書き換わる。
 
         再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
         """
@@ -179,8 +178,7 @@ class RustEngine:
             [(index[n], region(r)) for n, r in changed.items()],
             [(self._dim(model, d), [model.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
             [(index[n], h) for n, h in olds.items()],
-            [(index[n], region(r)) for n, r in forced.items()],
-            [index[n] for n in skip])
+            [(index[n], region(r)) for n, r in forced.items()])
 
         def named(entries):
             return [(names[i], {self._names[d]: frozenset(model.dimension(self._names[d]).members[j] for j in ms)
@@ -208,9 +206,9 @@ class RustEngine:
                 count = None if dp.count is None else bound(dp.count)
                 delta = self._delta_parts(model, m, dp)
             metrics.append((None if m.formula is None else bound(m.formula), count, delta, n in sources))
-        steps = [(None if s.scan_dim is None else self._dim(model, s.scan_dim), [index[n] for n in s.names])
-                 for s in model._plan]
-        plan = self.core.make_plan(metrics, steps)
+        levels = [[(None if s.scan_dim is None else self._dim(model, s.scan_dim), [index[n] for n in s.names])
+                   for s in level] for level in model._levels]
+        plan = self.core.make_plan(metrics, levels)
         self._plan = (model._plan, plan, names)
         return plan, names
 

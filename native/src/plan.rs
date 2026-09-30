@@ -5,7 +5,8 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::core::{eval, Catalog, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::core::{eval, Catalog, Cube, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store, PAR_MIN};
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -225,9 +226,34 @@ pub enum Step {
     Scan(DimId, Vec<usize>), // 時間軸に沿って 1 時点ずつ計算する Metric の組
 }
 
+/// 計算計画。levels は依存の段ごとの計算の段階で、同じ段の段階は互いに依存しない。
 pub struct Plan {
     pub metrics: Vec<Metric>,
-    pub steps: Vec<Step>,
+    pub levels: Vec<Vec<Step>>,
+}
+
+/// 段の中で計算し直す 1 つの Metric。
+struct Task {
+    m: usize,
+    region: Reg,
+    delta: bool,   // 差分集計で更新する
+    weight: usize, // 計算し直す行数の見積もり（並列にするかの判断に使う）
+}
+
+/// 計算し終えて、書き戻しを待つ値。範囲が全体なら、新しい格納データまで作っておく
+/// （置き換える前の格納データを読むだけで作れるので、同じ段の Metric と並列に作れる）。
+enum Write {
+    Whole(Store, Option<Vec<Vec<u32>>>), // 新しい格納データと、値が変わったセルの範囲
+    Part(Cube),                          // 範囲の中の新しい値
+}
+
+struct Done {
+    m: usize,
+    region: Reg,
+    delta: bool,
+    value: Write,
+    count: Option<Write>, // 差分集計する SUM の、各グループの件数（Whole の範囲は使わない）
+    old: Option<Src>,     // 書き戻す前の値（下流の差分集計の集計元なら）
 }
 
 /// 値が変わった範囲がセル全体のこの割合以上なら、全体が変わったものとして下流へ伝える
@@ -268,8 +294,8 @@ struct Run<'a> {
 }
 
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
-/// forced は定義を変えたので必ず計算し直す計算 Metric の範囲、skip は飛ばす Metric（呼び出し側が
-/// あとで全体を計算し直す）。stores と counts（Metric の番号順）はその場で書き換える。
+/// forced は定義を変えたので必ず計算し直す計算 Metric の範囲。stores と counts（Metric の番号順）は
+/// その場で書き換える。
 #[allow(clippy::too_many_arguments)]
 pub fn recalc(
     cat: &Catalog,
@@ -280,7 +306,6 @@ pub fn recalc(
     added: &[(DimId, Vec<u32>)],
     olds: Vec<(usize, Src)>,
     forced: Vec<(usize, Reg)>,
-    skip: &[usize],
 ) -> Result<Log> {
     let n = plan.metrics.len();
     let added: Vec<(DimId, Vec<u32>)> = added.iter().map(|(d, ms)| (*d, sorted(ms.clone()))).collect();
@@ -304,27 +329,41 @@ pub fn recalc(
     for (m, s) in olds {
         run.olds[m] = Some(s);
     }
-    let mut skipped = vec![false; n];
-    for &m in skip {
-        skipped[m] = true;
-    }
-    for step in &plan.steps {
-        let first = match step {
-            Step::One(m) => *m,
-            Step::Scan(_, names) => names[0],
-        };
-        if skipped[first] {
-            continue;
-        }
-        match step {
-            Step::One(m) => run.one(*m)?,
-            Step::Scan(dim, names) => run.scan_step(*dim, names)?,
-        }
+    for level in &plan.levels {
+        run.level(level)?;
     }
     Ok(run.log)
 }
 
 impl<'a> Run<'a> {
+    /// 依存の段を 1 つ計算し直す。同じ段の Metric は互いを読まないので、範囲を決めてから並列に計算し、
+    /// 順に書き戻す。scan は時点ごとに自分の格納データへ書き込むので、そのあとで順に計算する。
+    fn level(&mut self, level: &[Step]) -> Result<()> {
+        let mut tasks = Vec::new();
+        let mut scans = Vec::new();
+        for step in level {
+            match step {
+                Step::One(m) => tasks.extend(self.prepare(*m)),
+                Step::Scan(dim, names) => scans.push((*dim, names)),
+            }
+        }
+        // 小さな仕事ばかりなら、並列にする受け渡しの費用のほうが大きいので順に計算する
+        let weight: usize = tasks.iter().map(|t| t.weight).sum();
+        let run: &Self = self;
+        let done: Vec<Result<Done>> = if tasks.len() > 1 && weight >= PAR_MIN.load(Ordering::Relaxed) {
+            tasks.par_iter().map(|t| run.compute(t)).collect()
+        } else {
+            tasks.iter().map(|t| run.compute(t)).collect()
+        };
+        for d in done {
+            self.apply(d?)?;
+        }
+        for (dim, names) in scans {
+            self.scan_step(dim, names)?;
+        }
+        Ok(())
+    }
+
     fn env(&self) -> Env<'_> {
         Env { cat: self.cat, regions: &self.regions, added: self.added }
     }
@@ -334,7 +373,7 @@ impl<'a> Run<'a> {
         plan.metrics[m].formula.as_ref().expect("計算 Metric")
     }
 
-    fn eval(&self, f: &Formula, work: Option<&[Src]>, r: &Restrict) -> Result<crate::core::Cube> {
+    fn eval(&self, f: &Formula, work: Option<&[Src]>, r: &Restrict) -> Result<Cube> {
         let src: Vec<Src> = match work {
             Some(w) => f.refs.iter().map(|&i| w[i].clone()).collect(),
             None => f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect(),
@@ -346,23 +385,88 @@ impl<'a> Run<'a> {
         Src::Store(Arc::new(self.stores[m].slice(&r.restrict(self.cat))))
     }
 
-    fn one(&mut self, m: usize) -> Result<()> {
+    /// 段の 1 つの Metric について、計算し直す範囲と方法を決める。計算し直さなくてよければ None。
+    fn prepare(&self, m: usize) -> Option<Task> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[m];
-        let Some(f) = &metric.formula else { return Ok(()) };
+        let f = metric.formula.as_ref()?;
         let forced = self.forced[m].clone();
         let redefined = forced.is_some();
-        let Some(region) = union(self.env().affected(&f.node, &f.refs), forced) else { return Ok(()) };
-        if metric.source {
-            // 全体を計算し直すなら、置き換える前の格納データをそのまま変更前の値にする（複製しない）
-            self.olds[m] = Some(if region.is_all() { Src::Store(self.stores[m].clone()) } else { self.slice(m, &region) });
-        }
-        let changed = match &metric.delta {
-            Some(d) if !redefined && self.delta_applicable(d) => self.apply_delta(m, d, &region)?,
-            _ => self.recompute(m, &region)?,
+        let region = union(self.env().affected(&f.node, &f.refs), forced)?;
+        let delta = match &metric.delta {
+            Some(d) => !redefined && self.delta_applicable(d),
+            None => false,
         };
-        if changed.is_some() {
-            self.regions[m] = changed;
+        let size = |d: DimId| self.cat.dims[d].size.max(1) as f64;
+        let share: f64 = region.sels.iter().map(|(d, ms)| ms.len() as f64 / size(*d)).product();
+        let weight = (self.stores[m].rows_hint() as f64 * share) as usize;
+        Some(Task { m, region, delta, weight })
+    }
+
+    /// 計算する（格納データは読むだけなので、同じ段の Metric を並列に計算できる）。
+    fn compute(&self, t: &Task) -> Result<Done> {
+        let plan: &'a Plan = self.plan;
+        let metric = &plan.metrics[t.m];
+        // 集計元なら、書き戻す前の値を下流の差分集計のために取っておく。全体を計算し直すなら、
+        // 置き換える前の格納データをそのまま使う（複製しない）
+        let old = metric.source.then(|| {
+            if t.region.is_all() {
+                Src::Store(self.stores[t.m].clone())
+            } else {
+                self.slice(t.m, &t.region)
+            }
+        });
+        let (value, count) = match (&metric.delta, t.delta) {
+            (Some(d), true) => self.compute_delta(t.m, d, &t.region)?,
+            _ => {
+                let r = t.region.restrict(self.cat);
+                let value = self.eval(self.formula(t.m), None, &r)?;
+                let count = match &metric.count {
+                    Some(c) => Some(self.eval(c, None, &r)?),
+                    None => None,
+                };
+                (value, count)
+            }
+        };
+        let (value, count) = if t.region.is_all() {
+            let (store, sets) = self.stores[t.m].replaced_all(&value)?;
+            let count = match count {
+                Some(c) => {
+                    let mut s = self.counts[t.m].as_ref().expect("件数の格納").emptied();
+                    s.replace(&Restrict::all(self.cat.dims.len()), &c)?;
+                    Some(Write::Whole(s, None))
+                }
+                None => None,
+            };
+            (Write::Whole(store, sets), count)
+        } else {
+            (Write::Part(value), count.map(Write::Part))
+        };
+        Ok(Done { m: t.m, region: t.region.clone(), delta: t.delta, value, count, old })
+    }
+
+    /// 計算した値を書き戻し、値が実際に変わったセルの範囲を下流への影響範囲にする。
+    fn apply(&mut self, done: Done) -> Result<()> {
+        let Done { m, region, delta, value, count, old } = done;
+        let r = region.restrict(self.cat);
+        let sets = match value {
+            Write::Whole(store, sets) => {
+                self.stores[m] = Arc::new(store);
+                sets
+            }
+            Write::Part(value) => Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?,
+        };
+        match count {
+            Some(Write::Whole(store, _)) => self.counts[m] = Some(Arc::new(store)),
+            Some(Write::Part(c)) => Arc::make_mut(self.counts[m].as_mut().expect("件数の格納")).replace(&r, &c)?,
+            None => {}
+        }
+        if old.is_some() {
+            self.olds[m] = old;
+        }
+        self.log.push((m, delta, region));
+        if let Some(sets) = sets {
+            self.regions[m] = Some(self.changed_region(m, sets));
         }
         Ok(())
     }
@@ -382,30 +486,6 @@ impl<'a> Run<'a> {
         Reg::new(dims.iter().copied().zip(sets).filter(|(d, ms)| ms.len() < size(*d)).collect())
     }
 
-    /// region を式から計算し直して書き戻し、値が実際に変わったセルの範囲を返す。
-    fn recompute(&mut self, m: usize, region: &Reg) -> Result<Option<Reg>> {
-        let plan: &'a Plan = self.plan;
-        let metric = &plan.metrics[m];
-        let r = region.restrict(self.cat);
-        let value = self.eval(self.formula(m), None, &r)?;
-        let count = match &metric.count {
-            Some(c) => Some(self.eval(c, None, &r)?),
-            None => None,
-        };
-        let sets = if region.is_all() {
-            let (store, sets) = self.stores[m].replaced_all(&value)?;
-            self.stores[m] = Arc::new(store);
-            sets
-        } else {
-            Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?
-        };
-        if let Some(c) = count {
-            Arc::make_mut(self.counts[m].as_mut().expect("件数の格納")).replace(&r, &c)?;
-        }
-        self.log.push((m, false, region.clone()));
-        Ok(sets.map(|sets| self.changed_region(m, sets)))
-    }
-
     /// 集計元と対応表の変更範囲を合わせた範囲。どれも変わっていなければ None。
     fn delta_range(&self, d: &Delta) -> Option<Reg> {
         d.inputs.iter().fold(None, |acc, &n| union(acc, self.regions[n].clone()))
@@ -419,8 +499,8 @@ impl<'a> Run<'a> {
             && self.delta_range(d).is_some_and(|r| !r.is_all())
     }
 
-    /// 集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込む。
-    fn apply_delta(&mut self, m: usize, d: &Delta, region: &Reg) -> Result<Option<Reg>> {
+    /// 集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込んだ値と件数。
+    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg) -> Result<(Cube, Option<Cube>)> {
         let cat = self.cat;
         let all = Restrict::all(cat.dims.len());
         let range = self.delta_range(d).expect("変更範囲").restrict(cat);
@@ -456,14 +536,12 @@ impl<'a> Run<'a> {
         };
         let count = Arc::new(eval(&new_count(), cat, &[old_count, Src::Cube(Arc::new(d_count))], &all)?);
         let value = eval(&new_value(), cat, &[old_value, Src::Cube(Arc::new(d_value)), Src::Cube(count.clone())], &all)?;
-        let sets = Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?;
-        if metric.count.is_some() {
-            // 件数が 0 になったグループは消す
-            let kept = eval(&kept_count(), cat, &[Src::Cube(count)], &all)?;
-            Arc::make_mut(self.counts[m].as_mut().expect("件数の格納")).replace(&r, &kept)?;
-        }
-        self.log.push((m, true, region.clone()));
-        Ok(sets.map(|sets| self.changed_region(m, sets)))
+        // 件数が 0 になったグループは消す
+        let kept = match metric.count {
+            Some(_) => Some(eval(&kept_count(), cat, &[Src::Cube(count)], &all)?),
+            None => None,
+        };
+        Ok((value, kept))
     }
 
     /// scan の Metric の影響範囲を、増えなくなるまで伝えてから、時間軸に沿って 1 時点ずつ計算する。

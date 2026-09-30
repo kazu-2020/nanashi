@@ -9,8 +9,6 @@ from .test_engines import build_with
 from .test_incremental import model as build, same, snapshot
 from .test_members import random_round as edit_or_add_member
 
-import sparse_engine.model as model_module
-
 try:
     import nanashi_core
     from sparse_engine.rust_engine import RustEngine
@@ -295,29 +293,22 @@ class RustMatchesReference(unittest.TestCase):
         run_random(self, seed=37, rounds=120, engines=[ReferenceEngine, RustEngine])
 
 
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class EagerHeuristics(unittest.TestCase):
-    """大きなモデルでだけ働く速さのための規則（下流ごとの計算し直し、変わった範囲を全体へ広げること）を、
-    小さなモデルでも常に働かせて、結果が変わらないことを確かめる。"""
+    """大きなモデルでだけ働く速さのための規則（値が変わった範囲が大半を占めれば全体へ広げる、
+    同じ段の Metric を並列に計算する）を、小さなモデルでも常に働かせて、結果が変わらないことを確かめる。"""
 
     def setUp(self):
-        self.saved = (model_module.REBUILD_MIN, model_module.REBUILD_SHARE)
-        model_module.REBUILD_MIN, model_module.REBUILD_SHARE = 0, 0.0
-        if RustEngine is not None:
-            nanashi_core.set_widen_min_rows(0)
+        nanashi_core.set_widen_min_rows(0)
+        nanashi_core.set_par_min(0)
 
     def tearDown(self):
-        model_module.REBUILD_MIN, model_module.REBUILD_SHARE = self.saved
-        if RustEngine is not None:
-            nanashi_core.set_widen_min_rows(4096)
+        nanashi_core.set_widen_min_rows(4096)
+        nanashi_core.set_par_min(16_384)
 
-    def test_random(self):
-        run_random(self, seed=41, rounds=80, engines=[ReferenceEngine])
-
-    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_random_rust(self):
         run_random(self, seed=43, rounds=80, engines=[ReferenceEngine, RustEngine])
 
-    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_random_rust_alone(self):
         run_random(self, seed=47, rounds=80, engines=[RustEngine])
 

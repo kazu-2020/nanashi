@@ -363,8 +363,9 @@ impl Core {
     ///
     /// metrics は Metric ごとの (式, 件数の式, 差分集計, 集計元か)。式は (Expr, 読み出す Metric の番号)、
     /// 差分集計は ([集計元, 対応表...], 件数の差分の式, 値の差分の式または None) で、差分の式の読み出し元は
-    /// 作業データの番号（i 番目の変更後が 2i、変更前が 2i + 1）。steps は (scan の軸または None, Metric の番号)。
-    fn make_plan(&self, metrics: Vec<Bound<'_, PyTuple>>, steps: Vec<(Option<DimId>, Vec<usize>)>) -> PyResult<PlanHandle> {
+    /// 作業データの番号（i 番目の変更後が 2i、変更前が 2i + 1）。levels は依存の段ごとの
+    /// (scan の軸または None, Metric の番号) の並び。
+    fn make_plan(&self, metrics: Vec<Bound<'_, PyTuple>>, levels: Vec<Vec<(Option<DimId>, Vec<usize>)>>) -> PyResult<PlanHandle> {
         let mut out = Vec::with_capacity(metrics.len());
         for t in &metrics {
             let delta = t.get_item(2)?;
@@ -385,20 +386,24 @@ impl Core {
                 source: t.get_item(3)?.extract()?,
             });
         }
-        let steps = steps
+        let levels = levels
             .into_iter()
-            .map(|(dim, names)| match dim {
-                Some(d) => Step::Scan(d, names),
-                None => Step::One(names[0]),
+            .map(|level| {
+                level
+                    .into_iter()
+                    .map(|(dim, names)| match dim {
+                        Some(d) => Step::Scan(d, names),
+                        None => Step::One(names[0]),
+                    })
+                    .collect()
             })
             .collect();
-        Ok(PlanHandle { plan: Arc::new(Plan { metrics: out, steps }) })
+        Ok(PlanHandle { plan: Arc::new(Plan { metrics: out, levels }) })
     }
 
     /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
     /// 格納データで、その場で書き換える。changed は入力の変更範囲、added は軸ごとの追加したメンバー、
-    /// olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲、
-    /// skip は飛ばす Metric（Python があとで全体を計算し直す）。
+    /// olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
     /// 再計算した (Metric, 差分集計か, 範囲) を返す。
     #[allow(clippy::too_many_arguments)]
     fn recalc_changes(
@@ -411,7 +416,6 @@ impl Core {
         added: Vec<(DimId, Vec<u32>)>,
         olds: Vec<(usize, Bound<'_, PyAny>)>,
         forced: Vec<(usize, Region)>,
-        skip: Vec<usize>,
     ) -> PyResult<Vec<(usize, bool, Region)>> {
         let olds: Vec<(usize, Src)> = olds.iter().map(|(m, o)| Ok((*m, Core::source(o)?))).collect::<PyResult<_>>()?;
         let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
@@ -424,7 +428,7 @@ impl Core {
             .map(|h| h.as_ref().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())))
             .collect();
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
-        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds, forced, &skip));
+        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds, forced));
         for (h, s) in stores.iter().zip(own) {
             h.borrow_mut().store = s;
         }

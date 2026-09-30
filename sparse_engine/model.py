@@ -481,13 +481,8 @@ class Model:
                 self._values[name] = eng.remove_member(self._values[name], dim, index, member, values, self)
             if dim in m.dims and name in self._counts:
                 self._counts[name] = eng.remove_member(self._counts[name], dim, index, member, False, self)
-        for step in self._plan:
-            if step.scan_dim is not None:
-                active = {n: todo[n] for n in step.names if n in todo}
-                if active:
-                    self._scan(step, active, False)
-            elif step.names[0] in todo:
-                self._recompute(self.metrics[step.names[0]], todo[step.names[0]])
+        self._forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
+        self.recalc()
 
     def _removal_regions(self, dim: str, member: str, has_cells) -> dict[str, Restrict]:
         """入力を空にしたあと、メンバーを消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。
@@ -692,20 +687,6 @@ class Model:
                 self._forced[n] = {}  # 件数も含めて、全体を計算し直す
         self._dirty.clear()
 
-    def _downstream(self, names) -> set[str]:
-        """names と、それを（間接的にでも）参照する Metric。"""
-        users: dict[str, list[str]] = {}
-        for src, edges in self._edges.items():
-            for e in edges:
-                users.setdefault(e.target, []).append(src)
-        out, todo = set(names), list(names)
-        while todo:
-            for u in users.get(todo.pop(), ()):
-                if u not in out:
-                    out.add(u)
-                    todo.append(u)
-        return out
-
     def _delta_sources(self) -> set[str]:
         """差分集計で、変更前の値が要る Metric（集計元と対応表）。"""
         return {n for plan in self._delta.values() for n in (plan.source, *plan.aux)}
@@ -873,36 +854,16 @@ class Model:
         self._changed.clear()
         self._old_cells.clear()
         self._old_slices.clear()
-        # 定義を変えた計算 Metric は、影響範囲に関係なく計算し直す（差分集計は使わない）。
-        # 下流が計算 Metric の REBUILD_SHARE を超えるなら、下流ごと全体の再計算と同じ方法（段ごとに
-        # まとめて並列に評価）で計算し直す。値が広く変わるなら、1 つずつ新旧を比べて伝えるより速く、
-        # 以前の全体の計算し直しより遅くなることはない。下流以外の Metric は下流を参照しないので、
-        # 先に差分で直してから下流を計算すればよい
+        # 定義を変えた計算 Metric は、影響範囲に関係なく計算し直す（差分集計は使わない）
         forced, self._forced = self._forced, {}
-        rebuild: set[str] = set()
-        if forced:
-            down = self._downstream(forced)
-            computed = sum(1 for m in self.metrics.values() if m.formula is not None)
-            if len(down) > max(REBUILD_MIN, REBUILD_SHARE * computed):
-                rebuild, forced = down, {}
-        self._recalc_changes(regions, added, olds, forced, rebuild, sources)
-        if rebuild:
-            self._recalc_all(rebuild)
-
-    def _recalc_changes(self, regions: dict[str, Restrict], added: dict[str, frozenset[str]],
-                        olds: dict[str, Any], forced: dict[str, Restrict], skip: set[str],
-                        sources: set[str]) -> None:
-        """差分再計算の本体。skip の Metric は飛ばす（あとで全体を計算し直す）。"""
         fast = getattr(self.engine, "recalc_changes", None)
         if fast is not None:  # 段取りごとエンジンに任せる（Rust）。意味は以下の Python の経路と同じ
-            done, named = fast(self, regions, added, olds, forced, skip)
+            done, named = fast(self, regions, added, olds, forced)
             self.eval_log.extend(n for n, _ in done)
             self.delta_log.extend(n for n, delta in done if delta)
             self.slice_log.extend_later(named)
             return
         for step in self._plan:
-            if step.names[0] in skip:
-                continue
             if step.scan_dim is not None:
                 seeded = regions | {n: forced[n] for n in step.names if n in forced}
                 active = {n: r for n, r in self._scan_regions(step, seeded, added).items()
@@ -942,12 +903,9 @@ class Model:
             return changed
         return self._replace(m, region, self.engine.evaluate(m.formula, self, region), diff)
 
-    def _recalc_all(self, only: set[str] | None = None) -> None:
-        """全体（only を渡せばその Metric だけ）を計算し直す。同じ段の Metric はまとめて評価し、
-        差分集計する SUM は件数も同時に求める。"""
+    def _recalc_all(self) -> None:
+        """全体を計算し直す。同じ段の Metric はまとめて評価し、差分集計する SUM は件数も同時に求める。"""
         for level in self._levels:
-            if only is not None:
-                level = [s for s in level if s.names[0] in only]
             batch = [self.metrics[s.names[0]] for s in level
                      if s.scan_dim is None and self.metrics[s.names[0]].formula is not None]
             fused = [m for m in batch if m.name in self._delta and self._delta[m.name].count is not None]
@@ -1101,11 +1059,6 @@ class Model:
             self.eval_log.append(n)
             self.slice_log.append((n, r))
 
-
-# 定義を変えた Metric の下流が計算 Metric のこの割合（とこの数）を超えたら、下流ごと全体の再計算と
-# 同じ方法で計算し直す（値が狭くしか変わらないなら差分のほうが速いが、広く変わると差分は 2 倍ほど遅い）
-REBUILD_SHARE = 0.25
-REBUILD_MIN = 32
 
 # 差分集計の後半で使う式（名前は _apply_delta の作業データ）
 _ALIVE = BinOp(">", Ref("__new_count"), Const(0.0))
