@@ -28,7 +28,7 @@ from itertools import product
 from typing import Iterator, Mapping, Protocol
 
 from .core import Cube, Dimension
-from .expr import (AGGREGATORS, ARITH, COMPARE, LOGIC, AsAxis, BinOp, By, Coalesce, Const, DimRef,
+from .expr import (AGGREGATIONS, AGGREGATORS, ARITH, COMPARE, LOGIC, AsAxis, BinOp, By, Coalesce, Const, DimRef,
                    Expand, Expr, Filter, If, IfBlank, IsBlank, Member, Not, On, Ref, Remove, Select,
                    Shift)
 
@@ -84,13 +84,12 @@ def _need(t: Type, kind: Kind, what: str) -> None:
 
 
 def _agg_kind(agg: str, t: Type, what: str) -> Kind:
-    if agg not in AGGREGATORS:
+    if agg not in AGGREGATIONS:
         raise FormulaError(f"未知の集計関数 {agg}")
-    if agg == "first":
-        return t.kind
-    if agg != "count":
+    a = AGGREGATIONS[agg]
+    if a.numeric:
         _need(t, "number", f"{what} の {agg}")
-    return "number"
+    return t.kind if a.kind is None else a.kind
 
 
 def _check_expand(warnings: list[str], what: str, dims: tuple[str, ...],

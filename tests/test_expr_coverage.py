@@ -6,7 +6,7 @@
 """
 import unittest
 
-from sparse_engine import Model, parse, to_formula
+from sparse_engine import FormulaError, Model, parse, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.evaluate import affected, collect_refs, estimate, infer
 from sparse_engine.expr import Expr, _children
@@ -266,6 +266,33 @@ class RustAffectedMatchesPython(unittest.TestCase):
                         with python_resolved(m):
                             want = affected(m.metrics[x.name].formula, m, regions)
                         self.assertEqual(got, want)
+
+
+class Aggregations(unittest.TestCase):
+    """集計関数の一覧は expr.AGGREGATIONS だけにあり、構文、集計の読み出し、Rust がそれに従う。"""
+
+    def test_only_public_aggregations_can_be_written(self):
+        from sparse_engine.expr import AGGREGATIONS, PUBLIC_AGGREGATIONS
+        self.assertEqual(PUBLIC_AGGREGATIONS, ("sum", "avg", "min", "max", "count"))
+        for name in PUBLIC_AGGREGATIONS:
+            parse(f"X[REMOVE {name.upper()}: A]")
+        hidden = [n for n in AGGREGATIONS if n not in PUBLIC_AGGREGATIONS]
+        self.assertEqual(hidden, ["first"])
+        with self.assertRaisesRegex(FormulaError, "SUM, AVG, MIN, MAX, COUNT"):
+            parse("X[REMOVE FIRST: A]")
+        m = model(ReferenceEngine())
+        with self.assertRaisesRegex(ValueError, "sum、avg、min、max、count"):
+            m.summarize("Price", agg="first")
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_rust_knows_every_aggregation(self):
+        import nanashi_core
+        from sparse_engine.expr import AGGREGATIONS
+        core = nanashi_core.Core()
+        d = core.add_dim(3, False, "A")
+        for name in AGGREGATIONS:
+            with self.subTest(name):
+                core.compile(("remove", ("ref", 0), d, name), ["X"], [([d], "number", -1)])
 
 
 CYCLIC = [  # (名前, 軸, 式) の列。計画を作るときに失敗する循環。文言が両方の実装で一致すること

@@ -33,7 +33,8 @@ from .core import Cube, Dimension, Key
 from .delta import DeltaPlan
 from .engine import Store, default_engine
 from .evaluate import Edge, FormulaError, Kind, Restrict, Type, combos, member_kind, union_region
-from .expr import Coalesce, Expr, Ref, mentions_member, references_metric, rename_member, rename_metrics, uses_property
+from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_member, references_metric,
+                   rename_member, rename_metrics, uses_property)
 from .journal import AlreadyCommitted, Transaction, changes, jsonable, now
 from .parser import parse
 from .planner import CompiledPlan, Step
@@ -1032,10 +1033,11 @@ class Model:
         m = self._metric(name)
         keep = tuple(keep)
         agg = agg.lower()
-        if agg not in ("sum", "avg", "min", "max", "count"):
-            raise ValueError(f"集計は sum、avg、min、max、count のいずれか（{agg!r}）")
-        if agg != "count" and m.kind != "number":
-            raise ValueError(f"{name} は {m.kind} なので {agg} で集計できない（count は使える）")
+        if agg not in PUBLIC_AGGREGATIONS:
+            raise ValueError(f"集計は {'、'.join(PUBLIC_AGGREGATIONS)} のいずれか（{agg!r}）")
+        if AGGREGATIONS[agg].numeric and m.kind != "number":
+            numeric = [a for a in PUBLIC_AGGREGATIONS if not AGGREGATIONS[a].numeric]
+            raise ValueError(f"{name} は {m.kind} なので {agg} で集計できない（{'、'.join(numeric)} は使える）")
         for d in keep:
             if d not in m.dims:
                 raise ValueError(f"{name}: 軸 {d} がない")
