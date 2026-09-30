@@ -3,6 +3,7 @@ import http.client
 import json
 import socket
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -256,6 +257,84 @@ class Limits(unittest.TestCase):
             self.assertEqual(Client(server.url).get("/health")[0], 200)
         finally:
             server.stop()
+
+
+class Observability(JournalCase, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.ws = workspace(self, model(ReferenceEngine()))
+        self.server = Server(self.ws, "127.0.0.1", 0, tokens=TOKENS).start()
+        self.c = Client(self.server.url)
+
+    def tearDown(self):
+        self.server.stop()
+        super().tearDown()
+
+    def stats(self) -> dict:
+        req = urllib.request.Request(self.server.url + "/stats", headers=self.c.headers)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertTrue(r.headers["Content-Type"].startswith("text/plain"))
+            text = r.read().decode()
+        return {line.split()[0]: float(line.split()[1]) for line in text.splitlines() if not line.startswith("#")}
+
+    def test_ready_is_separate_from_health(self):
+        self.assertEqual(self.c.get("/ready")[0], 200)
+        self.ws._degraded = "記録先からの開き直しに失敗した: OSError"  # 開き直しに失敗し、古い版を公開している
+        status, body = Client(self.server.url, token=None).get("/ready")
+        self.assertEqual((status, body["ready"]), (503, False))
+        self.assertIn("開き直し", body["reasons"][0])
+        self.assertEqual(self.c.get("/health")[0], 200)  # 生きてはいる
+
+    def test_failed_reopen_is_reported(self):
+        self.ws.journal.catch_up = lambda m: (_ for _ in ()).throw(OSError("記録先が読めない"))
+        self.ws.journal.open = lambda engine=None: (_ for _ in ()).throw(OSError("記録先が読めない"))
+        self.ws._reload()
+        status, body = self.c.get("/ready")
+        self.assertEqual(status, 503)
+        self.assertEqual(self.stats()["nanashi_reopen_failures_total"], 1)
+
+    def test_stats(self):
+        for i in range(3):
+            self.c.post("/writes", {"client_op_id": f"s{i}", "ops": [write("Stock", i, Product="p0", Month="Jan")]})
+        self.c.post("/writes", {"client_op_id": "bad", "ops": [write("Stock", "x", Product="p0", Month="Jan")]})
+        self.ws.checkpoint()
+        st = self.stats()
+        self.assertEqual(st["nanashi_seq"], 3)
+        self.assertEqual(st["nanashi_commits_total"], 3)
+        self.assertEqual(st["nanashi_rejected_total"], 1)
+        self.assertGreater(st["nanashi_commit_seconds_sum"], 0)
+        self.assertEqual(st["nanashi_snapshot_seq"], 3)
+        self.assertLess(st["nanashi_snapshot_age_seconds"], 60)
+        self.assertEqual(st["nanashi_lease_held"], 1)
+        self.assertEqual(st["nanashi_ready"], 1)
+        self.assertEqual(Client(self.server.url, token=None).get("/stats")[0], 401)
+
+
+class PgObservability(Observability):
+    store = PgStore
+    journal_options = {"lease_ttl": 1.5}  # 延長の間隔を短くする
+
+    def test_heartbeat_failures_are_not_swallowed(self):
+        j = self.ws.journal
+        self.c.post("/writes", {"client_op_id": "h", "ops": [write("Stock", 1, Product="p0", Month="Jan")]})
+        self.assertTrue(j.lease()["held"])
+        real = j.conn
+
+        class Broken:
+            closed = False
+
+            def execute(self, *a, **k):
+                raise OSError("接続が切れた")
+        with self.assertLogs("sparse_engine.pg_journal", "WARNING") as logs:
+            j.conn = Broken()
+            deadline = time.monotonic() + 5
+            while j.lease()["error"] is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            j.conn = real
+        self.assertIn("延長できなかった", logs.output[0])
+        status, body = self.c.get("/ready")
+        self.assertEqual(status, 503)
+        self.assertIn("延長できない", body["reasons"][0])
 
 
 class WithJournal(JournalCase, unittest.TestCase):

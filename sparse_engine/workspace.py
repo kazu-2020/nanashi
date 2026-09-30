@@ -89,6 +89,43 @@ class Written:
         return any(m == n and x.overlaps(y) for m, x in self.blocks for n, y in other.blocks)
 
 
+class Stats:
+    """観察用の数（HTTP サーバーの /stats が出す）。時間は秒で、時刻は time.monotonic の値。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.commits = 0              # 確定した書き込み
+        self.batches = 0              # 確定したまとまり（1 回の記録の書き出し）
+        self.commit_seconds = 0.0     # 記録の書き出しと確定にかかった時間の合計
+        self.commit_seconds_max = 0.0
+        self.rejected = 0             # 失敗して取り消した書き込み（Conflict、式の誤りなど）
+        self.journal_errors = 0       # 記録の書き出しに失敗したまとまり
+        self.catch_ups = 0            # ほかのプロセスの書き込みに追いついた回数
+        self.reopen_failures = 0      # 追いつけず、開き直しにも失敗した回数
+        self.snapshots = 0
+        self.snapshot_failures = 0
+        self.snapshot_at: float | None = None  # 最後にスナップショットを置き終えた時刻
+        self.snapshot_seq: int | None = None
+        self.last_error: str | None = None
+
+    def add(self, **counts) -> None:
+        with self._lock:
+            for k, v in counts.items():
+                setattr(self, k, getattr(self, k) + v)
+
+    def set(self, **values) -> None:
+        with self._lock:
+            for k, v in values.items():
+                setattr(self, k, v)
+
+    def commit(self, n: int, seconds: float) -> None:
+        with self._lock:
+            self.commits += n
+            self.batches += 1
+            self.commit_seconds += seconds
+            self.commit_seconds_max = max(self.commit_seconds_max, seconds)
+
+
 def written_cells(record: dict) -> Written:
     """記録で書き換えた入力セル（Metric の ID と、座標のメンバーの ID）。"""
     return Written(record)
@@ -194,6 +231,8 @@ class Workspace:
         self._checkpoint_seq = self._version.seq  # 最後にスナップショットを取った（または取り始めた）版
         self._checkpoint_at = time.monotonic()
         self._checkpointing: threading.Thread | None = None
+        self.stats = Stats()
+        self._degraded: str | None = None  # 記録先に追いつけず、開き直しにも失敗した（古い版を公開している）
         self._thread = threading.Thread(target=self._run, name="nanashi-writer", daemon=True)
         self._thread.start()
 
@@ -262,8 +301,27 @@ class Workspace:
         """公開中の版のスナップショットを記録先に置く（版は変わらないので、どのスレッドからでもよい）。"""
         if self.journal is None:
             raise ValueError("記録先（journal）がない")
-        self._checkpoint_seq, self._checkpoint_at = self._version.seq, time.monotonic()
-        self.journal.save_snapshot(self._version_model)
+        model = self._version_model
+        self._checkpoint_seq, self._checkpoint_at = model.seq, time.monotonic()
+        self.journal.save_snapshot(model)
+        self.stats.add(snapshots=1)
+        self.stats.set(snapshot_at=time.monotonic(), snapshot_seq=model.seq)
+
+    def ready(self) -> list[str]:
+        """要求を受けられない理由の列（受けられるなら空）。HTTP サーバーの /ready が使う。"""
+        reasons = []
+        if self._closed:
+            reasons.append("閉じている")
+        elif not self._thread.is_alive():
+            reasons.append("ライターのスレッドが止まっている")
+        if self._degraded is not None:
+            reasons.append(self._degraded)
+        if self.journal is not None and (err := self.journal.lease()["error"]) is not None:
+            reasons.append(f"書き込みの権利を延長できない: {err}")
+        return reasons
+
+    def queued(self) -> int:
+        return self._queue.qsize()
 
     def close(self) -> None:
         """列に入っている書き込みを処理し終えてから、ライターを止める。取りかけのスナップショットも待つ。
@@ -339,6 +397,7 @@ class Workspace:
                     req.fn(working)
                 applied.append((req, txn.record))
             except Exception as e:
+                self.stats.add(rejected=1)
                 req.future.set_exception(e)
 
         committed = [(req, rec) for req, rec in applied if rec["ops"]]
@@ -348,12 +407,15 @@ class Workspace:
             for req, first in aliases:
                 _follow(req, first)
             return
+        started = time.monotonic()
         try:
             if self.journal is not None:
                 seqs = self.journal.append_many([rec for _, rec in committed])
             else:
                 seqs = list(range(working.seq + 1, working.seq + 1 + len(committed)))
         except Exception as e:  # 記録できなければ、まとまり全体を捨てる（公開中の版は変えない）
+            self.stats.add(journal_errors=1)
+            self.stats.set(last_error=f"{type(e).__name__}: {e}")
             if isinstance(e, Stale):
                 self._reload()  # 別のプロセスが書き込んでいた。知らせる前に、記録先から最新の版を開き直す
             for req, _ in applied:
@@ -362,6 +424,7 @@ class Workspace:
                 req.future.set_exception(e)
             return
 
+        self.stats.commit(len(committed), time.monotonic() - started)
         for (req, rec), seq in zip(committed, seqs):
             rec["seq"] = seq
             self._recent.append((seq, req.user, written_cells(rec)))
@@ -397,9 +460,13 @@ class Workspace:
             log.warning("記録先の記録に追いつけなかったので、開き直す", exc_info=True)
             try:
                 model = self.journal.open(self._version_model.engine)
-            except Exception:
+            except Exception as e:
                 log.exception("記録先からの開き直しに失敗した")
+                self.stats.add(reopen_failures=1)
+                self._degraded = f"記録先からの開き直しに失敗した: {type(e).__name__}: {e}"
                 return
+        self.stats.add(catch_ups=1)
+        self._degraded = None
         self._publish(model)
         self._recent.clear()
         self._ops.clear()
@@ -441,7 +508,10 @@ class Workspace:
         def run():
             try:
                 self.journal.save_snapshot(model)
+                self.stats.add(snapshots=1)
+                self.stats.set(snapshot_at=time.monotonic(), snapshot_seq=model.seq)
             except Exception:
+                self.stats.add(snapshot_failures=1)
                 log.exception("スナップショットの保存に失敗した（次の間隔で取り直す）")
         thread = threading.Thread(target=run, name="nanashi-checkpoint", daemon=True)
         thread.start()
@@ -466,6 +536,7 @@ class Replica:
         self._publish(journal.open(engine))
         self._stop = threading.Event()
         self.error: BaseException | None = None  # 最後に追いつけなかった理由（追いつけたら None）
+        self.stats = Stats()
         self._thread = threading.Thread(target=self._run, name="nanashi-replica", daemon=True)
         self._thread.start()
 
@@ -489,6 +560,7 @@ class Replica:
             model = self._version.model.fork()
             if self.journal.catch_up(model):
                 self._publish(model)
+                self.stats.add(catch_ups=1)
             self.error = None
             return self.seq
 
@@ -500,8 +572,22 @@ class Replica:
                     self.refresh()
             except Exception as e:  # 記録先が一時的に使えない。次の間隔で改めて追いつく
                 self.error = e
+                self.stats.set(last_error=f"{type(e).__name__}: {e}")
                 log.warning("記録先に追いつけなかった（次の間隔で改めて試す）", exc_info=True)
                 self._stop.wait(self.interval)
+
+    def ready(self) -> list[str]:
+        """要求を受けられない理由の列（受けられるなら空）。"""
+        reasons = []
+        if not self._thread.is_alive():
+            reasons.append("追従のスレッドが止まっている")
+        if self.error is not None:
+            reasons.append(f"記録先に追いつけない: {type(self.error).__name__}: {self.error}")
+        return reasons
+
+    def lag(self) -> int:
+        """記録先の最後の記録から、公開中の版がいくつ遅れているか（最後に記録先を読んだ時点で）。"""
+        return max(0, self.journal.head - self.seq)
 
     def close(self) -> None:
         self._stop.set()

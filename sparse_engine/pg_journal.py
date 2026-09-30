@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
 import socket
 import threading
@@ -47,6 +48,8 @@ from .engine import native
 from .journal import (Fenced, Journal, Snapshot, _shown, as_block, cell_count, put_snapshot, read_cell_files,
                       read_snapshot, write_cell_files)
 from .objects import open_objects
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 create table if not exists nanashi_model (
@@ -119,6 +122,8 @@ class PgJournal(Journal):
         self.acquire_wait = lease_ttl if acquire_wait is None else acquire_wait
         self.holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.epoch: int | None = None  # 取ったリースの世代番号（まだ取っていなければ None）
+        self.lease_until: float | None = None  # リースの期限（time.monotonic の値。延長できた時点から数える）
+        self.lease_error: BaseException | None = None  # 最後に延長できなかった理由（延長できたら None）
         self.conn = psycopg.connect(dsn, autocommit=True)  # 複数の文は transaction() で囲む
         with self.conn.transaction():
             self.conn.execute(SCHEMA)
@@ -207,6 +212,7 @@ class PgJournal(Journal):
                 raise Fenced(f"{self.model_id}: 別のプロセス（{holder}）が書き込み中（リースの期限内）")
             time.sleep(min(remaining, max(0.05, min(float(left or 0) + 0.05, 1.0))))
         epoch, head = row
+        self.lease_until = time.monotonic() + self.lease_ttl
         if head != self.head:
             raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
         self.epoch = epoch
@@ -221,14 +227,26 @@ class PgJournal(Journal):
                 with self._lock:
                     if self.epoch is None:
                         continue
+                    started = time.monotonic()
                     cur = self.conn.execute(
                         "update nanashi_model set lease_expires = now() + make_interval(secs => %s)"
                         " where model_id = %s and writer_epoch = %s and lease_holder = %s",
                         (self.lease_ttl, self.model_id, self.epoch, self.holder))
                     if cur.rowcount != 1:
-                        self.epoch = None
-            except Exception:  # 接続の一時的な失敗。次の確定で改めて確かめる
-                pass
+                        self.epoch, self.lease_until = None, None
+                        log.warning("%s: リースを失った（別のプロセスが書き込みを始めた）", self.model_id)
+                    else:
+                        self.lease_until = started + self.lease_ttl
+                    self.lease_error = None
+            except Exception as e:  # 接続の一時的な失敗。期限までに延長できなければ、次の確定で締め出される
+                self.lease_error = e
+                log.warning("%s: リースを延長できなかった", self.model_id, exc_info=True)
+
+    def lease(self) -> dict:
+        """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
+        left = None if self.lease_until is None else self.lease_until - time.monotonic()
+        return {"held": self.epoch is not None, "expires_in": left,
+                "error": None if self.lease_error is None else repr(self.lease_error)}
 
     # ------------------------------------------------ 記録
 
@@ -247,7 +265,7 @@ class PgJournal(Journal):
                     " where model_id = %s and head_seq = %s and writer_epoch = %s and lease_holder = %s",
                     (seqs[-1], self.lease_ttl, self.model_id, self.head, self.epoch, self.holder))
                 if cur.rowcount != 1:
-                    self.epoch = None
+                    self.epoch, self.lease_until = None, None
                     raise Fenced(f"{self.model_id}: リースを失ったか、別のプロセスが先に書き込んだ")
                 with cur.copy("copy nanashi_operation (model_id, seq, at, user_name, reason, client_op_id, record,"
                               " cells_uri, indexed) from stdin") as copy:

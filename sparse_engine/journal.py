@@ -402,6 +402,10 @@ class Journal:
     def acquire(self) -> None:
         """書き込みの権利を取る。取れなければ Fenced。"""
 
+    def lease(self) -> dict:
+        """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
+        return {"held": False, "expires_in": None, "error": None}
+
     def refresh(self) -> int:
         """記録先の最新の通し番号を読み直して head にする（ほかのプロセスの書き込みに追いつくとき）。"""
         raise NotImplementedError
@@ -580,6 +584,9 @@ class FileJournal(Journal):
             f.close()
             raise Fenced(f"{self.path}: 読み込んだあとに別のプロセスが書き込んだ（{head} → {self.head}）。開き直す")
         self._lock_file = f
+
+    def lease(self) -> dict:
+        return {"held": self._lock_file is not None, "expires_in": None, "error": None}
 
     def release(self) -> None:
         if self._lock_file is not None:

@@ -10,7 +10,9 @@
 変えた書き込みがあれば 409 で拒否する（楽観的な排他）。
 
     GET  /                                    モデルの定義（軸、Metric）と公開中の版の通し番号
-    GET  /health                              通し番号だけ（認証なしで読める）
+    GET  /health                              生きているか（通し番号。認証なしで読める）
+    GET  /ready                               要求を受けられるか（受けられなければ 503 と理由。認証なしで読める）
+    GET  /stats                               観察用の数（Prometheus のテキスト形式）
     GET  /metrics/<name>/cell?<軸>=<メンバー>   1 セル（{"value": ..., "seq": ...}）
     GET  /metrics/<name>/slice?<軸>=a,b        範囲（{"dims": [...], "cells": [[座標..., 値], ...]}）
     GET  /metrics/<name>/rows?<軸>=a&offset=0&limit=50   行の列と全行数
@@ -48,6 +50,7 @@ import json
 import logging
 import sys
 import threading
+import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -139,9 +142,12 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------ 応答
 
     def _json(self, status: int, body: Any) -> None:
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        if isinstance(body, _Text):
+            data, kind = body.encode("utf-8"), "text/plain; version=0.0.4; charset=utf-8"
+        else:
+            data, kind = json.dumps(body, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8"
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -194,7 +200,12 @@ class Handler(BaseHTTPRequestHandler):
         v = self.server.workspace.version
         if parts == ["health"]:
             return 200, {"seq": v.seq}
+        if parts == ["ready"]:
+            reasons = self.server.workspace.ready()
+            return (503 if reasons else 200), {"seq": v.seq, "ready": not reasons, "reasons": reasons}
         self._user()
+        if parts == ["stats"]:
+            return 200, _Text(stats_text(self.server.workspace))
         if not parts:
             dims = {d.name: {"id": d.id, "members": list(d.members), "ordered": d.ordered,
                              "properties": {p: t for p, (t, _) in d.properties.items()}}
@@ -290,6 +301,46 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             raise ApiError(503, "closed", str(e)) from None
         return 200, {"seq": seq}
+
+
+class _Text(str):
+    """JSON でなく、テキストのまま返す応答の本文。"""
+
+
+def stats_text(ws) -> str:
+    """Workspace か Replica の観察用の数を、Prometheus のテキスト形式にする。"""
+    st, now = ws.stats, time.monotonic()
+    rows = [("nanashi_seq", "公開中の版の通し番号", "gauge", ws.seq),
+            ("nanashi_ready", "要求を受けられるか", "gauge", int(not ws.ready()))]
+    if isinstance(ws, Workspace):
+        lease = ws.journal.lease() if ws.journal is not None else {"held": False, "expires_in": None}
+        rows += [
+            ("nanashi_commits_total", "確定した書き込み", "counter", st.commits),
+            ("nanashi_commit_batches_total", "記録の書き出し（まとめて確定した回数）", "counter", st.batches),
+            ("nanashi_commit_seconds_sum", "記録の書き出しと確定にかかった時間の合計", "counter", st.commit_seconds),
+            ("nanashi_commit_seconds_max", "記録の書き出しと確定にかかった時間の最大", "gauge", st.commit_seconds_max),
+            ("nanashi_rejected_total", "失敗して取り消した書き込み", "counter", st.rejected),
+            ("nanashi_journal_errors_total", "記録の書き出しに失敗したまとまり", "counter", st.journal_errors),
+            ("nanashi_queue_length", "書き込みの列に待っている数", "gauge", ws.queued()),
+            ("nanashi_lease_held", "書き込みの権利を持っているか", "gauge", int(lease["held"])),
+            ("nanashi_lease_expires_seconds", "書き込みの権利の残りの秒数", "gauge", lease["expires_in"]),
+            ("nanashi_catch_ups_total", "ほかのプロセスの書き込みに追いついた回数", "counter", st.catch_ups),
+            ("nanashi_reopen_failures_total", "開き直しに失敗した回数", "counter", st.reopen_failures),
+            ("nanashi_snapshots_total", "置いたスナップショット", "counter", st.snapshots),
+            ("nanashi_snapshot_failures_total", "置けなかったスナップショット", "counter", st.snapshot_failures),
+            ("nanashi_snapshot_age_seconds", "最後にスナップショットを置いてからの秒数", "gauge",
+             None if st.snapshot_at is None else now - st.snapshot_at),
+            ("nanashi_snapshot_seq", "最後のスナップショットの通し番号", "gauge", st.snapshot_seq),
+        ]
+    else:
+        rows += [("nanashi_catch_ups_total", "記録先に追いついた回数", "counter", st.catch_ups),
+                 ("nanashi_replica_lag", "記録先の最後の記録から遅れている数", "gauge", ws.lag())]
+    out = []
+    for name, help_, kind, value in rows:
+        if value is None:
+            continue
+        out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}", f"{name} {value}"]
+    return "\n".join(out) + "\n"
 
 
 def _formula(written) -> str:
