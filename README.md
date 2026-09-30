@@ -20,6 +20,16 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
 `pyproject.toml` が依存（numpy、開発用に maturin、psycopg、pyflakes）の版を決めている。
 最後の行で、Rust のエンジン（`nanashi_core`）をビルドして `.venv` に入れる。
 Rust のエンジンがなくても、参照実装のエンジンだけで動く。
+
+読み手を多く抱えるサーバーでは、free-threaded の Python（3.14t）を使う。
+Rust のエンジンは GIL なしで動く宣言をしていて（`gil_used = false`）、格納データは Arc と永続的な木で共有するので、読み手が何人いても書き込みを待たせない（「性能」の表）。
+
+```bash
+brew install python-freethreading          # macOS。Linux はディストリビューションのパッケージか uv で
+python3.14t -m venv .venv-ft
+.venv-ft/bin/pip install -e ".[dev]"
+VIRTUAL_ENV=$PWD/.venv-ft .venv-ft/bin/maturin develop --release -m native/Cargo.toml
+```
 GitHub Actions（`.github/workflows/test.yml`）が、両方のエンジンでテストと静的検査を回す。
 
 テストは次のように実行する。
@@ -545,9 +555,22 @@ Apple M4（10 コア、メモリ 16 GB）での、Rust エンジンの測定値�
 `get` が読み出し API になる前は、1 セル読むのにも `value` と同じ約 500 ms かかり、その間 GIL を握っていた。
 `save` も Python で全セルを走査していて約 500 ms かかった。
 
-8 人の読み手が休みなく読み続ける中での書き込み（給与を 1 人変更、単独なら 0.6 ms）は、読み手が `get` でも中央値 82 ms かかる。
-読みの費用ではなく、ライターが GIL を取り直すたびに Python のスレッド切り替えの間隔（既定 5 ms）を待つためで、`sys.setswitchinterval(0.0005)` にすると 7.5 ms になる。
-読み手を多く抱えるプロセスでは、切り替えの間隔を短くするか、free-threaded の Python を使う。
+8 人の読み手が休みなく読み続ける中での書き込み（給与を 1 人変更、単独なら 0.6 ms）は、通常の Python では読み手が `get` でも中央値 84 ms かかる。
+読みの費用ではなく、ライターが GIL を取り直すたびに Python のスレッド切り替えの間隔（既定 5 ms）を待つためで、`sys.setswitchinterval(0.0005)` にすると 8 ms になる。
+free-threaded の Python（3.14t）では GIL がないので、同じ状況で 2.9 ms になり、切り替えの間隔をいじる必要もない。
+
+| 計測（損益計画 大） | 通常の Python 3.14 | free-threaded 3.14t |
+|---|---|---|
+| 8 人が休みなく `get` する中での書き込み | 84 ms | 2.9 ms |
+| HTTP で 8 人が休みなく読む中での書き込み | 2.0 ms | 2.3 ms |
+| その間の HTTP の読み出し | 毎秒 2,200 件 | 毎秒 9,700 件 |
+| スナップショットの保存 | 24 ms | 11 ms |
+| 全体の再計算 | 133 ms | 128 ms |
+| 給与を 1 人変更 | 0.4 ms | 0.4 ms |
+| HTTP の書き込み（単独） | 0.8 ms | 1.8 ms |
+
+1 本のスレッドの処理は同じ速さで、HTTP の書き込みの単独の時間だけ free-threaded の Python の固定費で 1 ms ほど増える。
+読み手が多い状況では、読み出しの件数が 4 倍を超え、書き込みは待たされない。
 
 記録先を比べると次のとおり（`bench_journal.py`、損益計画、PostgreSQL は手元の Docker）。
 

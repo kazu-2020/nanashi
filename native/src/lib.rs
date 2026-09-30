@@ -630,7 +630,7 @@ fn set_widen_min_rows(n: usize) {
     plan::WIDEN_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
-#[pymodule]
+#[pymodule(gil_used = false)] // free-threaded の Python でも GIL を有効に戻さない（格納データは Arc と永続的な木で共有する）
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_compact_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_par_min, m)?)?;
