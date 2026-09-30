@@ -387,12 +387,19 @@ class Workspace:
         return known
 
     def _reload(self) -> None:
-        """記録先から最新の版を開き直す（手元の版が古いと言われたとき）。"""
+        """記録先の最新の版に追いつく（手元の版が古いと言われたとき）。公開中の版の複製に、ほかのプロセスが
+        確定した記録を書き込み、影響範囲だけを計算し直す。追いつけなければ、記録先から開き直す。"""
         try:
-            model = self.journal.open(self._version_model.engine)
+            model = self._version_model.fork()
+            if not self.journal.catch_up(model):
+                return
         except Exception:
-            log.exception("記録先からの開き直しに失敗した")
-            return
+            log.warning("記録先の記録に追いつけなかったので、開き直す", exc_info=True)
+            try:
+                model = self.journal.open(self._version_model.engine)
+            except Exception:
+                log.exception("記録先からの開き直しに失敗した")
+                return
         self._publish(model)
         self._recent.clear()
         self._ops.clear()
@@ -439,3 +446,69 @@ class Workspace:
         thread = threading.Thread(target=run, name="nanashi-checkpoint", daemon=True)
         thread.start()
         self._checkpointing = thread
+
+
+class Replica:
+    """記録先に追従する読み出し専用の版。書き込むプロセス（Workspace）とは別のプロセスで、読み手を増やすのに使う。
+
+        replica = Replica(PgJournal(dsn, "plan", "s3://nanashi/plans", heartbeat=False), RustEngine())
+        replica.version.get("Price", Product="A")
+
+    別のスレッドで記録先を見張り（PgJournal は確定の通知、FileJournal はファイルの長さ）、ほかのプロセスが
+    確定した記録を、公開中の版の複製に入力の変更として書き込んで影響範囲だけを計算し直し、新しい版として
+    公開する。読み出しはいつでも公開中の版を見る。書き込めない（書くのは Workspace を持つ 1 つのプロセス）。
+    """
+
+    def __init__(self, journal: Journal, engine=None, *, interval: float = 1.0):
+        self.journal = journal
+        self.interval = interval
+        self._lock = threading.Lock()  # 追いつく処理を順に並べる（見張りのスレッドと refresh）
+        self._publish(journal.open(engine))
+        self._stop = threading.Event()
+        self.error: BaseException | None = None  # 最後に追いつけなかった理由（追いつけたら None）
+        self._thread = threading.Thread(target=self._run, name="nanashi-replica", daemon=True)
+        self._thread.start()
+
+    def _publish(self, model) -> None:
+        model.journal = None
+        model.recalc()
+        model._frozen = True
+        self._version = Version(model)
+
+    @property
+    def version(self) -> Version:
+        return self._version
+
+    @property
+    def seq(self) -> int:
+        return self._version.seq
+
+    def refresh(self) -> int:
+        """今すぐ記録先に追いつく。公開中の版の通し番号を返す。"""
+        with self._lock:
+            model = self._version.model.fork()
+            if self.journal.catch_up(model):
+                self._publish(model)
+            self.error = None
+            return self.seq
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.journal.wait(self.interval)
+                if not self._stop.is_set():
+                    self.refresh()
+            except Exception as e:  # 記録先が一時的に使えない。次の間隔で改めて追いつく
+                self.error = e
+                log.warning("記録先に追いつけなかった（次の間隔で改めて試す）", exc_info=True)
+                self._stop.wait(self.interval)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def __enter__(self) -> Replica:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()

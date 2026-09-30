@@ -3,6 +3,8 @@
     python -m sparse_engine.server plan/ --port 8080 --engine rust --checkpoint-every 1000
 
 読み出しは公開中の版に対して行い、必要な分だけ読む（get、slice、rows、summarize）。
+--follow なら書き込まず、記録先に追従する読み出し専用のサーバーになる（workspace.Replica。読み手を複数の
+プロセスに増やすとき。書き込みは 405）。
 書き込みは 1 つの要求を 1 つのトランザクションとして Workspace に渡す。再送しても二重に確定しないよう、
 書き込みには client_op_id を必ず付ける。読んだ版の通し番号を expect に付けると、その後に同じセルを
 変えた書き込みがあれば 409 で拒否する（楽観的な排他）。
@@ -53,7 +55,7 @@ from typing import Any
 
 from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
-from .workspace import Conflict, Overloaded, Workspace
+from .workspace import Conflict, Overloaded, Replica, Workspace
 
 log = logging.getLogger(__name__)
 
@@ -248,6 +250,8 @@ class Handler(BaseHTTPRequestHandler):
         if [p for p in url.path.split("/") if p] != ["writes"]:
             raise ApiError(404, "not_found", f"{url.path} はない")
         user = self._user()
+        if isinstance(self.server.workspace, Replica):
+            raise ApiError(405, "read_only", "このサーバーは記録先に追従する読み出し専用（書き込みは書き手のサーバーへ送る）")
         length = self.headers.get("Content-Length")
         if length is None:
             raise ApiError(411, "length_required", "Content-Length が要る")
@@ -299,7 +303,7 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, workspace: Workspace, host: str = "127.0.0.1", port: int = 8080, *,
+    def __init__(self, workspace: Workspace | Replica, host: str = "127.0.0.1", port: int = 8080, *,
                  write_timeout: float | None = 30.0, tokens: dict[str, str] | None = None,
                  user_header: str | None = None, max_body: int = 16 << 20, max_cells: int = 100_000,
                  max_threads: int = 64, request_timeout: float | None = 30.0):
@@ -375,6 +379,8 @@ def main(argv=None) -> None:
     ap.add_argument("--max-cells", type=int, default=100_000, help="slice、rows、summary で返すセルの上限")
     ap.add_argument("--max-threads", type=int, default=64, help="同時に処理する要求の上限（超えたら 503）")
     ap.add_argument("--max-bytes", type=int, help="Rust のエンジンで、1 つの式の評価が持つ途中結果の上限（バイト）")
+    ap.add_argument("--follow", action="store_true",
+                    help="書き込まず、記録先に追従する読み出し専用のサーバーにする（読み手を増やすとき）")
     args = ap.parse_args(argv)
     tokens = None
     if args.tokens:
@@ -392,11 +398,14 @@ def main(argv=None) -> None:
         engine = ReferenceEngine()
     if args.pg:
         from .pg_journal import PgJournal
-        journal = PgJournal(args.pg, args.model_id, args.path)
+        journal = PgJournal(args.pg, args.model_id, args.path, heartbeat=not args.follow)
     else:
         from .journal import FileJournal
         journal = FileJournal(args.path)
-    ws = Workspace.open(journal, engine, checkpoint_every=args.checkpoint_every, max_queue=args.max_queue)
+    if args.follow:
+        ws = Replica(journal, engine)
+    else:
+        ws = Workspace.open(journal, engine, checkpoint_every=args.checkpoint_every, max_queue=args.max_queue)
     server = Server(ws, args.host, args.port, tokens=tokens, user_header=args.user_header, max_body=args.max_body,
                     max_cells=args.max_cells, max_threads=args.max_threads)
     log.info("公開中の版 %d、%s で待ち受ける", ws.seq, server.url)

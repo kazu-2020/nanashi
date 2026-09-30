@@ -8,9 +8,11 @@
     cell_change  書き換えた入力セルごとに 1 行（Metric の ID、座標のメンバーの ID の配列、変更前後の値）。
                  セルの履歴を索引で引ける
     snapshot     スナップショットの置き場所とハッシュ（ファイルはオブジェクトストレージに置き、
-                 置き終えてから登録する。ハッシュは読むときに確かめ、合わなければ 1 つ前のものを使う）
+                 各ファイル、manifest.json の順に置き終えてから登録する。ハッシュは読むときに確かめ、
+                 合わなければ 1 つ前のものを使う）
 
 ファイルの置き場所（objects.py）は S3 互換のオブジェクトストレージ（s3://…）か、ローカルのディレクトリ。
+表には置き場所の中の相対的なキーだけを保存するので、置き場所を移しても（ディレクトリから S3 へなど）読める。
 
 大量のセルを書き換えた記録（bulk_cells を超えるもの）は、変更前後の値を Metric ごとに Parquet の
 ファイルにしてオブジェクトストレージに置いてから確定し、operation にはその置き場所とハッシュだけを
@@ -36,16 +38,15 @@ import socket
 import threading
 import time
 import uuid
-from typing import Iterator, NamedTuple
+from typing import Iterator
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from .engine import native
-from .journal import (BrokenSnapshot, Fenced, Journal, _shown, as_block, cell_count, read_cell_files,
-                      write_cell_files)
+from .journal import (Fenced, Journal, Snapshot, _shown, as_block, cell_count, put_snapshot, read_cell_files,
+                      read_snapshot, write_cell_files)
 from .objects import open_objects
-from .storage import dump, read
 
 SCHEMA = """
 create table if not exists nanashi_model (
@@ -94,11 +95,6 @@ create table if not exists nanashi_snapshot (
 ANALYZE_ROWS = 100_000
 
 
-class Snapshot(NamedTuple):
-    uri: str               # ファイルの置き場所の接頭辞（<uri>/<ファイルの名前>）
-    files: dict[str, str]  # ファイルの名前 -> SHA-256
-
-
 class PgJournal(Journal):
     def __init__(self, dsn: str, model_id: str, objects, *, lease_ttl: float = 30.0,
                  holder: str | None = None, bulk_cells: int = 10_000, heartbeat: bool = True,
@@ -117,6 +113,8 @@ class PgJournal(Journal):
         self._lock = threading.RLock()
         self._index_conn = None
         self._index_lock = threading.Lock()
+        self._listen_conn = None  # 確定の通知を待つ接続（wait で初めて使うときにつなぐ）
+        self._listen_lock = threading.Lock()
         self.lease_ttl = lease_ttl
         self.acquire_wait = lease_ttl if acquire_wait is None else acquire_wait
         self.holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -141,8 +139,9 @@ class PgJournal(Journal):
             self.release()
         finally:
             self.conn.close()
-            if self._index_conn is not None:
-                self._index_conn.close()
+            for c in (self._index_conn, self._listen_conn):
+                if c is not None:
+                    c.close()
 
     def release(self) -> None:
         """持っているリースを手放す。持っていなければ何もしない。"""
@@ -158,6 +157,20 @@ class PgJournal(Journal):
         """記録先の最新の状態を開く（手元の通し番号が古くても、表の通し番号から開き直す）。"""
         self.head = self._db_head()
         return super().open(engine)
+
+    def refresh(self) -> int:
+        self.head = self._db_head()
+        return self.head
+
+    def wait(self, timeout: float) -> None:
+        """確定のたびに書き手が送る通知（NOTIFY nanashi_head）を、専用の接続で待つ。"""
+        with self._listen_lock:
+            if self._listen_conn is None:
+                self._listen_conn = psycopg.connect(self.dsn, autocommit=True)
+                self._listen_conn.execute("listen nanashi_head")
+            for n in self._listen_conn.notifies(timeout=timeout):
+                if n.payload == self.model_id:
+                    return
 
     def _db_head(self) -> int:
         with self._lock:
@@ -251,6 +264,8 @@ class PgJournal(Journal):
                     for rec, seq, blob in zip(records, seqs, blobs):
                         if blob is None:
                             _copy_cells(copy, self.model_id, seq, rec["changes"].get("cells", []))
+                # 追従する読み手（Replica）に知らせる。確定したときに届く
+                self.conn.execute("select pg_notify('nanashi_head', %s)", (self.model_id,))
             self.head = seqs[-1]
             return seqs
 
@@ -259,8 +274,12 @@ class PgJournal(Journal):
     def _write_blob(self, record: dict) -> dict:
         """記録のセルの変更を Metric ごとの Parquet にして置き、置き場所、ハッシュ、件数を返す。"""
         prefix = f"{self.model_id}/cells/{uuid.uuid4().hex}"
-        files = write_cell_files(record, lambda name, data: self.objects.put(f"{prefix}-{name}", data))
-        return {"format": "parquet", "prefix": self.objects.uri(prefix), "files": files, "cells": cell_count(record)}
+
+        def put(name: str, data: bytes) -> str:
+            self.objects.put(f"{prefix}-{name}", data)
+            return f"{prefix}-{name}"
+        files = write_cell_files(record, put)
+        return {"format": "parquet", "prefix": prefix, "files": files, "cells": cell_count(record)}
 
     def _read_blob(self, blob: dict) -> list[dict]:
         """_write_blob で置いたセルの変更を読む（Metric ごとの変更の塊）。以前の版の npz も読む。"""
@@ -276,30 +295,44 @@ class PgJournal(Journal):
 
     def index_pending(self) -> int:
         """確定の後に回した大量のセルの変更を、cell_change に書き込む（専用の接続で行うので、
-        書き込みを止めない）。書き込んだ記録の数を返す。"""
+        書き込みを止めない）。書き込んだ記録の数を返す。
+
+        複数のプロセスが同時に呼んでも、同じ記録を二重に書かない。モデルごとの advisory lock で順に並べ、
+        記録ごとに「まだ反映していない」印を先に外してから書く（印を外せなければ、ほかが書いた）。"""
         with self._index_lock:
             if self._index_conn is None:
                 self._index_conn = psycopg.connect(self.dsn, autocommit=True)
             conn = self._index_conn
-            pending = conn.execute("select seq, record->'cells_blob' from nanashi_operation"
-                                   " where model_id = %s and not indexed order by seq", (self.model_id,)).fetchall()
-            loaded = 0
-            core = native() if pending else None
-            for seq, blob in pending:
-                cells = self._read_blob(blob)
-                with conn.transaction():
-                    with conn.cursor().copy("copy nanashi_cell_change (model_id, seq, metric_id, coords,"
-                                            " old_value, new_value) from stdin") as copy:
-                        for c in cells:  # COPY のテキストは Rust で作る（行ごとに Python を通さない）
-                            copy.write(as_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
-                    conn.execute("update nanashi_operation set indexed = true where model_id = %s and seq = %s",
-                                 (self.model_id, seq))
-                loaded += blob["cells"]
-            if loaded > ANALYZE_ROWS:
-                # 大量に入れた直後は表の統計が古く、セルの索引を使わない実行計画になりうる
-                # （300 万行で、1 つのセルの履歴に 250 ms かかった。統計を取り直すと 0.2 ms）
-                conn.execute("analyze nanashi_cell_change")
-            return len(pending)
+            conn.execute("select pg_advisory_lock(hashtextextended(%s, 0))", ("nanashi_index:" + self.model_id,))
+            try:
+                return self._index_locked(conn)
+            finally:
+                conn.execute("select pg_advisory_unlock(hashtextextended(%s, 0))", ("nanashi_index:" + self.model_id,))
+
+    def _index_locked(self, conn) -> int:
+        pending = conn.execute("select seq, record->'cells_blob' from nanashi_operation"
+                               " where model_id = %s and not indexed order by seq", (self.model_id,)).fetchall()
+        loaded, done = 0, 0
+        core = native() if pending else None
+        for seq, blob in pending:
+            cells = self._read_blob(blob)
+            with conn.transaction():
+                claimed = conn.execute("update nanashi_operation set indexed = true"
+                                       " where model_id = %s and seq = %s and not indexed",
+                                       (self.model_id, seq)).rowcount
+                if not claimed:
+                    continue  # ほかのプロセスが先に反映した
+                with conn.cursor().copy("copy nanashi_cell_change (model_id, seq, metric_id, coords,"
+                                        " old_value, new_value) from stdin") as copy:
+                    for c in cells:  # COPY のテキストは Rust で作る（行ごとに Python を通さない）
+                        copy.write(as_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
+            loaded += blob["cells"]
+            done += 1
+        if loaded > ANALYZE_ROWS:
+            # 大量に入れた直後は表の統計が古く、セルの索引を使わない実行計画になりうる
+            # （300 万行で、1 つのセルの履歴に 250 ms かかった。統計を取り直すと 0.2 ms）
+            conn.execute("analyze nanashi_cell_change")
+        return done
 
     def seq_of(self, client_op_id: str) -> int | None:
         with self._lock:
@@ -354,16 +387,12 @@ class PgJournal(Journal):
     def save_snapshot(self, model) -> str:
         # 同じ通し番号で取り直しても、登録済みのファイルを書き換えないよう、置き場所ごとに乱数を付ける
         prefix = f"{self.model_id}/snapshots/{model.seq:020d}-{uuid.uuid4().hex[:8]}"
-        files = {}
-        for name, data in dump(model).items():
-            self.objects.put(f"{prefix}/{name}", data)
-            files[name] = hashlib.sha256(data).hexdigest()
-        uri, meta = self.objects.uri(prefix), {"seq": model.seq, "files": files}
-        with self._lock, self.conn.transaction():  # ファイルを置き終えてから登録する
+        meta = put_snapshot(self.objects, prefix, model)
+        with self._lock, self.conn.transaction():  # ファイルと manifest を置き終えてから登録する
             self.conn.execute("insert into nanashi_snapshot (model_id, seq, uri, meta) values (%s, %s, %s, %s)"
                               " on conflict (model_id, seq) do update set uri = excluded.uri, meta = excluded.meta",
-                              (self.model_id, model.seq, uri, Jsonb(meta)))
-        return uri
+                              (self.model_id, model.seq, prefix, Jsonb(meta)))
+        return prefix
 
     def snapshots(self) -> list[tuple[int, Snapshot]]:
         """登録したスナップショット（新しい順）。ファイルのハッシュは読むときに確かめる
@@ -374,17 +403,7 @@ class PgJournal(Journal):
         return [(seq, Snapshot(uri, meta["files"])) for seq, uri, meta in rows]
 
     def load_snapshot(self, place: Snapshot, engine):
-        def file(name: str) -> bytes:
-            if name not in place.files:
-                raise BrokenSnapshot(f"{place.uri}: {name} が登録されていない")
-            try:
-                data = self.objects.get(f"{place.uri}/{name}")
-            except FileNotFoundError:
-                raise BrokenSnapshot(f"{place.uri}: {name} がない") from None
-            if hashlib.sha256(data).hexdigest() != place.files[name]:
-                raise BrokenSnapshot(f"{place.uri}: {name} のハッシュが合わない")
-            return data
-        return read(file, engine)
+        return read_snapshot(self.objects, place, engine)
 
     def drop(self) -> None:
         """このモデルの記録をすべて消す（テスト用）。"""

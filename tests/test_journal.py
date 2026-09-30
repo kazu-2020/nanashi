@@ -195,11 +195,11 @@ class Journal(JournalCase, unittest.TestCase):
         snapshots = self.journals.journal().snapshots()
         self.assertEqual([s for s, _ in snapshots], [1, 0])
         check_same_state(self, self.m, self.reopen())
-        # 新しいスナップショットが壊れていたら、古いスナップショットから記録を多く再生する
-        # （FileJournal は一覧から外し、PgJournal は読むときにハッシュが合わないので 1 つ前に戻る）
+        # 新しいスナップショットが壊れていたら、読むときにハッシュが合わないので、古いスナップショットから
+        # 記録を多く再生する
         place = dict(snapshots)[1]
-        broken = next(Path(getattr(place, "uri", place)).glob("inputs.*.parquet"))  # PgJournal は Snapshot
-        broken.write_bytes(b"broken")
+        name = next(n for n in place.files if n.startswith("inputs."))
+        self.journals.journal().objects.put(f"{place.uri}/{name}", b"broken")
         check_same_state(self, self.m, self.reopen())
 
     def test_torn_last_line_is_dropped(self):
@@ -279,6 +279,31 @@ class Journal(JournalCase, unittest.TestCase):
         size = (self.path / "log.jsonl").stat().st_size
         self.assertEqual(self.reopen().get("Price", Product="A"), 12)
         self.assertEqual((self.path / "log.jsonl").stat().st_size, size)
+
+    def test_snapshot_without_manifest_is_not_used(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        self.m.checkpoint()
+        manifest = next(k for k in self.m.journal.objects.list("snapshots/") if k.endswith("manifest.json")
+                        and "/00000000000000000001-" in k)
+        self.m.journal.objects.delete(manifest)  # ファイルを置いている途中で落ちた
+        self.assertEqual([s for s, _ in self.journals.journal().snapshots()], [0])
+        check_same_state(self, self.m, self.reopen())
+
+    def test_legacy_snapshot_directory_is_read(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        self.m.checkpoint()
+        # 以前の版の置き方（snapshots/<通し番号>/ に、ファイルと meta.json）に直す
+        objects = self.m.journal.objects
+        (seq, place), _ = self.journals.journal().snapshots()
+        for name in place.files:
+            objects.put(f"snapshots/{seq:020d}/{name}", objects.get(f"{place.uri}/{name}"))
+            objects.delete(f"{place.uri}/{name}")
+        objects.put(f"snapshots/{seq:020d}/meta.json", objects.get(f"{place.uri}/manifest.json"))
+        objects.delete(f"{place.uri}/manifest.json")
+        self.assertEqual(self.journals.journal().snapshots()[0][1].uri, f"snapshots/{seq:020d}")
+        check_same_state(self, self.m, self.reopen())
 
     def test_corruption_in_the_middle_is_an_error(self):
         self.file_only()
