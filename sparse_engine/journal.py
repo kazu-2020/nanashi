@@ -269,7 +269,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     for i in ch.get("metrics_removed", []):
         m = metric_of(i)
         model.metrics.pop(m.name)
-        model._values.pop(m.name, None)
+        model._state.pop(m.name, None)
     defs = ch.get("metrics", [])
     for spec in defs:  # 名前を入れ替える変更もあるので、一度仮の名前にする
         m = metric_of(spec["id"])
@@ -353,8 +353,8 @@ def _rename_metric_raw(model, old: str, new: str) -> None:
     m = model.metrics.pop(old)
     m.name = new
     model.metrics[new] = m
-    if old in model._values:
-        model._values[new] = model._values.pop(old)
+    if old in model._state:
+        model._state[new] = model._state.pop(old)
 
 
 def _define(model, spec: dict) -> None:

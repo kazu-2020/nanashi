@@ -7,6 +7,7 @@ from pathlib import Path
 from examples.fpa import build as build_fpa
 from sparse_engine import Model, to_formula
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.model import _UNSET
 
 from .test_engines import build_with
 from .test_incremental import same, snapshot
@@ -70,6 +71,22 @@ class Ids(unittest.TestCase):
         self.assertNotEqual(d.id_of("B"), b)
         ids = all_ids(self.m)
         self.assertEqual(len(ids), len(set(ids)))
+
+    def test_per_metric_state_moves_as_one(self):
+        m = build_with(ReferenceEngine())
+        m.add_formula("Double", ["Product", "Month"], "Margin * 2", overridable=True)
+        m.recalc()
+        fields = lambda name: {f for f in m._state[name].__slots__ if getattr(m._state[name], f) is not _UNSET}
+        margin = fields("Margin")
+        m.rename_metric("Margin", "Profit")
+        self.assertNotIn("Margin", m._state)
+        self.assertEqual(fields("Profit"), margin)  # 格納データ、計画、分割軸、見積もりなどが一緒に移る
+        m.remove_metric("Double")
+        self.assertFalse({"Double", "__override__Double"} & set(m._state))
+        self.assertEqual(set(m._state), set(m.metrics))
+        check_full = snapshot(m)
+        m._invalidate()
+        self.assertEqual(snapshot(m), check_full)
 
     def test_metrics_keep_their_id(self):
         margin = self.m.metrics["Margin"].id

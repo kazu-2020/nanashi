@@ -26,6 +26,7 @@ import itertools
 import math
 from dataclasses import dataclass, field
 from statistics import mean
+from collections.abc import MutableMapping
 from typing import Any, Mapping
 
 from .core import Cube, Dimension, Key
@@ -183,6 +184,85 @@ class _CellCounts(dict):
         return n
 
 
+_UNSET = object()
+
+
+@dataclass(slots=True)
+class MetricState:
+    """Metric ごとに Model が持つ、定義（Metric）以外の状態。Metric を消す・名前を変えるときは、これを
+    まるごと動かす（状態を 1 つ足しても、消すところと名前を変えるところを直さなくてよい）。
+    まだ持っていない状態は _UNSET。"""
+    value: Any = _UNSET           # 格納データ（エンジンごとの形式）
+    count: Any = _UNSET           # 差分集計する SUM の各グループの件数
+    delta: Any = _UNSET           # 差分集計の計画（DeltaPlan）
+    partition: Any = _UNSET       # 分割軸（layout）
+    warnings: Any = _UNSET        # 型検査の警告
+    edges: Any = _UNSET           # 依存グラフの辺（この Metric -> 参照先）
+    samples: Any = _UNSET         # この入力の 1 セルを変えたときの影響範囲（分割軸の選択に使う）
+    estimate: Any = _UNSET        # 結果のセル数の見積もり（上限）
+    estimate_refs: Any = _UNSET   # 見積もりが読んだ Metric
+    estimate_users: Any = _UNSET  # この Metric を読む見積もり
+
+
+class _Field(MutableMapping):
+    """Model._state の 1 つの状態を、Metric 名 -> 値の dict のように見せる。"""
+    __slots__ = ("_states", "_name")
+
+    def __init__(self, states: dict[str, MetricState], name: str):
+        self._states, self._name = states, name
+
+    def __getitem__(self, key: str):
+        st = self._states.get(key)
+        v = _UNSET if st is None else getattr(st, self._name)
+        if v is _UNSET:
+            raise KeyError(key)
+        return v
+
+    def get(self, key: str, default=None):
+        st = self._states.get(key)
+        v = _UNSET if st is None else getattr(st, self._name)
+        return default if v is _UNSET else v
+
+    def __contains__(self, key) -> bool:
+        st = self._states.get(key)
+        return st is not None and getattr(st, self._name) is not _UNSET
+
+    def __setitem__(self, key: str, value) -> None:
+        st = self._states.get(key)
+        if st is None:
+            st = self._states[key] = MetricState()
+        setattr(st, self._name, value)
+
+    def __delitem__(self, key: str) -> None:
+        if key not in self:
+            raise KeyError(key)
+        setattr(self._states[key], self._name, _UNSET)
+
+    def __iter__(self):
+        name = self._name
+        return (k for k, st in list(self._states.items()) if getattr(st, name) is not _UNSET)
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def __repr__(self) -> str:
+        return repr(dict(self))
+
+
+def _per_metric(name: str, doc: str) -> property:
+    """Model._state の状態 name を dict のように読み書きする属性。代入すると、その状態だけを入れ替える。"""
+    def get(self) -> _Field:
+        return _Field(self._state, name)
+
+    def set(self, mapping) -> None:
+        mapping = dict(mapping)
+        for k, st in self._state.items():
+            setattr(st, name, mapping.pop(k, _UNSET))
+        for k, v in mapping.items():
+            self._state[k] = MetricState(**{name: v})
+    return property(get, set, doc=doc)
+
+
 @dataclass
 class Model:
     engine: Store = field(default_factory=default_engine)
@@ -190,29 +270,32 @@ class Model:
     delta_aggregation: bool = True  # False なら集計も普通に計算し直す
     max_cells: int | None = 1_000_000_000  # 計算 Metric 1 つのセル数の見積もりの上限。None なら検査しない
     dimensions: dict[str, Dimension] = field(default_factory=dict)
-    layout: dict[str, str | None] = field(default_factory=dict)  # Metric ごとの分割軸
     metrics: dict[str, Metric] = field(default_factory=dict)
-    warnings: dict[str, list[str]] = field(default_factory=dict)
-    cell_estimates: dict[str, float] = field(default_factory=dict)  # 計算 Metric のセル数の見積もり（上限）
     eval_log: Log = field(default_factory=Log)  # 再計算した Metric 名（観察用）
     slice_log: SliceLog = field(default_factory=lambda: SliceLog())  # 再計算した範囲（観察用）
     delta_log: Log = field(default_factory=Log)  # 差分集計で更新した Metric（観察用）
-    _values: dict[str, Any] = field(default_factory=dict)  # エンジンごとの格納形式
+    _state: dict[str, MetricState] = field(default_factory=dict)  # Metric ごとの、定義以外の状態
     _plan: list[Step] | None = None
     _levels: list[list[Step]] = field(default_factory=list)  # 依存関係の段ごとの計画（全体の再計算用）
     _pending: Pending = field(default_factory=Pending)  # 前回の再計算のあとにためている変更
-    _delta: dict[str, DeltaPlan] = field(default_factory=dict)  # 差分集計する Metric -> 計画
-    _counts: dict[str, Any] = field(default_factory=dict)  # 差分集計する SUM の各グループの件数
-    _edges: dict[str, list[Edge]] = field(default_factory=dict)  # 依存グラフ（Metric -> 参照先）
-    _samples: dict[str, dict[str, Restrict]] = field(default_factory=dict)  # 分割軸の選択に使った、入力ごとの影響範囲
-    _estimate_refs: dict[str, frozenset[str]] = field(default_factory=dict)  # 見積もりが読んだ Metric
-    _estimate_users: dict[str, frozenset[str]] = field(default_factory=dict)  # Metric -> それを読む見積もり
     _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
     journal: Any = None  # 記録先（journal.FileJournal など）。None なら記録しない
     seq: int = 0  # 確定した最後のトランザクションの通し番号
     last_record: dict | None = None  # 最後に確定したトランザクションの記録
     _txn: Transaction | None = None  # 実行中のトランザクション
     _frozen: bool = False  # 公開済みの版（Workspace）。書き換えない
+
+    # Metric ごとの状態（_state）を、Metric 名 -> 値の dict のように見せる
+    _values = _per_metric("value", "格納データ（エンジンごとの形式）")
+    _counts = _per_metric("count", "差分集計する SUM の各グループの件数")
+    _delta = _per_metric("delta", "差分集計する Metric -> 計画")
+    layout = _per_metric("partition", "Metric ごとの分割軸")
+    warnings = _per_metric("warnings", "Metric ごとの型検査の警告")
+    _edges = _per_metric("edges", "依存グラフ（Metric -> 参照先）")
+    _samples = _per_metric("samples", "分割軸の選択に使った、入力ごとの影響範囲")
+    cell_estimates = _per_metric("estimate", "計算 Metric のセル数の見積もり（上限）")
+    _estimate_refs = _per_metric("estimate_refs", "見積もりが読んだ Metric")
+    _estimate_users = _per_metric("estimate_users", "Metric -> それを読む見積もり")
 
     # ------------------------------------------------ Catalog
 
@@ -500,10 +583,8 @@ class Model:
             raise ValueError(f"{name} は {', '.join(users)} の式が参照しているので消せない")
         gone = {name} | ({m.override_name} if m.overridable and m.override_name in self.metrics else set())
         for n in gone:
-            for store in (self.metrics, self._values, self._counts, self._delta, self.layout,
-                          self.warnings, self._edges, self._samples, self.cell_estimates, self._estimate_refs,
-                          self._estimate_users):
-                store.pop(n, None)
+            self.metrics.pop(n, None)
+            self._state.pop(n, None)
             for regions in self._samples.values():
                 regions.pop(n, None)
         self._pending.forget(gone)
@@ -526,11 +607,8 @@ class Model:
         names = {old: new}
         if m.overridable and m.override_name in self.metrics:
             names[m.override_name] = f"__override__{new}"
-        for store in (self.metrics, self._values, self._counts, self._delta, self.layout, self.warnings,
-                      self._edges, self._samples, self.cell_estimates):
-            for o, n in names.items():
-                if o in store:
-                    store[n] = store.pop(o)
+        self.metrics = {names.get(k, k): v for k, v in self.metrics.items()}  # 並び順は保つ
+        self._state = {names.get(k, k): v for k, v in self._state.items()}
         for o, n in names.items():
             self.metrics[n].name = n
         for store in ("_estimate_refs", "_estimate_users"):
