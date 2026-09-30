@@ -244,7 +244,8 @@ class Server(ThreadingHTTPServer):
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="nanashi の HTTP サーバー")
-    ap.add_argument("path", help="記録先のディレクトリ（FileJournal）。--pg ならスナップショットの置き場所")
+    ap.add_argument("path", help="記録先のディレクトリ（FileJournal）。--pg ならスナップショットと"
+                    "大量の変更のファイルの置き場所（s3://<バケット>/<接頭辞> かディレクトリ）")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--engine", choices=["rust", "reference"], default="rust")

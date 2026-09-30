@@ -7,11 +7,13 @@
     operation    1 トランザクション 1 行。意図と、セル以外の結果を JSONB で持つ
     cell_change  書き換えた入力セルごとに 1 行（Metric の ID、座標のメンバーの ID の配列、変更前後の値）。
                  セルの履歴を索引で引ける
-    snapshot     スナップショットの置き場所とハッシュ（ファイルはオブジェクトストレージの代わりに
-                 ローカルのディレクトリに置き、置き終えてから登録する）
+    snapshot     スナップショットの置き場所とハッシュ（ファイルはオブジェクトストレージに置き、
+                 置き終えてから登録する。ハッシュは読むときに確かめ、合わなければ 1 つ前のものを使う）
+
+ファイルの置き場所（objects.py）は S3 互換のオブジェクトストレージ（s3://…）か、ローカルのディレクトリ。
 
 大量のセルを書き換えた記録（bulk_cells を超えるもの）は、変更前後の値を Metric ごとに Parquet の
-ファイル（オブジェクトストレージの代わり）に書いて確定し、operation にはその置き場所とハッシュだけを
+ファイルにしてオブジェクトストレージに置いてから確定し、operation にはその置き場所とハッシュだけを
 持つ。Parquet の列は、座標のメンバーの ID（d<軸の ID>、Int64）と、変更前 old と変更後 new（空は null）。
 cell_change への書き込み（と索引の更新）は確定の後で行う（index_pending）。行を 1 件ずつ入れる費用が
 大きく、確定の経路に入れると大量の書き込みの確定が十数倍遅くなるため。セルの履歴を引くときは、
@@ -28,20 +30,22 @@ cell_change への書き込み（と索引の更新）は確定の後で行う�
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import socket
 import threading
 import time
 import uuid
-from pathlib import Path
-from typing import Iterator
+from typing import Iterator, NamedTuple
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from .engine import native
-from .journal import Journal, Stale, _sha256, _shown, _sync, snapshot_ok, write_snapshot
+from .journal import BrokenSnapshot, Journal, Stale, _shown
+from .objects import open_objects
+from .storage import dump, read
 
 SCHEMA = """
 create table if not exists nanashi_model (
@@ -94,19 +98,23 @@ class Fenced(Stale):
     """書き込むためのリースを持っていないか、別のプロセスが先に書き込んでいた。"""
 
 
+class Snapshot(NamedTuple):
+    uri: str               # ファイルの置き場所の接頭辞（<uri>/<ファイルの名前>）
+    files: dict[str, str]  # ファイルの名前 -> SHA-256
+
+
 class PgJournal(Journal):
-    def __init__(self, dsn: str, model_id: str, snapshot_dir, *, lease_ttl: float = 30.0,
+    def __init__(self, dsn: str, model_id: str, objects, *, lease_ttl: float = 30.0,
                  holder: str | None = None, bulk_cells: int = 10_000, heartbeat: bool = True,
                  acquire_wait: float | None = None):
-        """lease_ttl はリースの期限（秒）。heartbeat なら、リースを持っている間は期限の 1/3 ごとに延長する。
+        """objects はスナップショットと大量の変更のファイルの置き場所（s3://<バケット>/<接頭辞> か
+        ディレクトリ。objects.py）。その下の <model_id>/ に置く。
+        lease_ttl はリースの期限（秒）。heartbeat なら、リースを持っている間は期限の 1/3 ごとに延長する。
         acquire_wait は、別のプロセスのリースが切れるのを待つ長さ（既定は lease_ttl）。
         holder はリースの持ち主の名前（既定はホスト名、プロセス番号、乱数）。"""
         self.dsn = dsn
         self.model_id = model_id
-        self.snapshot_dir = Path(snapshot_dir) / model_id
-        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
-        self.blob_dir = self.snapshot_dir / "cells"
-        self.blob_dir.mkdir(exist_ok=True)
+        self.objects = open_objects(objects)
         self.bulk_cells = bulk_cells
         # 接続はスレッドをまたいで使われうる（ライターと読み出し）。トランザクションの途中に別の文が
         # 割り込まないよう、接続を使う処理はロックで順に並べる。後からの反映は別の接続で行う
@@ -222,7 +230,7 @@ class PgJournal(Journal):
             if self.epoch is None:
                 self.acquire()
             seqs = list(range(self.head + 1, self.head + 1 + len(records)))
-            # 大量のセルは、確定の前にファイルへ書いておく（確定に失敗したら参照されないファイルが残るだけ）
+            # 大量のセルは、確定の前にファイルを置いておく（確定に失敗したら参照されないファイルが残るだけ）
             blobs = [self._write_blob(r) if _cell_count(r) > self.bulk_cells else None for r in records]
             with self.conn.transaction():
                 cur = self.conn.execute(
@@ -253,39 +261,33 @@ class PgJournal(Journal):
     # ------------------------------------------------ 大量のセル
 
     def _write_blob(self, record: dict) -> dict:
-        """記録のセルの変更を Metric ごとの Parquet に書き、置き場所、ハッシュ、件数を返す。"""
+        """記録のセルの変更を Metric ごとの Parquet にして置き、置き場所、ハッシュ、件数を返す。"""
         core = native()
-        prefix = self.blob_dir / uuid.uuid4().hex
+        prefix = f"{self.model_id}/cells/{uuid.uuid4().hex}"
         files = []
         for c in record["changes"].get("cells", []):
             block = _block(core, c["rows"])
             # 列の名前は軸の ID（記録に軸がなければ c0、c1、…）
             names = [f"d{i}" for i in c["dims"]] if "dims" in c else [f"c{j}" for j in range(block.width)]
             data = block.to_parquet(names, [("nanashi", json.dumps({"metric": c["metric"]}))])
-            final = Path(f"{prefix}-{c['metric']}.parquet")
-            tmp = final.with_suffix(".tmp")
-            with open(tmp, "wb") as f:
-                f.write(data)
-                f.flush()
-                _sync(f.fileno())
-            os.rename(tmp, final)
-            files.append({"metric": c["metric"], "uri": str(final), "sha256": hashlib.sha256(data).hexdigest(),
+            uri = self.objects.put(f"{prefix}-{c['metric']}.parquet", data)
+            files.append({"metric": c["metric"], "uri": uri, "sha256": hashlib.sha256(data).hexdigest(),
                           "cells": len(block)})
-        return {"format": "parquet", "prefix": str(prefix), "files": files, "cells": _cell_count(record)}
+        return {"format": "parquet", "prefix": self.objects.uri(prefix), "files": files, "cells": _cell_count(record)}
 
-    @staticmethod
-    def _read_blob(blob: dict) -> list[dict]:
-        """_write_blob で書いたセルの変更を読む（Metric ごとの変更の塊）。以前の版の npz も読む。"""
+    def _read_blob(self, blob: dict) -> list[dict]:
+        """_write_blob で置いたセルの変更を読む（Metric ごとの変更の塊）。以前の版の npz も読む。"""
         if blob.get("format") != "parquet":
-            return _read_npz(blob)
+            return _read_npz(self._get_checked(blob))
         core = native()
-        cells = []
-        for f in blob["files"]:
-            data = Path(f["uri"]).read_bytes()
-            if hashlib.sha256(data).hexdigest() != f["sha256"]:
-                raise ValueError(f"{f['uri']}: セルの変更のファイルが壊れている")
-            cells.append({"metric": f["metric"], "rows": core.CellBlock.from_parquet(data)})
-        return cells
+        return [{"metric": f["metric"], "rows": core.CellBlock.from_parquet(self._get_checked(f))}
+                for f in blob["files"]]
+
+    def _get_checked(self, f: dict) -> bytes:
+        data = self.objects.get(f["uri"])
+        if hashlib.sha256(data).hexdigest() != f["sha256"]:
+            raise ValueError(f"{f['uri']}: セルの変更のファイルが壊れている")
+        return data
 
     def index_pending(self) -> int:
         """確定の後に回した大量のセルの変更を、cell_change に書き込む（専用の接続で行うので、
@@ -364,20 +366,40 @@ class PgJournal(Journal):
 
     # ------------------------------------------------ スナップショット
 
-    def save_snapshot(self, model) -> Path:
-        final = self.snapshot_dir / f"{model.seq:020d}"
-        meta = write_snapshot(model, final, fsync=True)
+    def save_snapshot(self, model) -> str:
+        # 同じ通し番号で取り直しても、登録済みのファイルを書き換えないよう、置き場所ごとに乱数を付ける
+        prefix = f"{self.model_id}/snapshots/{model.seq:020d}-{uuid.uuid4().hex[:8]}"
+        files = {}
+        for name, data in dump(model).items():
+            self.objects.put(f"{prefix}/{name}", data)
+            files[name] = hashlib.sha256(data).hexdigest()
+        uri, meta = self.objects.uri(prefix), {"seq": model.seq, "files": files}
         with self._lock, self.conn.transaction():  # ファイルを置き終えてから登録する
             self.conn.execute("insert into nanashi_snapshot (model_id, seq, uri, meta) values (%s, %s, %s, %s)"
                               " on conflict (model_id, seq) do update set uri = excluded.uri, meta = excluded.meta",
-                              (self.model_id, model.seq, str(final), Jsonb(meta)))
-        return final
+                              (self.model_id, model.seq, uri, Jsonb(meta)))
+        return uri
 
-    def snapshots(self) -> list[tuple[int, Path]]:
+    def snapshots(self) -> list[tuple[int, Snapshot]]:
+        """登録したスナップショット（新しい順）。ファイルのハッシュは読むときに確かめる
+        （オブジェクトストレージから一覧のためにすべて読まない）。"""
         with self._lock:
             rows = self.conn.execute("select seq, uri, meta from nanashi_snapshot where model_id = %s and seq <= %s"
                                      " order by seq desc", (self.model_id, self.head)).fetchall()
-        return [(seq, Path(uri)) for seq, uri, meta in rows if snapshot_ok(Path(uri), meta)]
+        return [(seq, Snapshot(uri, meta["files"])) for seq, uri, meta in rows]
+
+    def load_snapshot(self, place: Snapshot, engine):
+        def file(name: str) -> bytes:
+            if name not in place.files:
+                raise BrokenSnapshot(f"{place.uri}: {name} が登録されていない")
+            try:
+                data = self.objects.get(f"{place.uri}/{name}")
+            except FileNotFoundError:
+                raise BrokenSnapshot(f"{place.uri}: {name} がない") from None
+            if hashlib.sha256(data).hexdigest() != place.files[name]:
+                raise BrokenSnapshot(f"{place.uri}: {name} のハッシュが合わない")
+            return data
+        return read(file, engine)
 
     def drop(self) -> None:
         """このモデルの記録をすべて消す（テスト用）。"""
@@ -406,13 +428,10 @@ def _copy_cells(copy, model_id: str, seq: int, cells: list[dict]) -> None:
                             None if old is None else float(old), None if new is None else float(new)))
 
 
-def _read_npz(blob: dict) -> list[dict]:
+def _read_npz(raw: bytes) -> list[dict]:
     """以前の版が書いたセルの変更（1 つの npz に、Metric ごとの配列を持つ）。値は float で返す。"""
     from . import npz
-    path = Path(blob["uri"])
-    if _sha256(path) != blob["sha256"]:
-        raise ValueError(f"{path}: セルの変更のファイルが壊れている")
-    data = npz.load(path)
+    data = npz.load(io.BytesIO(raw))
     cells = []
     i = 0
     while f"metric{i}" in data:

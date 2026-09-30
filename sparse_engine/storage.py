@@ -15,8 +15,10 @@ Parquet の読み書きは nanashi_core が行う（参照実装のエンジン�
 """
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
+from typing import Callable
 
 from .engine import Engine, default_engine, native, parquet_columns, parquet_value
 from .parser import to_formula
@@ -28,6 +30,12 @@ READABLE = (1, 2, 3)
 def save(model, path) -> None:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
+    for name, data in dump(model).items():
+        (path / name).write_bytes(data)
+
+
+def dump(model) -> dict[str, bytes]:
+    """save で置くファイルの名前 -> 中身（オブジェクトストレージなど、ディレクトリ以外に置くとき）。"""
     dims = []
     for d in model.dimensions.values():
         props = {prop: {"target": target, "mapping": mapping} for prop, (target, mapping) in d.properties.items()}
@@ -48,9 +56,7 @@ def save(model, path) -> None:
     meta = {"format": FORMAT_VERSION, "next_id": model._next_id, "dimensions": dims, "metrics": metrics,
             "options": {"auto_layout": model.auto_layout, "delta_aggregation": model.delta_aggregation,
                         "max_cells": model.max_cells}}
-    (path / "model.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
-    for name, data in files.items():
-        (path / name).write_bytes(data)
+    return {"model.json": json.dumps(meta, ensure_ascii=False, indent=1).encode(), **files}
 
 
 def input_file(metric_id: int) -> str:
@@ -58,10 +64,15 @@ def input_file(metric_id: int) -> str:
 
 
 def load(path, engine: Engine | None = None):
+    path = Path(path)
+    return read(lambda name: (path / name).read_bytes(), engine)
+
+
+def read(file: Callable[[str], bytes], engine: Engine | None = None):
+    """save の形式を、ファイルの名前から中身を返す file で読む（ディレクトリ以外に置いたとき）。"""
     from .model import Model
 
-    path = Path(path)
-    meta = json.loads((path / "model.json").read_text())
+    meta = json.loads(file("model.json"))
     if meta.get("format") not in READABLE:
         raise ValueError(f"対応していない保存形式: {meta.get('format')}")
     engine = engine if engine is not None else default_engine()
@@ -77,13 +88,13 @@ def load(path, engine: Engine | None = None):
     legacy = None
     if meta["format"] < 3:
         from . import npz
-        legacy = npz.load(path / "inputs.npz")
+        legacy = npz.load(io.BytesIO(file("inputs.npz")))
     for i, spec in enumerate(meta["metrics"]):
         if spec["formula"] is not None:
             continue
         dims, kind = tuple(spec["dims"]), spec["kind"]
         if legacy is None:
-            data = (path / input_file(spec["id"])).read_bytes()
+            data = file(input_file(spec["id"]))
         else:  # 旧い形式の配列を、同じ Parquet の形にしてから読む
             data = native().write_parquet(parquet_columns(dims, m), [legacy[f"{i}.{d}"] for d in dims],
                                           legacy[f"{i}.__v"], parquet_value(kind), [])

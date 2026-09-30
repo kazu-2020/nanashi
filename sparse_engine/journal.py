@@ -26,6 +26,7 @@ import datetime
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -40,9 +41,15 @@ from .parser import parse, to_formula
 
 LOG_VERSION = 1
 
+log = logging.getLogger(__name__)
+
 
 class Stale(Exception):
     """手元のモデルが記録先より古い（別のプロセスが書き込んだ）。開き直せば続けられる。"""
+
+
+class BrokenSnapshot(Exception):
+    """スナップショットのファイルが欠けているか、ハッシュが合わない。"""
 
 
 class AlreadyCommitted(Exception):
@@ -328,7 +335,9 @@ class Journal:
         seq_of(client_op_id)       その ID の記録の通し番号（なければ None）
         records(after)             通し番号が after より後の記録（古い順）
         save_snapshot(model)       model（通し番号 model.seq の時点）のスナップショットを置く
-        snapshots()                使えるスナップショットの (通し番号, 置き場所) を新しい順に
+        snapshots()                スナップショットの (通し番号, 置き場所) を新しい順に
+        load_snapshot(place)       置き場所のスナップショットを読む。壊れていれば BrokenSnapshot
+                                   （open は 1 つ前のスナップショットから記録を多く再生する）
     """
 
     head: int = 0
@@ -364,12 +373,13 @@ class Journal:
         """最新のスナップショットを読み、その後の記録を再生したモデル（記録先はこの Journal）。"""
         from .engine import default_engine
         from .model import Model
-        from .storage import load
         engine = engine if engine is not None else default_engine()
-        snaps = self.snapshots()
-        if snaps:
-            base, path = snaps[0]
-            model = load(path, engine)
+        for base, place in self.snapshots():
+            try:
+                model = self.load_snapshot(place, engine)
+                break
+            except BrokenSnapshot as e:
+                log.warning("スナップショット %d が壊れている（1 つ前から開く）: %s", base, e)
         else:
             base, model = 0, Model(engine=engine)
         for rec in self.records(after=base):
@@ -377,6 +387,10 @@ class Journal:
         model.seq = self.head
         model.journal = self
         return model
+
+    def load_snapshot(self, place, engine):
+        from .storage import load
+        return load(place, engine)
 
     def start(self, model) -> None:
         """記録のない新しい記録先に、model の今の状態を最初のスナップショットとして置き、

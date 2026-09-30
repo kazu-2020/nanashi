@@ -17,7 +17,7 @@ python3 -m venv .venv
 VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
 ```
 
-`pyproject.toml` が依存の版を決めている。実行時に要る Python のパッケージはなく、開発用に maturin、psycopg、pyflakes、ベンチマークの入力を作るのに numpy を使う。
+`pyproject.toml` が依存の版を決めている。実行時に要る Python のパッケージはなく、開発用に maturin、psycopg、boto3、pyflakes、ベンチマークの入力を作るのに numpy を使う。
 最後の行で、Rust のエンジン（`nanashi_core`）をビルドして `.venv` に入れる。
 Rust のエンジンがなくても、参照実装のエンジンだけで計算できる。
 保存と読み込み（Parquet の読み書き）には、参照実装のエンジンでも `nanashi_core` を使う。
@@ -41,14 +41,20 @@ SPARSE_ENGINE=rust .venv/bin/python -m unittest discover -s tests -t .
 ```
 
 PostgreSQL の記録先（`PgJournal`）を使うときと、そのテストを回すときは、PostgreSQL と `psycopg` を用意する。
-テストは `NANASHI_PG_DSN`（既定は `postgresql://postgres@127.0.0.1:55432/nanashi`）につなぎ、つながらなければ飛ばす。
+記録先のスナップショットと大量の変更のファイルは、S3 互換のオブジェクトストレージに置く（`boto3` を使う）。
+手元では S3 の代わりに [RustFS](https://github.com/rustfs/rustfs)（Apache-2.0）の Docker イメージを使う。
+`compose.yaml` が、PostgreSQL と RustFS をまとめて起動する。
 
 ```bash
 .venv/bin/pip install "psycopg[binary]"
-docker run -d --name nanashi-pg -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=nanashi postgres:18-bookworm
+docker compose up -d   # PostgreSQL は 55432 番、RustFS は 59000 番（S3 の API）と 59001 番（管理画面）
 ```
 
-この `docker run` は開発とテスト用で、パスワードなしでつながる（手元からだけつながるように 127.0.0.1 に限っている）。
+テストは `NANASHI_PG_DSN`（既定は `postgresql://postgres@127.0.0.1:55432/nanashi`）と `NANASHI_S3_ENDPOINT`（既定は `http://127.0.0.1:59000`）につなぐ。
+PostgreSQL につながらなければ記録先のテストを飛ばし、RustFS につながらなければ、ファイルをオブジェクトストレージに置くテストだけを飛ばす（ローカルのディレクトリに置くテストは回す）。
+テスト用のバケット（`nanashi-test`）はテストが作る。
+
+`compose.yaml` は開発とテスト用で、PostgreSQL にはパスワードなしで、RustFS には固定の認証情報（`nanashi` / `nanashi-secret`）でつながる（どちらも手元からだけつながるように 127.0.0.1 に限っている）。
 
 損益計画と人員計画のサンプル（`examples/fpa.py`）は、ベンチマークも兼ねている。
 
@@ -423,15 +429,28 @@ Rust のエンジンでは、1 つの Metric で 1000 セル以上書き換え�
 ```python
 from sparse_engine.pg_journal import PgJournal
 
-journal = PgJournal("postgresql://...", "plan-2027", "snapshots/")  # モデルの ID と、スナップショットの置き場所
+journal = PgJournal("postgresql://...", "plan-2027", "s3://nanashi/plans")  # モデルの ID と、ファイルの置き場所
 ws = Workspace.open(journal, RustEngine())
 ```
+
+ファイルの置き場所は `s3://<バケット>/<接頭辞>` で、その下の `<モデルの ID>/` に置く。
+接続先と認証情報は boto3 の決まりどおり環境変数から読む。
+手元の RustFS なら次のとおりで、バケットは先に作っておく。
+
+```bash
+export AWS_ENDPOINT_URL=http://127.0.0.1:59000 AWS_ACCESS_KEY_ID=nanashi AWS_SECRET_ACCESS_KEY=nanashi-secret AWS_REGION=us-east-1
+.venv/bin/python -c 'import boto3; boto3.client("s3").create_bucket(Bucket="nanashi")'
+```
+
+`s3://` で始まらなければローカルのディレクトリに置く（オブジェクトストレージを用意しないときのため）。
 
 表は 4 つ（`nanashi_model`、`nanashi_operation`、`nanashi_cell_change`、`nanashi_snapshot`）で、1 つのデータベースに複数のモデルを置ける。
 
 - **操作**（`nanashi_operation`）：1 トランザクション 1 行。意図とセル以外の結果を JSONB で持つ。
 - **セルの変更**（`nanashi_cell_change`）：書き換えた入力セルごとに 1 行。Metric とメンバーの ID の配列で持ち、1 つのセルの履歴を索引で引ける。
-- **スナップショット**：ファイルはオブジェクトストレージの代わりにローカルのディレクトリに置き、置き終えてから表に登録する。
+- **スナップショット**：ファイルはオブジェクトストレージの `<モデルの ID>/snapshots/<通し番号>-<乱数>/` に置き、置き終えてから表に登録する。
+  置いたファイルは書き換えない（同じ通し番号で取り直しても別の場所に置く）。
+  ハッシュは開くときに読みながら確かめ、欠けていたり合わなかったりすれば、1 つ前のスナップショットから記録を多く再生する（一覧のためにすべてを読むことはしない）。
 
 書き込むプロセスは 1 つに限る。
 最初に書き込むときにリースを取って世代番号を 1 つ進め、確定は「通し番号が読んだとおりで、世代番号が自分のもの」のときだけ通る 1 回のトランザクションで行う。
@@ -443,12 +462,13 @@ ws = Workspace.open(journal, RustEngine())
 落ちたプロセスのリースが残っていれば、`acquire` は期限が切れるまで（既定で `lease_ttl` の長さまで）待ってから取るので、再起動が期限のぶん失敗し続けることはない（`acquire_wait=0` で待たない）。
 `Fenced` は `journal.Stale` の一種で、`Workspace` はこれを受けると記録先から最新の版を開き直す。
 
-1 万セルを超える変更は、変更前後の値を Metric ごとに Parquet のファイル（オブジェクトストレージの代わり）に書いて確定し、セルの変更の表への書き込みは確定の後に回す（`index_pending`）。
+1 万セルを超える変更は、変更前後の値を Metric ごとに Parquet のファイルにしてオブジェクトストレージ（`<モデルの ID>/cells/`）に置いてから確定し、セルの変更の表への書き込みは確定の後に回す（`index_pending`）。
 Parquet の列は、座標のメンバーの ID（`d<軸の ID>`、Int64）と、変更前 `old` と変更後 `new`（空は null）である。
 行を 1 件ずつ表に入れる費用が大きく、確定の経路に入れると大量の書き込みの確定が十数倍遅くなるためである。
 セルの履歴を引くときは、先に未反映の分を反映する。
 表に入れる COPY の行は Rust で作る。
 以前の版が書いた npz のファイルも読める。
+ローカルのディレクトリに置いていた記録先を、オブジェクトストレージに移しても、それまでのファイルはそのまま読める（記録にはファイルの置き場所をそのまま持つ）。
 10 万行を超えて反映したら、表の統計を取り直す（大量に入れた直後は統計が古く、セルの索引を使わない実行計画になって、1 つのセルの履歴に 250 ms かかった。取り直すと 0.2 ms）。
 
 ## 同時の読み書き
@@ -498,7 +518,7 @@ except Conflict as e:
 
 ```bash
 .venv/bin/python -m sparse_engine.server plan/ --port 8080 --checkpoint-every 1000   # FileJournal
-.venv/bin/python -m sparse_engine.server snapshots/ --pg postgresql://... --model-id plan-2027
+.venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id plan-2027
 ```
 
 | 要求 | 内容 |
@@ -703,6 +723,7 @@ Rust のエンジンは、並列化、差分のまとめ直し、準結合、転
 | `sparse_engine/journal.py` | トランザクションの記録、記録先（ファイル）、スナップショットと記録の再生による復元 |
 | `sparse_engine/workspace.py` | 版の公開と単一ライター（同時の読み書き、グループコミット、楽観的な排他） |
 | `sparse_engine/pg_journal.py` | PostgreSQL の記録先（リースと締め出し、大量の変更の後からの反映） |
+| `sparse_engine/objects.py` | オブジェクトストレージ（S3 互換か、ローカルのディレクトリ）。PostgreSQL の記録先のファイルの置き場所 |
 | `sparse_engine/server.py` | HTTP サーバー（Workspace を JSON の API で公開する） |
 | `native/` | Rust のエンジン（PyO3）。`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`core.rs` が格納と評価、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
@@ -718,7 +739,7 @@ Rust のエンジンを使うときの本番の経路は、構文（`expr.py`、
 
 - 順序付きの軸の途中へのメンバーの挿入には対応していない（追加は末尾だけ）。
 - 同時に読み書きするときは `Workspace` を通す。`Model` を直接複数のスレッドから使うことはできない（Rust の再計算中は、別のスレッドから読むと格納データが空に見える）。
-- PostgreSQL の記録先のスナップショットと大量の変更のファイル（どちらも Parquet）は、オブジェクトストレージの代わりにローカルのディレクトリに置いている。読み書きはバイト列で行うので、置き場所だけを差し替えればよい。参照されなくなったファイルの片付け（確定に失敗したときに残るものなど）もまだない。
+- PostgreSQL の記録先のファイル（スナップショットと大量の変更）のうち、参照されなくなったもの（確定に失敗したときに残るもの、古いスナップショットなど）の片付けはまだない。オブジェクトストレージへはファイルを 1 つずつ置くので、Metric の多いモデルではスナップショットの保存が往復の回数ぶん遅くなる。
 - `FileJournal` は大量の変更も JSON の行で書くので、開くときに行を読み直す費用は減っていない。
 - ライターは 1 つのまとまりを確定し終えてから次のまとまりを計算する（確定を待つ間に次を計算するパイプライン化はしていない）。重い書き込み（全体の再計算に近いもの）が列にあると、その間ほかの書き込みは待たされる。列の長さ（`max_queue`）と待ち時間で過負荷を上流に伝えることはできる。
 - Rust のエンジンは 1 セルのキーを 64 ビットの整数で持つので、軸のビット幅（メンバー数の対数）の合計が 64 を超える Metric は作れない（登録時に、軸ごとのビット幅と直し方を示して拒否する）。メンバー数が 2 の 22 乗を超える軸には、分割軸以外の索引を作らない。
