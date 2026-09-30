@@ -26,6 +26,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
@@ -40,5 +42,9 @@ jobs:
         run: SPARSE_ENGINE=rust python -m unittest discover -s tests -t .
         env:
           NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
+      - name: Rust の単体テスト
+        run: cargo test --release --manifest-path native/Cargo.toml
       - name: 静的検査
-        run: pyflakes sparse_engine tests examples bench*.py
+        run: |
+          pyflakes sparse_engine tests examples bench*.py
+          cargo clippy --release --all-targets --manifest-path native/Cargo.toml -- -D warnings
