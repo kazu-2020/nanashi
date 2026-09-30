@@ -5,9 +5,9 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::core::{eval, Agg, Catalog, Cube, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store, PAR_MIN};
+use crate::{eval, Agg, Catalog, Cube, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+
 use std::sync::Arc;
 
 // ------------------------------------------------------------------ 影響範囲
@@ -498,8 +498,6 @@ struct Done {
 /// 値が変わった範囲がセル全体のこの割合以上なら、全体が変わったものとして下流へ伝える
 /// （この行数以上の Metric だけ。小さな Metric では範囲を細かく伝えても安い）。
 pub const WIDEN_SHARE: f64 = 0.5;
-pub static WIDEN_MIN_ROWS: AtomicUsize = AtomicUsize::new(4096);
-
 /// 再計算した Metric の記録: (Metric の番号, 差分集計なら true, 範囲)。
 pub type Log = Vec<(usize, bool, Reg)>;
 
@@ -532,9 +530,6 @@ struct Run<'a> {
     olds: Vec<Option<Src>>,
     log: Log,
 }
-
-/// テスト用に、この番号の Metric を書き戻すところで失敗させる（-1 は失敗させない、-2 - m は panic させる）。
-pub static FAIL_AT: AtomicIsize = AtomicIsize::new(-1);
 
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
 /// forced は定義を変えたので必ず計算し直す計算 Metric の範囲。stores と counts（Metric の番号順）は
@@ -595,7 +590,7 @@ impl<'a> Run<'a> {
         // 小さな仕事ばかりなら、並列にする受け渡しの費用のほうが大きいので順に計算する
         let weight: usize = tasks.iter().map(|t| t.weight).sum();
         let run: &Self = self;
-        let done: Vec<Result<Done>> = if tasks.len() > 1 && (self.full || weight >= PAR_MIN.load(Ordering::Relaxed)) {
+        let done: Vec<Result<Done>> = if tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min) {
             tasks.par_iter().map(|t| run.compute(t)).collect()
         } else {
             tasks.iter().map(|t| run.compute(t)).collect()
@@ -667,7 +662,7 @@ impl<'a> Run<'a> {
                 let r = t.region.restrict(self.cat);
                 match &metric.count {
                     // 件数の式は値の式と同じ集計元を読むので、仕事が大きければ並列に評価する
-                    Some(c) if self.full || t.weight >= PAR_MIN.load(Ordering::Relaxed) => {
+                    Some(c) if self.full || t.weight >= self.cat.cfg.par_min => {
                         let (value, count) = rayon::join(|| self.eval(self.formula(t.m), None, &r), || self.eval(c, None, &r));
                         (value?, Some(count?))
                     }
@@ -706,9 +701,9 @@ impl<'a> Run<'a> {
     /// 計算した値を書き戻し、値が実際に変わったセルの範囲を下流への影響範囲にする。
     fn apply(&mut self, done: Done) -> Result<()> {
         let Done { m, region, delta, value, count, old } = done;
-        match FAIL_AT.load(Ordering::Relaxed) {
-            f if f == m as isize => return Err(format!("書き戻しの失敗（テスト用、Metric {m}）")),
-            f if f == -2 - m as isize => panic!("書き戻しの panic（テスト用、Metric {m}）"),
+        match self.cat.cfg.fail_at {
+            Some((f, false)) if f == m => return Err(format!("書き戻しの失敗（テスト用、Metric {m}）")),
+            Some((f, true)) if f == m => panic!("書き戻しの panic（テスト用、Metric {m}）"),
             _ => {}
         }
         let r = region.restrict(self.cat);
@@ -743,7 +738,7 @@ impl<'a> Run<'a> {
         let dims = &store.metric_dims;
         let size = |d: DimId| self.cat.dims[d].size as usize;
         let share: f64 = dims.iter().zip(&sets).map(|(&d, ms)| ms.len() as f64 / size(d).max(1) as f64).product();
-        if share >= WIDEN_SHARE && store.rows_hint() >= WIDEN_MIN_ROWS.load(Ordering::Relaxed) {
+        if share >= WIDEN_SHARE && store.rows_hint() >= self.cat.cfg.widen_min_rows {
             return Reg::default();
         }
         Reg::new(dims.iter().copied().zip(sets).filter(|(d, ms)| ms.len() < size(*d)).collect())
@@ -774,7 +769,7 @@ impl<'a> Run<'a> {
                 // 変更前の値は、実際に変わった範囲の分だけ戻す
                 Some(changed) => {
                     let rn = changed.restrict(cat);
-                    let before = self.olds[n].as_ref().expect("変更前の値").read(&rn);
+                    let before = self.olds[n].as_ref().expect("変更前の値").read(&self.cat.cfg, &rn);
                     let mut old = new.clone();
                     old.replace(&rn, &before)?;
                     Arc::new(old)

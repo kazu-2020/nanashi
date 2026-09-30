@@ -306,9 +306,12 @@ Metric の軸か値の種類を変えたときは、それを参照する式の�
 
 ### エンジン
 
-格納と評価は **エンジン** に任せ、Model は定義と操作、トランザクション、分割軸の選択を受け持つ。
-式の型検査（軸と値の種類、密になる演算の警告、エラーの文言、Metric を使った BY の書き換え）、計算計画（依存グラフ、強連結成分、scan の判定、依存の段）、差分集計の判定と差分の式、影響範囲の計算（入力の変更の伝搬、分割軸の選択、メンバーの削除で変わる範囲）は、Rust のエンジンでは Rust（`check.rs`、`graph.rs`、`plan.rs`）が行い、参照実装では Python（`evaluate.py`、`delta.py`、`model.py`）が行う。
-全体の再計算も、Rust では差分再計算と同じ段取り（すべての計算 Metric を全体について計算し直す指示）で行う。
+Model は定義と操作、トランザクション、分割軸の選択を受け持ち、それ以外は **エンジン** に任せる。
+エンジンは 2 つの役を持つ。セルの格納と式の評価（`engine.Store`）と、計画と段取り（`engine.planner`、`planner.Planner`）である。
+Planner は、式の型検査（軸と値の種類、密になる演算の警告、エラーの文言、Metric を使った BY の書き換え）、計算計画（依存グラフ、強連結成分、scan の判定、依存の段）、差分集計の判定と差分の式、影響範囲の計算（入力の変更の伝搬、分割軸の選択、メンバーの削除で変わる範囲）、再計算の段取りを受け持つ。
+Rust のエンジンでは Rust（`check.rs`、`graph.rs`、`plan.rs`）が行い（`RustPlanner`）、参照実装では Python（`planner.PyPlanner`、`evaluate.py`、`delta.py`）が行う。
+どの口も必須で、Model は口の有無を調べない（足りないエンジンは、黙って別の経路で動くのでなく、呼んだところで失敗する）。
+全体の再計算も、差分再計算と同じ段取り（すべての計算 Metric を全体について計算し直す指示）で行う。
 両方の型、文言、計画、差分集計の判定、範囲が一致することをテストで確かめている（`tests/test_expr_coverage.py`）。
 エンジンは 2 つある。
 
@@ -741,7 +744,7 @@ Parquet にした時点では 3,814 ms かかっていて、ほぼすべてが 2
 - 参照実装の結果（Rust のエンジンのとき）
 
 テスト自体がバグを検出できることは、影響範囲の伝搬や差分集計をわざと壊した実装でテストが失敗することで確かめている。
-Rust のエンジンは、並列化、差分のまとめ直し、準結合、転置索引の閾値を変えた設定でもテストを通す（`nanashi_core.set_par_min` などで変えられる）。
+Rust のエンジンは、並列化、差分のまとめ直し、準結合、転置索引の閾値を変えた設定でもテストを通す（`RustEngine(par_min=0, compact_min=3)` のように、エンジンごとに変えられる。値は `native/engine/src/config.rs`）。
 
 記録先を使うテスト（記録と再生の共通の性質、`Workspace`、HTTP サーバー）は、ファイルの記録先と PostgreSQL の記録先の両方で回す（`tests/journals.py` の `JournalCase`）。
 本番で使う組み合わせは Rust のエンジンと PostgreSQL の記録先なので、`Workspace` と HTTP サーバーのテストはこの組み合わせでも必ず回す。
@@ -751,37 +754,39 @@ PostgreSQL は `NANASHI_PG_DSN`（既定は手元の 55432 番）で指定し、
 
 | 場所 | 役割 |
 |---|---|
-| `sparse_engine/model.py` | Model。定義、読み出し、計算計画、影響範囲の伝搬、差分集計、scan。ためている変更は `Pending` にまとめる |
+| `sparse_engine/model.py` | Model。定義、操作、読み出し、トランザクション、分割軸の選択。ためている変更は `Pending` にまとめ、計画と再計算は Planner に任せる |
+| `sparse_engine/planner.py` | 計画と再計算の段取りの口（`Planner`）と、Python の参照実装（`PyPlanner`。計算計画、影響範囲、差分集計、scan） |
 | `sparse_engine/evaluate.py` | 型の検査、影響範囲、参照実装の評価器 |
 | `sparse_engine/parser.py` | 式の文字列の解析と、構文木から文字列への変換 |
 | `sparse_engine/delta.py` | 差分集計の対象になる式の判定 |
-| `sparse_engine/engine.py`、`rust_engine.py` | エンジンの差し替え口（`Engine`、計画を渡す `CompiledPlan`）と、参照実装、Rust の橋渡し |
+| `sparse_engine/engine.py`、`rust_engine.py` | 格納と評価の口（`Store`）と、参照実装、Rust の橋渡し（`RustEngine` と `RustPlanner`） |
 | `sparse_engine/storage.py`、`npz.py` | 保存と読み込み（Parquet）と、以前の版の形式（npz）の読み込み |
 | `sparse_engine/journal.py` | トランザクションの記録、記録先（ファイル）、スナップショットと記録の再生による復元 |
 | `sparse_engine/workspace.py` | 版の公開と単一ライター（同時の読み書き、グループコミット、楽観的な排他） |
 | `sparse_engine/pg_journal.py` | PostgreSQL の記録先（リースと締め出し、大量の変更の後からの反映） |
 | `sparse_engine/objects.py` | オブジェクトストレージ（S3 互換か、ローカルのディレクトリ）。PostgreSQL の記録先のファイルの置き場所 |
 | `sparse_engine/server.py` | HTTP サーバー（Workspace を JSON の API で公開する） |
-| `native/` | Rust のエンジン（PyO3）。`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`core.rs` が格納と評価、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き |
+| `native/engine/` | Rust のエンジン（`nanashi-engine`、Python に依存しない）。`key.rs` がキーの詰め方、`store.rs` が格納、`ast.rs` が式の構文木、`eval/` が評価（`join.rs` が突き合わせ、`agg.rs` が集計）、`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き、`config.rs` が速さのための調整値。`tests/` に格納の性質テスト（BTreeMap と突き合わせる） |
+| `native/src/lib.rs` | Python から使う薄い層（`nanashi_core`、PyO3）。受け取った番号と長さはここで検査する |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
 | `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py`、`bench_http.py`、`bench_memory.py` | ベンチマーク |
 | `tests/test_expr_coverage.py` | すべての種類の式のノードを、すべての実装の場所（構文、型推論、影響範囲、評価、依存、Rust）に通す |
 
 式の意味は、Python の参照実装と Rust の両方に実装している。
-Rust のエンジンを使うときの本番の経路は、構文（`expr.py`、`parser.py`）、名前の解決（`evaluate.resolve` の軸の名前の解決、`rust_engine._tree`）、型検査と BY の書き換え（`check.rs`）、計算計画（`graph.rs`）、差分集計の判定と影響範囲と再計算の段取り（`plan.rs`）、評価（`core.rs`）で、Python の `evaluate.py`、`delta.py`、`model.py` の計画と再計算は参照実装にだけ使う。
+Rust のエンジンを使うときの本番の経路は、構文（`expr.py`、`parser.py`）、名前の解決（`evaluate.resolve` の軸の名前の解決、`rust_engine._tree`）、型検査と BY の書き換え（`check.rs`）、計算計画（`graph.rs`）、差分集計の判定と影響範囲と再計算の段取り（`plan.rs`）、評価（`eval/`）で、Python の `evaluate.py`、`delta.py`、`planner.py` は参照実装にだけ使う。
 ノードを 1 種類足すときはこれらをすべて直し、`tests/test_expr_coverage.py` のモデルにそのノードを使う式を足す。
 足し忘れた場所があれば、このテストが失敗する。
 
 ## 制約と今後
 
 - 順序付きの軸の途中へのメンバーの挿入には対応していない（追加は末尾だけ）。
-- 同時に読み書きするときは `Workspace` を通す。`Model` を直接複数のスレッドから使うことはできない（Rust の再計算中は、別のスレッドから読むと格納データが空に見える）。
+- 同時に読み書きするときは `Workspace` を通す。`Model` を直接複数のスレッドから使うことはできない（Rust の再計算中に別のスレッドから同じ格納データを使うと、RuntimeError になる）。
 - PostgreSQL の記録先のファイル（スナップショットと大量の変更）のうち、参照されなくなったもの（確定に失敗したときに残るもの、古いスナップショットなど。`FileJournal` の `cells/` も同じ）の片付けはまだない。オブジェクトストレージへはファイルを 1 つずつ置くので、Metric の多いモデルではスナップショットの保存が往復の回数ぶん遅くなる。
 - ライターは 1 つのまとまりを確定し終えてから次のまとまりを計算する（確定を待つ間に次を計算するパイプライン化はしていない）。重い書き込み（全体の再計算に近いもの）が列にあると、その間ほかの書き込みは待たされる。列の長さ（`max_queue`）と待ち時間で過負荷を上流に伝えることはできる。
 - Rust のエンジンは 1 セルのキーを 64 ビットの整数で持つので、軸のビット幅（メンバー数の対数）の合計が 64 を超える Metric は作れない（登録時に、軸ごとのビット幅と直し方を示して拒否する）。メンバー数が 2 の 22 乗を超える軸には、分割軸以外の索引を作らない。
 - 式の評価は演算ごとに中間結果を実体化し、演算の融合はしない（集計だけは、集計先が少なければ読みながら行う）。大きな Metric を演算でつなぐモデル（小売、1,756 万セル）では、全体の再計算の間に格納データの 6 倍を超えるヒープを使う（「性能」のメモリの内訳）。並列に評価する Metric をメモリの予算で絞ることと、要素ごとの演算の融合が、次に効く手である。
 - セル数の見積もりは定義を変えたときだけ行うので、あとから入力やメンバーが増えて上限を超えても、次に定義を変えるまでは拒否しない。
-- 並列化の閾値（`nanashi_core.set_par_min` など）と rayon のスレッドプールはプロセス全体で 1 つで、モデルごとには変えられない。
+- rayon のスレッドプールはプロセス全体で 1 つで、モデルごとには分けられない（並列化の閾値などの調整値はエンジンごとに変えられる）。
 - 楽観的な排他で比べるのは入力セルだけで、定義やメンバーの変更どうしの食い違いは確かめない。
 - 影響範囲は軸ごとの集合の直積で持つので、離れた 2 セルの変更はそれらを囲む範囲に広がる。
 - 差分集計を続けると浮動小数点の誤差が積み上がる。`refresh()` で全体を計算し直すと誤差はなくなる。

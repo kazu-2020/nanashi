@@ -5,7 +5,7 @@
 //! - Bin、If、IsBlank、IfBlank の grow: 軸にメンバーを追加したとき、新しいメンバーへ値が広がる軸
 //! - By: 式が持つ軸から、集約（ByAgg）か引き下ろし（ByLookup）かを決める
 
-use crate::core::{Agg, Catalog, DimId, Node, Op, Result};
+use crate::{Agg, Catalog, DimId, Node, Op, Result};
 
 /// 値の種類。number、boolean、または軸のメンバー（member:<軸>）。
 #[derive(Clone, Debug, PartialEq)]
@@ -140,7 +140,7 @@ pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Resu
     let cat = env.cat;
     match node {
         Node::Ref(i) => Ok(env.types[*i].clone()),
-        Node::Const(_, kind) => Ok(Ty { dims: vec![], kind: if *kind == crate::core::Kind::Bool { TKind::Bool } else { TKind::Num } }),
+        Node::Const(_, kind) => Ok(Ty { dims: vec![], kind: if *kind == crate::Kind::Bool { TKind::Bool } else { TKind::Num } }),
         Node::DimRef(d) => Ok(Ty { dims: vec![*d], kind: TKind::Member(*d) }),
         Node::MemberConst(d, _) => Ok(Ty { dims: vec![], kind: TKind::Member(*d) }),
 
@@ -292,13 +292,13 @@ pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Resu
                 }
                 let agg = agg.unwrap_or(Agg::Sum);
                 let kind = agg_kind(agg, &t, &what, cat)?;
-                let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::core::Kind::Num)));
+                let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::Kind::Num)));
                 (Node::ByAgg { child, src, dst, map, agg }, Ty { dims: replace(&t.dims, src, dst), kind })
             } else if t.dims.contains(&dst) {
                 if agg.is_some() {
                     return Err(format!("{what}: 引き下ろし（lookup）に集計関数は指定できない"));
                 }
-                let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::core::Kind::Num)));
+                let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::Kind::Num)));
                 (Node::ByLookup { child, src, dst, map }, Ty { dims: replace(&t.dims, dst, src), kind: t.kind })
             } else {
                 return Err(format!("{what}: 式の軸 {} に {dim} も {target} もない", tuple_repr(&t.dims, cat)));
@@ -356,7 +356,7 @@ pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Resu
             } else {
                 return Err(format!("{what}: 式の軸 {} に {dim} も {} もない", tuple_repr(&t.dims, cat), cat.dims[target].name));
             };
-            let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::core::Kind::Num)));
+            let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::Kind::Num)));
             let edges = Box::new(Node::AsAxis { child: Box::new(Node::Ref(metric)), dim: target });
             *node = Node::Remove { child: Box::new(Node::On(child, edges)), dim: remove, agg };
             Ok(ty)

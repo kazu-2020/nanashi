@@ -447,15 +447,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanashi_core"
+name = "nanashi-engine"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
  "bytes",
  "imbl",
- "numpy",
  "parquet",
+ "rayon",
+ "rustc-hash",
+]
+
+[[package]]
+name = "nanashi_core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "nanashi-engine",
+ "numpy",
  "pyo3",
  "rayon",
  "rustc-hash",

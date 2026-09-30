@@ -5,7 +5,7 @@
 //! 循環は「全員が同じ順序付き軸を持ち、循環が必ず正のずらし（PREVIOUS）を通る」場合だけ許し、
 //! その軸に沿った scan として 1 時点ずつ計算する。それ以外の循環はエラーにする。
 
-use crate::core::{Catalog, DimId, Node, Result};
+use crate::{Catalog, DimId, Node, Result};
 use crate::plan::Formula;
 
 /// Metric -> 参照先 Metric。lags は参照経路上での各軸方向のずらし量の合計、

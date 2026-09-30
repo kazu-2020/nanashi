@@ -1,21 +1,15 @@
 //! Python から使う入口。Metric の格納データ（Store）と評価の途中結果（Cube）は Rust 側に置き、
 //! Python には中身を持たないハンドルだけを渡す。
 
-mod check;
-mod core;
-mod graph;
-mod plan;
-mod pq;
-
-use crate::check::{Env, TKind, Ty};
-use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
-use crate::plan::{Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
+use nanashi_engine::check::{self, Env, TKind, Ty};
+use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
+use nanashi_engine::{eval, graph, pq, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
-use pyo3::types::{PyBool, PyBytes, PyInt, PyIterator, PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyIterator, PyList, PyTuple};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -358,9 +352,36 @@ impl Core {
 
 #[pymethods]
 impl Core {
+    /// config は速さのための調整値（nanashi_engine::Config のフィールド名。結果は変えない）。
     #[new]
-    fn new() -> Core {
-        Core { cat: Arc::new(Catalog::default()) }
+    #[pyo3(signature = (**config))]
+    fn new(config: Option<&Bound<'_, PyDict>>) -> PyResult<Core> {
+        let mut core = Core { cat: Arc::new(Catalog::default()) };
+        core.configure(config)?;
+        Ok(core)
+    }
+
+    /// 調整値を変える。評価と再計算の段取りにはすぐ効き、格納データの持ち方（差分をまとめ直す件数、
+    /// 索引を作る行数、並列にする件数）は、このあと作る格納データから効く。fail_at はテスト用で、
+    /// (Metric の番号, panic させるか) か None。
+    #[pyo3(signature = (**config))]
+    fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let Some(config) = config else { return Ok(()) };
+        let cfg = &mut Arc::make_mut(&mut self.cat).cfg;
+        for (k, v) in config.iter() {
+            let k: String = k.extract()?;
+            match k.as_str() {
+                "compact_min" => cfg.compact_min = v.extract()?,
+                "par_min" => cfg.par_min = v.extract()?,
+                "postings_min_rows" => cfg.postings_min_rows = v.extract()?,
+                "stream_always" => cfg.stream_always = v.extract()?,
+                "semi_max" => cfg.semi_max = v.extract()?,
+                "widen_min_rows" => cfg.widen_min_rows = v.extract()?,
+                "fail_at" => cfg.fail_at = v.extract()?,
+                _ => return Err(err(format!("未知の調整値 {k}"))),
+            }
+        }
+        Ok(())
     }
 
     /// 同じ軸と対応表を持つ Core（モデルの複製用）。以後の変更は互いに影響しない（書き込み時に複製）。
@@ -555,7 +576,7 @@ impl Core {
             })
             .collect::<PyResult<_>>()?;
         let cat = self.cat.clone();
-        let cubes: Vec<core::Result<Cube>> = py.detach(move || jobs.par_iter().map(|(n, s, r)| eval(n, &cat, s, r)).collect());
+        let cubes: Vec<nanashi_engine::Result<Cube>> = py.detach(move || jobs.par_iter().map(|(n, s, r)| eval(n, &cat, s, r)).collect());
         cubes.into_iter().map(|c| Ok(CubeHandle { cube: Arc::new(c.map_err(err)?) })).collect()
     }
 
@@ -1053,54 +1074,6 @@ fn reset_heap_peak() {
     HEAP_PEAK.store(HEAP_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
-/// 再計算で、Metric の番号 metric を書き戻すところで失敗させる（テスト用。None で戻す）。panic なら panic させる。
-#[pyfunction]
-#[pyo3(signature = (metric, panic = false))]
-fn set_fail_at(metric: Option<usize>, panic: bool) {
-    let v = match metric {
-        None => -1,
-        Some(m) if panic => -2 - m as isize,
-        Some(m) => m as isize,
-    };
-    plan::FAIL_AT.store(v, Ordering::Relaxed);
-}
-
-/// 差分を本体にまとめ直す件数の下限を変える（テスト用）。
-#[pyfunction]
-fn set_compact_min(n: usize) {
-    core::COMPACT_MIN.store(n, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// これより少ない件数は並列にしない下限を変える（テスト用。0 にすると常に並列）。
-#[pyfunction]
-fn set_par_min(n: usize) {
-    core::PAR_MIN.store(n, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// 準結合で絞り込む片側の件数の上限を変える（テスト用。0 にすると絞り込まない）。
-#[pyfunction]
-fn set_semi_max(n: usize) {
-    core::SEMI_MAX.store(n, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// 分割軸以外の軸の索引を使う本体の行数の下限を変える（テスト用。0 にすると常に使う）。
-#[pyfunction]
-fn set_postings_min_rows(n: usize) {
-    core::POSTINGS_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// true なら、集計先の数によらず、集計元を写さずに読みながら集計する（テスト用）。
-#[pyfunction]
-fn set_stream_always(on: bool) {
-    core::STREAM_ALWAYS.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// 値が変わった範囲が大半を占めるとき全体に広げる、Metric の行数の下限を変える（テスト用。0 なら常に）。
-#[pyfunction]
-fn set_widen_min_rows(n: usize) {
-    plan::WIDEN_MIN_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// 2 つの格納データの差（宣言した軸の順のメンバー番号の列と、変更前後の値）。Python のオブジェクトにはしない。
 #[pyclass(frozen)]
 struct Diff {
@@ -1386,13 +1359,6 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(track_heap, m)?)?;
     m.add_function(wrap_pyfunction!(heap, m)?)?;
     m.add_function(wrap_pyfunction!(reset_heap_peak, m)?)?;
-    m.add_function(wrap_pyfunction!(set_compact_min, m)?)?;
-    m.add_function(wrap_pyfunction!(set_fail_at, m)?)?;
-    m.add_function(wrap_pyfunction!(set_par_min, m)?)?;
-    m.add_function(wrap_pyfunction!(set_stream_always, m)?)?;
-    m.add_function(wrap_pyfunction!(set_semi_max, m)?)?;
-    m.add_function(wrap_pyfunction!(set_postings_min_rows, m)?)?;
-    m.add_function(wrap_pyfunction!(set_widen_min_rows, m)?)?;
     m.add_function(wrap_pyfunction!(write_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_metadata, m)?)?;

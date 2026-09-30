@@ -15,13 +15,10 @@ except ImportError:  # nanashi_core をビルドしていない環境
 
 @unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class FailedRecalc(unittest.TestCase):
-    def tearDown(self):
-        nanashi_core.set_fail_at(None)
-
-    def failing(self, metric: str, panic: bool) -> None:
-        """metric を書き戻すところで Rust の再計算を失敗させる。"""
+    def failing(self, metric: str | None, panic: bool = False) -> None:
+        """metric を書き戻すところで Rust の再計算を失敗させる（None なら戻す）。"""
         _, names = self.m.engine.planner._plan_for(self.m.compiled(), self.m)
-        nanashi_core.set_fail_at(names.index(metric), panic)
+        self.m.engine.core.configure(fail_at=None if metric is None else (names.index(metric), panic))
 
     def check(self, panic: bool) -> None:
         self.m = build_with(RustEngine())
@@ -40,7 +37,7 @@ class FailedRecalc(unittest.TestCase):
         for n, cells in inputs.items():  # 入力の格納データは失われない（計算し直さずに読む）
             if n not in ("Volume", "Price"):
                 self.assertEqual(self.m.engine.to_cube(self.m._values[n], self.m).cells, cells)
-        nanashi_core.set_fail_at(None)
+        self.failing(None)
         expected, actual = snapshot(ref), snapshot(self.m)
         for n in expected:
             self.assertTrue(same(expected[n], actual[n]), f"{n}\n参照: {expected[n]}\nRust: {actual[n]}")
@@ -58,7 +55,7 @@ class FailedRecalc(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             with self.m.transaction():
                 self.m.set_cell("Price", 7, Product="A")
-        nanashi_core.set_fail_at(None)
+        self.failing(None)
         self.assertEqual(snapshot(self.m), before)
 
 

@@ -57,8 +57,9 @@ class RustEngine:
     partitions = 1 << 20  # 分割軸のメンバーごとに範囲検索できる（分割軸の自動選択に使う）
     key_bits = 64  # 1 セルのキーは各軸のメンバー番号を詰めた 64 ビット整数
 
-    def __init__(self):
-        self.core = nanashi_core.Core()
+    def __init__(self, **config):
+        """config は Rust の速さのための調整値（nanashi_core.Core に渡す。結果は変えない）。"""
+        self.core = nanashi_core.Core(**config)
         self._dims: dict[str, tuple[Any, int]] = {}  # 軸名 -> (Dimension, 番号)
         self._names: dict[int, str] = {}
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)

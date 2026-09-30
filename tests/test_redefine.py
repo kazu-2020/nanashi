@@ -1,6 +1,7 @@
 """定義の差分再計算。式や入力を足したり置き換えたりしても、変えた Metric とその影響だけを計算し直す。"""
 import random
 import unittest
+from unittest import mock
 
 from sparse_engine import FormulaError, Model
 from sparse_engine.engine import ReferenceEngine
@@ -10,7 +11,6 @@ from .test_incremental import model as build, same, snapshot
 from .test_members import random_round as edit_or_add_member
 
 try:
-    import nanashi_core
     from sparse_engine.rust_engine import RustEngine
 except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
@@ -340,19 +340,13 @@ class EagerHeuristics(unittest.TestCase):
     """大きなモデルでだけ働く速さのための規則（値が変わった範囲が大半を占めれば全体へ広げる、
     同じ段の Metric を並列に計算する）を、小さなモデルでも常に働かせて、結果が変わらないことを確かめる。"""
 
-    def setUp(self):
-        nanashi_core.set_widen_min_rows(0)
-        nanashi_core.set_par_min(0)
-
-    def tearDown(self):
-        nanashi_core.set_widen_min_rows(4096)
-        nanashi_core.set_par_min(16_384)
+    engine = staticmethod(lambda: RustEngine(widen_min_rows=0, par_min=0))
 
     def test_random_rust(self):
-        run_random(self, seed=43, rounds=80, engines=[ReferenceEngine, RustEngine])
+        run_random(self, seed=43, rounds=80, engines=[ReferenceEngine, self.engine])
 
     def test_random_rust_alone(self):
-        run_random(self, seed=47, rounds=80, engines=[RustEngine])
+        run_random(self, seed=47, rounds=80, engines=[self.engine])
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -360,25 +354,24 @@ class StreamedAggregation(unittest.TestCase):
     """集計先が少ないときに集計元を写さずに読みながら集計する経路（Metric を使った BY は対応表を
     引きながら）を、小さなモデルでも常に使い、並列の足し込みも働かせて、結果が変わらないことを確かめる。"""
 
-    def setUp(self):
-        nanashi_core.set_stream_always(True)
-        nanashi_core.set_par_min(0)
-
-    def tearDown(self):
-        nanashi_core.set_stream_always(False)
-        nanashi_core.set_par_min(16_384)
+    config = {"stream_always": True, "par_min": 0}
 
     def test_random_rust(self):
-        run_random(self, seed=53, rounds=80, engines=[ReferenceEngine, RustEngine])
+        run_random(self, seed=53, rounds=80, engines=[ReferenceEngine, lambda: RustEngine(**self.config)])
 
     def test_other_suites(self):  # Metric を使った BY（異動、損益計画）を含むテストも、この設定で回す
         from .test_dynamic_hierarchy import RustMatchesReference as Dynamic
         from .test_expr_coverage import EveryNodeEverywhere
         from .test_fpa import RustMatchesReference as Fpa
-        for case, name in [(EveryNodeEverywhere, "test_rust_handles_every_node_and_agrees"),
-                           (Dynamic, "test_random_edits"), (Fpa, "test_random_edits")]:
-            with self.subTest(case=case.__module__, test=name):
-                getattr(case(name), name)()
+        original = RustEngine.__init__
+
+        def configured(engine, **config):  # ほかのテストが作る RustEngine にも、この設定を渡す
+            original(engine, **{**self.config, **config})
+        with mock.patch.object(RustEngine, "__init__", configured):
+            for case, name in [(EveryNodeEverywhere, "test_rust_handles_every_node_and_agrees"),
+                               (Dynamic, "test_random_edits"), (Fpa, "test_random_edits")]:
+                with self.subTest(case=case.__module__, test=name):
+                    getattr(case(name), name)()
 
 
 if __name__ == "__main__":

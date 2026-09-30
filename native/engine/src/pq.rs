@@ -4,7 +4,7 @@
 //! v の型は値の種類に合わせる（number は Float64、boolean は Boolean、member はメンバー番号の UInt32）。
 //! どの列も null を持たない。ファイルの置き場所は呼び出し側が決め、ここではバイト列だけを扱う。
 
-use crate::core::Result;
+use crate::Result;
 use arrow_array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, UInt32Array};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
@@ -172,6 +172,10 @@ pub struct Changes {
 impl Changes {
     pub fn len(&self) -> usize {
         self.new.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.new.is_empty()
     }
 }
 
