@@ -205,6 +205,14 @@ class MetricState:
     estimate_refs: Any = _UNSET   # 見積もりが読んだ Metric
     estimate_users: Any = _UNSET  # この Metric を読む見積もり
 
+    def fork(self, share) -> MetricState:
+        """Model.fork 用の複製。格納データは share で共有し、書き足していく状態（samples）は写す。
+        ほかの状態は定義だけに依存し、書き換えるときは丸ごと入れ替えるので、そのまま引き継ぐ。"""
+        own = lambda v, f: v if v is _UNSET else f(v)
+        return MetricState(own(self.value, share), own(self.count, share), self.delta, self.partition,
+                           self.warnings, self.edges, own(self.samples, dict),
+                           self.estimate, self.estimate_refs, self.estimate_users)
+
 
 class _Field(MutableMapping):
     """Model._state の 1 つの状態を、Metric 名 -> 値の dict のように見せる。"""
@@ -362,16 +370,9 @@ class Model:
         other.dimensions = {n: d.copy() for n, d in self.dimensions.items()}
         other.engine = self.engine.fork(other)
         other.metrics = {n: dataclasses.replace(m) for n, m in self.metrics.items()}
-        other._values = {n: self.engine.share(v) for n, v in self._values.items()}
-        other._counts = {n: self.engine.share(v) for n, v in self._counts.items()}
+        other._state = {n: st.fork(self.engine.share) for n, st in self._state.items()}
         # 計算計画は定義だけに依存するので、そのまま引き継ぐ
-        other.layout, other.warnings = dict(self.layout), dict(self.warnings)
-        other.cell_estimates = dict(self.cell_estimates)
-        other._estimate_refs, other._estimate_users = dict(self._estimate_refs), dict(self._estimate_users)
         other._plan, other._levels = self._plan, self._levels
-        other._delta = dict(self._delta)
-        other._edges = dict(self._edges)
-        other._samples = {src: dict(regions) for src, regions in self._samples.items()}  # 定義を変えると書き足す
         other._next_id = self._next_id
         other.seq = self.seq
         other._pending = Pending(full=False)
@@ -1001,7 +1002,7 @@ class Model:
         for d, member in zip(m.dims, key):
             if member not in self.dimension(d):
                 return None  # ないメンバーのセルは空（消した、名前を変えた直後の読み出しなど）
-        return self._decode(m, self.engine.get(self._values[name], key, self))
+        return self._decode(m, self.engine.get(self._state[name].value, key, self))
 
     def slice(self, name: str, **coords) -> Cube:
         """coords で絞った範囲のセル。各軸はメンバー名か、その集まり（list など）で指定する。
