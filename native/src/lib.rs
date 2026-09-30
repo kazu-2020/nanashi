@@ -14,6 +14,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use rayon::prelude::*;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Arc;
 
 fn err(msg: String) -> PyErr {
@@ -302,6 +304,11 @@ impl Core {
         Ok((Expr { node: Arc::new(node) }, ty.dims, kind, d, warnings))
     }
 
+    /// 型を決めた式の結果のセル数の見積もり（上限）。refs は Ref の番号ごとの (軸, セル数)。
+    fn estimate(&self, expr: &Expr, refs: Vec<(Vec<DimId>, f64)>) -> PyResult<f64> {
+        Ok(check::estimate(&expr.node, &self.cat, &refs).map_err(err)?.1)
+    }
+
     #[pyo3(signature = (dims, index, is_bool))]
     fn empty(&self, dims: Vec<DimId>, index: Option<DimId>, is_bool: bool) -> PyResult<StoreHandle> {
         let store = Store::new(&dims, index, kind_of(is_bool), &self.cat).map_err(err)?;
@@ -462,6 +469,17 @@ impl Core {
         store.borrow().store.len()
     }
 
+    /// 行数の上限（本体と差分の件数の和。差分の上書きや削除を数え直さないので、差分があっても O(1)）。
+    fn size_hint(&self, store: &Bound<'_, StoreHandle>) -> usize {
+        store.borrow().store.rows_hint()
+    }
+
+    /// 格納データが確保しているメモリ（本体の行数、本体、差分の件数、差分、索引。単位はバイト）。
+    fn memory(&self, store: &Bound<'_, StoreHandle>) -> (usize, usize, usize, usize, usize) {
+        let m = store.borrow().store.memory();
+        (m.rows, m.base, m.delta_rows, m.delta, m.index)
+    }
+
     fn is_bool(&self, store: &Bound<'_, StoreHandle>) -> bool {
         store.borrow().store.kind == Kind::Bool
     }
@@ -600,6 +618,84 @@ impl Core {
     }
 }
 
+// ------------------------------------------------------------------ ヒープの計測
+
+/// Rust の側で確保しているメモリを数えるアロケータ。中身の確保は System に任せる。
+/// 数えるのは track_heap(true) の後だけで、止めている間は確保のたびにフラグを 1 回読むだけにする
+/// （原子的な加減算を毎回すると、並列の再計算で数 % 遅くなったため）。Python のオブジェクトは数えない。
+struct Counting;
+
+static HEAP_TRACK: AtomicBool = AtomicBool::new(false);
+static HEAP_NOW: AtomicIsize = AtomicIsize::new(0); // 数え始めてからの確保と解放の差
+static HEAP_PEAK: AtomicIsize = AtomicIsize::new(0);
+
+fn heap_add(n: isize) {
+    if !HEAP_TRACK.load(Ordering::Relaxed) {
+        return;
+    }
+    let now = HEAP_NOW.fetch_add(n, Ordering::Relaxed) + n;
+    if n > 0 && now > HEAP_PEAK.load(Ordering::Relaxed) {
+        HEAP_PEAK.fetch_max(now, Ordering::Relaxed);
+    }
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc(layout) };
+        if !p.is_null() {
+            heap_add(layout.size() as isize);
+        }
+        p
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc_zeroed(layout) };
+        if !p.is_null() {
+            heap_add(layout.size() as isize);
+        }
+        p
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+        heap_add(-(layout.size() as isize));
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        if !p.is_null() {
+            heap_add(new_size as isize - layout.size() as isize);
+        }
+        p
+    }
+}
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+/// ヒープを数えるかを切り替える。数え始めるときは今の量と最大を 0 にする。
+/// 数える前に確保したメモリの解放は差し引かれるので、モデルを作る前に数え始める。
+#[pyfunction]
+fn track_heap(on: bool) {
+    if on {
+        HEAP_NOW.store(0, Ordering::Relaxed);
+        HEAP_PEAK.store(0, Ordering::Relaxed);
+    }
+    HEAP_TRACK.store(on, Ordering::Relaxed);
+}
+
+/// 数え始めてから Rust の側で確保しているメモリと、reset_heap_peak の後の最大（バイト）。
+#[pyfunction]
+fn heap() -> (usize, usize) {
+    (HEAP_NOW.load(Ordering::Relaxed).max(0) as usize, HEAP_PEAK.load(Ordering::Relaxed).max(0) as usize)
+}
+
+/// ヒープの最大を今の量に戻す（ある処理の間の最大を測るときに、その前に呼ぶ）。
+#[pyfunction]
+fn reset_heap_peak() {
+    HEAP_PEAK.store(HEAP_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
+}
+
 /// 差分を本体にまとめ直す件数の下限を変える（テスト用）。
 #[pyfunction]
 fn set_compact_min(n: usize) {
@@ -632,6 +728,9 @@ fn set_widen_min_rows(n: usize) {
 
 #[pymodule(gil_used = false)] // free-threaded の Python でも GIL を有効に戻さない（格納データは Arc と永続的な木で共有する）
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(track_heap, m)?)?;
+    m.add_function(wrap_pyfunction!(heap, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_heap_peak, m)?)?;
     m.add_function(wrap_pyfunction!(set_compact_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_par_min, m)?)?;
     m.add_function(wrap_pyfunction!(set_semi_max, m)?)?;

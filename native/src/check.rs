@@ -402,3 +402,100 @@ pub fn infer(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<String>) -> Resu
         }
     }
 }
+
+// ------------------------------------------------------------------ セル数の見積もり
+
+/// 軸の全組み合わせの数（dims の順に掛ける。Python の参照実装と同じ順にして、丸めを揃える）。
+fn dense(dims: &[DimId], cat: &Catalog) -> f64 {
+    dims.iter().fold(1.0, |acc, &d| acc * cat.dims[d].size as f64)
+}
+
+/// dims のうち own にない軸の全組み合わせの数（own の値がその方向へ複製される倍率）。
+fn spread(dims: &[DimId], own: &[DimId], cat: &Catalog) -> f64 {
+    dims.iter().filter(|d| !own.contains(d)).fold(1.0, |acc, &d| acc * cat.dims[d].size as f64)
+}
+
+fn without(dims: &[DimId], dim: DimId) -> Vec<DimId> {
+    dims.iter().copied().filter(|d| *d != dim).collect()
+}
+
+/// 型を決めた式（infer の後）の結果の軸と、セル数の上限の見積もり。refs は Ref の番号ごとの
+/// (軸, セル数)。値のあるセルだけが結果に残る演算は小さい側で、片側だけでも残る演算は和で、
+/// 全組み合わせに値を作る演算は軸の大きさの積で見積もり、どれも結果の軸の全組み合わせで頭打ちにする。
+/// 意味は Python の参照実装（evaluate.estimate）と同じ。
+pub fn estimate(node: &Node, cat: &Catalog, refs: &[(Vec<DimId>, f64)]) -> Result<(Vec<DimId>, f64)> {
+    let est = |n: &Node| estimate(n, cat, refs);
+    let (dims, n) = match node {
+        Node::Ref(i) => refs[*i].clone(),
+        Node::Const(..) | Node::MemberConst(..) => (vec![], 1.0),
+        Node::DimRef(d) => (vec![*d], cat.dims[*d].size as f64),
+        Node::Bin(op, l, r, _) => {
+            let ((ld, ln), (rd, rn)) = (est(l)?, est(r)?);
+            let dims = merge(&ld, &rd);
+            let (a, b) = (ln * spread(&dims, &ld, cat), rn * spread(&dims, &rd, cat));
+            let n = if matches!(op, Op::Add | Op::Sub | Op::And | Op::Or) { a + b } else { a.min(b) };
+            (dims, n)
+        }
+        Node::Not(c) | Node::Shift { child: c, .. } => est(c)?,
+        Node::If(cond, then, else_, _) => {
+            let (cd, cn) = est(cond)?;
+            let mut branches = vec![est(then)?];
+            if let Some(e) = else_ {
+                branches.push(est(e)?);
+            }
+            let mut dims = cd.clone();
+            for (bd, _) in &branches {
+                dims = merge(&dims, bd);
+            }
+            let mut n = 0.0;
+            for (bd, bn) in &branches {
+                let part = merge(&cd, bd);
+                n += (cn * spread(&part, &cd, cat)).min(bn * spread(&part, bd, cat)) * spread(&dims, &part, cat);
+            }
+            (dims, n)
+        }
+        Node::Filter(child, cond) => {
+            let ((d, n), (cd, cn)) = (est(child)?, est(cond)?);
+            let m = cn * spread(&d, &cd, cat);
+            (d, n.min(m))
+        }
+        Node::On(child, other) => {
+            let ((d, n), (od, on)) = (est(child)?, est(other)?);
+            let dims = merge(&d, &od);
+            let n = (n * spread(&dims, &d, cat)).min(on * spread(&dims, &od, cat));
+            (dims, n)
+        }
+        Node::Expand(child, ds) => {
+            let (d, n) = est(child)?;
+            (merge(&d, ds), n * dense(ds, cat))
+        }
+        Node::IsBlank(child, _) | Node::IfBlank(child, ..) => {
+            let (d, _) = est(child)?;
+            let n = dense(&d, cat);
+            (d, n)
+        }
+        Node::ByAgg { child, src, dst, .. } => {
+            let (d, n) = est(child)?;
+            (replace(&d, *src, *dst), n)
+        }
+        Node::ByLookup { child, src, dst, .. } => {
+            let (d, n) = est(child)?;
+            (replace(&d, *dst, *src), n * cat.dims[*src].size as f64)
+        }
+        Node::Remove { child, dim, .. } | Node::Select { child, dim, .. } => {
+            let (d, n) = est(child)?;
+            (without(&d, *dim), n)
+        }
+        Node::AsAxis { child, dim } => {
+            let (d, n) = est(child)?;
+            ([d.as_slice(), &[*dim]].concat(), n)
+        }
+        Node::Coalesce(first, second) => {
+            let ((_, fnum), (sd, sn)) = (est(first)?, est(second)?);
+            (sd, fnum + sn)
+        }
+        Node::By { .. } | Node::ByMetric { .. } => return Err("セル数の見積もりは型を決めた式にだけ使える".into()),
+    };
+    let cap = dense(&dims, cat);
+    Ok((dims, n.min(cap)))
+}

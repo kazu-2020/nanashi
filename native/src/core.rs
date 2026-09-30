@@ -304,6 +304,15 @@ pub struct Store {
     delta: OrdMap<u64, Option<f64>>, // 差分（Some = 値を置く、None = 消す）
 }
 
+/// Store が確保しているメモリの内訳（Store::memory）。
+pub struct Mem {
+    pub rows: usize,       // 本体の行数
+    pub base: usize,       // 本体のキーと値（バイト）
+    pub delta_rows: usize, // 差分の件数
+    pub delta: usize,      // 差分（バイト。木の節の分を含まない）
+    pub index: usize,      // 分割軸以外の軸の索引（バイト）
+}
+
 /// Store の本体。作ったら変えない。
 #[derive(Debug)]
 struct Base {
@@ -467,6 +476,21 @@ impl Store {
         let mut cells = Vec::new();
         self.for_each_in(r, |k, v| cells.push((k, v)));
         Cube { pack: self.pack.clone(), kind: self.kind, cells }
+    }
+
+    /// 格納データが確保しているメモリ（バイト）。本体は確保した容量、索引は作ったものだけを数える。
+    /// 差分の木は 1 件の大きさ×件数で、木の節の分を含まない（下限）。本体を版どうしで共有していても、
+    /// この Store の分として数える。
+    pub fn memory(&self) -> Mem {
+        let b = &*self.base;
+        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| (p.offsets.capacity() + p.rows.capacity()) * 4).sum();
+        Mem {
+            rows: b.keys.len(),
+            base: b.keys.capacity() * 8 + b.vals.capacity() * 8,
+            delta_rows: self.delta.len(),
+            delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
+            index,
+        }
     }
 
     /// 行数のおおよその値（本体と差分の件数の和。差分の上書きや削除を数え直さない）。

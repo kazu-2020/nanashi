@@ -1,7 +1,8 @@
-"""エンジンの上限の検査と、観察用の記録の上限。"""
+"""エンジンの上限の検査、セル数の見積もりの上限、観察用の記録の上限、メモリの内訳。"""
+import tempfile
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import FormulaError, Model
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import LOG_MAX
 
@@ -32,6 +33,159 @@ class KeyWidth(unittest.TestCase):
     def test_reference_has_no_width_limit(self):
         m = wide(ReferenceEngine())
         m.add_input("Wide", [f"D{i}" for i in range(5)])
+
+
+ENGINES = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
+
+
+def big(engine) -> Model:
+    """顧客 200 × 商品 100（全組み合わせで 2 万）のモデル。値は少しだけ入れ、上限を 1 万にする。
+    上限の検査が壊れていても、テストが大量のメモリを使わない大きさにしてある。"""
+    m = Model(engine=engine, max_cells=10_000)
+    m.add_dimension("Customer", [f"c{i}" for i in range(200)])
+    m.add_dimension("SKU", [f"s{i}" for i in range(100)])
+    m.add_dimension("Week", [f"w{i}" for i in range(52)], ordered=True)
+    m.add_input("Sales", ["Customer", "SKU"], {("c1", "s1"): 1.0, ("c2", "s1"): 2.0})
+    return m
+
+
+class CellEstimates(unittest.TestCase):
+    def test_default_limit(self):
+        self.assertEqual(Model(engine=ReferenceEngine()).max_cells, 1_000_000_000)
+
+    def test_rejects_formulas_that_densify_beyond_the_limit(self):
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__):
+                m = big(engine())
+                m.add_formula("Filled", ["Customer", "SKU"], "IFBLANK(Sales, 0)")
+                with self.assertRaisesRegex(FormulaError, r"Filled: .*最大 20,000 .*上限 10,000 .*"
+                                                          r"IFBLANK が \['Customer', 'SKU'\]"):
+                    m.recalc()
+                m.add_formula("Filled", ["Customer", "SKU"], "Sales * 2")  # 直せば通る
+                self.assertEqual(m.value("Filled").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
+                self.assertEqual(m.cell_estimates["Filled"], 2.0)
+
+    def test_rejected_definition_is_rolled_back_in_a_transaction(self):
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__):
+                m = big(engine())
+                m.add_formula("Double", ["Customer", "SKU"], "Sales * 2")
+                m.recalc()
+                with self.assertRaises(FormulaError):
+                    with m.transaction():
+                        m.add_formula("Double", ["Customer", "SKU"], "Sales + 1")  # 定数との足し算で密になる
+                self.assertEqual(m.value("Double").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
+
+    def test_downstream_of_a_dense_metric_is_checked_too(self):
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__):
+                m = big(engine())
+                m.add_formula("Small", ["Customer"], "Sales[REMOVE SUM: SKU]")
+                m.recalc()
+                m.add_formula("Dense", ["Customer"], "IFBLANK(Small, 0)")  # 200 は上限内
+                m.add_formula("Weekly", ["Customer", "Week"], "Dense[EXPAND: Week]")  # 200 × 52 = 10,400
+                with self.assertRaisesRegex(FormulaError, "Weekly: .*最大 10,400 "):
+                    m.recalc()
+
+    def test_no_limit(self):
+        for engine in ENGINES:
+            for limit in (8, None):
+                with self.subTest(engine=engine.__name__, limit=limit):
+                    m = Model(engine=engine(), max_cells=limit)
+                    m.add_dimension("P", ["a", "b", "c"])
+                    m.add_dimension("M", ["x", "y", "z"])
+                    m.add_input("V", ["P", "M"], {("a", "x"): 1.0})
+                    m.add_formula("Filled", ["P", "M"], "IFBLANK(V, 0)")
+                    if limit is not None:
+                        with self.assertRaisesRegex(FormulaError, "最大 9 と見積もられ、上限 8 を超える"):
+                            m.recalc()
+                    else:
+                        self.assertEqual(len(m.value("Filled").cells), 9)
+                        self.assertEqual(m.cell_estimates["Filled"], 9.0)
+
+    def test_scan_is_estimated_as_carried_over_all_periods(self):
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__):
+                m = big(engine())
+                m.add_input("In", ["Customer", "SKU", "Week"], {("c1", "s1", "w3"): 5.0})
+                m.add_formula("Stock", ["Customer", "SKU", "Week"], "PREVIOUS(Week) + In")
+                m.recalc()
+                self.assertEqual(m.cell_estimates["Stock"], 52.0)  # 1 セルが 52 週へ持ち越されうる
+                self.assertEqual(len(m.value("Stock").cells), 49)  # 実際は w3 から w51 まで
+
+    def test_incremental_estimates_match_full(self):
+        """定義を変えたときに下流だけ見積もり直した結果は、全体を見積もり直した結果と同じ。"""
+        from .test_expr_coverage import model
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__):
+                m = model(engine())
+                m.recalc()
+                steps = [
+                    lambda: m.add_formula("Revenue", ["Product", "Month"], "IFBLANK(Volume, 0) * Price[EXPAND: Month]"),
+                    lambda: m.rename_metric("Revenue", "Rev"),
+                    lambda: m.add_formula("Rev", ["Product", "Month"], "Volume * Price"),
+                    lambda: m.add_input("Volume", ["Product", "Month"], {("A", "Jan"): 1, ("B", "Jan"): 2}),
+                    lambda: m.add_formula("Leaf", ["Month"], "Total[FILTER: Actual]"),
+                    lambda: m.remove_metric("Leaf"),
+                    lambda: m.add_formula("Total", ["Month"], "IFBLANK(ByCat[REMOVE SUM: Category], 0)"),
+                    lambda: m.add_input("Total", ["Month"], {("Jan",): 1.0}),  # 式を入力にすると何も読まない
+                    lambda: m.remove_metric("ByCat"),
+                    lambda: m.add_formula("Total", ["Month"], "Rev[REMOVE SUM: Product]"),
+                ]
+                for step in steps:  # m は差分の見積もりだけを続け、全体の見積もり直しは複製で行う
+                    step()
+                    m.recalc()
+                    full = m.fork()
+                    full._invalidate()
+                    full.recalc()
+                    self.assertEqual(m.cell_estimates, full.cell_estimates)
+
+    def test_limit_is_saved(self):
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__), tempfile.TemporaryDirectory() as d:
+                m = Model(engine=engine(), max_cells=123)
+                m.add_dimension("P", ["a"])
+                m.save(d)
+                self.assertEqual(Model.load(d, engine()).max_cells, 123)
+
+
+class Memory(unittest.TestCase):
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_rust_reports_storage_bytes(self):
+        import nanashi_core
+        nanashi_core.track_heap(True)
+        self.addCleanup(nanashi_core.track_heap, False)
+        before = nanashi_core.heap()[0]
+        m = Model(engine=RustEngine())
+        m.add_dimension("P", [f"p{i}" for i in range(2000)])
+        m.add_dimension("M", [f"m{i}" for i in range(12)])
+        m.add_input("V", ["P", "M"], {(f"p{i}", f"m{j}"): float(i) for i in range(2000) for j in range(12)})
+        m.add_property("P", "Group", "M", {f"p{i}": f"m{i % 12}" for i in range(2000)})
+        m.add_formula("ByGroup", ["M"], "V[REMOVE SUM: M][BY SUM: P.Group]")
+        m.recalc()
+        mem = m.memory()
+        self.assertEqual(mem["V"]["rows"], 24_000)
+        self.assertGreaterEqual(mem["V"]["base"], 24_000 * 16)
+        self.assertEqual(mem["V"]["delta_rows"], 0)
+        m.set_cell("V", 1.0, P="p0", M="m0")
+        m.recalc()
+        self.assertEqual(m.memory()["V"]["delta_rows"], 1)
+        self.assertIn("counts", m.memory()["ByGroup"])  # 差分集計の件数
+        now, peak = nanashi_core.heap()
+        self.assertGreater(now, before + 24_000 * 16)
+        self.assertGreaterEqual(peak, now)
+        nanashi_core.reset_heap_peak()
+        self.assertEqual(nanashi_core.heap()[1], nanashi_core.heap()[0])
+        nanashi_core.track_heap(False)  # 止めている間は数えない
+        m.add_input("W", ["P", "M"], {(f"p{i}", "m0"): 1.0 for i in range(2000)})
+        m.recalc()
+        self.assertEqual(nanashi_core.heap()[0], now)
+
+    def test_reference_reports_rows_only(self):
+        m = Model(engine=ReferenceEngine())
+        m.add_dimension("P", ["a", "b"])
+        m.add_input("V", ["P"], {("a",): 1.0})
+        self.assertEqual(m.memory(), {"V": {"rows": 1}})
 
 
 class Logs(unittest.TestCase):

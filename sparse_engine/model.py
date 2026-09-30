@@ -30,8 +30,8 @@ from typing import Any, Mapping
 from .core import Cube, Dimension, Key
 from .delta import DeltaPlan, plan_for, rename
 from .engine import CompiledPlan, Engine, default_engine
-from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, collect_refs, infer,
-                       member_kind, resolve, union_region)
+from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, collect_refs, combos, estimate,
+                       infer, member_kind, resolve, union_region)
 from .expr import (BinOp, Coalesce, Const, Expr, Filter, Ref, mentions_member, references_metric,
                    rename_member, rename_metrics, uses_property)
 from .journal import AlreadyCommitted, Transaction, changes, jsonable, now
@@ -168,15 +168,39 @@ def _operation(fn):
     return wrapper
 
 
+class _CellCounts(dict):
+    """見積もりに使う Metric ごとのセル数。計算 Metric は known（見積もり）から、入力は今の行数から、
+    初めて読まれたときに取る。読まれた名前を read に記録する。"""
+
+    def __init__(self, model: Model, known: dict[str, float]):
+        super().__init__()
+        self.model, self.known, self.read = model, known, set()
+
+    def __getitem__(self, name: str) -> float:
+        self.read.add(name)
+        return super().__getitem__(name)
+
+    def __missing__(self, name: str) -> float:
+        if name in self.known:
+            n = self.known[name]
+        else:
+            hint = getattr(self.model.engine, "size_hint", self.model.engine.size)
+            n = float(hint(self.model._values[name]))
+        self[name] = n
+        return n
+
+
 @dataclass
 class Model:
     engine: Engine = field(default_factory=default_engine)
     auto_layout: bool = True  # False なら分割軸はエンジンの既定（メンバー数が最も多い軸）
     delta_aggregation: bool = True  # False なら集計も普通に計算し直す
+    max_cells: int | None = 1_000_000_000  # 計算 Metric 1 つのセル数の見積もりの上限。None なら検査しない
     dimensions: dict[str, Dimension] = field(default_factory=dict)
     layout: dict[str, str | None] = field(default_factory=dict)  # Metric ごとの分割軸
     metrics: dict[str, Metric] = field(default_factory=dict)
     warnings: dict[str, list[str]] = field(default_factory=dict)
+    cell_estimates: dict[str, float] = field(default_factory=dict)  # 計算 Metric のセル数の見積もり（上限）
     eval_log: Log = field(default_factory=Log)  # 再計算した Metric 名（観察用）
     slice_log: SliceLog = field(default_factory=lambda: SliceLog())  # 再計算した範囲（観察用）
     delta_log: Log = field(default_factory=Log)  # 差分集計で更新した Metric（観察用）
@@ -191,6 +215,8 @@ class Model:
     _delta_cache: dict[str, tuple] = field(default_factory=dict)  # Metric -> (計画, 件数の差分の式, 値の差分の式)
     _edges: dict[str, list[Edge]] = field(default_factory=dict)  # 依存グラフ（Metric -> 参照先）
     _samples: dict[str, dict[str, Restrict]] = field(default_factory=dict)  # 分割軸の選択に使った、入力ごとの影響範囲
+    _estimate_refs: dict[str, frozenset[str]] = field(default_factory=dict)  # 見積もりが読んだ Metric
+    _estimate_users: dict[str, frozenset[str]] = field(default_factory=dict)  # Metric -> それを読む見積もり
     _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
     journal: Any = None  # 記録先（journal.FileJournal など）。None なら記録しない
     seq: int = 0  # 確定した最後のトランザクションの通し番号
@@ -236,6 +262,24 @@ class Model:
         self._pending.full = True
         self.recalc()
 
+    def memory(self) -> dict[str, dict[str, int]]:
+        """Metric ごとの格納データが確保しているメモリ（バイト）。計算の途中結果や計画は含まない。
+
+        rows は本体の行数、base・delta・index は本体・差分・索引、counts は差分集計の件数の格納データ
+        （本体と差分と索引の合計）。エンジンが memory を持たなければ（参照実装）、rows だけを返す。
+        """
+        mem = getattr(self.engine, "memory", None)
+        if mem is None:
+            return {n: {"rows": self.engine.size(v)} for n, v in self._values.items()}
+        out = {}
+        for n, v in self._values.items():
+            row = mem(v)
+            if n in self._counts:
+                c = mem(self._counts[n])
+                row["counts"] = c["base"] + c["delta"] + c["index"]
+            out[n] = row
+        return out
+
     # ------------------------------------------------ 複製
 
     def fork(self) -> Model:
@@ -246,7 +290,8 @@ class Model:
         書き込みのときに複製するので、複製そのものは Metric の数に比例する時間で済む。
         """
         self.recalc()
-        other = Model(engine=self.engine, auto_layout=self.auto_layout, delta_aggregation=self.delta_aggregation)
+        other = Model(engine=self.engine, auto_layout=self.auto_layout, delta_aggregation=self.delta_aggregation,
+                      max_cells=self.max_cells)
         other.dimensions = {n: d.copy() for n, d in self.dimensions.items()}
         other.engine = self.engine.fork(other)
         other.metrics = {n: dataclasses.replace(m) for n, m in self.metrics.items()}
@@ -254,6 +299,8 @@ class Model:
         other._counts = {n: self.engine.share(v) for n, v in self._counts.items()}
         # 計算計画は定義だけに依存するので、そのまま引き継ぐ
         other.layout, other.warnings = dict(self.layout), dict(self.warnings)
+        other.cell_estimates = dict(self.cell_estimates)
+        other._estimate_refs, other._estimate_users = dict(self._estimate_refs), dict(self._estimate_users)
         other._plan, other._levels = self._plan, self._levels
         other._delta, other._delta_cache = dict(self._delta), dict(self._delta_cache)
         other._edges = dict(self._edges)
@@ -476,7 +523,8 @@ class Model:
         gone = {name} | ({m.override_name} if m.overridable and m.override_name in self.metrics else set())
         for n in gone:
             for store in (self.metrics, self._values, self._counts, self._delta, self._delta_cache, self.layout,
-                          self.warnings, self._edges, self._samples):
+                          self.warnings, self._edges, self._samples, self.cell_estimates, self._estimate_refs,
+                          self._estimate_users):
                 store.pop(n, None)
             for regions in self._samples.values():
                 regions.pop(n, None)
@@ -501,12 +549,15 @@ class Model:
         if m.overridable and m.override_name in self.metrics:
             names[m.override_name] = f"__override__{new}"
         for store in (self.metrics, self._values, self._counts, self._delta, self.layout, self.warnings,
-                      self._edges, self._samples):
+                      self._edges, self._samples, self.cell_estimates):
             for o, n in names.items():
                 if o in store:
                     store[n] = store.pop(o)
         for o, n in names.items():
             self.metrics[n].name = n
+        for store in ("_estimate_refs", "_estimate_users"):
+            setattr(self, store, {names.get(k, k): frozenset(names.get(x, x) for x in v)
+                                  for k, v in getattr(self, store).items()})
         for regions in self._samples.values():
             for o, n in names.items():
                 if o in regions:
@@ -1028,7 +1079,10 @@ class Model:
         for m in self.metrics.values():
             if m.formula is not None:
                 m.formula, self.warnings[m.name] = self._checked(m)
-        self._plan, self._edges, self._levels = self._make_plan({n: m.formula for n, m in self.metrics.items()})
+        formulas = {n: m.formula for n, m in self.metrics.items()}
+        self._plan, self._edges, self._levels = self._make_plan(formulas)
+        self.cell_estimates, self._estimate_refs, self._estimate_users = self._estimate_cells(
+            formulas, self._plan, self.warnings)
         self._apply_layout()
         self._delta = {}
         if self.delta_aggregation:
@@ -1054,7 +1108,9 @@ class Model:
         formulas = {n: checked[n][0] if n in checked else (None if n in self._pending.dirty else m.formula)
                     for n, m in self.metrics.items()}
         plan, edges, levels = self._make_plan(formulas)
+        estimates = self._estimate_cells(formulas, plan, {n: w for n, (_, w) in checked.items()}, set(dirty))
 
+        self.cell_estimates, self._estimate_refs, self._estimate_users = estimates
         for n, (formula, w) in checked.items():
             self.metrics[n].formula, self.warnings[n] = formula, w
         for n in dirty:
@@ -1080,6 +1136,81 @@ class Model:
             if m.formula is not None:
                 self._pending.forced[n] = {}  # 件数も含めて、全体を計算し直す
         self._pending.dirty.clear()
+
+    def _estimate_cells(self, formulas: dict[str, Expr | None], plan: list[Step], warnings: dict[str, list[str]],
+                        dirty: set[str] | None = None) -> tuple[dict, dict, dict]:
+        """計算 Metric ごとの結果のセル数の見積もり（上限）。返すのは (見積もり, 各見積もりが読んだ
+        Metric, 各 Metric を読む見積もり)。warnings は検査し直した Metric の警告（ほかは self.warnings）。
+
+        入力は今のセル数を使い、計画の順に式から見積もる。dirty を渡すと、その Metric と、見積もりが
+        変わった Metric を読む Metric だけを見積もり直し、ほかは前の見積もりを使う（定義の変更の
+        費用を Metric の数に比例させないため。入力のセル数や軸のメンバー数が変わっただけでは見積もり直さない）。
+        max_cells を超える Metric があれば、計画の順で最初のものを FormulaError にする。
+
+        scan（前の時点の自分を読む Metric）は、まず自分たちを空として見積もり、その値が時間の軸の
+        全時点へ持ち越されうるとして時点の数を掛ける。それを自分たちのセル数としてもう一度見積もり、
+        小さいほうを取る。
+        """
+        def one(expr: Expr, cat, cells: dict[str, float]) -> float:
+            return estimate(expr, cat, cells)[1]
+
+        one = getattr(self.engine, "estimate", one)
+        if dirty is None:
+            out, refs, users, todo = {}, {}, {}, None
+        else:
+            out, refs, users = dict(self.cell_estimates), dict(self._estimate_refs), dict(self._estimate_users)
+            todo = set(dirty)
+            for n in dirty:
+                if formulas.get(n) is None:  # 入力になった Metric は見積もらず、何も読まない
+                    out.pop(n, None)
+                    for x in refs.pop(n, ()):
+                        users[x] = users.get(x, frozenset()) - {n}
+            stack = list(dirty)
+            while stack:  # 見積もりが変わりうるのは、定義を変えた Metric を（間接に）読む Metric だけ
+                for u in users.get(stack.pop(), ()):
+                    if u not in todo:
+                        todo.add(u)
+                        stack.append(u)
+        cells = _CellCounts(self, out)
+        changed = set(dirty or ())
+        for step in plan:
+            if todo is not None and todo.isdisjoint(step.names):
+                continue
+            names = [n for n in step.names if formulas[n] is not None]
+            if todo is not None and all(n in out and n not in changed and n in refs and refs[n].isdisjoint(changed)
+                                        for n in names):
+                continue  # 読む Metric の見積もりが変わらなかった
+            cells.read.clear()
+            before = {n: out.get(n) for n in names}
+            if step.scan_dim is None:
+                for n in names:
+                    out[n] = cells[n] = one(formulas[n], self, cells)
+            else:
+                cells.update({n: 0.0 for n in names})
+                carried = sum(one(formulas[n], self, cells) for n in names)
+                carried *= len(self.dimensions[step.scan_dim].members)
+                cells.update({n: min(carried, combos(self, self.metrics[n].dims)) for n in names})
+                for n in names:
+                    out[n] = min(one(formulas[n], self, cells), cells[n])
+                cells.update({n: out[n] for n in names})
+            read = frozenset(cells.read)
+            for n in names:
+                old = refs.get(n, frozenset())
+                if old != read:  # 逆引きは写してから書き換える（複製したモデルと共有しているため）
+                    for x in old - read:
+                        users[x] = users.get(x, frozenset()) - {n}
+                    for x in read - old:
+                        users[x] = users.get(x, frozenset()) | {n}
+                    refs[n] = read
+                if before[n] != out[n]:
+                    changed.add(n)
+                if self.max_cells is not None and out[n] > self.max_cells:
+                    dense = [w for w in warnings.get(n, self.warnings.get(n, [])) if w.endswith("（密化）")]
+                    raise FormulaError(
+                        f"{n}: 結果のセル数が最大 {out[n]:,.0f} と見積もられ、上限 {self.max_cells:,} を超える"
+                        + (f"。密になる演算: {'、'.join(dense)}" if dense else "")
+                        + "。値のあるセルだけに絞るなら [ON: 相手] か FILTER を使う。上限は Model(max_cells=...) で変えられる")
+        return out, refs, users
 
     def _delta_plan(self, formula: Expr) -> DeltaPlan | None:
         """差分集計の対象なら、その計画。エンジンが判定できるなら（Rust）それに任せる

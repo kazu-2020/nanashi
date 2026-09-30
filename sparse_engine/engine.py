@@ -39,6 +39,11 @@ class Engine(Protocol):
     - from_arrays(dims, kind, cols, cat, partition) / to_arrays(storage, cat):
         軸ごとのメンバー番号の配列と値の配列で、大量のセルを出し入れする（保存と読み込み）。
     - key_bits: 1 セルのキーの固定幅（ビット）。Model は軸の組み合わせがこれに収まるか検査する。
+    - estimate(expr, cat, cells): 型を決めた式の結果のセル数の見積もり（意味は evaluate.estimate と同じ）。
+    - size_hint(storage): 行数の上限。size が行を数え直すエンジン（Rust で差分があるとき）の代わりに、
+        セル数の見積もりが使う。
+    - memory(storage): 格納データが確保しているメモリ。rows（本体の行数）、base（本体）、delta_rows
+        （差分の件数）、delta（差分）、index（索引）。単位はバイト。Model.memory が使う。
     """
     name: str
 

@@ -8,7 +8,7 @@ import unittest
 
 from sparse_engine import Model, parse, to_formula
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.evaluate import affected, collect_refs, infer
+from sparse_engine.evaluate import affected, collect_refs, estimate, infer
 from sparse_engine.expr import Expr, _children
 
 from .test_incremental import same
@@ -107,6 +107,7 @@ class EveryNodeEverywhere(unittest.TestCase):
             changed = {n: {} for n, y in m.metrics.items() if y.formula is None}
             affected(x.formula, m, changed, {"Month": frozenset(["Apr"])}, {"Month": "Feb"})  # 影響範囲
             m.engine.evaluate(x.formula, m, {})               # 評価（参照実装）
+            estimate(x.formula, m, {n: 2.0 for n in m.metrics})  # セル数の見積もり
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_rust_handles_every_node_and_agrees(self):
@@ -172,6 +173,24 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
             want = infer(formula, m, w)
             got, warnings = m.engine.check(formula, m)
             self.assertEqual((got.dims, got.kind, warnings), (want.dims, want.kind, w), x.name)
+
+    def test_cell_estimates(self):
+        """セル数の見積もりが一致し、実際のセル数の上限になっている。"""
+        ref, rust = model(ReferenceEngine()), model(RustEngine())
+        ref.recalc()
+        rust.recalc()
+        self.assertEqual(ref.cell_estimates.keys(), rust.cell_estimates.keys())
+        for name, want in ref.cell_estimates.items():
+            self.assertAlmostEqual(rust.cell_estimates[name], want, msg=name)
+            self.assertGreaterEqual(want, ref.engine.size(ref._values[name]), name)
+        # 頭打ちにならない大きさ（1 より小さいセル数）でも、式ごとに一致する
+        cells = {n: 0.5 + 0.01 * i for i, n in enumerate(ref.metrics)}
+        with python_resolved(ref):
+            for x in ref.metrics.values():
+                if x.formula is not None:
+                    want = estimate(x.formula, ref, cells)[1]
+                    self.assertAlmostEqual(rust.engine.estimate(rust.metrics[x.name].formula, rust, cells), want,
+                                           msg=x.name)
 
     def test_error_messages(self):
         from sparse_engine.evaluate import FormulaError as FE, infer, resolve

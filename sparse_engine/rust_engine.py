@@ -144,6 +144,13 @@ class RustEngine:
         _, _, t, warnings = self._compile_full(expr, cat)
         return t, list(warnings)
 
+    def estimate(self, expr: Expr, cat: Catalog, cells) -> float:
+        """型を決めた式の結果のセル数の見積もり（上限）。cells は Metric ごとのセル数。
+        意味は参照実装（evaluate.estimate）と同じ。"""
+        compiled, names = self._compile(expr, cat)
+        refs = [(self._type(cat, cat.metric_type(n))[0], float(cells[n])) for n in names]
+        return self.core.estimate(compiled, refs)
+
     def _compile(self, expr: Expr, cat: Catalog) -> tuple[Any, list[str]]:
         compiled, names, _, _ = self._compile_full(expr, cat)
         return compiled, names
@@ -547,6 +554,13 @@ class RustEngine:
 
     def size(self, store) -> int:
         return self.core.size(store)
+
+    def size_hint(self, store) -> int:
+        return self.core.size_hint(store)
+
+    def memory(self, store) -> dict:
+        rows, base, delta_rows, delta, index = self.core.memory(store)
+        return {"rows": rows, "base": base, "delta_rows": delta_rows, "delta": delta, "index": index}
 
     def same(self, a, b) -> bool:
         return self.core.same_store(a, b)

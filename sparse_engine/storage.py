@@ -46,7 +46,8 @@ def save(model, path) -> None:
             arrays[f"{i}.{d}"] = np.ascontiguousarray(cols[d], dtype=np.uint32)
         arrays[f"{i}.__v"] = np.ascontiguousarray(cols["__v"], dtype=np.float64)
     meta = {"format": FORMAT_VERSION, "next_id": model._next_id, "dimensions": dims, "metrics": metrics,
-            "options": {"auto_layout": model.auto_layout, "delta_aggregation": model.delta_aggregation}}
+            "options": {"auto_layout": model.auto_layout, "delta_aggregation": model.delta_aggregation,
+                        "max_cells": model.max_cells}}
     (path / "model.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
     np.savez(path / "inputs.npz", **arrays)
 

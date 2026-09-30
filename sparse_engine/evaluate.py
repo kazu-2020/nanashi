@@ -25,7 +25,7 @@ import operator
 from collections import defaultdict
 from dataclasses import dataclass, fields, replace
 from itertools import product
-from typing import Iterator, Protocol
+from typing import Iterator, Mapping, Protocol
 
 from .core import Cube, Dimension
 from .expr import (AGGREGATORS, ARITH, COMPARE, LOGIC, AsAxis, BinOp, By, Coalesce, Const, DimRef,
@@ -264,6 +264,85 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
                 warnings.append(f"IFBLANK が {list(t.dims)} の全組み合わせに展開される（密化）")
             return t
     raise TypeError(expr)
+
+
+# ---------------------------------------------------------------- セル数の見積もり
+
+def combos(cat: Catalog, dims) -> float:
+    """dims の全組み合わせの数（dims の順に掛ける。Rust と同じ順にして、丸めを揃える）。"""
+    n = 1.0
+    for d in dims:
+        n *= float(len(cat.dimension(d).members))
+    return n
+
+
+def estimate(expr: Expr, cat: Catalog, cells: Mapping[str, float]) -> tuple[tuple[str, ...], float]:
+    """型を決めた式の結果の軸と、セル数の上限の見積もり。cells は Metric ごとのセル数。
+
+    値のあるセルだけが結果に残る演算は小さい側で、片側だけでも残る演算は和で、全組み合わせに
+    値を作る演算は軸の大きさの積で見積もり、どれも結果の軸の全組み合わせで頭打ちにする。
+    意味は Rust（check.rs の estimate）と同じ。
+    """
+    def est(e: Expr) -> tuple[tuple[str, ...], float]:
+        return estimate(e, cat, cells)
+
+    def spread(dims, own) -> float:  # own の値が、dims のうち own にない軸の方向へ複製される倍率
+        return combos(cat, [d for d in dims if d not in own])
+
+    match expr:
+        case Ref(name):
+            dims, n = cat.metric_type(name).dims, float(cells[name])
+        case Const() | Member():
+            dims, n = (), 1.0
+        case DimRef(dim):
+            dims, n = (dim,), combos(cat, (dim,))
+        case BinOp(op, left, right):
+            (ld, ln), (rd, rn) = est(left), est(right)
+            dims = _merge(ld, rd)
+            a, b = ln * spread(dims, ld), rn * spread(dims, rd)
+            n = a + b if op in {"+", "-"} | LOGIC else min(a, b)
+        case Not(child) | Shift(child, _, _):
+            dims, n = est(child)
+        case If(cond, then, else_):
+            cd, cn = est(cond)
+            branches = [est(then)] + ([est(else_)] if else_ is not None else [])
+            dims = _merge(cd, *(bd for bd, _ in branches))
+            n = 0.0
+            for bd, bn in branches:
+                part = _merge(cd, bd)
+                n += min(cn * spread(part, cd), bn * spread(part, bd)) * spread(dims, part)
+        case Filter(child, cond):
+            (dims, n), (cd, cn) = est(child), est(cond)
+            n = min(n, cn * spread(dims, cd))
+        case On(child, other):
+            (d, n), (od, on) = est(child), est(other)
+            dims = _merge(d, od)
+            n = min(n * spread(dims, d), on * spread(dims, od))
+        case Expand(child, ds):
+            d, n = est(child)
+            dims, n = _merge(d, ds), n * combos(cat, ds)
+        case IsBlank(child) | IfBlank(child, _):
+            dims, _ = est(child)
+            n = combos(cat, dims)
+        case By(child, dim, prop, _):
+            d, n = est(child)
+            target, _ = _property(cat, dim, prop)
+            if dim in d:  # 集約
+                dims = _replace(d, dim, target)
+            else:  # 引き下ろし: target の値が、対応する dim の各メンバーへ配られる
+                dims, n = _replace(d, target, dim), n * combos(cat, (dim,))
+        case Remove(child, dim, _) | Select(child, dim, _):
+            d, n = est(child)
+            dims = tuple(x for x in d if x != dim)
+        case AsAxis(child, dim):
+            d, n = est(child)
+            dims = d + (dim,)
+        case Coalesce(first, second):
+            (_, fn), (dims, sn) = est(first), est(second)
+            n = fn + sn
+        case _:
+            raise TypeError(expr)
+    return dims, min(n, combos(cat, dims))
 
 
 # ---------------------------------------------------------------- 名前の解決
