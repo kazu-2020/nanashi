@@ -14,7 +14,7 @@ from typing import Any
 import nanashi_core
 
 from .core import Cube
-from .evaluate import Catalog, infer
+from .evaluate import Catalog, _merge, infer
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
@@ -29,6 +29,7 @@ class RustEngine:
         self._names: dict[int, str] = {}
         self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
         self._exprs: dict[int, tuple[Expr, Any, list[str]]] = {}  # id(式) -> (式, 変換結果, 読む名前)
+        self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
 
     def fork(self, cat: Catalog) -> RustEngine:
         """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
@@ -38,6 +39,7 @@ class RustEngine:
         other._names = dict(self._names)
         other._maps = dict(self._maps)
         other._exprs = dict(self._exprs)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
+        other._plan = self._plan  # 計算計画も Metric の番号と式だけに依存する（複製は同じ計画を持つ）
         return other
 
     def share(self, store):
@@ -100,7 +102,11 @@ class RustEngine:
         return compiled, names
 
     def _tree(self, e: Expr, cat: Catalog, names: list[str]) -> tuple:
+        """式を Rust の構文木（タプル）にする。Bin、If、IsBlank、IfBlank には、メンバーを追加したときに
+        値が広がる軸を添える（evaluate.affected の grow と同じ規則）。"""
         t = lambda x: self._tree(x, cat, names)
+        ids = lambda dims: [self._dim(cat, d) for d in dims]
+        dims_of = lambda x: infer(x, cat, []).dims
         match e:
             case Ref(name):
                 if name not in names:
@@ -113,11 +119,18 @@ class RustEngine:
             case Member(dim, member):  # 値はメンバーの番号（順序付きの軸では並び順で比べられる）
                 return ("const", float(cat.dimension(dim)._index[member]), False)
             case BinOp(op, left, right):
-                return ("bin", op, t(left), t(right))
+                grow = []
+                if op in ("+", "-", "and", "or"):
+                    ld, rd = dims_of(left), dims_of(right)
+                    grow = [d for d in _merge(ld, rd) if d not in ld or d not in rd]
+                return ("bin", op, t(left), t(right), ids(grow))
             case Not(child):
                 return ("not", t(child))
             case If(cond, then, else_):
-                return ("if", t(cond), t(then), None if else_ is None else t(else_))
+                cd = dims_of(cond)
+                branches = [dims_of(b) for b in (then, else_) if b is not None]
+                grow = [d for d in _merge(cd, *branches) if any(d not in _merge(cd, b) for b in branches)]
+                return ("if", t(cond), t(then), None if else_ is None else t(else_), ids(grow))
             case Filter(child, cond):
                 return ("filter", t(child), t(cond))
             case On(child, other):
@@ -127,9 +140,9 @@ class RustEngine:
             case Expand(child, dims):
                 return ("expand", t(child), [self._dim(cat, d) for d in dims])
             case IsBlank(child):
-                return ("isblank", t(child))
+                return ("isblank", t(child), ids(dims_of(child)))
             case IfBlank(child, value):
-                return ("ifblank", t(child), float(value))
+                return ("ifblank", t(child), float(value), ids(dims_of(child)))
             case By(child, dim, prop, agg):
                 target, _ = cat.dimension(dim).properties[prop]
                 ids = (self._dim(cat, dim), self._dim(cat, target), self._map(cat, dim, prop))
@@ -145,6 +158,77 @@ class RustEngine:
             case Select(child, dim, member):
                 return ("select", t(child), self._dim(cat, dim), cat.dimension(dim)._index[member])
         raise TypeError(e)
+
+    # ------------------------------------------------ 差分再計算の段取り
+
+    def recalc_changes(self, model, changed: dict, added: dict, olds: dict) -> tuple[list, Any]:
+        """Model.recalc の差分の経路を Rust で行う。changed は入力の変更範囲、added は追加したメンバー、
+        olds は差分集計の集計元になる入力の変更前の値。格納データはその場で書き換わる。
+
+        再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
+        """
+        plan, names = self._plan_for(model)
+        index = {n: i for i, n in enumerate(names)}
+        region = lambda r: self._region(model, r)
+        log = self.core.recalc_changes(
+            plan,
+            [model._values[n] for n in names],
+            [model._counts.get(n) for n in names],
+            [(index[n], region(r)) for n, r in changed.items()],
+            [(self._dim(model, d), [model.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
+            [(index[n], h) for n, h in olds.items()])
+
+        def named(entries):
+            return [(names[i], {self._names[d]: frozenset(model.dimension(self._names[d]).members[j] for j in ms)
+                                for d, ms in r}) for i, _, r in entries]
+        return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
+
+    def _plan_for(self, model) -> tuple[Any, list[str]]:
+        """Model の計算計画を Rust の計算計画にする。計画を作り直すまで使い回す。"""
+        if self._plan is not None and self._plan[0] is model._plan:
+            return self._plan[1], self._plan[2]
+        names = list(model.metrics)
+        index = {n: i for i, n in enumerate(names)}
+        sources = model._delta_sources()
+
+        def bound(expr):
+            compiled, reads = self._compile(expr, model)
+            return compiled, [index[n] for n in reads]
+
+        metrics = []
+        for n in names:
+            m = model.metrics[n]
+            count = delta = None
+            dp = model._delta.get(n)
+            if dp is not None:
+                count = None if dp.count is None else bound(dp.count)
+                delta = self._delta_parts(model, m, dp)
+            metrics.append((None if m.formula is None else bound(m.formula), count, delta, n in sources))
+        steps = [(None if s.scan_dim is None else self._dim(model, s.scan_dim), [index[n] for n in s.names])
+                 for s in model._plan]
+        plan = self.core.make_plan(metrics, steps)
+        self._plan = (model._plan, plan, names)
+        return plan, names
+
+    def _delta_parts(self, model, m, dp) -> tuple:
+        """差分集計の ([集計元, 対応表...], 件数の差分の式, 値の差分の式)。差分の式が読む __new{i} と
+        __old{i}（Model._delta_exprs の作業データ）は、作業データの番号 2i と 2i + 1 にする。"""
+        inputs = (dp.source, *dp.aux)
+        d_count, d_value = model._delta_exprs(m, dp)
+        types = {}
+        for i, n in enumerate(inputs):
+            types[f"__new{i}"] = types[f"__old{i}"] = model.metric_type(n)
+        model._temp_types = types
+        try:
+            def slots(expr):
+                compiled, reads = self._compile(expr, model)
+                return compiled, [2 * int(r[5:]) + (r.startswith("__old")) for r in reads]
+            count = slots(d_count)
+            value = None if dp.count is None else slots(d_value)
+        finally:
+            model._temp_types = {}
+        index = {n: i for i, n in enumerate(model.metrics)}
+        return [index[n] for n in inputs], count, value
 
     # ------------------------------------------------ Engine
 
@@ -178,6 +262,7 @@ class RustEngine:
         """メンバー数と、dim が関わる対応表を Rust 側に反映する。"""
         if renumbered:  # 変換済みの式はメンバーの番号（定数、SELECT）を持っているので作り直す
             self._exprs.clear()
+            self._plan = None
         if dim in self._dims:
             d, i = self._dims[dim]
             if d is cat.dimension(dim):

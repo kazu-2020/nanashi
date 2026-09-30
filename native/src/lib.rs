@@ -2,8 +2,10 @@
 //! Python には中身を持たないハンドルだけを渡す。
 
 mod core;
+mod plan;
 
 use crate::core::{eval, Agg, Catalog, Cube, DimId, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
+use crate::plan::{Delta, Formula, Metric, Plan, Reg, Step};
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -51,6 +53,23 @@ struct StoreHandle {
 #[pyclass]
 struct Core {
     cat: Arc<Catalog>,
+}
+
+/// 差分再計算の計算計画（Rust の段取り用）。
+#[pyclass(frozen)]
+struct PlanHandle {
+    plan: Arc<Plan>,
+}
+
+/// Python の (式, 読み出し元の番号) から Formula を作る。None なら None。
+fn formula(obj: &Bound<'_, PyAny>) -> PyResult<Option<Formula>> {
+    if obj.is_none() {
+        return Ok(None);
+    }
+    let t = obj.cast::<PyTuple>()?;
+    let e = t.get_item(0)?;
+    let node = e.cast::<Expr>()?.get().node.clone();
+    Ok(Some(Formula { node, refs: t.get_item(1)?.extract()? }))
 }
 
 type Region = Vec<(DimId, Vec<u32>)>;
@@ -117,19 +136,20 @@ impl Core {
                     "or" => Op::Or,
                     _ => return Err(err(format!("未知の演算子 {op}"))),
                 };
-                Node::Bin(op, child(2)?, child(3)?)
+                Node::Bin(op, child(2)?, child(3)?, t.get_item(4)?.extract()?)
             }
             "not" => Node::Not(child(1)?),
             "if" => {
                 let e = t.get_item(3)?;
-                Node::If(child(1)?, child(2)?, if e.is_none() { None } else { Some(Box::new(self.node(&e)?)) })
+                let e = if e.is_none() { None } else { Some(Box::new(self.node(&e)?)) };
+                Node::If(child(1)?, child(2)?, e, t.get_item(4)?.extract()?)
             }
             "filter" => Node::Filter(child(1)?, child(2)?),
             "on" => Node::On(child(1)?, child(2)?),
             "coalesce" => Node::Coalesce(child(1)?, child(2)?),
             "expand" => Node::Expand(child(1)?, t.get_item(2)?.extract()?),
-            "isblank" => Node::IsBlank(child(1)?),
-            "ifblank" => Node::IfBlank(child(1)?, t.get_item(2)?.extract()?),
+            "isblank" => Node::IsBlank(child(1)?, t.get_item(2)?.extract()?),
+            "ifblank" => Node::IfBlank(child(1)?, t.get_item(2)?.extract()?, t.get_item(3)?.extract()?),
             "byagg" => Node::ByAgg {
                 child: child(1)?,
                 src: t.get_item(2)?.extract()?,
@@ -338,6 +358,79 @@ impl Core {
     fn cube_len(&self, cube: &Bound<'_, CubeHandle>) -> usize {
         cube.get().cube.cells.len()
     }
+
+    /// 差分再計算の計算計画を作る。
+    ///
+    /// metrics は Metric ごとの (式, 件数の式, 差分集計, 集計元か)。式は (Expr, 読み出す Metric の番号)、
+    /// 差分集計は ([集計元, 対応表...], 件数の差分の式, 値の差分の式または None) で、差分の式の読み出し元は
+    /// 作業データの番号（i 番目の変更後が 2i、変更前が 2i + 1）。steps は (scan の軸または None, Metric の番号)。
+    fn make_plan(&self, metrics: Vec<Bound<'_, PyTuple>>, steps: Vec<(Option<DimId>, Vec<usize>)>) -> PyResult<PlanHandle> {
+        let mut out = Vec::with_capacity(metrics.len());
+        for t in &metrics {
+            let delta = t.get_item(2)?;
+            let delta = if delta.is_none() {
+                None
+            } else {
+                let d = delta.cast::<PyTuple>()?;
+                Some(Delta {
+                    inputs: d.get_item(0)?.extract()?,
+                    d_count: formula(&d.get_item(1)?)?.ok_or_else(|| err("件数の差分の式がない".into()))?,
+                    d_value: formula(&d.get_item(2)?)?,
+                })
+            };
+            out.push(Metric {
+                formula: formula(&t.get_item(0)?)?,
+                count: formula(&t.get_item(1)?)?,
+                delta,
+                source: t.get_item(3)?.extract()?,
+            });
+        }
+        let steps = steps
+            .into_iter()
+            .map(|(dim, names)| match dim {
+                Some(d) => Step::Scan(d, names),
+                None => Step::One(names[0]),
+            })
+            .collect();
+        Ok(PlanHandle { plan: Arc::new(Plan { metrics: out, steps }) })
+    }
+
+    /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
+    /// 格納データで、その場で書き換える。changed は入力の変更範囲、added は軸ごとの追加したメンバー、
+    /// olds は差分集計の集計元になる入力の変更前の値。再計算した (Metric, 差分集計か, 範囲) を返す。
+    #[allow(clippy::too_many_arguments)]
+    fn recalc_changes(
+        &self,
+        py: Python<'_>,
+        plan: &PlanHandle,
+        stores: Vec<Bound<'_, StoreHandle>>,
+        counts: Vec<Option<Bound<'_, StoreHandle>>>,
+        changed: Vec<(usize, Region)>,
+        added: Vec<(DimId, Vec<u32>)>,
+        olds: Vec<(usize, Bound<'_, PyAny>)>,
+    ) -> PyResult<Vec<(usize, bool, Region)>> {
+        let olds: Vec<(usize, Src)> = olds.iter().map(|(m, o)| Ok((*m, Core::source(o)?))).collect::<PyResult<_>>()?;
+        let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| (m, Reg::new(r))).collect();
+        // 格納データをハンドルから取り出して渡し、終わったら戻す（参照を増やすと書き込み時に複製されるため）
+        let empty = Arc::new(Store::new(&[], None, Kind::Num, &self.cat).map_err(err)?);
+        let mut own: Vec<Arc<Store>> = stores.iter().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())).collect();
+        let mut own_counts: Vec<Option<Arc<Store>>> = counts
+            .iter()
+            .map(|h| h.as_ref().map(|h| std::mem::replace(&mut h.borrow_mut().store, empty.clone())))
+            .collect();
+        let (cat, plan) = (self.cat.clone(), plan.plan.clone());
+        let result = py.detach(|| plan::recalc(&cat, &plan, &mut own, &mut own_counts, changed, &added, olds));
+        for (h, s) in stores.iter().zip(own) {
+            h.borrow_mut().store = s;
+        }
+        for (h, s) in counts.iter().zip(own_counts) {
+            if let (Some(h), Some(s)) = (h, s) {
+                h.borrow_mut().store = s;
+            }
+        }
+        let log = result.map_err(err)?;
+        Ok(log.into_iter().map(|(m, delta, r)| (m, delta, r.into_parts())).collect())
+    }
 }
 
 /// 差分を本体にまとめ直す件数の下限を変える（テスト用）。
@@ -374,5 +467,6 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Expr>()?;
     m.add_class::<CubeHandle>()?;
     m.add_class::<StoreHandle>()?;
+    m.add_class::<PlanHandle>()?;
     Ok(())
 }

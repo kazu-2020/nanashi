@@ -52,6 +52,46 @@ class Step:
     scan_dim: str | None = None  # None なら通常の 1 Metric の計算
 
 
+class SliceLog:
+    """再計算した (Metric, 範囲) の記録（観察用）。エンジンがメンバーの番号で返した範囲は、
+    読まれたときに名前へ直す（1 回の変更で何百もの範囲を直すと、それだけで時間がかかるため）。"""
+
+    def __init__(self):
+        self._items: list[tuple[str, Restrict]] = []
+        self._later: list = []  # 名前に直した記録を返す関数
+
+    def _flush(self) -> list[tuple[str, Restrict]]:
+        for named in self._later:
+            self._items.extend(named())
+        self._later.clear()
+        return self._items
+
+    def append(self, item: tuple[str, Restrict]) -> None:
+        self._flush().append(item)
+
+    def extend_later(self, named) -> None:
+        self._later.append(named)
+
+    def clear(self) -> None:
+        self._items.clear()
+        self._later.clear()
+
+    def __iter__(self):
+        return iter(self._flush())
+
+    def __len__(self) -> int:
+        return len(self._flush())
+
+    def __getitem__(self, i):
+        return self._flush()[i]
+
+    def __eq__(self, other) -> bool:
+        return self._flush() == list(other)
+
+    def __repr__(self) -> str:
+        return repr(self._flush())
+
+
 @dataclass
 class Model:
     engine: Engine = field(default_factory=default_engine)
@@ -62,7 +102,7 @@ class Model:
     metrics: dict[str, Metric] = field(default_factory=dict)
     warnings: dict[str, list[str]] = field(default_factory=dict)
     eval_log: list[str] = field(default_factory=list)  # 再計算した Metric 名（観察用）
-    slice_log: list[tuple[str, Restrict]] = field(default_factory=list)  # 再計算した範囲（観察用）
+    slice_log: SliceLog = field(default_factory=lambda: SliceLog())  # 再計算した範囲（観察用）
     delta_log: list[str] = field(default_factory=list)  # 差分集計で更新した Metric（観察用）
     _values: dict[str, Any] = field(default_factory=dict)  # エンジンごとの格納形式
     _plan: list[Step] | None = None
@@ -295,6 +335,7 @@ class Model:
         """
         d = self.dimension(dim)
         self.recalc()  # 変更範囲はメンバー名で持つので、ためている変更を先に片付ける
+        self.slice_log._flush()  # 記録を今の名前で直しておく
         d.rename_member(old, new)
         for other in self.dimensions.values():
             for prop, (target, mapping) in list(other.properties.items()):
@@ -370,6 +411,7 @@ class Model:
         # 2. メンバーを消して変わる範囲を、消す前の軸と対応表のもとで求める。下流に伝えるのは、
         #    そのメンバーのセルが実際にある Metric の消えるセルと、計算し直す範囲だけにする
         todo = self._removal_regions(dim, member, has_cells)
+        self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、詰める前に名前へ直す
         d.remove_member(member)
         for other in self.dimensions.values():
             for prop, (target, mapping) in list(other.properties.items()):
@@ -672,6 +714,13 @@ class Model:
         self._changed.clear()
         self._old_cells.clear()
         self._old_slices.clear()
+        fast = getattr(self.engine, "recalc_changes", None)
+        if fast is not None:  # 段取りごとエンジンに任せる（Rust）。意味は以下の Python の経路と同じ
+            done, named = fast(self, regions, added, olds)
+            self.eval_log.extend(n for n, _ in done)
+            self.delta_log.extend(n for n, delta in done if delta)
+            self.slice_log.extend_later(named)
+            return
         for step in self._plan:
             if step.scan_dim is not None:
                 active = {n: r for n, r in self._scan_regions(step, regions, added).items()

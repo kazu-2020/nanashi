@@ -756,19 +756,21 @@ pub enum Agg {
     First, // 値が 1 つしかないグループ用（引き下ろしの内部で使う）
 }
 
+/// 式の構文木。Bin、If、IsBlank、IfBlank の Vec<DimId> は、軸にメンバーを追加したときに
+/// 新しいメンバーへ値が広がる軸（影響範囲の計算に使う。評価には使わない）。
 #[derive(Debug)]
 pub enum Node {
     Ref(usize), // 評価時に渡す読み出し元の番号
     DimRef(DimId), // 軸そのもの。値は各セルのメンバー番号
     Const(f64, Kind),
-    Bin(Op, Box<Node>, Box<Node>),
+    Bin(Op, Box<Node>, Box<Node>, Vec<DimId>),
     Not(Box<Node>),
-    If(Box<Node>, Box<Node>, Option<Box<Node>>),
+    If(Box<Node>, Box<Node>, Option<Box<Node>>, Vec<DimId>),
     Filter(Box<Node>, Box<Node>),
     On(Box<Node>, Box<Node>),
     Expand(Box<Node>, Vec<DimId>),
-    IsBlank(Box<Node>),
-    IfBlank(Box<Node>, f64),
+    IsBlank(Box<Node>, Vec<DimId>),
+    IfBlank(Box<Node>, f64, Vec<DimId>),
     ByAgg { child: Box<Node>, src: DimId, dst: DimId, map: usize, agg: Agg },
     ByLookup { child: Box<Node>, src: DimId, dst: DimId, map: usize },
     Remove { child: Box<Node>, dim: DimId, agg: Agg },
@@ -779,13 +781,14 @@ pub enum Node {
 }
 
 /// 式が読む Metric（格納データ、または評価の途中結果）。
+#[derive(Clone)]
 pub enum Src {
     Store(Arc<Store>),
     Cube(Arc<Cube>),
 }
 
 impl Src {
-    fn read(&self, r: &Restrict) -> Cube {
+    pub fn read(&self, r: &Restrict) -> Cube {
         match self {
             Src::Store(s) => s.read(r),
             Src::Cube(c) => c.filter(r),
@@ -1093,7 +1096,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
 
         Node::Const(v, kind) => Ok(Cube { pack: Packing::new(&[], cat)?, kind: *kind, cells: vec![(0, *v)] }),
 
-        Node::Bin(op, l, rt) => {
+        Node::Bin(op, l, rt, _) => {
             let a = ev(l)?;
             let b = match op {
                 // INNER JOIN の演算は、左が小さければ右を左のメンバーに絞って評価する
@@ -1131,7 +1134,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             Ok(c)
         }
 
-        Node::If(cond, then, else_) => {
+        Node::If(cond, then, else_, _) => {
             // TRUE のセルは THEN と、FALSE のセルは ELSE と INNER JOIN する。空の条件はどちらにも入らない
             let c = ev(cond)?;
             let pick = |want: bool| Cube {
@@ -1190,14 +1193,14 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
             expand(&c, &[c.dims(), &dims[..]].concat(), cat, r)
         }
 
-        Node::IsBlank(child) => {
+        Node::IsBlank(child, _) => {
             let c = ev(child)?;
             let present: FxHashSet<u64> = c.cells.iter().map(|c| c.0).collect();
             let cells = dense(&c, cat, r).into_iter().map(|k| (k, b2f(!present.contains(&k)))).collect();
             Ok(Cube { pack: c.pack, kind: Kind::Bool, cells })
         }
 
-        Node::IfBlank(child, value) => {
+        Node::IfBlank(child, value, _) => {
             let c = ev(child)?;
             let present: FxHashMap<u64, f64> = c.cells.iter().copied().collect();
             let cells = dense(&c, cat, r).into_iter().map(|k| (k, *present.get(&k).unwrap_or(value))).collect();
