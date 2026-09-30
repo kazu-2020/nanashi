@@ -342,17 +342,24 @@ class FileJournal:
 
     def append(self, record: dict) -> int:
         """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
-        seq = self.head + 1
-        line = json.dumps({**record, "seq": seq}, ensure_ascii=False, separators=(",", ":")) + "\n"
+        return self.append_many([record])[0]
+
+    def append_many(self, records: list[dict]) -> list[int]:
+        """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。"""
+        seqs = list(range(self.head + 1, self.head + 1 + len(records)))
+        lines = "".join(json.dumps({**r, "seq": q}, ensure_ascii=False, separators=(",", ":")) + "\n"
+                        for r, q in zip(records, seqs))
         with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(line)
+            f.write(lines)
             f.flush()
             if self.fsync:
                 _sync(f.fileno())
-        self.head = seq
-        if record.get("client_op_id") is not None:
-            self._by_client_op[record["client_op_id"]] = seq
-        return seq
+        if seqs:
+            self.head = seqs[-1]
+        for r, q in zip(records, seqs):
+            if r.get("client_op_id") is not None:
+                self._by_client_op[r["client_op_id"]] = q
+        return seqs
 
     def seq_of(self, client_op_id: str) -> int | None:
         return self._by_client_op.get(client_op_id)

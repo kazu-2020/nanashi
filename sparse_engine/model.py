@@ -105,6 +105,8 @@ def _operation(fn):
     記録しない）。記録先があってトランザクションの外なら、1 回の呼び出しを 1 トランザクションにする。"""
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
+        if self._frozen:
+            raise ValueError("公開済みの版は書き換えられない（Workspace.write で書き込む）")
         txn = self._txn
         if txn is None:
             if self.journal is None:
@@ -156,6 +158,7 @@ class Model:
     seq: int = 0  # 確定した最後のトランザクションの通し番号
     last_record: dict | None = None  # 最後に確定したトランザクションの記録
     _txn: Transaction | None = None  # 実行中のトランザクション
+    _frozen: bool = False  # 公開済みの版（Workspace）。書き換えない
 
     # ------------------------------------------------ Catalog
 
@@ -185,6 +188,8 @@ class Model:
 
     def refresh(self) -> None:
         """全体を計算し直す。差分集計を続けてたまった浮動小数点の誤差もなくなる。"""
+        if self._frozen:
+            raise ValueError("公開済みの版は計算し直せない（Workspace.write の中で計算し直す）")
         self._full = True
         self.recalc()
 
@@ -219,7 +224,7 @@ class Model:
 
     @contextlib.contextmanager
     def transaction(self, *, user: str | None = None, reason: str | None = None,
-                    client_op_id: str | None = None):
+                    client_op_id: str | None = None, validate=None):
         """複数の操作を 1 つのトランザクションにまとめる。
 
             with m.transaction(user="alice", reason="予算の修正") as txn:
@@ -233,10 +238,14 @@ class Model:
 
         client_op_id を渡すと、同じ ID のトランザクションが確定済みなら AlreadyCommitted を投げる
         （中の操作は実行しない）。応答を受け取れなかった利用者が再送したときに、二重に確定しない。
+
+        validate を渡すと、確定する前に記録を渡して呼ぶ。例外を投げれば取り消す（排他の確認などに使う）。
         """
         if self._txn is not None:
             yield self._txn
             return
+        if self._frozen:
+            raise ValueError("公開済みの版は書き換えられない（Workspace.write で書き込む）")
         if client_op_id is not None and self.journal is not None:
             if (seq := self.journal.seq_of(client_op_id)) is not None:
                 raise AlreadyCommitted(seq)
@@ -248,6 +257,8 @@ class Model:
             self.recalc()
             record = {"v": 1, "at": now(), "user": user, "reason": reason, "client_op_id": client_op_id,
                       "ops": txn.ops, "changes": changes(saved, self)}
+            if validate is not None:
+                validate(record)
             if self.journal is not None and txn.ops:
                 self.seq = self.journal.append(record)
                 record["seq"] = self.seq
