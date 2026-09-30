@@ -26,11 +26,12 @@ import datetime
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .core import Dimension
 from .engine import native, parquet_value
@@ -41,9 +42,15 @@ from .parser import parse, to_formula
 
 LOG_VERSION = 1
 
+log = logging.getLogger(__name__)
+
 
 class Stale(Exception):
     """手元のモデルが記録先より古い（別のプロセスが書き込んだ）。開き直せば続けられる。"""
+
+
+class BrokenSnapshot(Exception):
+    """スナップショットのファイルが欠けているか、ハッシュが合わない。"""
 
 
 class AlreadyCommitted(Exception):
@@ -329,7 +336,9 @@ class Journal:
         seq_of(client_op_id)       その ID の記録の通し番号（なければ None）
         records(after)             通し番号が after より後の記録（古い順）
         save_snapshot(model)       model（通し番号 model.seq の時点）のスナップショットを置く
-        snapshots()                使えるスナップショットの (通し番号, 置き場所) を新しい順に
+        snapshots()                スナップショットの (通し番号, 置き場所) を新しい順に
+        load_snapshot(place)       置き場所のスナップショットを読む。壊れていれば BrokenSnapshot
+                                   （open は 1 つ前のスナップショットから記録を多く再生する）
         release()                  書き込みの権利（PgJournal のリース）を手放す。次の書き手が待たずに済む
     """
 
@@ -371,12 +380,13 @@ class Journal:
         """最新のスナップショットを読み、その後の記録を再生したモデル（記録先はこの Journal）。"""
         from .engine import default_engine
         from .model import Model
-        from .storage import load
         engine = engine if engine is not None else default_engine()
-        snaps = self.snapshots()
-        if snaps:
-            base, path = snaps[0]
-            model = load(path, engine)
+        for base, place in self.snapshots():
+            try:
+                model = self.load_snapshot(place, engine)
+                break
+            except BrokenSnapshot as e:
+                log.warning("スナップショット %d が壊れている（1 つ前から開く）: %s", base, e)
         else:
             base, model = 0, Model(engine=engine)
         for rec in self.records(after=base):
@@ -384,6 +394,10 @@ class Journal:
         model.seq = self.head
         model.journal = self
         return model
+
+    def load_snapshot(self, place, engine):
+        from .storage import load
+        return load(place, engine)
 
     def start(self, model) -> None:
         """記録のない新しい記録先に、model の今の状態を最初のスナップショットとして置き、
@@ -523,10 +537,19 @@ class FileJournal(Journal):
     def _write_cells(self, record: dict) -> dict:
         """記録のセルの変更を cells/ の Parquet に書き、記録の行に入れる参照（名前は path からの相対）を返す。"""
         self.cells_dir.mkdir(exist_ok=True)
-        files = write_cell_files(record, self.cells_dir / uuid.uuid4().hex, fsync=self.fsync)
-        for f in files:
-            f["uri"] = Path(f["uri"]).relative_to(self.path).as_posix()
-        return {"format": "parquet", "files": files, "cells": cell_count(record)}
+        prefix = uuid.uuid4().hex
+
+        def put(name: str, data: bytes) -> str:  # 一時ファイルに書いてから名前を変える
+            final = self.cells_dir / f"{prefix}-{name}"
+            tmp = final.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                if self.fsync:
+                    _sync(f.fileno())
+            os.rename(tmp, final)
+            return final.relative_to(self.path).as_posix()
+        return {"format": "parquet", "files": write_cell_files(record, put), "cells": cell_count(record)}
 
     def records(self, after: int = 0) -> Iterator[dict]:
         if not self.log_path.exists():
@@ -536,7 +559,8 @@ class FileJournal(Journal):
                 rec = json.loads(line)
                 if rec["seq"] > after:
                     if "cells_blob" in rec:  # 大量のセルはファイルから、変更の塊として読む
-                        rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"], self.path)
+                        rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"],
+                                                                   lambda uri: (self.path / uri).read_bytes())
                     yield rec
 
     # ------------------------------------------------ スナップショット
@@ -571,9 +595,9 @@ def as_block(core, rows):
     return core.CellBlock.from_rows(rows) if isinstance(rows, list) else rows
 
 
-def write_cell_files(record: dict, prefix: Path, *, fsync: bool) -> list[dict]:
-    """記録のセルの変更を Metric ごとの Parquet（<prefix>-<Metric の ID>.parquet）に書き、
-    [{"metric", "uri"（書いたファイル）, "sha256", "cells"}] を返す。一時ファイルに書いてから名前を変える。"""
+def write_cell_files(record: dict, put: Callable[[str, bytes], str]) -> list[dict]:
+    """記録のセルの変更を Metric ごとの Parquet にし、put(<Metric の ID>.parquet, 中身) で置いて、
+    [{"metric", "uri"（put が返した置き場所）, "sha256", "cells"}] を返す。"""
     core = native()
     files = []
     for c in record["changes"].get("cells", []):
@@ -581,28 +605,19 @@ def write_cell_files(record: dict, prefix: Path, *, fsync: bool) -> list[dict]:
         # 列の名前は軸の ID（記録に軸がなければ c0、c1、…）
         names = [f"d{i}" for i in c["dims"]] if "dims" in c else [f"c{j}" for j in range(block.width)]
         data = block.to_parquet(names, [("nanashi", json.dumps({"metric": c["metric"]}))])
-        final = Path(f"{prefix}-{c['metric']}.parquet")
-        tmp = final.with_suffix(".tmp")
-        with open(tmp, "wb") as f:
-            f.write(data)
-            f.flush()
-            if fsync:
-                _sync(f.fileno())
-        os.rename(tmp, final)
-        files.append({"metric": c["metric"], "uri": str(final), "sha256": hashlib.sha256(data).hexdigest(),
-                      "cells": len(block)})
+        files.append({"metric": c["metric"], "uri": put(f"{c['metric']}.parquet", data),
+                      "sha256": hashlib.sha256(data).hexdigest(), "cells": len(block)})
     return files
 
 
-def read_cell_files(files: list[dict], base: Path | None = None) -> list[dict]:
-    """write_cell_files で書いたセルの変更を、Metric ごとの変更の塊で読む。uri が相対なら base から探す。"""
+def read_cell_files(files: list[dict], get: Callable[[str], bytes]) -> list[dict]:
+    """write_cell_files で置いたセルの変更を、get(置き場所) で読み、Metric ごとの変更の塊で返す。"""
     core = native()
     cells = []
     for f in files:
-        path = Path(base) / f["uri"] if base is not None else Path(f["uri"])
-        data = path.read_bytes()
+        data = get(f["uri"])
         if hashlib.sha256(data).hexdigest() != f["sha256"]:
-            raise ValueError(f"{path}: セルの変更のファイルが壊れている")
+            raise ValueError(f"{f['uri']}: セルの変更のファイルが壊れている")
         cells.append({"metric": f["metric"], "rows": core.CellBlock.from_parquet(data)})
     return cells
 

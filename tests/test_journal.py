@@ -192,9 +192,10 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual([s for s, _ in snapshots], [1, 0])
         check_same_state(self, self.m, self.reopen())
         # 新しいスナップショットが壊れていたら、古いスナップショットから記録を多く再生する
-        broken = next(Path(dict(snapshots)[1]).glob("inputs.*.parquet"))
+        # （FileJournal は一覧から外し、PgJournal は読むときにハッシュが合わないので 1 つ前に戻る）
+        place = dict(snapshots)[1]
+        broken = next(Path(getattr(place, "uri", place)).glob("inputs.*.parquet"))  # PgJournal は Snapshot
         broken.write_bytes(b"broken")
-        self.assertEqual([s for s, _ in self.journals.journal().snapshots()], [0])
         check_same_state(self, self.m, self.reopen())
 
     def test_torn_last_line_is_dropped(self):

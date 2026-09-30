@@ -1,0 +1,17 @@
+# 開発とテスト用の PostgreSQL と、S3 互換のオブジェクトストレージ（RustFS）。docker compose up -d で起動する。
+# どちらも手元（127.0.0.1）からだけつながる。認証情報は開発用の固定のもので、本番には使わない。
+services:
+  postgres:
+    image: postgres:18-bookworm
+    container_name: nanashi-pg
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: nanashi
+    ports: ["127.0.0.1:55432:5432"]
+  s3:
+    image: rustfs/rustfs:1.0.0
+    container_name: nanashi-s3
+    environment:
+      RUSTFS_ACCESS_KEY: nanashi
+      RUSTFS_SECRET_KEY: nanashi-secret
+    ports: ["127.0.0.1:59000:9000", "127.0.0.1:59001:9001"]  # S3 の API と、管理画面
