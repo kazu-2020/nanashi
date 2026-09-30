@@ -1,9 +1,12 @@
 """HTTP サーバー（Workspace を JSON の API で公開する）。"""
+import http.client
 import json
+import socket
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.server import Server
@@ -18,16 +21,22 @@ except ImportError:  # nanashi_core をビルドしていない環境
     RustEngine = None
 
 
+TOKENS = {"t-alice": "alice", "t-bob": "bob"}
+
+
 class Client:
-    def __init__(self, url: str):
+    def __init__(self, url: str, token: str | None = "t-alice", headers: dict | None = None):
         self.url = url
+        self.headers = dict(headers or {})
+        if token is not None:
+            self.headers["Authorization"] = f"Bearer {token}"
 
     def get(self, path: str) -> tuple[int, dict]:
-        return self._call(urllib.request.Request(self.url + path))
+        return self._call(urllib.request.Request(self.url + path, headers=self.headers))
 
     def post(self, path: str, body: dict) -> tuple[int, dict]:
         req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json", **self.headers})
         return self._call(req)
 
     @staticmethod
@@ -48,7 +57,7 @@ class Api:
 
     def setUp(self):
         self.ws = workspace(self, model(self.engine()), max_queue=8)
-        self.server = Server(self.ws, "127.0.0.1", 0).start()
+        self.server = Server(self.ws, "127.0.0.1", 0, tokens=TOKENS, max_cells=50).start()
         self.c = Client(self.server.url)
 
     def tearDown(self):
@@ -81,7 +90,7 @@ class Api:
         self.assertEqual(self.c.get("/metrics/Stock/rows?offset=x")[0], 400)
 
     def test_writes_are_transactions_with_resend(self):
-        body = {"client_op_id": "op-1", "user": "alice", "reason": "移動",
+        body = {"client_op_id": "op-1", "reason": "移動",
                 "ops": [write("Stock", 95, Product="p0", Month="Jan"), write("Stock", 105, Product="p1", Month="Jan")]}
         self.assertEqual(self.c.post("/writes", body), (200, {"seq": 1}))
         self.assertEqual(self.c.get("/metrics/Stock/cell?Product=p1&Month=Jan")[1]["value"], 105.0)
@@ -101,8 +110,9 @@ class Api:
 
     def test_optimistic_concurrency(self):
         seq = self.c.get("/health")[1]["seq"]
-        self.c.post("/writes", {"client_op_id": "a", "user": "alice", "ops": [write("Stock", 90, Product="p0", Month="Jan")]})
-        status, err = self.c.post("/writes", {"client_op_id": "b", "user": "bob", "expect": seq,
+        self.c.post("/writes", {"client_op_id": "a", "ops": [write("Stock", 90, Product="p0", Month="Jan")]})
+        bob = Client(self.server.url, "t-bob")
+        status, err = bob.post("/writes", {"client_op_id": "b", "expect": seq,
                                               "ops": [write("Stock", 80, Product="p0", Month="Jan")]})
         self.assertEqual((status, err["error"], err["user"], err["seq"]), (409, "conflict", "alice", 1))
         status, body = self.c.post("/writes", {"client_op_id": "c", "expect": seq,
@@ -127,6 +137,48 @@ class Api:
             self.assertIn(504, results)  # 列に入った分は、確定を待ちきれずに 504
         finally:
             release()
+
+    def test_user_comes_from_authentication(self):
+        anonymous = Client(self.server.url, token=None)
+        self.assertEqual(anonymous.get("/health")[0], 200)  # 死活監視は認証なしで読める
+        self.assertEqual(anonymous.get("/metrics/Stock/cell?Product=p1&Month=Jan")[0], 401)
+        self.assertEqual(Client(self.server.url, "t-eve").get("/")[0], 401)
+        body = {"client_op_id": "u1", "ops": [write("Stock", 90, Product="p0", Month="Jan")]}
+        self.assertEqual(anonymous.post("/writes", body)[0], 401)
+        status, err = self.c.post("/writes", {**body, "user": "bob"})  # 本文の自己申告は受け付けない
+        self.assertEqual((status, err["error"]), (400, "bad_request"))
+        self.assertEqual(Client(self.server.url, "t-bob").post("/writes", body)[0], 200)
+        self.assertEqual(self.ws.version.model.last_record["user"], "bob")
+
+    def test_size_limits(self):
+        status, err = self.c.get("/metrics/Stock/slice")  # 80 セルは上限 50 を超える
+        self.assertEqual((status, err["error"]), (413, "too_large"))
+        self.assertEqual(self.c.get("/metrics/Stock/slice?Product=p1,p2")[0], 200)
+        self.assertEqual(self.c.get("/metrics/Stock/rows?limit=51")[0], 400)
+        status, body = self.c.get("/metrics/Stock/rows")  # limit を省くと上限まで
+        self.assertEqual((status, len(body["rows"]), body["total"]), (200, 50, 80))
+        self.assertEqual(self.c.get("/metrics/Stock/summary?keep=Product,Month")[0], 413)
+        self.assertEqual(self.c.get("/metrics/Stock/summary?keep=Product,Month&Month=Jan")[0], 200)
+        self.server.max_body = 100
+        big = {"client_op_id": "big", "ops": [write("Stock", 1, Product="p0", Month="Jan")] * 10}
+        status, err = self.c.post("/writes", big)
+        self.assertEqual((status, err["error"]), (413, "too_large"))
+        self.assertEqual(self.c.get("/health")[1]["seq"], 0)
+
+    def test_argument_errors_are_400_and_internal_errors_hide_details(self):
+        for op in [write("Nope", 1, Product="p0", Month="Jan"), write("Stock", 1, Product="p0"),
+                   write("Stock", 1, Product="p0", Month="Jan", Color="red"),
+                   {"op": "add_member", "args": ["Product"]}, {"op": "spread", "args": ["Stock", "x"]},
+                   {"op": "set_cell", "args": "Stock"}, "set_cell"]:
+            with self.subTest(op=op):
+                status, err = self.c.post("/writes", {"client_op_id": f"bad-{op}", "ops": [op]})
+                self.assertEqual((status, err["error"]), (400, "bad_request"), err)
+        self.assertEqual(self.c.get("/metrics/Stock/cell?Product=p0")[0], 400)
+        with mock.patch("sparse_engine.workspace.Version.get", side_effect=KeyError("secret")):
+            status, err = self.c.get("/metrics/Stock/cell?Product=p1&Month=Jan")
+        self.assertEqual((status, err["error"], err["message"]), (500, "internal", "内部エラー"))
+        self.assertNotIn("secret", json.dumps(err))
+        self.assertTrue(err["error_id"])
 
     def test_definition_changes_through_the_api(self):
         ops = [{"op": "add_dimension", "args": ["Region", ["N", "S"]]},
@@ -158,14 +210,62 @@ class PgRustApi(JournalCase, RustApi):
     store = PgStore
 
 
+class Limits(unittest.TestCase):
+    def setUp(self):
+        self.ws = Workspace(model(ReferenceEngine()))
+
+    def test_proxy_header_names_the_user(self):
+        server = Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User").start()
+        try:
+            self.assertEqual(Client(server.url, token=None).get("/")[0], 401)
+            c = Client(server.url, token=None, headers={"X-Forwarded-User": "carol"})
+            self.assertEqual(c.post("/writes", {"client_op_id": "p", "ops": [write("Stock", 1, Product="p0", Month="Jan")]})[0], 200)
+            self.assertEqual(self.ws.version.model.last_record["user"], "carol")
+        finally:
+            server.stop()
+
+    def test_requests_beyond_max_threads_are_refused(self):
+        server = Server(self.ws, "127.0.0.1", 0, max_threads=2, request_timeout=5).start()
+        idle = []
+        try:
+            for _ in range(2):  # 要求を送らずにつないだままの接続が、処理のスレッドを 2 本とも使う
+                s = socket.create_connection(server.server_address[:2])
+                idle.append(s)
+            for _ in range(50):
+                conn = http.client.HTTPConnection(*server.server_address[:2], timeout=5)
+                conn.request("GET", "/health")
+                r = conn.getresponse()
+                status = r.status
+                conn.close()
+                if status == 503:
+                    break
+            self.assertEqual(status, 503)
+        finally:
+            for s in idle:
+                s.close()
+            server.stop()
+
+    def test_stalled_connection_is_dropped(self):
+        server = Server(self.ws, "127.0.0.1", 0, max_threads=1, request_timeout=0.2).start()
+        try:
+            s = socket.create_connection(server.server_address[:2])
+            s.sendall(b"GET /health HTTP/1.0\r\n")  # 見出しの途中で止まる
+            s.settimeout(5)
+            self.assertEqual(s.recv(100), b"")  # 読み書きの期限で切られる
+            s.close()
+            self.assertEqual(Client(server.url).get("/health")[0], 200)
+        finally:
+            server.stop()
+
+
 class WithJournal(JournalCase, unittest.TestCase):
     def test_server_over_a_journal_survives_restart(self):
-        server = Server(workspace(self, model(ReferenceEngine()), checkpoint_every=2), "127.0.0.1", 0).start()
+        server = Server(workspace(self, model(ReferenceEngine()), checkpoint_every=2), "127.0.0.1", 0, tokens=TOKENS).start()
         c = Client(server.url)
         for i in range(5):
             c.post("/writes", {"client_op_id": f"w{i}", "ops": [write("Stock", 100 + i, Product="p0", Month="Jan")]})
         server.stop()
-        server = Server(Workspace.open(self.journals.journal(), ReferenceEngine()), "127.0.0.1", 0).start()
+        server = Server(Workspace.open(self.journals.journal(), ReferenceEngine()), "127.0.0.1", 0, tokens=TOKENS).start()
         try:
             c = Client(server.url)
             self.assertEqual(c.get("/health")[1]["seq"], 5)

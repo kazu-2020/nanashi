@@ -642,9 +642,11 @@ class Model:
         今の値の合計が 0 のときや how="even" のときは、今値のあるセルへ均等に配る。
         値のあるセルが 1 つもなければ、範囲の全組み合わせへ均等に配る。
         """
-        m = self.metrics[name]
+        m = self._metric(name)
         if m.formula is not None or m.kind != "number":
             raise ValueError(f"{name}: 按分できるのは number の入力 Metric だけ")
+        if isinstance(total, bool) or not isinstance(total, (int, float)):
+            raise ValueError(f"{name}: 按分する合計は数値（{total!r}）")
         if how not in ("proportional", "even"):
             raise ValueError(f"how は proportional か even（{how!r}）")
         region: dict[str, frozenset[str]] = {}
@@ -882,13 +884,16 @@ class Model:
 
     @_operation
     def set_cell(self, name: str, value: float | bool | None, **coords: str) -> None:
-        m = self.metrics[name]
+        m = self._metric(name)
         if m.formula is not None:
             if not m.overridable:
                 raise ValueError(f"{name} は計算 Metric なので直接入力できない"
                                  "（上書きしたいなら add_formula で overridable=True にする）")
             return self.set_cell(m.override_name, value, **coords)
-        key = tuple(coords[d] for d in m.dims)
+        for d in coords:
+            if d not in m.dims:
+                raise ValueError(f"{name}: 軸 {d} がない")
+        key = tuple(coords[d] if d in coords else self._missing(name, d) for d in m.dims)
         value = self._check(name, key, value)
         if self._plan is not None and name in self._delta_sources():
             # 差分集計には変更前の値が要る。前回の再計算以降で最初に触れたときの値を覚えておく
@@ -960,6 +965,9 @@ class Model:
         """1 セルの値。空なら None。Metric 全体を読まず、そのセルだけを引く。"""
         self.recalc()
         m = self._metric(name)
+        for d in coords:
+            if d not in m.dims:
+                raise ValueError(f"{name}: 軸 {d} がない")
         key = tuple(coords[d] if d in coords else self._missing(name, d) for d in m.dims)
         for d, member in zip(m.dims, key):
             if member not in self.dimension(d):

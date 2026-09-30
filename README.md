@@ -522,7 +522,8 @@ except Conflict as e:
 
 ```bash
 .venv/bin/python -m sparse_engine.server plan/ --port 8080 --checkpoint-every 1000   # FileJournal
-.venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id plan-2027
+.venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id plan-2027 \
+    --host 0.0.0.0 --tokens tokens.json                                                # {"<トークン>": "<利用者>"}
 ```
 
 | 要求 | 内容 |
@@ -532,11 +533,19 @@ except Conflict as e:
 | `GET /metrics/<name>/slice?<軸>=a,b` | 範囲のセル |
 | `GET /metrics/<name>/rows?<軸>=a&offset=0&limit=50` | 行の列と全行数 |
 | `GET /metrics/<name>/summary?keep=Month&agg=sum&<軸>=a,b` | 集計 |
-| `POST /writes` | `{"client_op_id", "user", "reason", "expect", "ops": [{"op": "set_cell", "args": [...], "kwargs": {...}}, ...]}` |
+| `POST /writes` | `{"client_op_id", "reason", "expect", "ops": [{"op": "set_cell", "args": [...], "kwargs": {...}}, ...]}` |
+| `GET /health` | 公開中の版の通し番号（認証なしで読める） |
+
+監査に残す利用者は、本文ではなく認証で決める。
+`--tokens` なら `Authorization: Bearer <トークン>` を求め、`--user-header X-Forwarded-User` なら、認証を済ませたプロキシが付けた見出しの値を使う。
+どちらもなければ認証せず（利用者は空）、127.0.0.1 以外で待ち受けるのを拒む（`--insecure` で外せる）。
+
+本文は 16 MiB（`--max-body`）、slice、rows、summary で返すセルは 10 万件（`--max-cells`）、同時に処理する要求は 64 本（`--max-threads`、超えれば 503）までで、要求の読み書きが 30 秒止まった接続は切る。
 
 書き込みは 1 要求 1 トランザクションで、`client_op_id` が必須（再送しても二重に確定しない。再起動をまたいでも同じ）。
 `expect` に読んだ版の通し番号を付けると、その後に同じセルを変えた書き込みがあれば 409 で拒否する。
-列が溢れれば 429、確定を待ちきれなければ 504、式や引数の誤りは 400 で、いずれも `{"error", "message"}` を返す。
+列が溢れれば 429、確定を待ちきれなければ 504、式や引数の誤りは 400、認証の誤りは 401、大きすぎれば 413 で、いずれも `{"error", "message"}` を返す。
+内部の誤りは 500 で、文言は固定にし、原因はサーバーのログに `error_id` と一緒に残す。
 
 損益計画（大）で、HTTP 経由の 1 セルの読み出しは 0.24 ms、給与を 1 人変える書き込みは 0.9 ms、8 人が休みなく読み続ける中での書き込みは 2.2 ms（`bench_http.py`、手元の loopback、読み出しは毎秒約 2,800 件）。
 サーバーは起動時に Python のスレッド切り替えの間隔を 0.5 ms にする（`--switch-interval`）。
