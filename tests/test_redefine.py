@@ -214,12 +214,13 @@ def template(rng: random.Random, m: Model, target: str, dims: tuple[str, ...]) -
 
 
 def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> None:
-    """式の追加と置き換え、入力の置き換え、計算 Metric と入力の入れ替え、プロパティの置き換えのどれか。"""
+    """式の追加と置き換え、入力の置き換え、計算 Metric と入力の入れ替え、プロパティの置き換え、
+    Metric の名前の変更と削除のどれか。"""
     m0 = models[0]
     m0.recalc()
     kind = rng.random()
     numbers = [n for n, x in m0.metrics.items() if x.kind == "number" and not n.startswith("__")]
-    if kind < 0.3:  # 新しい計算 Metric
+    if kind < 0.25:  # 新しい計算 Metric
         a = rng.choice(numbers)
         dims = m0.metrics[a].dims
         counter[0] += 1
@@ -235,14 +236,14 @@ def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> Non
         formula, dims = rng.choice(choices)
         for m in models:
             m.add_formula(name, dims, formula)
-    elif kind < 0.6:  # 計算 Metric の式を置き換える（入力を計算 Metric にすることもある）
+    elif kind < 0.5:  # 計算 Metric の式を置き換える（入力を計算 Metric にすることもある）
         target = rng.choice(numbers)
         formula = template(rng, m0, target, m0.metrics[target].dims)
         if formula is None:
             return
         for m in models:
             m.add_formula(target, m.metrics[target].dims, formula)
-    elif kind < 0.85:  # 入力に置き換える（計算 Metric を入力にすることもある）
+    elif kind < 0.7:  # 入力に置き換える（計算 Metric を入力にすることもある）
         target = rng.choice(numbers)
         dims = m0.metrics[target].dims
         cells = {}
@@ -251,10 +252,21 @@ def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> Non
             cells[key] = float(rng.randint(-5, 60))
         for m in models:
             m.add_input(target, dims, cells)
-    else:  # プロパティを置き換える
+    elif kind < 0.8:  # プロパティを置き換える
         mapping = {p: rng.choice(m0.dimensions["Category"].members) for p in m0.dimensions["Product"].members}
         for m in models:
             m.add_property("Product", "Category", "Category", mapping)
+    elif kind < 0.9:  # Metric の名前を変える
+        target = rng.choice([n for n in m0.metrics if not n.startswith("__")])
+        counter[0] += 1
+        for m in models:
+            m.rename_metric(target, f"{target.split('_')[0]}_{counter[0]}")
+    else:  # 誰も参照していない Metric を消す
+        leaves = [n for n in m0.metrics if not n.startswith("__") and dependents(m0, n) == set()]
+        if leaves:
+            target = rng.choice(leaves)
+            for m in models:
+                m.remove_metric(target)
 
 
 def run_random(test, seed: int, rounds: int, engines) -> None:

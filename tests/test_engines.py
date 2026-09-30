@@ -17,6 +17,7 @@ def build_with(engine) -> Model:
     m = build()
     fresh = Model(engine=engine)
     fresh.dimensions = m.dimensions
+    fresh._next_id = m._next_id  # 軸のメンバーに振った ID と重ならないように、続きから振る
     for name, meta in m.metrics.items():
         if meta.formula is None:
             fresh.add_input(name, meta.dims, m.value(name).cells, kind=meta.kind)

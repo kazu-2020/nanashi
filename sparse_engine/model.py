@@ -26,7 +26,8 @@ from .delta import DeltaPlan, plan_for, rename
 from .engine import Engine, default_engine
 from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, collect_refs, infer,
                        member_kind, resolve, union_region)
-from .expr import BinOp, Coalesce, Const, Expr, Filter, Ref, mentions_member, rename_member, uses_property
+from .expr import (BinOp, Coalesce, Const, Expr, Filter, Ref, mentions_member, references_metric,
+                   rename_member, rename_metrics, uses_property)
 from .parser import parse
 
 
@@ -39,6 +40,7 @@ class Metric:
     partition: str | None = None  # 明示した分割軸。None なら自動で選ぶ
     written: Expr | None = None  # 利用者が書いた元の式（保存や表示に使う）
     overridable: bool = False  # True なら set_cell で式の結果を手入力で上書きできる
+    id: int = 0  # 変わらない ID（名前の変更や式の置き換えで変わらない。Model が振る）
 
     @property
     def override_name(self) -> str:
@@ -121,6 +123,7 @@ class Model:
     _dirty: set[str] = field(default_factory=set)  # 前回の計画のあとで定義を変えた Metric
     _forced: dict[str, Restrict] = field(default_factory=dict)  # 次の再計算で必ず計算し直す計算 Metric の範囲
     _samples: dict[str, dict[str, Restrict]] = field(default_factory=dict)  # 分割軸の選択に使った、入力ごとの影響範囲
+    _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
 
     # ------------------------------------------------ Catalog
 
@@ -175,6 +178,7 @@ class Model:
         other._delta, other._delta_cache = dict(self._delta), dict(self._delta_cache)
         other._edges = dict(self._edges)
         other._samples = {src: dict(regions) for src, regions in self._samples.items()}  # 定義を変えると書き足す
+        other._next_id = self._next_id
         other._full = False
         return other
 
@@ -196,8 +200,26 @@ class Model:
     def add_dimension(self, name: str, members, *, ordered: bool = False) -> Dimension:
         if name in self.metrics:
             raise ValueError(f"{name}: 同じ名前の Metric がある（式の中で軸と区別できなくなる）")
-        self.dimensions[name] = Dimension(name, members, ordered=ordered)
+        members = list(members)
+        self.dimensions[name] = Dimension(name, members, ordered=ordered, id=self._new_id(),
+                                          ids=[self._new_id() for _ in members])
         return self.dimensions[name]
+
+    def _new_id(self) -> int:
+        """軸、メンバー、Metric に振る、モデルの中で一意の ID。
+
+        複製（fork）は同じ番号から振り続けるので、複製と元で別々に足したものが同じ ID になりうる
+        （複製の変更を元へ取り込むときは、ID を振り直す必要がある）。
+        """
+        self._next_id += 1
+        return self._next_id - 1
+
+    def metric_name(self, id: int) -> str:
+        """ID の Metric の今の名前。"""
+        for m in self.metrics.values():
+            if m.id == id:
+                return m.name
+        raise ValueError(f"ID {id} の Metric がない")
 
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str]) -> None:
         """軸 dim にプロパティ prop（dim のメンバー -> target のメンバー）を付ける。同じ名前があれば置き換える。
@@ -223,7 +245,8 @@ class Model:
         for d in dims:
             self.dimension(d)
         old = self.metrics.get(name)
-        new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition))
+        new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition),
+                     id=old.id if old is not None else self._new_id())
         if storage is None:
             self.metrics[name] = new  # _check は登録した Metric の軸で検査する
             try:
@@ -267,13 +290,87 @@ class Model:
             formula = parse(formula, self_name=name)
         dims = tuple(dims)
         old = self.metrics.get(name)
-        m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable)
+        m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable,
+                   id=old.id if old is not None else self._new_id())
         if old is not None and old.formula is None and name in self._changed:
             self._invalidate()  # 未反映の入力の変更があった入力を式にするのは、全体で計算し直す
         self.metrics[name] = m
         if overridable and m.override_name not in self.metrics:  # 読み込みでは上書き値が先に入る
             self.add_input(m.override_name, dims, kind=kind, partition=partition)
         self._redefine(name, old)
+
+    # ------------------------------------------------ Metric の削除と名前の変更
+
+    def remove_metric(self, name: str) -> None:
+        """Metric を消す。どの式からも参照されていない Metric だけを消せる（消しても他の値は変わらない）。
+        上書きできる Metric なら、上書き用の隠し入力も一緒に消す。ID は再利用しない。"""
+        m = self._own_metric(name)
+        users = sorted(x.name for x in self.metrics.values()
+                       if x.written is not None and x.name != name and references_metric(x.written, name))
+        if users:
+            raise ValueError(f"{name} は {', '.join(users)} の式が参照しているので消せない")
+        gone = {name} | ({m.override_name} if m.overridable and m.override_name in self.metrics else set())
+        for n in gone:
+            for store in (self.metrics, self._values, self._counts, self._delta, self._delta_cache, self.layout,
+                          self.warnings, self._edges, self._samples, self._forced, self._changed,
+                          self._old_cells, self._old_slices):
+                store.pop(n, None)
+            for regions in self._samples.values():
+                regions.pop(n, None)
+        self._dirty -= gone
+        if self._plan is not None:  # 誰も参照していないので、計画からその段階を外すだけで済む
+            self._plan = [s for s in self._plan if s.names[0] not in gone]
+            self._levels = [[s for s in level if s.names[0] not in gone] for level in self._levels]
+
+    def rename_metric(self, old: str, new: str) -> None:
+        """Metric の名前を変える。値は変わらないので計算し直さない。式の中の参照（Metric を使った
+        BY も）はすべて新しい名前になる。上書き用の隠し入力の名前も一緒に変わる。ID は変わらない。"""
+        m = self._own_metric(old)
+        if not isinstance(new, str) or not new or new.startswith("__"):
+            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {new!r}")
+        if new in self.metrics:
+            raise ValueError(f"{new}: 同じ名前の Metric がある")
+        self._check_name(new)
+        self.recalc()  # 変更範囲などは名前で持つので、ためている変更を先に片付ける
+        self.slice_log._flush()
+        names = {old: new}
+        if m.overridable and m.override_name in self.metrics:
+            names[m.override_name] = f"__override__{new}"
+        for store in (self.metrics, self._values, self._counts, self._delta, self.layout, self.warnings,
+                      self._edges, self._samples):
+            for o, n in names.items():
+                if o in store:
+                    store[n] = store.pop(o)
+        for o, n in names.items():
+            self.metrics[n].name = n
+        for regions in self._samples.values():
+            for o, n in names.items():
+                if o in regions:
+                    regions[n] = regions.pop(o)
+        for x in self.metrics.values():
+            if x.written is not None:
+                x.written = rename_metrics(x.written, names)
+            if x.formula is not None:
+                x.formula = rename_metrics(x.formula, names)
+        self._edges = {src: [dataclasses.replace(e, target=names.get(e.target, e.target)) for e in edges]
+                       for src, edges in self._edges.items()}
+        self._delta = {n: dataclasses.replace(dp, source=names.get(dp.source, dp.source),
+                                              aux=tuple(names.get(a, a) for a in dp.aux),
+                                              count=None if dp.count is None else rename_metrics(dp.count, names))
+                       for n, dp in self._delta.items()}
+        self._delta_cache.clear()
+        if self._plan is not None:
+            step = lambda s: Step(tuple(names.get(n, n) for n in s.names), s.scan_dim)
+            self._plan = [step(s) for s in self._plan]
+            self._levels = [[step(s) for s in level] for level in self._levels]
+
+    def _own_metric(self, name: str) -> Metric:
+        """利用者が名前で扱える Metric（上書き用の隠し入力は、持ち主と一緒にしか扱えない）。"""
+        if name not in self.metrics:
+            raise ValueError(f"Metric {name} がない")
+        if name.startswith("__override__"):
+            raise ValueError(f"{name} は上書き用の隠し入力なので、持ち主の Metric を通して扱う")
+        return self.metrics[name]
 
     @staticmethod
     def _same_type(old: Metric, new: Metric) -> bool:
@@ -372,7 +469,7 @@ class Model:
                 raise ValueError(f"{dim} にプロパティ {prop} がない")
             if value not in self.dimension(d.properties[prop][0]):
                 raise ValueError(f"{dim}.{prop}: {d.properties[prop][0]} に {value!r} がない")
-        d.add_member(member)
+        d.add_member(member, self._new_id())
         for prop, value in properties.items():
             d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
         self.engine.dimension_changed(self, dim)

@@ -16,22 +16,50 @@ def _show(v: float | bool) -> str:
 
 
 class Dimension:
-    """名前付きの軸。メンバーは後から増やす、消す、名前を変えることができるが、Metric が持つ軸の組は固定。"""
+    """名前付きの軸。メンバーは後から増やす、消す、名前を変えることができるが、Metric が持つ軸の組は固定。
 
-    def __init__(self, name: str, members: Iterable[str], *, ordered: bool = False):
+    メンバーは並び順の番号（位置）で扱う。位置はメンバーを消すと詰まるので、記録や保存のために
+    変わらない ID も持つ（ids は位置ごとの ID）。ID は名前を変えても変わらず、消した ID は再利用しない。
+    Model に登録した軸の ID は、Model が軸や Metric と重ならないように振る。
+    """
+
+    def __init__(self, name: str, members: Iterable[str], *, ordered: bool = False,
+                 ids: Iterable[int] | None = None, id: int = 0):
         self.name = name
+        self.id = id
         self.members: list[str] = list(members)
         self.ordered = ordered  # True の軸だけ prev（時間方向のずらし）を許す
         self._index = {m: i for i, m in enumerate(self.members)}
         if len(self._index) != len(self.members):
             raise ValueError(f"{name}: メンバーが重複している")
+        self.set_ids(range(1, len(self.members) + 1) if ids is None else ids)
         # プロパティ名 -> (参照先の Dimension 名, {メンバー -> 参照先メンバー})
         self.properties: dict[str, tuple[str, dict[str, str]]] = {}
+
+    def set_ids(self, ids: Iterable[int]) -> None:
+        """位置ごとのメンバーの ID を設定する（保存したモデルを読み込むとき）。"""
+        ids = [int(i) for i in ids]
+        if len(ids) != len(self.members) or len(set(ids)) != len(ids):
+            raise ValueError(f"{self.name}: メンバーの ID はメンバーと同じ数で、重複しないこと")
+        self.ids = ids
+        self._by_id = {i: pos for pos, i in enumerate(ids)}
+
+    def id_of(self, member: str) -> int:
+        """メンバーの変わらない ID。"""
+        if member not in self._index:
+            raise ValueError(f"{self.name}: メンバー {member!r} がない")
+        return self.ids[self._index[member]]
+
+    def member_of(self, id: int) -> str:
+        """ID のメンバーの今の名前。消したメンバーの ID なら ValueError。"""
+        if id not in self._by_id:
+            raise ValueError(f"{self.name}: ID {id} のメンバーがない")
+        return self.members[self._by_id[id]]
 
     def copy(self) -> Dimension:
         """同じメンバーとプロパティを持つ別の Dimension。対応表の dict は共有する
         （プロパティの変更は set_property_value で新しい dict に置き換えるので、共有しても干渉しない）。"""
-        other = Dimension(self.name, self.members, ordered=self.ordered)
+        other = Dimension(self.name, self.members, ordered=self.ordered, ids=self.ids, id=self.id)
         other.properties = dict(self.properties)
         return other
 
@@ -46,12 +74,19 @@ class Dimension:
                 raise ValueError(f"{self.name}.{prop}: {target.name} に {dst!r} がない")
         self.properties[prop] = (target.name, dict(mapping))
 
-    def add_member(self, member: str) -> None:
-        """末尾にメンバーを足す。順序付きの軸では、最後の時点の次になる。"""
+    def add_member(self, member: str, id: int | None = None) -> None:
+        """末尾にメンバーを足す。順序付きの軸では、最後の時点の次になる。
+        id を省くと、この軸の中で使ったことのない ID を振る（Model は自分で振った ID を渡す）。"""
         if member in self._index:
             raise ValueError(f"{self.name}: メンバー {member!r} はすでにある")
+        if id is None:
+            id = max(self.ids, default=0) + 1
+        if id in self._by_id:
+            raise ValueError(f"{self.name}: ID {id} はすでにある")
         self._index[member] = len(self.members)
+        self._by_id[id] = len(self.members)
         self.members.append(member)
+        self.ids.append(id)
 
     def rename_member(self, old: str, new: str) -> None:
         """メンバーの名前を変える。番号（並び順）はそのまま。自分のプロパティの対応表も新しい dict にする。"""
@@ -72,8 +107,11 @@ class Dimension:
         """メンバーを消す。後ろのメンバーの番号は 1 つずつ詰まる。自分のプロパティの対応表からも消す。"""
         if member not in self._index:
             raise ValueError(f"{self.name}: メンバー {member!r} がない")
-        del self.members[self._index[member]]
+        pos = self._index[member]
+        del self.members[pos]
+        del self.ids[pos]
         self._index = {m: i for i, m in enumerate(self.members)}
+        self._by_id = {i: p for p, i in enumerate(self.ids)}
         for prop, (target, mapping) in list(self.properties.items()):
             if member in mapping:
                 self.properties[prop] = (target, {k: v for k, v in mapping.items() if k != member})

@@ -134,6 +134,23 @@ def mentions_member(e: Expr, dim: str, member: str) -> bool:
     return _names_member(e, dim, member) or any(mentions_member(c, dim, member) for _, c in _children(e))
 
 
+def references_metric(e: Expr, name: str) -> bool:
+    """式が Metric name を参照しているか（Metric を使った BY の `[BY: D.name]` も含む）。"""
+    here = (isinstance(e, Ref) and e.name == name) or (isinstance(e, By) and e.prop == name)
+    return here or any(references_metric(c, name) for _, c in _children(e))
+
+
+def rename_metrics(e: Expr, names: dict[str, str]) -> Expr:
+    """式の中の Metric の名前を names に従って置き換える（Metric を使った BY も）。
+    変わらなければ同じオブジェクトを返す。"""
+    changes: dict = {n: r for n, c in _children(e) if (r := rename_metrics(c, names)) is not c}
+    if isinstance(e, Ref) and e.name in names:
+        changes["name"] = names[e.name]
+    if isinstance(e, By) and e.prop in names:
+        changes["prop"] = names[e.prop]
+    return replace(e, **changes) if changes else e
+
+
 def uses_property(e: Expr, dim: str, prop: str) -> bool:
     """式が `[BY: dim.prop]` を書いているか。"""
     here = isinstance(e, By) and e.dim == dim and e.prop == prop
