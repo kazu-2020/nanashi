@@ -58,6 +58,23 @@ class Standby(JournalCase):
         self.assertEqual(self.b.write(move("p2", "p3", "Jan", 1)), 3)
         check_same_state(self, self.b.version.model, self.journal().open(ReferenceEngine()))
 
+    def test_failed_promotion_releases_the_lease(self):
+        failing, real_publish = threading.Event(), self.b._publish
+
+        def publish(model):
+            if failing.is_set():
+                raise RuntimeError("再計算に失敗した")
+            real_publish(model)
+        failing.set()
+        self.b._publish = publish
+        self.a.close()
+        wait_for(lambda: self.b._watch_error is not None, timeout=2.0)
+        self.assertIs(self.b.role, Role.STANDBY)
+        self.assertFalse(self.b.journal.lease()["held"])  # 持ったままだと、ほかのプロセスも書き手になれない
+        failing.clear()
+        wait_for(lambda: self.b.role is Role.LEADER, timeout=2.0)
+        self.assertEqual(self.b.ready(), [])
+
     def test_promotion_catches_up_with_writes_made_after_the_last_follow(self):
         # 権利を取る直前に別のプロセスが確定した記録は、権利を取ったあとに追いついてから書き手になる
         other = self.journal(heartbeat=False, acquire_wait=0)

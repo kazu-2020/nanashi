@@ -571,12 +571,18 @@ class Workspace:
         return NotLeader(leader)
 
     def _promote(self) -> None:
-        """リースを取ったあとに呼ぶ（_role_lock の中で）。ほかのプロセスの記録に追いついてから書き手になる。"""
-        self._reload()
+        """リースを取ったあとに呼ぶ（_role_lock の中で）。ほかのプロセスの記録に追いついてから書き手になる。
+        書き手になれなければリースを手放す（持ったまま待機系でいると、どのプロセスも書き手になれない）。"""
+        try:
+            self._reload()
+            if self._degraded is None:
+                self._publish(self._version_model)  # 版が同じでも、expect を確かめる基準は今の版にする
+        except BaseException:
+            self.journal.release()
+            raise
         if self._degraded is not None:  # 追いつけない版で書くと、ほかの書き手の記録を上書きしてしまう
             self.journal.release()
             return
-        self._publish(self._version_model)  # 版が同じでも、expect を確かめる基準は今の版にする
         self._recent.clear()
         self._ops.clear()
         self._role = Role.LEADER
