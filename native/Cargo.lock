@@ -454,6 +454,7 @@ dependencies = [
  "arrow-schema",
  "bytes",
  "imbl",
+ "libc",
  "parquet",
  "rayon",
  "rustc-hash",
