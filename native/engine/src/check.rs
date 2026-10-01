@@ -372,6 +372,10 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<Diag>) -> Resul
             } else {
                 return Err(Diag::new("by_no_dims").arg("what", what).arg("dims", tuple(&t.dims, cat)).arg("dim", &*dim).arg("target", name(target, cat)));
             };
+            // 書き換えたあとの結合は D と T の両方を持つ。結果の軸が収まっても結合が収まらなければ、
+            // 評価の途中でなくここで拒否する（書き換えたノードは型検査を通らないので、ここで確かめる）。
+            // BY の書き方の誤りを先に示すため、上の検査のあとに確かめる
+            key_fits(&joined, cat)?;
             let child = std::mem::replace(child, Box::new(Node::Const(0.0, crate::Kind::Num)));
             let edges = Box::new(Node::AsAxis { child: Box::new(Node::Ref(metric)), dim: target });
             *node = Node::Remove { child: Box::new(Node::On(child, edges)), dim: remove, agg };

@@ -59,6 +59,52 @@ class KeyWidth(unittest.TestCase):
         m.set_cell("Y", 3.0, E="e1")
         self.assertEqual(m.get("Z", D0="m1"), 3.0)
 
+    @staticmethod
+    def by_metric(ebits: int) -> Model:
+        """Salary[E, D1, D2, D3] を所属（DeptOf[E] -> Dept）で部署別に集計するモデル。結果の軸は
+        D1、D2、D3、Dept の 52 ビットだが、途中で社員と部署の両方を持つ（E が 13 ビットなら 65 ビット）。"""
+        m = Model(engine=RustEngine())
+        m.add_dimension("E", [f"e{j}" for j in range(1 << ebits)])
+        m.add_dimension("Dept", [f"g{j}" for j in range(1 << 13)])
+        for i in range(1, 4):
+            m.add_dimension(f"D{i}", [f"m{j}" for j in range(1 << 13)])
+        m.add_input("Salary", ["E", "D1", "D2", "D3"], {("e1", "m1", "m1", "m1"): 10.0, ("e2", "m1", "m1", "m1"): 5.0})
+        m.add_input("DeptOf", ["E"], {("e1",): "g1", ("e2",): "g2"}, kind="member:Dept")
+        m.add_formula("Cost", ["D1", "D2", "D3", "Dept"], "Salary[BY SUM: E.DeptOf]")
+        return m
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_by_metric_join_is_checked_when_the_formula_is_checked(self):
+        # Metric を使った BY は、型検査が社員と部署の両方を持つ結合に書き換える。結果が収まっても、
+        # 結合が収まらなければ、評価の途中でなく型検査で直し方を示して拒否する
+        m = self.by_metric(13)
+        with self.assertRaisesRegex(FormulaError, r"式の途中の結果の軸 \[.*E.*Dept.*\] が 64 ビット.*E 13 ビット"):
+            m.recalc()
+        m.add_formula("Cost", ["D1", "D2", "D3"], "Salary[REMOVE SUM: E]")  # 直せば通る
+        self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1"), 15.0)
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_malformed_by_metric_reports_its_own_error_before_the_width(self):
+        # 結合が収まらなくても、BY の書き方の誤り（所属が月ごとなのに式に月がない）を先に示す
+        m = self.by_metric(13)
+        m.add_dimension("Month", ["Jan", "Feb"])
+        m.add_input("DeptOfM", ["E", "Month"], {("e1", "Jan"): "g1"}, kind="member:Dept")
+        m.add_formula("Cost", ["D1", "D2", "D3", "Dept", "Month"], "Salary[BY SUM: E.DeptOfM]")
+        with self.assertRaisesRegex(FormulaError, "DeptOfM の軸 .*Month.* を持っていない"):
+            m.recalc()
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_member_that_would_widen_a_by_metric_join_past_64_bits_is_refused(self):
+        m = self.by_metric(12)  # 結合は 64 ビットでちょうど収まる
+        self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g1"), 10.0)
+        with self.assertRaisesRegex(FormulaError, "途中の結果の軸"):  # E が 13 ビットになると結合が収まらない
+            m.add_member("E", "e_new")
+        self.assertNotIn("e_new", m.dimensions["E"])
+        m.set_cell("Salary", 20.0, E="e1", D1="m1", D2="m1", D3="m1")  # 拒否したあとも計算し直せる
+        self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g1"), 20.0)
+        m.set_cell("DeptOf", "g2", E="e1")
+        self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g2"), 25.0)
+
     def test_reference_has_no_width_limit(self):
         m = wide(ReferenceEngine())
         m.add_input("Wide", [f"D{i}" for i in range(5)])
