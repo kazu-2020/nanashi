@@ -37,6 +37,9 @@ remove_metric、rename_metric）を順に呼ぶ。add_input の cells は [[座�
 大きさの上限: 本文は max_body バイト、slice、rows、summary で返すセルは max_cells、同時に処理する
 要求は max_threads（超えたら 503）。要求の読み書きが request_timeout 秒止まれば接続を切る。
 
+SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き込みを確定させ、リースを手放してから止まる
+（ECS などのコンテナは SIGTERM で止める）。
+
 標準ライブラリの HTTP サーバーで、要求ごとにスレッドを作る。読み手が多いプロセスでは
 --switch-interval で Python のスレッド切り替えの間隔を短くする（README の「性能」）。
 """
@@ -48,6 +51,7 @@ import inspect
 import ipaddress
 import json
 import logging
+import signal
 import sys
 import threading
 import time
@@ -463,6 +467,7 @@ def main(argv=None) -> None:
     server = Server(ws, args.host, args.port, tokens=tokens, user_header=args.user_header, max_body=args.max_body,
                     max_cells=args.max_cells, max_threads=args.max_threads)
     log.info("公開中の版 %d、%s で待ち受ける", ws.seq, server.url)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
