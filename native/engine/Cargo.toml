@@ -14,5 +14,5 @@ arrow-schema = "60"
 bytes = "1"
 
 [dev-dependencies]
-# examples/out_of_core.rs の mmap と proc_pid_rusage
+# examples/out_of_core.rs の mmap、posix_fadvise、proc_pid_rusage
 libc = "0.2"

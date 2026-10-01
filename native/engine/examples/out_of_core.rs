@@ -3,13 +3,20 @@
 //!     cargo run --release -p nanashi-engine --example out_of_core --manifest-path native/Cargo.toml -- [セル数] [置き場所]
 //!
 //! エンジンの本体は使わず、Store の本体と同じ形（昇順の u64 のキーと f64 の値の 2 列）のファイルを作り、
-//! 次の持ち方で、エンジンの主な操作に当たる処理を測る。macOS 専用（proc_pid_rusage、F_NOCACHE）。
+//! 次の持ち方で、エンジンの主な操作に当たる処理を測る。macOS と Linux で動く。
 //!
 //! - heap: 今のエンジン。2 列をヒープの Vec に読み込んで持つ
 //! - mmap 暖 / 冷: ファイルを読み出し専用で写像し、ページの出し入れを OS に任せる。
-//!   暖はページキャッシュに載った状態、冷は処理の前に msync(MS_INVALIDATE) で追い出した状態
-//! - pread: ページキャッシュを通さず（F_NOCACHE）、決まった数のセルずつ読み込む。
-//!   メモリには、16 KB のページごとの先頭のキー（フェンス）だけを持つ
+//!   暖はページキャッシュに載った状態、冷は処理の前にページキャッシュから追い出した状態
+//! - pread: ページキャッシュに残さずに、決まった数のセルずつ読み込む。
+//!   メモリには、16 KB ごとの先頭のキー（フェンス）だけを持つ
+//!
+//! ページキャッシュに残さない方法は OS で違う。
+//!
+//! - macOS: ファイルに F_NOCACHE を付ける。冷の写像は msync(MS_INVALIDATE) で追い出す
+//! - Linux: 読んだ範囲と書き終えたファイルを posix_fadvise(POSIX_FADV_DONTNEED) で追い出す
+//!   （書いたものは sync_file_range でデバイスへ送ってから）。冷の写像は madvise(MADV_DONTNEED) で外してから、
+//!   同じように追い出す。O_DIRECT は、バッファと位置を 4 KB にそろえる必要があるので使わない
 //!
 //! 処理:
 //! - scan: 全セルを読む
@@ -19,7 +26,8 @@
 //! - rekey: 軸の順番を変えて並べ直す。heap はメモリ内で並べ替え、ほかは外部ソート
 //!   （決まった量ずつ並べてファイルに書き、キーの範囲ごとに並列に併合する）
 //!
-//! ディスクから実際に読んだ量（ri_diskio_bytesread）も出すので、冷の測定が本当にディスクを読んだかを確かめられる。
+//! ディスクから実際に読んだ量（macOS は ri_diskio_bytesread、Linux は /proc/self/io の read_bytes）も出すので、
+//! 冷の測定が本当にディスクを読んだかを確かめられる。
 
 use rayon::prelude::*;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -84,7 +92,7 @@ const SIZES: [u64; 4] = [2000, 1000, 100, 60];
 const SHIFT: [u32; 4] = [23, 13, 6, 0];
 /// 集計先（軸 0 × 軸 3）のグループ数。
 const GROUPS: usize = 2000 * 60;
-/// フェンスの間隔。キー 2,048 個で 16 KB（Apple Silicon のページ 1 枚）。
+/// フェンスの間隔。キー 2,048 個で 16 KB（Apple Silicon のページ 1 枚、Linux の x86 ではページ 4 枚）。
 const PAGE: usize = 2048;
 /// 1 回に読むセル数（キーと値で 16 MB）。PAGE の倍数。
 const BLOCK: usize = 1 << 20;
@@ -111,14 +119,57 @@ fn rekey(k: u64) -> u64 {
 
 // ---- ファイル ----
 
+/// 開いたファイルを、ページキャッシュに残さない読み書きにする（macOS）。
+/// Linux では何もせず、読み書きのあとで read_at と settle が追い出す。
 fn nocache(f: &File) {
-    unsafe { libc::fcntl(f.as_raw_fd(), libc::F_NOCACHE, 1) };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::fcntl(f.as_raw_fd(), libc::F_NOCACHE, 1)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = f;
+}
+
+/// [off, off + len) を含むページを、ページキャッシュから追い出す（Linux）。
+#[cfg(target_os = "linux")]
+fn fadvise_dontneed(f: &File, off: u64, len: u64) {
+    let lo = off & !4095;
+    let hi = (off + len).next_multiple_of(4096);
+    unsafe { libc::posix_fadvise(f.as_raw_fd(), lo as i64, (hi - lo) as i64, libc::POSIX_FADV_DONTNEED) };
+}
+
+/// off から buf の長さだけ読む。Linux では読んだページをページキャッシュから追い出す。
+fn read_at(f: &File, buf: &mut [u8], off: u64) {
+    f.read_exact_at(buf, off).unwrap();
+    #[cfg(target_os = "linux")]
+    fadvise_dontneed(f, off, buf.len() as u64);
+}
+
+/// 書き終えたファイルを、ページキャッシュに残さない（Linux）。デバイスへ送り終えるのを待ってから追い出す。
+/// sync_file_range はデバイスのキャッシュの書き出しまでは命じないので、macOS の F_NOCACHE の書き込みに近い。
+fn settle(f: &File) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let flags = libc::SYNC_FILE_RANGE_WAIT_BEFORE | libc::SYNC_FILE_RANGE_WRITE | libc::SYNC_FILE_RANGE_WAIT_AFTER;
+        libc::sync_file_range(f.as_raw_fd(), 0, 0, flags);
+        libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = f;
 }
 
 fn create(path: &Path) -> BufWriter<File> {
     let f = File::create(path).unwrap();
     nocache(&f);
     BufWriter::with_capacity(8 << 20, f)
+}
+
+/// data を 1 つのファイルに書く。途中結果なので fsync はしない（落ちたら計算し直せばよい）。
+fn write_file(path: &Path, data: &[u8]) {
+    let f = File::create(path).unwrap();
+    nocache(&f);
+    (&f).write_all(data).unwrap();
+    settle(&f);
 }
 
 fn bytes<T>(s: &[T]) -> &[u8] {
@@ -153,20 +204,19 @@ impl Writer {
         Writer { keys: create(&p.keys), vals: create(&p.vals), n: 0, fence: Vec::new() }
     }
     fn push(&mut self, k: u64, v: f64) {
-        if self.n % PAGE == 0 {
+        if self.n.is_multiple_of(PAGE) {
             self.fence.push(k);
         }
         self.keys.write_all(&k.to_ne_bytes()).unwrap();
         self.vals.write_all(&v.to_ne_bytes()).unwrap();
         self.n += 1;
     }
-    /// 書き終える。sync なら F_FULLFSYNC でディスクまで書き出す（std の sync_data は macOS ではこれになる）。
-    fn finish(self, sync: bool) -> (usize, Vec<u64>) {
+    /// 書き終え、ディスクまで書き出す（std の sync_data は macOS では F_FULLFSYNC、Linux では fdatasync になる）。
+    fn finish(self) -> (usize, Vec<u64>) {
         for w in [self.keys, self.vals] {
             let f = w.into_inner().unwrap();
-            if sync {
-                f.sync_data().unwrap();
-            }
+            f.sync_data().unwrap();
+            settle(&f);
         }
         (self.n, self.fence)
     }
@@ -214,8 +264,8 @@ fn generate(dir: &Path, n: usize) -> Data {
     for i in (1..probes.len()).rev() {
         probes.swap(i, (rng.next() % (i as u64 + 1)) as usize);
     }
-    let (n_a, fence_a) = wa.finish(true);
-    let (n_b, fence_b) = wb.finish(true);
+    let (n_a, fence_a) = wa.finish();
+    let (n_b, fence_b) = wb.finish();
     Data { a: pa, b: pb, n_a, n_b, fence_a, fence_b, probes }
 }
 
@@ -223,6 +273,7 @@ fn generate(dir: &Path, n: usize) -> Data {
 struct Map {
     ptr: *mut libc::c_void,
     len: usize,
+    file: File,
 }
 
 unsafe impl Send for Map {}
@@ -236,14 +287,23 @@ impl Map {
             libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, f.as_raw_fd(), 0)
         };
         assert!(ptr != libc::MAP_FAILED, "mmap に失敗した");
-        Map { ptr, len }
+        Map { ptr, len, file: f }
     }
     fn slice<T>(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr as *const T, self.len / std::mem::size_of::<T>()) }
     }
-    /// ページキャッシュから追い出す。
+    /// ページキャッシュから追い出す。Linux の msync(MS_INVALIDATE) はキャッシュを捨てないので、
+    /// 写像からページを外したうえで、ファイルのページキャッシュを捨てる。
     fn evict(&self) {
-        unsafe { libc::msync(self.ptr, self.len, libc::MS_INVALIDATE) };
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::madvise(self.ptr, self.len, libc::MADV_DONTNEED);
+            libc::posix_fadvise(self.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            libc::msync(self.ptr, self.len, libc::MS_INVALIDATE)
+        };
     }
     /// 先読みを強める（MADV_SEQUENTIAL）か、既定に戻す。
     fn sequential(&self, on: bool) {
@@ -303,8 +363,8 @@ impl Cols<'_> {
             Cols::File(c) => {
                 buf.k.resize(hi - lo, 0);
                 buf.v.resize(hi - lo, 0.0);
-                c.keys.read_exact_at(bytes_mut(&mut buf.k), lo as u64 * 8).unwrap();
-                c.vals.read_exact_at(bytes_mut(&mut buf.v), lo as u64 * 8).unwrap();
+                read_at(&c.keys, bytes_mut(&mut buf.k), lo as u64 * 8);
+                read_at(&c.vals, bytes_mut(&mut buf.v), lo as u64 * 8);
                 f(&buf.k, &buf.v)
             }
         }
@@ -322,7 +382,7 @@ impl Cols<'_> {
                 let lo = (page - 1) * PAGE;
                 let hi = (page * PAGE).min(c.n);
                 buf.k.resize(hi - lo, 0);
-                c.keys.read_exact_at(bytes_mut(&mut buf.k), lo as u64 * 8).unwrap();
+                read_at(&c.keys, bytes_mut(&mut buf.k), lo as u64 * 8);
                 lo + buf.k.partition_point(|&x| x < key)
             }
         }
@@ -338,12 +398,12 @@ impl Cols<'_> {
             Cols::File(c) => {
                 // lower_bound が読んだページに pos のキーがある（ページの末尾なら次のページの先頭）
                 let found = match c.fence.get(pos / PAGE) {
-                    Some(&first) if pos % PAGE == 0 => first,
+                    Some(&first) if pos.is_multiple_of(PAGE) => first,
                     _ => buf.k[pos % PAGE],
                 };
                 (found == key).then(|| {
                     let mut v = [0f64];
-                    c.vals.read_exact_at(bytes_mut(&mut v), pos as u64 * 8).unwrap();
+                    read_at(&c.vals, bytes_mut(&mut v), pos as u64 * 8);
                     v[0]
                 })
             }
@@ -419,9 +479,12 @@ fn merge_into(ak: &[u64], av: &[f64], bk: &[u64], bv: &[f64], ok: &mut Vec<u64>,
     ov.extend_from_slice(&bv[j..]);
 }
 
+/// 結果の 1 つの範囲（キーと値の 2 列）。
+type Part = (Vec<u64>, Vec<f64>);
+
 /// A + B。範囲を A の BLOCK おきのキーで切り、範囲ごとに並べて突き合わせる。
 /// out が None なら結果を Vec に持ち、Some なら範囲ごとのファイルに書き出す。返すのは結果のセル数。
-fn merge(a: &Cols, b: &Cols, out: Option<&Path>) -> (usize, Vec<(Vec<u64>, Vec<f64>)>) {
+fn merge(a: &Cols, b: &Cols, out: Option<&Path>) -> (usize, Vec<Part>) {
     let mut buf = Buf::default();
     let mut bounds = vec![(0usize, 0usize)];
     for lo in (BLOCK..a.len()).step_by(BLOCK) {
@@ -432,7 +495,7 @@ fn merge(a: &Cols, b: &Cols, out: Option<&Path>) -> (usize, Vec<(Vec<u64>, Vec<f
         bounds.push((lo, b.lower_bound(key, &mut buf)));
     }
     bounds.push((a.len(), b.len()));
-    let parts: Vec<(usize, Option<(Vec<u64>, Vec<f64>)>)> = bounds
+    let parts: Vec<(usize, Option<Part>)> = bounds
         .par_windows(2)
         .enumerate()
         .map_init(
@@ -450,11 +513,8 @@ fn merge(a: &Cols, b: &Cols, out: Option<&Path>) -> (usize, Vec<(Vec<u64>, Vec<f
                 match out {
                     Some(dir) => {
                         let p = Paths::new(dir, &format!("merge.{i:05}"));
-                        for (path, data) in [(&p.keys, bytes(&ok)), (&p.vals, bytes(&ov))] {
-                            let f = File::create(path).unwrap();
-                            nocache(&f);
-                            (&f).write_all(data).unwrap();
-                        }
+                        write_file(&p.keys, bytes(&ok));
+                        write_file(&p.vals, bytes(&ov));
                         (o.k, o.v) = (ok, ov);
                         (n, None)
                     }
@@ -503,7 +563,7 @@ impl Run {
         }
         let lo = (page - 1) * PAGE;
         let mut buf = vec![(0u64, 0f64); (page * PAGE).min(self.n) - lo];
-        self.file.read_exact_at(bytes_mut(&mut buf), lo as u64 * 16).unwrap();
+        read_at(&self.file, bytes_mut(&mut buf), lo as u64 * 16);
         lo + buf.partition_point(|p| p.0 < key)
     }
 }
@@ -521,9 +581,7 @@ fn rekey_external(c: &Cols, dir: &Path) -> usize {
     let flush = |run: &mut Vec<(u64, f64)>, runs: &mut Vec<Run>| {
         run.par_sort_unstable_by_key(|p| p.0);
         let path = dir.join(format!("run.{:04}", runs.len()));
-        let f = File::create(&path).unwrap();
-        nocache(&f);
-        (&f).write_all(bytes(run)).unwrap();
+        write_file(&path, bytes(run));
         let file = File::open(&path).unwrap();
         nocache(&file);
         runs.push(Run { file, path, n: run.len(), fence: run.iter().step_by(PAGE).map(|p| p.0).collect() });
@@ -570,7 +628,7 @@ fn rekey_external(c: &Cols, dir: &Path) -> usize {
                 .zip(&cuts)
                 .map(|(r, c)| {
                     let mut s = vec![(0u64, 0f64); c[j + 1] - c[j]];
-                    r.file.read_exact_at(bytes_mut(&mut s), c[j] as u64 * 16).unwrap();
+                    read_at(&r.file, bytes_mut(&mut s), c[j] as u64 * 16);
                     s
                 })
                 .collect();
@@ -590,11 +648,8 @@ fn rekey_external(c: &Cols, dir: &Path) -> usize {
             }
             drop(segs);
             let p = Paths::new(dir, &format!("sorted.{j:05}"));
-            for (path, data) in [(&p.keys, bytes(&ok)), (&p.vals, bytes(&ov))] {
-                let f = File::create(path).unwrap();
-                nocache(&f);
-                (&f).write_all(data).unwrap();
-            }
+            write_file(&p.keys, bytes(&ok));
+            write_file(&p.vals, bytes(&ov));
             ok.len()
         })
         .sum();
@@ -606,11 +661,53 @@ fn rekey_external(c: &Cols, dir: &Path) -> usize {
 
 // ---- 測定 ----
 
-fn usage() -> libc::rusage_info_v4 {
-    unsafe {
+/// プロセスの I/O とメモリ（バイト）。
+struct Usage {
+    /// ディスクから読んだ量
+    read: u64,
+    /// ディスクへ書いた量
+    written: u64,
+    /// 無名のページ（macOS は phys_footprint、Linux は RssAnon）
+    anon: u64,
+    /// 常駐する量（写像したファイルのページを含む）
+    rss: u64,
+}
+
+/// Usage の anon の列の名前。
+#[cfg(target_os = "macos")]
+const ANON: &str = "footprint";
+#[cfg(target_os = "linux")]
+const ANON: &str = "RssAnon";
+
+#[cfg(target_os = "macos")]
+fn usage() -> Usage {
+    let u = unsafe {
         let mut u: libc::rusage_info_v4 = std::mem::zeroed();
         libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V4, &mut u as *mut _ as *mut libc::rusage_info_t);
         u
+    };
+    Usage {
+        read: u.ri_diskio_bytesread,
+        written: u.ri_diskio_byteswritten,
+        anon: u.ri_phys_footprint,
+        rss: u.ri_resident_size,
+    }
+}
+
+/// /proc/self/io（バイト）と /proc/self/status（kB）から読む。
+#[cfg(target_os = "linux")]
+fn usage() -> Usage {
+    fn field(text: &str, name: &str) -> u64 {
+        let line = text.lines().find(|l| l.starts_with(name)).unwrap_or_else(|| panic!("{name} がない"));
+        line[name.len()..].split_whitespace().next().unwrap().parse().unwrap()
+    }
+    let io = fs::read_to_string("/proc/self/io").unwrap();
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    Usage {
+        read: field(&io, "read_bytes:"),
+        written: field(&io, "write_bytes:"),
+        anon: field(&status, "RssAnon:") * 1024,
+        rss: field(&status, "VmRSS:") * 1024,
     }
 }
 
@@ -643,11 +740,11 @@ fn measure<R: Send>(row: Row, f: impl FnOnce() -> R + Send) -> R {
         secs * 1e3,
         secs * 1e9 / row.units as f64,
         if row.in_bytes == 0 { "-".to_string() } else { format!("{:.2}", row.in_bytes as f64 / secs / 1e9) },
-        (after.ri_diskio_bytesread - before.ri_diskio_bytesread) as f64 / MB,
-        (after.ri_diskio_byteswritten - before.ri_diskio_byteswritten) as f64 / MB,
+        (after.read - before.read) as f64 / MB,
+        (after.written - before.written) as f64 / MB,
         (PEAK.load(Relaxed) - base) as f64 / MB,
-        after.ri_phys_footprint as f64 / MB,
-        after.ri_resident_size as f64 / MB,
+        after.anon as f64 / MB,
+        after.rss as f64 / MB,
     );
     r
 }
@@ -696,7 +793,7 @@ fn main() {
         t.elapsed().as_secs_f64(),
         threads
     );
-    println!("| 処理 | 持ち方 | スレッド | ms | ns/単位 | GB/s | 読んだ MB | 書いた MB | ヒープの最大 MB | footprint MB | RSS MB |");
+    println!("| 処理 | 持ち方 | スレッド | ms | ns/単位 | GB/s | 読んだ MB | 書いた MB | ヒープの最大 MB | {ANON} MB | RSS MB |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|");
     let (in_a, in_ab) = (d.n_a * 16, (d.n_a + d.n_b) * 16);
     let row = |op, mode, threads, units, in_bytes| Row { op, mode, threads, units, in_bytes };
