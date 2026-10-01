@@ -84,6 +84,16 @@ class KeyWidth(unittest.TestCase):
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1"), 15.0)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+    def test_malformed_by_metric_reports_its_own_error_before_the_width(self):
+        # 結合が収まらなくても、BY の書き方の誤り（所属が月ごとなのに式に月がない）を先に示す
+        m = self.by_metric(13)
+        m.add_dimension("Month", ["Jan", "Feb"])
+        m.add_input("DeptOfM", ["E", "Month"], {("e1", "Jan"): "g1"}, kind="member:Dept")
+        m.add_formula("Cost", ["D1", "D2", "D3", "Dept", "Month"], "Salary[BY SUM: E.DeptOfM]")
+        with self.assertRaisesRegex(FormulaError, "DeptOfM の軸 .*Month.* を持っていない"):
+            m.recalc()
+
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_member_that_would_widen_a_by_metric_join_past_64_bits_is_refused(self):
         m = self.by_metric(12)  # 結合は 64 ビットでちょうど収まる
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g1"), 10.0)
