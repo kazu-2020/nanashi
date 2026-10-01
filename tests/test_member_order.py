@@ -80,6 +80,14 @@ class MemberOrder(unittest.TestCase):
         m.rename_member("Account", "原価", "売上原価")
         self.assertEqual(account.in_order(), ["売上", "売上原価", "販管費"])
 
+    def test_rename_after_reading_in_order(self):
+        m = self.m
+        m.move_member("Account", "販管費", 0)
+        self.assertEqual(self.rows(), [("販管費", "Mar"), ("売上", "Jan"), ("売上", "Feb"), ("原価", "Jan")])
+        m.rename_member("Account", "販管費", "一般管理費")  # 名前 -> 順位の表を引いたあとで名前を変える
+        self.assertEqual(self.rows()[0], ("一般管理費", "Mar"))
+        self.assertEqual(m.dimensions["Account"].ranks()["一般管理費"], 0)
+
     def test_ordered_dimensions_cannot_be_reordered(self):
         m = self.m
         with self.assertRaisesRegex(ValueError, "順序付きの軸"):

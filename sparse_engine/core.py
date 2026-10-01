@@ -175,6 +175,7 @@ class Dimension:
         i = self._index.pop(old)
         self._index[new] = i
         self.members[i] = new
+        self._rank = None  # 名前 -> 順位の表は名前を鍵にするので作り直す
         for prop, (target, mapping) in list(self.properties.items()):
             if old in mapping:
                 self.properties[prop] = (target, {(new if k == old else k): v for k, v in mapping.items()})
