@@ -49,7 +49,7 @@ SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き�
 （ECS などのコンテナは SIGTERM で止める）。
 
 標準ライブラリの HTTP サーバーで、要求ごとにスレッドを作る。読み手が多いプロセスでは
---switch-interval で Python のスレッド切り替えの間隔を短くする（README の「性能」）。
+--switch-interval で Python のスレッド切り替えの間隔を短くする（docs/performance.md）。
 """
 from __future__ import annotations
 
