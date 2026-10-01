@@ -624,7 +624,7 @@ except NotLeader as e:
 
 同じモデルを複数のサーバーで開くと、書き込みの権利（リース）を持つ 1 つが書き手になり、ほかは待機系として追従する（`Workspace(standby=True)`。「同時の読み書き」）。
 待機系は読み出しを受け、書き込みは 421 と `{"error": "not_leader", "leader": <書き手の番地>}` で拒むので、送り手は `leader` へ送り直す。
-ルーターは `nanashi_model.lease_endpoint` でも書き手を見つけられる。
+ルーター（「ルーター」）は `nanashi_model.lease_endpoint` で書き手を見つける。
 書き手としてほかのプロセスに知らせる自分の番地は `--advertise`（既定は `http://<host>:<port>`。`0.0.0.0` で待ち受けるときは必須）、リースの期限は `--lease-ttl`（既定 30 秒）で決める。
 
 SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き込みを確定させ、リースを手放してから止まる（ECS などのコンテナは SIGTERM で止める）。
@@ -633,6 +633,50 @@ SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き�
 
 損益計画（大）で、HTTP 経由の 1 セルの読み出しは 0.24 ms、給与を 1 人変える書き込みは 0.9 ms、8 人が休みなく読み続ける中での書き込みは 2.2 ms（`bench_http.py`、手元の loopback、読み出しは毎秒約 2,800 件）。
 サーバーは起動時に Python のスレッド切り替えの間隔を 0.5 ms にする（`--switch-interval`）。
+
+## ルーター
+
+`router/` は、エンジンのサーバーの前に置く Go のルーター（`nanashi-router`）である。
+`/models/<モデルの ID>/...` の要求を、そのモデルの書き手のサーバーへ、`/models/<モデルの ID>` を外して送る（`/models/plan-2027/writes` は書き手の `/writes` へ）。
+パスと問い合わせは受け取ったまま渡す（Metric の名前の `%2F` も読み解かない）。
+モデルの ID は、英数字で始まり英数字と `_` と `-` だけの 128 文字までに限る（それ以外は 400）。
+
+```bash
+(cd router && go build -o nanashi-router ./cmd/nanashi-router)
+router/nanashi-router --pg postgresql://... --listen 0.0.0.0:8090 --tokens tokens.json   # {"<トークン>": "<利用者>"}
+```
+
+書き手は記録先の `nanashi_model` から引く（期限内のリースの `lease_endpoint`。エンジンの `--advertise`）。
+引いた番地はモデルごとに覚えておき、送れなかったとき、5xx のとき、書き手の分からない 421 のときに忘れる。
+読み出しも書き手へ送る（自分の書き込みをすぐ読めるように）。
+
+エンジンの応答に応じて、次のように送り直す。
+本文は毎回同じバイト列を送る。
+`client_op_id` があるので、確定したか分からない応答（500、504、途中で切れた）のあとに送り直しても二重には確定しない。
+
+| エンジンの応答 | ルーター |
+|---|---|
+| 200、400、401、404、405、409、411、413 | そのまま返す |
+| 421 で `leader` がある | 待たずに `leader` へ送り直す |
+| 429 | 間を置いて同じサーバーへ送り直す |
+| 500、504、503（`busy`、`stale`、`closed`）、つながらない、途中で切れた | 間を置いて書き手を引き直し、送り直す |
+
+間は 50 ms から倍にして 1 秒まで延ばす（ゆらぎを付ける）。
+1 回の送信は 70 秒まで待つ（エンジンは書き込みの確定を最大で約 60 秒待つ）。
+`--deadline`（既定 90 秒）までに書き手が見つからなければ 503 `{"error": "no_leader"}`、記録先にないモデルは 404 `{"error": "no_model"}` を返す。
+期限に達したときは、最後に受け取った応答を返す（応答を待ちきれなかったなら 504）。
+
+`--tokens` なら `Authorization: Bearer <トークン>` で利用者を決め、`X-Forwarded-User` に付けてエンジンへ渡す（エンジンは `--user-header X-Forwarded-User` で起こす）。
+送り手が付けてきた `X-Forwarded-User` は外す。
+`--tokens` がなければ認証せず、127.0.0.1 以外で待ち受けるのを拒む（`--insecure` で外せる）。
+ルーター自身が生きているかは `GET /healthz` で分かる。
+SIGTERM と SIGINT で新しい要求を断り、送り直している要求が終わるのを待ってから止まる。
+
+送り手がルーターにだけ送るときの引き継ぎを、`tests/failover.py --via-router` で測った。
+書き手を止めてから確定が途切れた最も長い間は、SIGTERM で 0.03〜0.13 秒、SIGKILL で 3.1〜3.3 秒（リースの期限 3 秒）だった。
+どの回も、ルーターは送り手に 200 以外を返さなかった。
+
+待機系に読み出しを振り分けることと、ECS などの環境に合わせて書き手を探すことは、まだしていない。
 
 ## 性能
 
@@ -836,6 +880,8 @@ PostgreSQL は `NANASHI_PG_DSN`（既定は手元の 55432 番）で指定し、
 送り手は確定を受け取るまで同じ `client_op_id` で再送し、つながらないときと 503 のときはもう一方へ、421 のときは応答にある書き手へ送る。
 両方を止めたあと、記録先の記録と開き直したモデルの値を、受け取った確定と突き合わせ、確定が途切れた最も長い間も測る（`python -m tests.failover --signal TERM`。リースの期限は 3 秒にして回す）。
 SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限と待機系が権利を試す間隔の分（約 3.2 秒）途切れる。
+`--via-router` なら、送り手はルーターにだけ送り、送り先を変えない（ルーターが 200 以外を返せば失敗として数える）。
+ルーターの送り直しの判断は、Go のテスト（`router/` で `go test ./...`）で、偽のエンジンと偽の書き手の引き先を使って確かめる。
 待機系が書き手の番地を返して書き込みを拒むこと、起動し直したプロセスが待機系として追従することも、同じ仕組みで確かめる（`tests/test_failover.py`）。
 待機系の役割の変わり方そのもの（昇格、降格、降格の直前に列に入った書き込み）は、1 つのプロセスの中の 2 つの `Workspace` で確かめる（`tests/test_standby.py`）。
 
@@ -855,6 +901,7 @@ SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限と待機系が権�
 | `sparse_engine/pg_journal.py` | PostgreSQL の記録先（リースと締め出し、大量の変更の後からの反映） |
 | `sparse_engine/objects.py` | ファイルの置き場所（`put`、`get`、`list`、`delete` を持つ BlobStore。S3 互換か、ローカルのディレクトリ）。記録先のスナップショットと大量の変更のファイルを置く |
 | `sparse_engine/server.py` | HTTP サーバー（Workspace を JSON の API で公開する） |
+| `router/` | ルーター（Go）。`router.go` が書き手への送り直し（応答ごとの次の動きは `decide`）、`pg.go` が記録先から書き手を引く `PgResolver`、`cmd/nanashi-router/` がコマンド |
 | `native/engine/` | Rust のエンジン（`nanashi-engine`、Python に依存しない）。`key.rs` がキーの詰め方、`store.rs` が格納、`ast.rs` が式の構文木、`eval/` が評価（`join.rs` が突き合わせ、`agg.rs` が集計）、`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き、`config.rs` が速さのための調整値。`tests/` に格納の性質テスト（BTreeMap と突き合わせる） |
 | `native/src/lib.rs` | Python から使う薄い層（`nanashi_core`、PyO3）。受け取った番号と長さはここで検査する |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
