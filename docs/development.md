@@ -71,6 +71,7 @@ PostgreSQL につながらなければ（`psycopg` が libpq を見つけられ�
 
 `--size` を付けないと、large（社員 2 万人、約 490 万セル）まですべての規模を回す。
 ほかのベンチマークはリポジトリ直下の `bench*.py` で、大きなモデルではメモリを数 GB 使うので、1 本ずつ実行する。
+キーの表し方による速さとメモリの違いは `native/engine/examples/key_layout.rs` で測る（[設計メモ](member-numbering.md)の「キーの表し方の測定」）。
 
 ## テストの方針
 
