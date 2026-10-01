@@ -676,20 +676,34 @@ impl Core {
         Ok((cols, values, is_bool))
     }
 
-    /// region の範囲の行を宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す
-    /// （軸ごとのメンバー番号の列、値の列、真偽値か、範囲の全行数）。表示やページングに使う。
-    #[pyo3(signature = (store, region, offset = 0, limit = None))]
+    /// region の範囲の行を宣言した軸の順に各軸のメンバーの並び順で並べ、offset 件目から limit 件だけ返す
+    /// （軸ごとのメンバー番号の列、値の列、真偽値か、範囲の全行数）。表示やページングに使う。ranks は
+    /// 宣言した軸ごとの「番号 -> 並び順の位置」の表で、None の軸は番号の順に並ぶ。
+    #[pyo3(signature = (store, region, ranks = Vec::new(), offset = 0, limit = None))]
     fn rows_in(
         &self,
         py: Python<'_>,
         store: &Bound<'_, StoreHandle>,
         region: Region,
+        ranks: Vec<Option<Vec<u32>>>,
         offset: usize,
         limit: Option<usize>,
     ) -> PyResult<Page> {
         let (s, r) = (read(store)?, self.restrict(&region)?);
+        if !ranks.is_empty() && ranks.len() != s.metric_dims.len() {
+            return Err(err(format!("並び順の表の数 {} が軸の数 {} と合わない", ranks.len(), s.metric_dims.len())));
+        }
+        for (&d, t) in s.metric_dims.iter().zip(&ranks) {
+            let size = self.cat.dims[d].size as usize;
+            if let Some(t) = t {
+                let mut seen = vec![false; size];
+                if t.len() != size || !t.iter().all(|&x| (x as usize) < size && !std::mem::replace(&mut seen[x as usize], true)) {
+                    return Err(err(format!("軸 {} の並び順の表が、メンバー数 {size} の並べ替えになっていない", self.cat.dims[d].name)));
+                }
+            }
+        }
         let is_bool = s.kind == Kind::Bool;
-        let (cols, values, total) = py.detach(move || s.rows_in(&r, offset, limit));
+        let (cols, values, total) = py.detach(move || s.rows_in(&r, &ranks, offset, limit));
         Ok((cols, values, is_bool, total))
     }
 

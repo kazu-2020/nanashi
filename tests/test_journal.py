@@ -32,7 +32,7 @@ except ImportError:
 
 def definitions(m: Model) -> dict:
     """値以外の状態（軸、メンバー、ID、プロパティ、Metric の定義）。"""
-    dims = {d.name: (d.id, d.ordered, list(zip(d.ids, d.members)),
+    dims = {d.name: (d.id, d.ordered, list(zip(d.ids, d.members)), d.in_order(),
                      {p: (t, dict(mp)) for p, (t, mp) in d.properties.items()})
             for d in m.dimensions.values()}
     metrics = {x.name: (x.id, x.dims, x.kind, None if x.written is None else to_formula(x.written),
@@ -138,6 +138,28 @@ class Journal(JournalCase, unittest.TestCase):
         self.m.rename_member("Product", "A", "Alpha")
         self.assertEqual(self.m.seq, 4)
         check_same_state(self, self.m, self.reopen())
+
+    def test_member_order_is_recorded(self):
+        product = self.m.dimensions["Product"]
+        with self.m.transaction() as moved:
+            self.m.move_member("Product", "D", 0)
+        # 並び替えだけなら、メンバーの変更（構造の変更）でなく並び順として記録する
+        self.assertEqual(moved.record["changes"]["member_order"],
+                         [{"dim": product.id, "order": [product.id_of(x) for x in "DABC"]}])
+        self.assertNotIn("members", moved.record["changes"])
+        with self.m.transaction() as txn:
+            self.m.add_member("Product", "E", at=1, Category="Y")
+            self.m.remove_member("Product", "B")
+            self.m.set_cell("Price", 3, Product="E")
+        self.assertEqual(txn.record["changes"]["member_order"],
+                         [{"dim": product.id, "order": [product.id_of(x) for x in "DEAC"]}])
+        with self.m.transaction() as appended:
+            self.m.add_member("Product", "F")  # 最後に足すだけなら、並び順は記録しない
+        self.assertNotIn("member_order", appended.record["changes"])
+        self.assertEqual(product.in_order(), ["D", "E", "A", "C", "F"])
+        reopened = self.reopen()
+        check_same_state(self, self.m, reopened)
+        self.assertEqual(reopened.rows("Price")[0], self.m.rows("Price")[0])
 
     def test_definitions_and_removals(self):
         with self.m.transaction(user="bob"):

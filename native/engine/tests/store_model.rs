@@ -73,7 +73,7 @@ fn check(s: &Store, m: &Model, rng: &mut Rng, cat: &Catalog, step: usize) {
     assert_eq!(cells(&s.slice(&r)), want, "slice（{step} 回目）");
     assert_eq!(s.read(&r).cells.len(), want.len(), "read（{step} 回目）");
     let (offset, limit) = (rng.below(4) as usize, rng.below(6) as usize);
-    let (cols, values, total) = s.rows_in(&r, offset, Some(limit));
+    let (cols, values, total) = s.rows_in(&r, &[], offset, Some(limit));
     assert_eq!(total, want.len());
     let page: Vec<(Vec<u32>, f64)> = want.iter().skip(offset).take(limit).map(|(k, v)| (k.clone(), *v)).collect();
     let got: Vec<(Vec<u32>, f64)> = (0..values.len()).map(|i| (cols.iter().map(|c| c[i]).collect(), values[i])).collect();

@@ -236,7 +236,7 @@ class ReferenceEngine:
 
     def rows(self, storage: Cube, restrict, cat, offset=0, limit=None):
         cube = _filter(storage, restrict or None)
-        order = [cat.dimension(d)._index for d in cube.dims]
+        order = [cat.dimension(d).ranks() for d in cube.dims]
         keys = sorted(cube.cells, key=lambda k: tuple(ix[m] for ix, m in zip(order, k)))
         total = len(keys)
         page = keys[offset:] if limit is None else keys[offset:offset + limit]
