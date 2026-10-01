@@ -1,12 +1,16 @@
 """トランザクションと操作ログ（記録）、スナップショットと記録の再生による復元。"""
+import errno
+import os
 import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sparse_engine import FormulaError, Model, to_formula
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.journal import AlreadyCommitted, FileJournal
+from sparse_engine import journal as journal_module
+from sparse_engine.journal import AlreadyCommitted, Fenced, FileJournal
 
 from .journals import FileStore, JournalCase, PgStore
 from .test_engines import build_with
@@ -191,30 +195,160 @@ class Journal(JournalCase, unittest.TestCase):
         snapshots = self.journals.journal().snapshots()
         self.assertEqual([s for s, _ in snapshots], [1, 0])
         check_same_state(self, self.m, self.reopen())
-        # 新しいスナップショットが壊れていたら、古いスナップショットから記録を多く再生する
-        # （FileJournal は一覧から外し、PgJournal は読むときにハッシュが合わないので 1 つ前に戻る）
+        # 新しいスナップショットが壊れていたら、読むときにハッシュが合わないので、古いスナップショットから
+        # 記録を多く再生する
         place = dict(snapshots)[1]
-        broken = next(Path(getattr(place, "uri", place)).glob("inputs.*.parquet"))  # PgJournal は Snapshot
-        broken.write_bytes(b"broken")
+        name = next(n for n in place.files if n.startswith("inputs."))
+        self.journals.journal().objects.put(f"{place.uri}/{name}", b"broken")
         check_same_state(self, self.m, self.reopen())
 
     def test_torn_last_line_is_dropped(self):
         self.file_only()
         self.m.set_cell("Price", 12, Product="A")
-        with open(self.path / "log.jsonl", "a") as f:
+        with open(self.m.journal.log_path, "a") as f:
             f.write('{"seq": 2, "changes"')  # 書いている途中で落ちた
+        self.m.journal.release()
         reopened = self.reopen()
         self.assertEqual(reopened.seq, 1)
         reopened.set_cell("Price", 14, Product="A")
         self.assertEqual(FileJournal(self.path).head, 2)
         self.assertEqual(self.reopen().get("Price", Product="A"), 14)
 
+    def test_failed_append_is_undone(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        size = (self.m.journal.log_path).stat().st_size
+
+        def disk_full(fd, data):
+            os.write(fd, data[:len(data) // 2])  # 行の途中まで書けたところで満杯になった
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        failed = []
+
+        def fsync_fails(fd):  # Linux の fsync は、失敗を 1 回だけ知らせる
+            if not failed:
+                failed.append(fd)
+                raise OSError(errno.EIO, "Input/output error")
+        for name, broken in (("_write_all", disk_full), ("_sync", fsync_fails)):
+            with self.subTest(name), mock.patch.object(journal_module, name, broken):
+                with self.assertRaises(OSError):
+                    self.m.set_cell("Price", 99, Product="A")
+            self.assertEqual((self.m.journal.log_path).stat().st_size, size)
+            self.assertEqual(self.m.get("Price", Product="A"), 12)
+        self.m.set_cell("Price", 13, Product="A")  # 同じ通し番号で書き直せる
+        self.assertEqual(self.m.seq, 2)
+        self.m.journal.release()
+        check_same_state(self, self.m, self.reopen())
+
+    def test_append_that_cannot_be_undone_stops_writes(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+
+        def disk_full(fd, data):
+            os.write(fd, data[:5])
+            raise OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(journal_module, "_write_all", disk_full), \
+                mock.patch.object(journal_module.os, "ftruncate", side_effect=OSError(errno.EIO, "EIO")):
+            with self.assertRaises(OSError):
+                self.m.set_cell("Price", 99, Product="A")
+        with self.assertRaisesRegex(OSError, "取り消せなかった"):
+            self.m.set_cell("Price", 13, Product="A")
+        self.assertEqual(self.m.get("Price", Product="A"), 12)
+        self.m.journal.release()
+        self.assertEqual(self.reopen().get("Price", Product="A"), 12)  # 書きかけの行は捨てて開ける
+
+    def test_second_writer_is_fenced(self):
+        self.file_only()
+        other = self.reopen()
+        self.m.set_cell("Price", 12, Product="A")  # self.m の記録先が書き込みの権利を持つ
+        with self.assertRaisesRegex(Fenced, "書き込み中"):
+            other.set_cell("Price", 20, Product="B")
+        self.m.journal.release()
+        with self.assertRaisesRegex(Fenced, "開き直す"):  # 権利は取れても、手元が古い
+            other.set_cell("Price", 20, Product="B")
+        other = self.reopen()
+        other.set_cell("Price", 20, Product="B")
+        self.assertEqual(self.reopen().get("Price", Product="A"), 12)
+        self.assertEqual(self.reopen().get("Price", Product="B"), 20)
+
+    def test_reader_leaves_the_writers_partial_line(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        with open(self.m.journal.log_path, "a") as f:
+            f.write('{"seq": 2, "changes"')  # 書き手がまだ書いている途中
+        size = (self.m.journal.log_path).stat().st_size
+        self.assertEqual(self.reopen().get("Price", Product="A"), 12)
+        self.assertEqual((self.m.journal.log_path).stat().st_size, size)
+
+    def test_snapshot_without_manifest_is_not_used(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        self.m.checkpoint()
+        manifest = next(k for k in self.m.journal.objects.list("snapshots/") if k.endswith("manifest.json")
+                        and "/00000000000000000001-" in k)
+        self.m.journal.objects.delete(manifest)  # ファイルを置いている途中で落ちた
+        self.assertEqual([s for s, _ in self.journals.journal().snapshots()], [0])
+        check_same_state(self, self.m, self.reopen())
+
+    def test_legacy_snapshot_directory_is_read(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        self.m.checkpoint()
+        # 以前の版の置き方（snapshots/<通し番号>/ に、ファイルと meta.json）に直す
+        objects = self.m.journal.objects
+        (seq, place), _ = self.journals.journal().snapshots()
+        for name in place.files:
+            objects.put(f"snapshots/{seq:020d}/{name}", objects.get(f"{place.uri}/{name}"))
+            objects.delete(f"{place.uri}/{name}")
+        objects.put(f"snapshots/{seq:020d}/meta.json", objects.get(f"{place.uri}/manifest.json"))
+        objects.delete(f"{place.uri}/manifest.json")
+        self.assertEqual(self.journals.journal().snapshots()[0][1].uri, f"snapshots/{seq:020d}")
+        check_same_state(self, self.m, self.reopen())
+
+    def test_snapshots_split_the_log_and_prune_removes_the_old_part(self):
+        self.file_only()
+        j = self.m.journal
+        for i in range(3):
+            self.m.set_cell("Price", 10 + i, Product="A")
+            self.m.checkpoint()
+        self.m.set_cell("Price", 20, Product="B")
+        segments = sorted(p.name for p in (self.path / "log").glob("*.jsonl"))
+        self.assertEqual(segments, [f"{q:020d}.jsonl" for q in (1, 2, 3, 4)])  # スナップショットごとに区切る
+        reopened = self.journals.journal()
+        self.assertEqual([r["seq"] for r in reopened.records(after=3)], [4])
+        check_same_state(self, self.m, self.reopen())
+        self.assertEqual(j.prune(keep=1), {"snapshots": 3, "segments": 3, "cells": 0})  # 通し番号 0、1、2 の分
+        self.assertEqual([s for s, _ in self.journals.journal().snapshots()], [3])
+        check_same_state(self, self.m, self.reopen())
+        with self.assertRaisesRegex(ValueError, "prune で消した"):
+            list(self.journals.journal().records(after=0))
+
+    def test_client_op_ids_are_remembered_within_the_window(self):
+        self.file_only()
+        self.m.journal = self.journals.journal(op_window=2)
+        for i, op in enumerate("abc"):
+            with self.m.transaction(client_op_id=op):
+                self.m.set_cell("Price", i, Product="A")
+        for j in (self.m.journal, self.journals.journal(op_window=2)):
+            self.assertEqual((j.seq_of("a"), j.seq_of("b"), j.seq_of("c")), (None, 2, 3))
+
+    def test_log_written_by_earlier_versions_is_read(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        self.m.journal.release()
+        self.m.journal.log_path.rename(self.path / "log.jsonl")  # 以前の版は 1 つのファイルに書いていた
+        reopened = self.reopen()
+        self.assertEqual(reopened.get("Price", Product="A"), 12)
+        reopened.set_cell("Price", 13, Product="A")
+        self.assertEqual(reopened.journal.log_path, self.path / "log.jsonl")  # 区切るまで同じファイルに書く
+        check_same_state(self, reopened, self.reopen())
+
     def test_corruption_in_the_middle_is_an_error(self):
         self.file_only()
         self.m.set_cell("Price", 12, Product="A")
         self.m.set_cell("Price", 13, Product="A")
-        lines = (self.path / "log.jsonl").read_text().splitlines(keepends=True)
-        (self.path / "log.jsonl").write_text("{broken\n" + lines[1])
+        lines = (self.m.journal.log_path).read_text().splitlines(keepends=True)
+        (self.m.journal.log_path).write_text("{broken\n" + lines[1])
         with self.assertRaisesRegex(ValueError, "壊れている"):
             FileJournal(self.path)
 
@@ -372,7 +506,7 @@ class CellFiles(unittest.TestCase):
             m.set_cell("V", 1.0, K="k7", T="t1")  # 少ないセルは、これまでどおり行に書く
             (f,) = (Path(tmp) / "cells").glob("*.parquet")
             self.assertTrue(f.name.endswith(f"-{m.metrics['V'].id}.parquet"))
-            lines = (Path(tmp) / "log.jsonl").read_text().splitlines()
+            lines = FileJournal(tmp).log_path.read_text().splitlines()
             self.assertLess(len(lines[0]), 1000)  # 記録の行には、ファイルの名前とハッシュだけ
             self.assertIn('"cells":[', lines[1])
             for e in (ReferenceEngine, RustEngine):

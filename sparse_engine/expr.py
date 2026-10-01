@@ -2,15 +2,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
+from typing import Any, Callable
 
-AGGREGATORS = {
-    "sum": sum,
-    "avg": lambda vs: sum(vs) / len(vs),
-    "min": min,
-    "max": max,
-    "count": lambda vs: float(len(vs)),
-    "first": lambda vs: vs[0],  # 値が 1 つしかないグループ用（引き下ろしの内部で使う）
-}
+@dataclass(frozen=True)
+class Aggregation:
+    """集計関数。集計関数の一覧はここだけに持つ（構文、型検査、評価、集計の読み出し、Rust の変換が使う）。"""
+    name: str
+    fn: Callable[[list], Any]
+    public: bool   # 利用者が式（BY、REMOVE）と集計の読み出し（summarize）で使える
+    numeric: bool  # number の値だけを集計できる（そうでなければ値の種類を問わない）
+    kind: str | None = "number"  # 結果の値の種類（None なら集計元と同じ）
+
+
+AGGREGATIONS: dict[str, Aggregation] = {a.name: a for a in [
+    Aggregation("sum", sum, True, True),
+    Aggregation("avg", lambda vs: sum(vs) / len(vs), True, True),
+    Aggregation("min", min, True, True),
+    Aggregation("max", max, True, True),
+    Aggregation("count", lambda vs: float(len(vs)), True, False),
+    # 値が 1 つしかないグループ用。Metric を使った BY の引き下ろしを書き換えた式の内部でだけ使う
+    Aggregation("first", lambda vs: vs[0], False, False, None),
+]}
+PUBLIC_AGGREGATIONS = tuple(n for n, a in AGGREGATIONS.items() if a.public)
+AGGREGATORS = {n: a.fn for n, a in AGGREGATIONS.items()}
 
 ARITH = {"+", "-", "*", "/"}
 COMPARE = {"=", "<>", "<", "<=", ">", ">="}

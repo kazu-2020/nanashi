@@ -99,7 +99,7 @@ class WriteMany(unittest.TestCase):
         m.add_input("X", ["A"], {})
         with self.assertRaisesRegex(ValueError, "メンバー番号 2"):
             m.engine.write_many(m._values["X"], [[0, 2]], [1.0, 2.0], m)
-        with self.assertRaisesRegex(ValueError, "列の数か長さ"):
+        with self.assertRaisesRegex(ValueError, "列の数"):
             m.engine.write_many(m._values["X"], [[0], [1]], [1.0], m)
 
 

@@ -26,17 +26,19 @@ import itertools
 import math
 from dataclasses import dataclass, field
 from statistics import mean
+from collections.abc import MutableMapping
 from typing import Any, Mapping
 
 from .core import Cube, Dimension, Key
-from .delta import DeltaPlan, plan_for, rename
-from .engine import CompiledPlan, Engine, default_engine
-from .evaluate import (Edge, FormulaError, Kind, Restrict, Type, affected, collect_refs, combos, estimate,
-                       infer, member_kind, resolve, union_region)
-from .expr import (BinOp, Coalesce, Const, Expr, Filter, Ref, mentions_member, references_metric,
+from .delta import DeltaPlan
+from .engine import Store, default_engine
+from .evaluate import Edge, FormulaError, Kind, Restrict, Type, combos, member_kind, union_region
+from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_member, references_metric,
                    rename_member, rename_metrics, uses_property)
 from .journal import AlreadyCommitted, Transaction, changes, jsonable, now
+from .messages import msg
 from .parser import parse
+from .planner import CompiledPlan, Step
 
 
 @dataclass
@@ -53,12 +55,6 @@ class Metric:
     @property
     def override_name(self) -> str:
         return f"__override__{self.name}"
-
-
-@dataclass
-class Step:
-    names: tuple[str, ...]
-    scan_dim: str | None = None  # None なら通常の 1 Metric の計算
 
 
 @dataclass
@@ -185,39 +181,113 @@ class _CellCounts(dict):
         if name in self.known:
             n = self.known[name]
         else:
-            hint = getattr(self.model.engine, "size_hint", self.model.engine.size)
-            n = float(hint(self.model._values[name]))
+            n = float(self.model.engine.size_hint(self.model._values[name]))
         self[name] = n
         return n
 
 
+_UNSET = object()
+
+
+@dataclass(slots=True)
+class MetricState:
+    """Metric ごとに Model が持つ、定義（Metric）以外の状態。Metric を消す・名前を変えるときは、これを
+    まるごと動かす（状態を 1 つ足しても、消すところと名前を変えるところを直さなくてよい）。
+    まだ持っていない状態は _UNSET。"""
+    value: Any = _UNSET           # 格納データ（エンジンごとの形式）
+    count: Any = _UNSET           # 差分集計する SUM の各グループの件数
+    delta: Any = _UNSET           # 差分集計の計画（DeltaPlan）
+    partition: Any = _UNSET       # 分割軸（layout）
+    warnings: Any = _UNSET        # 型検査の警告
+    edges: Any = _UNSET           # 依存グラフの辺（この Metric -> 参照先）
+    samples: Any = _UNSET         # この入力の 1 セルを変えたときの影響範囲（分割軸の選択に使う）
+    estimate: Any = _UNSET        # 結果のセル数の見積もり（上限）
+    estimate_refs: Any = _UNSET   # 見積もりが読んだ Metric
+    estimate_users: Any = _UNSET  # この Metric を読む見積もり
+
+    def fork(self, share) -> MetricState:
+        """Model.fork 用の複製。格納データは share で共有し、書き足していく状態（samples）は写す。
+        ほかの状態は定義だけに依存し、書き換えるときは丸ごと入れ替えるので、そのまま引き継ぐ。"""
+        own = lambda v, f: v if v is _UNSET else f(v)
+        return MetricState(own(self.value, share), own(self.count, share), self.delta, self.partition,
+                           self.warnings, self.edges, own(self.samples, dict),
+                           self.estimate, self.estimate_refs, self.estimate_users)
+
+
+class _Field(MutableMapping):
+    """Model._state の 1 つの状態を、Metric 名 -> 値の dict のように見せる。"""
+    __slots__ = ("_states", "_name")
+
+    def __init__(self, states: dict[str, MetricState], name: str):
+        self._states, self._name = states, name
+
+    def __getitem__(self, key: str):
+        st = self._states.get(key)
+        v = _UNSET if st is None else getattr(st, self._name)
+        if v is _UNSET:
+            raise KeyError(key)
+        return v
+
+    def get(self, key: str, default=None):
+        st = self._states.get(key)
+        v = _UNSET if st is None else getattr(st, self._name)
+        return default if v is _UNSET else v
+
+    def __contains__(self, key) -> bool:
+        st = self._states.get(key)
+        return st is not None and getattr(st, self._name) is not _UNSET
+
+    def __setitem__(self, key: str, value) -> None:
+        st = self._states.get(key)
+        if st is None:
+            st = self._states[key] = MetricState()
+        setattr(st, self._name, value)
+
+    def __delitem__(self, key: str) -> None:
+        if key not in self:
+            raise KeyError(key)
+        setattr(self._states[key], self._name, _UNSET)
+
+    def __iter__(self):
+        name = self._name
+        return (k for k, st in list(self._states.items()) if getattr(st, name) is not _UNSET)
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def __repr__(self) -> str:
+        return repr(dict(self))
+
+
+def _per_metric(name: str, doc: str) -> property:
+    """Model._state の状態 name を dict のように読み書きする属性。代入すると、その状態だけを入れ替える。"""
+    def get(self) -> _Field:
+        return _Field(self._state, name)
+
+    def set(self, mapping) -> None:
+        mapping = dict(mapping)
+        for k, st in self._state.items():
+            setattr(st, name, mapping.pop(k, _UNSET))
+        for k, v in mapping.items():
+            self._state[k] = MetricState(**{name: v})
+    return property(get, set, doc=doc)
+
+
 @dataclass
 class Model:
-    engine: Engine = field(default_factory=default_engine)
+    engine: Store = field(default_factory=default_engine)
     auto_layout: bool = True  # False なら分割軸はエンジンの既定（メンバー数が最も多い軸）
     delta_aggregation: bool = True  # False なら集計も普通に計算し直す
     max_cells: int | None = 1_000_000_000  # 計算 Metric 1 つのセル数の見積もりの上限。None なら検査しない
     dimensions: dict[str, Dimension] = field(default_factory=dict)
-    layout: dict[str, str | None] = field(default_factory=dict)  # Metric ごとの分割軸
     metrics: dict[str, Metric] = field(default_factory=dict)
-    warnings: dict[str, list[str]] = field(default_factory=dict)
-    cell_estimates: dict[str, float] = field(default_factory=dict)  # 計算 Metric のセル数の見積もり（上限）
     eval_log: Log = field(default_factory=Log)  # 再計算した Metric 名（観察用）
     slice_log: SliceLog = field(default_factory=lambda: SliceLog())  # 再計算した範囲（観察用）
     delta_log: Log = field(default_factory=Log)  # 差分集計で更新した Metric（観察用）
-    _values: dict[str, Any] = field(default_factory=dict)  # エンジンごとの格納形式
+    _state: dict[str, MetricState] = field(default_factory=dict)  # Metric ごとの、定義以外の状態
     _plan: list[Step] | None = None
     _levels: list[list[Step]] = field(default_factory=list)  # 依存関係の段ごとの計画（全体の再計算用）
     _pending: Pending = field(default_factory=Pending)  # 前回の再計算のあとにためている変更
-    _work: dict[str, Any] = field(default_factory=dict)  # scan 中の読み出し元（切り出し済み）
-    _delta: dict[str, DeltaPlan] = field(default_factory=dict)  # 差分集計する Metric -> 計画
-    _counts: dict[str, Any] = field(default_factory=dict)  # 差分集計する SUM の各グループの件数
-    _temp_types: dict[str, Type] = field(default_factory=dict)  # 差分計算中の一時的な名前の型
-    _delta_cache: dict[str, tuple] = field(default_factory=dict)  # Metric -> (計画, 件数の差分の式, 値の差分の式)
-    _edges: dict[str, list[Edge]] = field(default_factory=dict)  # 依存グラフ（Metric -> 参照先）
-    _samples: dict[str, dict[str, Restrict]] = field(default_factory=dict)  # 分割軸の選択に使った、入力ごとの影響範囲
-    _estimate_refs: dict[str, frozenset[str]] = field(default_factory=dict)  # 見積もりが読んだ Metric
-    _estimate_users: dict[str, frozenset[str]] = field(default_factory=dict)  # Metric -> それを読む見積もり
     _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
     journal: Any = None  # 記録先（journal.FileJournal など）。None なら記録しない
     seq: int = 0  # 確定した最後のトランザクションの通し番号
@@ -225,36 +295,42 @@ class Model:
     _txn: Transaction | None = None  # 実行中のトランザクション
     _frozen: bool = False  # 公開済みの版（Workspace）。書き換えない
 
+    # Metric ごとの状態（_state）を、Metric 名 -> 値の dict のように見せる
+    _values = _per_metric("value", "格納データ（エンジンごとの形式）")
+    _counts = _per_metric("count", "差分集計する SUM の各グループの件数")
+    _delta = _per_metric("delta", "差分集計する Metric -> 計画")
+    layout = _per_metric("partition", "Metric ごとの分割軸")
+    warnings = _per_metric("warnings", "Metric ごとの型検査の警告")
+    _edges = _per_metric("edges", "依存グラフ（Metric -> 参照先）")
+    _samples = _per_metric("samples", "分割軸の選択に使った、入力ごとの影響範囲")
+    cell_estimates = _per_metric("estimate", "計算 Metric のセル数の見積もり（上限）")
+    _estimate_refs = _per_metric("estimate_refs", "見積もりが読んだ Metric")
+    _estimate_users = _per_metric("estimate_users", "Metric -> それを読む見積もり")
+
     # ------------------------------------------------ Catalog
 
     def dimension(self, name: str) -> Dimension:
         if name not in self.dimensions:
-            raise FormulaError(f"未知の軸 {name}")
+            raise FormulaError("unknown_dim", name=name)
         return self.dimensions[name]
 
     def metric_type(self, name: str) -> Type:
-        if name in self._temp_types:
-            return self._temp_types[name]
         if name not in self.metrics:
-            raise FormulaError(f"未知の Metric {name}")
+            raise FormulaError("unknown_metric", name=name)
         m = self.metrics[name]
         return Type(m.dims, m.kind)
 
     def source(self, name: str) -> Any:
-        """name の読み出し元（差分集計の作業データがあればそれ、なければ格納データ）。
-
-        自分で範囲を絞り込めるエンジン（Rust）は、read ではなくこれで読み出し元を受け取る。
-        """
-        return self._work[name] if name in self._work else self._values[name]
+        """name の格納データ。自分で範囲を絞り込めるエンジン（Rust）は、read ではなくこれで読み出し元を受け取る。"""
+        return self._values[name]
 
     def read(self, name: str, restrict: Restrict | None) -> Any:
         """name を restrict の範囲に絞って返す（参照実装の評価器が使う）。"""
         return self.engine.view(self.source(name), restrict or None, self)
 
     def compiled(self) -> CompiledPlan:
-        """今の計算計画（エンジンが差分再計算の段取りを組むのに使う）。recalc の中でだけ有効。"""
-        return CompiledPlan(self._plan, self._levels, self._delta, frozenset(self._delta_sources()),
-                            self.delta_exprs)
+        """今の計算計画（Planner が段取りを組むのに使う）。"""
+        return CompiledPlan(self._plan, self._levels, self._delta, frozenset(self._delta_sources()))
 
     def refresh(self) -> None:
         """全体を計算し直す。差分集計を続けてたまった浮動小数点の誤差もなくなる。"""
@@ -267,15 +343,13 @@ class Model:
         """Metric ごとの格納データが確保しているメモリ（バイト）。計算の途中結果や計画は含まない。
 
         rows は本体の行数、base・delta・index は本体・差分・索引、counts は差分集計の件数の格納データ
-        （本体と差分と索引の合計）。エンジンが memory を持たなければ（参照実装）、rows だけを返す。
+        （本体と差分と索引の合計）。バイト数を測れないエンジン（参照実装）は rows だけを返す。
         """
-        mem = getattr(self.engine, "memory", None)
-        if mem is None:
-            return {n: {"rows": self.engine.size(v)} for n, v in self._values.items()}
+        mem = self.engine.memory
         out = {}
         for n, v in self._values.items():
             row = mem(v)
-            if n in self._counts:
+            if n in self._counts and "base" in row:
                 c = mem(self._counts[n])
                 row["counts"] = c["base"] + c["delta"] + c["index"]
             out[n] = row
@@ -296,16 +370,9 @@ class Model:
         other.dimensions = {n: d.copy() for n, d in self.dimensions.items()}
         other.engine = self.engine.fork(other)
         other.metrics = {n: dataclasses.replace(m) for n, m in self.metrics.items()}
-        other._values = {n: self.engine.share(v) for n, v in self._values.items()}
-        other._counts = {n: self.engine.share(v) for n, v in self._counts.items()}
+        other._state = {n: st.fork(self.engine.share) for n, st in self._state.items()}
         # 計算計画は定義だけに依存するので、そのまま引き継ぐ
-        other.layout, other.warnings = dict(self.layout), dict(self.warnings)
-        other.cell_estimates = dict(self.cell_estimates)
-        other._estimate_refs, other._estimate_users = dict(self._estimate_refs), dict(self._estimate_users)
         other._plan, other._levels = self._plan, self._levels
-        other._delta, other._delta_cache = dict(self._delta), dict(self._delta_cache)
-        other._edges = dict(self._edges)
-        other._samples = {src: dict(regions) for src, regions in self._samples.items()}  # 定義を変えると書き足す
         other._next_id = self._next_id
         other.seq = self.seq
         other._pending = Pending(full=False)
@@ -386,7 +453,7 @@ class Model:
         save(self, path)
 
     @classmethod
-    def load(cls, path, engine: Engine | None = None) -> Model:
+    def load(cls, path, engine: Store | None = None) -> Model:
         """save で保存したディレクトリから Model を作る。engine を省略すると既定のエンジン。"""
         from .storage import load
         return load(path, engine)
@@ -519,10 +586,8 @@ class Model:
             raise ValueError(f"{name} は {', '.join(users)} の式が参照しているので消せない")
         gone = {name} | ({m.override_name} if m.overridable and m.override_name in self.metrics else set())
         for n in gone:
-            for store in (self.metrics, self._values, self._counts, self._delta, self._delta_cache, self.layout,
-                          self.warnings, self._edges, self._samples, self.cell_estimates, self._estimate_refs,
-                          self._estimate_users):
-                store.pop(n, None)
+            self.metrics.pop(n, None)
+            self._state.pop(n, None)
             for regions in self._samples.values():
                 regions.pop(n, None)
         self._pending.forget(gone)
@@ -545,11 +610,8 @@ class Model:
         names = {old: new}
         if m.overridable and m.override_name in self.metrics:
             names[m.override_name] = f"__override__{new}"
-        for store in (self.metrics, self._values, self._counts, self._delta, self.layout, self.warnings,
-                      self._edges, self._samples, self.cell_estimates):
-            for o, n in names.items():
-                if o in store:
-                    store[n] = store.pop(o)
+        self.metrics = {names.get(k, k): v for k, v in self.metrics.items()}  # 並び順は保つ
+        self._state = {names.get(k, k): v for k, v in self._state.items()}
         for o, n in names.items():
             self.metrics[n].name = n
         for store in ("_estimate_refs", "_estimate_users"):
@@ -570,7 +632,6 @@ class Model:
                                               aux=tuple(names.get(a, a) for a in dp.aux),
                                               count=None if dp.count is None else rename_metrics(dp.count, names))
                        for n, dp in self._delta.items()}
-        self._delta_cache.clear()
         if self._plan is not None:
             step = lambda s: Step(tuple(names.get(n, n) for n in s.names), s.scan_dim)
             self._plan = [step(s) for s in self._plan]
@@ -619,10 +680,10 @@ class Model:
     def _check_key_width(self, name: str, dims: tuple[str, ...]) -> None:
         """エンジンが 1 セルのキーを固定幅の整数で持つなら、軸の組み合わせがその幅に収まるか確かめる
         。"""
-        width = getattr(self.engine, "key_bits", None)
+        width = self.engine.key_bits
         if width is None or not dims:
             return
-        bits = {d: max(1, (len(self.dimension(d).members) - 1).bit_length()) for d in dims}
+        bits = {d: _bits(len(self.dimension(d).members)) for d in dims}
         if sum(bits.values()) > width:
             detail = ", ".join(f"{d} {b} ビット" for d, b in bits.items())
             raise ValueError(f"{name}: 軸の組み合わせが {width} ビットのキーに収まらない（{detail}）。"
@@ -642,9 +703,11 @@ class Model:
         今の値の合計が 0 のときや how="even" のときは、今値のあるセルへ均等に配る。
         値のあるセルが 1 つもなければ、範囲の全組み合わせへ均等に配る。
         """
-        m = self.metrics[name]
+        m = self._metric(name)
         if m.formula is not None or m.kind != "number":
             raise ValueError(f"{name}: 按分できるのは number の入力 Metric だけ")
+        if isinstance(total, bool) or not isinstance(total, (int, float)):
+            raise ValueError(f"{name}: 按分する合計は数値（{total!r}）")
         if how not in ("proportional", "even"):
             raise ValueError(f"how は proportional か even（{how!r}）")
         region: dict[str, frozenset[str]] = {}
@@ -698,11 +761,30 @@ class Model:
                 raise ValueError(f"{dim} にプロパティ {prop} がない")
             if value not in self.dimension(d.properties[prop][0]):
                 raise ValueError(f"{dim}.{prop}: {d.properties[prop][0]} に {value!r} がない")
+        bits = _bits(len(d.members))
         d.add_member(member, self._new_id())
+        if self.engine.key_bits is not None and _bits(len(d.members)) > bits:
+            try:  # 軸のビット幅が増えた。キーに収まらなくなる Metric や式があれば、足さずにエラーにする
+                self.engine.dimension_changed(self, dim)
+                self._check_widths(dim)
+            except Exception:
+                d.remove_member(member)
+                self.engine.dimension_changed(self, dim)
+                raise
         for prop, value in properties.items():
             d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
         self._member_added(dim)
         self._pending.added.setdefault(dim, set()).add(member)
+
+    def _check_widths(self, dim: str) -> None:
+        """軸 dim のビット幅が増えたあとも、dim を持つ Metric と、すべての式の途中の結果が、エンジンの
+        キーの幅に収まるか確かめる（式はエンジンの型検査が確かめる）。"""
+        for m in self.metrics.values():
+            if dim in m.dims:
+                self._check_key_width(m.name, m.dims)
+        for m in self.metrics.values():
+            if m.written is not None:
+                self.engine.planner.check(m.written, self)
 
     def _member_added(self, dim: str) -> None:
         """軸 dim にメンバーを足したことをエンジンと格納データに反映する。"""
@@ -732,7 +814,6 @@ class Model:
         for name, plan in self._delta.items():
             if plan.count is not None:
                 self._delta[name] = dataclasses.replace(plan, count=rename_member(plan.count, dim, old, new))
-        self._delta_cache.clear()
 
     def _rename_member_raw(self, dim: str, old: str, new: str) -> None:
         """メンバーの名前の変更を、軸、プロパティの対応表、格納データに反映する（式は書き換えない）。"""
@@ -804,7 +885,7 @@ class Model:
 
         # 2. メンバーを消して変わる範囲を、消す前の軸と対応表のもとで求める。下流に伝えるのは、
         #    そのメンバーのセルが実際にある Metric の消えるセルと、計算し直す範囲だけにする
-        todo = self._removal_regions(dim, member, has_cells)
+        todo = self.engine.planner.removal_regions(self.compiled(), self._values, self, dim, member)
         self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、詰める前に名前へ直す
         self._drop_member(dim, member)
         self._pending.forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
@@ -829,66 +910,20 @@ class Model:
             if dim in m.dims and name in self._counts:
                 self._counts[name] = self.engine.remove_member(self._counts[name], dim, index, member, False, self)
 
-    def _removal_regions(self, dim: str, member: str, has_cells) -> dict[str, Restrict]:
-        """入力を空にしたあと、メンバーを消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。
-        エンジンが影響範囲を計算できるなら（Rust）それに任せる。"""
-        fast = getattr(self.engine, "removal_regions", None)
-        if fast is not None:
-            return fast(self.compiled(), self._values, self, dim, member)
-        return self._removal_regions_py(dim, member, has_cells)
-
-    def _removal_regions_py(self, dim: str, member: str, has_cells) -> dict[str, Restrict]:
-        """_removal_regions の参照実装。
-
-        計算 Metric がそのメンバーを指す値を持つのは、そのメンバーのセル自身（軸の値）か、
-        それを前月参照や引き下ろしで運んだセルだけなので、消えるセルからの伝搬で足りる。
-        """
-        point = frozenset([member])
-        added, removed = {dim: point}, {dim: member}
-
-        def surviving(r: Restrict | None) -> Restrict | None:
-            if r is None or dim not in r:
-                return r
-            rest = r[dim] - point
-            return {**r, dim: rest} if rest else None
-
-        changes: dict[str, Restrict] = {}  # 下流から見て変わる範囲（消えるセルと、計算し直す範囲）
-        todo: dict[str, Restrict] = {}
-
-        def settle(name: str, r: Restrict | None) -> None:
-            r = surviving(r)
-            if r is not None:
-                todo[name] = r
-            c = union_region({dim: point} if has_cells(name) else None, r)
-            if c is not None:
-                changes[name] = c
-
-        for step in self._plan:
-            if step.scan_dim is None:
-                m = self.metrics[step.names[0]]
-                if m.formula is not None:
-                    settle(m.name, affected(m.formula, self, changes, added, removed))
-                continue
-            for n in step.names:  # scan の中の前月参照は、消えるセルからも伝わる
-                if has_cells(n):
-                    changes[n] = {dim: point}
-            scanned = self._scan_regions(step, changes, added, removed)
-            for n in step.names:
-                changes.pop(n, None)
-                settle(n, scanned.get(n))
-        return todo
-
     # ------------------------------------------------ 入力
 
     @_operation
     def set_cell(self, name: str, value: float | bool | None, **coords: str) -> None:
-        m = self.metrics[name]
+        m = self._metric(name)
         if m.formula is not None:
             if not m.overridable:
                 raise ValueError(f"{name} は計算 Metric なので直接入力できない"
                                  "（上書きしたいなら add_formula で overridable=True にする）")
             return self.set_cell(m.override_name, value, **coords)
-        key = tuple(coords[d] for d in m.dims)
+        for d in coords:
+            if d not in m.dims:
+                raise ValueError(f"{name}: 軸 {d} がない")
+        key = tuple(coords[d] if d in coords else self._missing(name, d) for d in m.dims)
         value = self._check(name, key, value)
         if self._plan is not None and name in self._delta_sources():
             # 差分集計には変更前の値が要る。前回の再計算以降で最初に触れたときの値を覚えておく
@@ -960,11 +995,14 @@ class Model:
         """1 セルの値。空なら None。Metric 全体を読まず、そのセルだけを引く。"""
         self.recalc()
         m = self._metric(name)
+        for d in coords:
+            if d not in m.dims:
+                raise ValueError(f"{name}: 軸 {d} がない")
         key = tuple(coords[d] if d in coords else self._missing(name, d) for d in m.dims)
         for d, member in zip(m.dims, key):
             if member not in self.dimension(d):
                 return None  # ないメンバーのセルは空（消した、名前を変えた直後の読み出しなど）
-        return self._decode(m, self.engine.get(self._values[name], key, self))
+        return self._decode(m, self.engine.get(self._state[name].value, key, self))
 
     def slice(self, name: str, **coords) -> Cube:
         """coords で絞った範囲のセル。各軸はメンバー名か、その集まり（list など）で指定する。
@@ -997,10 +1035,11 @@ class Model:
         m = self._metric(name)
         keep = tuple(keep)
         agg = agg.lower()
-        if agg not in ("sum", "avg", "min", "max", "count"):
-            raise ValueError(f"集計は sum、avg、min、max、count のいずれか（{agg!r}）")
-        if agg != "count" and m.kind != "number":
-            raise ValueError(f"{name} は {m.kind} なので {agg} で集計できない（count は使える）")
+        if agg not in PUBLIC_AGGREGATIONS:
+            raise ValueError(f"集計は {'、'.join(PUBLIC_AGGREGATIONS)} のいずれか（{agg!r}）")
+        if AGGREGATIONS[agg].numeric and m.kind != "number":
+            numeric = [a for a in PUBLIC_AGGREGATIONS if not AGGREGATIONS[a].numeric]
+            raise ValueError(f"{name} は {m.kind} なので {agg} で集計できない（{'、'.join(numeric)} は使える）")
         for d in keep:
             if d not in m.dims:
                 raise ValueError(f"{name}: 軸 {d} がない")
@@ -1066,33 +1105,18 @@ class Model:
 
     def _checked(self, m: Metric) -> tuple[Expr, list[str]]:
         """m の式を評価できる形に直して型を検査し、(評価に使う式, 警告) を返す。"""
-        check = getattr(self.engine, "check", None)
-        if check is not None:  # エンジンが型検査を持つなら（Rust）それに任せる。文言は参照実装と同じ
-            formula = resolve(m.written, self, by_metric=False)  # Metric を使った BY もエンジンが書き換える
-            t, w = check(formula, self)
-        else:
-            formula = resolve(m.written, self)  # 軸の名前、Metric を使った BY を評価できる形に
-            w: list[str] = []
-            t = infer(formula, self, w)
+        formula, t, w = self.engine.planner.check(m.written, self)
         if set(t.dims) != set(m.dims):
-            raise FormulaError(f"{m.name}: 式の軸 {t.dims} が宣言した軸 {m.dims} と一致しない")
+            raise FormulaError("formula_dims", metric=m.name, dims=t.dims, declared=m.dims)
         if t.kind != m.kind:
-            raise FormulaError(f"{m.name}: 式の値は {t.kind} だが {m.kind} として宣言されている")
+            raise FormulaError("formula_kind", metric=m.name, kind=t.kind, declared=m.kind)
         if m.overridable:  # 検査は利用者が書いた式で済ませてから包む
             formula = Coalesce(Ref(m.override_name), formula)  # 上書きがあればそれを優先
         return formula, w
 
     def _make_plan(self, formulas: dict[str, Expr | None]) -> tuple[list[Step], dict[str, list[Edge]], list[list[Step]]]:
-        """依存グラフから計算計画（依存先が先の順の段階と、段ごとの段階）を作る。
-        エンジンが計画を作れるなら（Rust）それに任せる（依存グラフもエンジンが返す）。"""
-        fast = getattr(self.engine, "plan", None)
-        if fast is not None:
-            steps, levels, edges = fast(formulas, {n: self.metrics[n].dims for n in formulas}, self)
-            plan = [Step(names, dim) for names, dim in steps]
-            return plan, edges, [[plan[i] for i in level] for level in levels]
-        edges = {n: [] if f is None else list(collect_refs(f, self)) for n, f in formulas.items()}
-        plan = [self._make_step(scc, edges) for scc in _tarjan(edges)]
-        return plan, edges, _levels(plan, edges)
+        """依存グラフから計算計画（依存先が先の順の段階、依存グラフ、段ごとの段階）を作る。"""
+        return self.engine.planner.plan(formulas, {n: self.metrics[n].dims for n in formulas}, self)
 
     def _compile_all(self) -> None:
         self.warnings = {}
@@ -1145,7 +1169,6 @@ class Model:
         in_scan = scans(plan)
         for n in {*dirty, *moved}:
             self._delta.pop(n, None)
-            self._delta_cache.pop(n, None)
             self._counts.pop(n, None)
             m = self.metrics[n]
             if self.delta_aggregation and m.formula is not None and n not in in_scan:
@@ -1171,10 +1194,7 @@ class Model:
         全時点へ持ち越されうるとして時点の数を掛ける。それを自分たちのセル数としてもう一度見積もり、
         小さいほうを取る。
         """
-        def one(expr: Expr, cat, cells: dict[str, float]) -> float:
-            return estimate(expr, cat, cells)[1]
-
-        one = getattr(self.engine, "estimate", one)
+        one = self.engine.planner.estimate
         if dirty is None:
             out, refs, users, todo = {}, {}, {}, None
         else:
@@ -1226,50 +1246,17 @@ class Model:
                     changed.add(n)
                 if self.max_cells is not None and out[n] > self.max_cells:
                     dense = [w for w in warnings.get(n, self.warnings.get(n, [])) if w.endswith("（密化）")]
-                    raise FormulaError(
-                        f"{n}: 結果のセル数が最大 {out[n]:,.0f} と見積もられ、上限 {self.max_cells:,} を超える"
-                        + (f"。密になる演算: {'、'.join(dense)}" if dense else "")
-                        + "。値のあるセルだけに絞るなら [ON: 相手] か FILTER を使う。上限は Model(max_cells=...) で変えられる")
+                    raise FormulaError("too_many_cells", metric=n, cells=out[n], limit=self.max_cells,
+                                       dense=msg("dense_ops", ops=dense) if dense else "")
         return out, refs, users
 
     def _delta_plan(self, formula: Expr) -> DeltaPlan | None:
-        """差分集計の対象なら、その計画。エンジンが判定できるなら（Rust）それに任せる
-        （そのときは件数の式と差分の式もエンジンが作る）。"""
-        fast = getattr(self.engine, "delta_plan", None)
-        if fast is not None:
-            return fast(formula, self)
-        return plan_for(formula, self)
+        """差分集計の対象なら、その計画。"""
+        return self.engine.planner.delta_plan(formula, self)
 
     def _delta_sources(self) -> set[str]:
         """差分集計で、変更前の値が要る Metric（集計元と対応表）。"""
         return {n for plan in self._delta.values() for n in (plan.source, *plan.aux)}
-
-    def _make_step(self, scc: list[str], edges: dict[str, list[Edge]]) -> Step:
-        members = set(scc)
-        internal = [(src, e) for src in scc for e in edges[src] if e.target in members]
-        if not internal:
-            return Step((scc[0],))
-
-        lag_dims = {d for _, e in internal for d, n in e.lags if n >= 1}
-        if len(lag_dims) != 1:
-            raise FormulaError(f"循環参照: {sorted(members)}（時間方向のずらしを通らない循環がある）")
-        dim = lag_dims.pop()
-        same_time: dict[str, set[str]] = {n: set() for n in scc}
-        for src, e in internal:
-            if dim not in self.metrics[src].dims:
-                raise FormulaError(f"循環参照: {src} が scan 軸 {dim} を持たない")
-            if dim in e.broken:
-                raise FormulaError(f"循環参照: {src} -> {e.target} の経路で {dim} を集約・付け替えている")
-            if e.lag(dim) < 0:
-                raise FormulaError(f"循環参照: {src} が {e.target} の未来の値を参照している")
-            if e.lag(dim) == 0:
-                same_time[src].add(e.target)
-
-        # 同じ時点どうしの依存（ずらし 0）は非循環でなければならない
-        order = _tarjan(same_time)
-        if any(len(c) > 1 or c[0] in same_time[c[0]] for c in order):
-            raise FormulaError(f"循環参照: {sorted(members)} が同じ時点で循環している")
-        return Step(tuple(c[0] for c in order), scan_dim=dim)
 
     # ------------------------------------------------ 分割軸
 
@@ -1294,7 +1281,7 @@ class Model:
 
     def _choose_layout(self) -> dict[str, str | None]:
         self._samples = {}
-        if self.auto_layout and getattr(self.engine, "partitions", 1) > 1:
+        if self.auto_layout and self.engine.partitions > 1:
             # 各入力 Metric の 1 セルを変えたときの影響範囲を集める
             for src in self.metrics:
                 if (point := self._sample_point(src)) is not None:
@@ -1307,7 +1294,7 @@ class Model:
         m = self.metrics[name]
         if m.partition is not None or not m.dims:
             return m.partition
-        partitions = getattr(self.engine, "partitions", 1)
+        partitions = self.engine.partitions
 
         def by_members(d: str) -> int:
             return len(self.dimensions[d].members)
@@ -1354,150 +1341,50 @@ class Model:
     def _propagate(self, changed: dict[str, Restrict],
                    added: dict[str, frozenset[str]] | None = None) -> dict[str, Restrict]:
         """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲を返す
-        （changed を含む）。エンジンが影響範囲を計算できるなら（Rust）それに任せる。"""
-        fast = getattr(self.engine, "propagate", None)
-        if fast is not None:
-            return fast(self.compiled(), self, changed, added)
-        return self._propagate_py(changed, added)
+        （changed を含む）。"""
+        return self.engine.planner.propagate(self.compiled(), self, changed, added)
 
     def _affected(self, formula: Expr, regions: dict[str, Restrict]) -> Restrict | None:
-        """1 つの式の影響範囲。エンジンが計算できるなら（Rust）それに任せる。"""
-        fast = getattr(self.engine, "affected", None)
-        if fast is not None:
-            return fast(formula, self, regions)
-        return affected(formula, self, regions)
-
-    def _propagate_py(self, changed: dict[str, Restrict],
-                      added: dict[str, frozenset[str]] | None = None) -> dict[str, Restrict]:
-        """_propagate の参照実装。"""
-        regions = dict(changed)
-        for step in self._plan:
-            if step.scan_dim is None:
-                m = self.metrics[step.names[0]]
-                if m.formula is not None and (r := affected(m.formula, self, regions, added)) is not None:
-                    regions[m.name] = r
-                continue
-            regions.update(self._scan_regions(step, regions, added))
-        return regions
-
-    def _scan_regions(self, step: Step, regions: dict[str, Restrict],
-                      added: dict[str, frozenset[str]] | None,
-                      removed: dict[str, str] | None = None) -> dict[str, Restrict]:
-        """scan に含まれる Metric の影響範囲。互いを参照し合うので、範囲が増えなくなるまで
-        伝搬を繰り返す（範囲は単調に広がるだけで有限なので必ず止まる）。regions に scan の
-        Metric 自身の範囲があれば、そこから始める。"""
-        local: dict[str, Restrict | None] = {n: regions.get(n) for n in step.names}
-        while True:
-            env = regions | {n: r for n, r in local.items() if r is not None}
-            grown = False
-            for n in step.names:
-                r = union_region(local[n], affected(self.metrics[n].formula, self, env, added, removed))
-                if r != local[n]:
-                    local[n] = env[n] = r
-                    grown = True
-            if not grown:
-                return {n: r for n, r in local.items() if r is not None}
+        """1 つの式の影響範囲。"""
+        return self.engine.planner.affected(formula, self, regions)
 
     # ------------------------------------------------ 再計算
 
     def recalc(self) -> None:
+        """ためている変更を計算に反映する。途中で失敗したら（式のエラー、エンジンの内部エラー）、
+        途中まで書き換えた計算 Metric が残るので、次の recalc で全体を計算し直す（入力は書き換えない）。"""
         self._compile()
         if self._pending.empty():
             return
+        try:
+            self._recalc_pending()
+        except BaseException:
+            self._pending.full = True
+            raise
+
+    def _recalc_pending(self) -> None:
         full, self._pending.full = self._pending.full, False
         added = {d: frozenset(ms) for d, ms in self._pending.added.items()}
         self._pending.added.clear()
-        if full:
-            self._pending.changed.clear()
-            self._pending.old_cells.clear()
-            self._pending.old_slices.clear()
-            self._pending.forced.clear()
-            self._recalc_all()
-            return
-        # 計画の順に、計算しながら影響範囲を伝える。各 Metric は書き戻すときに新旧の値を比べ、
-        # 実際に値が変わったセルだけを下流への影響範囲にする（変わらなければ下流は計算しない）
-        regions: dict[str, Restrict] = dict(self._pending.changed)
-        # 差分集計の集計元と対応表について、変更前の値を確保しておく
-        sources = self._delta_sources()
-        olds = {n: self._old_input_slice(n, regions[n]) for n in self._pending.changed if n in sources}
+        if full:  # 全体を計算し直す
+            regions, olds, added = {}, {}, {}
+            forced = {n: {} for n, m in self.metrics.items() if m.formula is not None}
+        else:
+            regions = dict(self._pending.changed)
+            # 差分集計の集計元と対応表について、変更前の値を確保しておく
+            sources = self._delta_sources()
+            olds = {n: self._old_input_slice(n, regions[n]) for n in self._pending.changed if n in sources}
+            # 定義を変えた計算 Metric は、影響範囲に関係なく計算し直す（差分集計は使わない）
+            forced = self._pending.forced
         self._pending.changed.clear()
         self._pending.old_cells.clear()
         self._pending.old_slices.clear()
-        # 定義を変えた計算 Metric は、影響範囲に関係なく計算し直す（差分集計は使わない）
-        forced, self._pending.forced = self._pending.forced, {}
-        fast = getattr(self.engine, "recalc_changes", None)
-        if fast is not None:  # 段取りごとエンジンに任せる（Rust）。意味は以下の Python の経路と同じ
-            done, named = fast(self.compiled(), self._values, self._counts, self, regions, added, olds, forced)
-            self.eval_log.extend(n for n, _ in done)
-            self.delta_log.extend(n for n, delta in done if delta)
-            self.slice_log.extend_later(named)
-            return
-        for step in self._plan:
-            if step.scan_dim is not None:
-                seeded = regions | {n: forced[n] for n in step.names if n in forced}
-                active = {n: r for n, r in self._scan_regions(step, seeded, added).items()
-                          if self.metrics[n].formula is not None}
-                if not active:
-                    continue
-                for n, r in active.items():
-                    if n in sources:
-                        olds[n] = self.engine.filter(self._values[n], r or None, self)
-                self._scan(step, active, False)
-                regions.update(active)
-                continue
-            m = self.metrics[step.names[0]]
-            if m.formula is None:
-                continue
-            region = union_region(affected(m.formula, self, regions, added), forced.get(m.name))
-            if region is None:
-                continue
-            if m.name in sources:
-                olds[m.name] = self.engine.filter(self._values[m.name], region or None, self)
-            plan = self._delta.get(m.name)
-            if plan is not None and m.name not in forced and self._delta_applicable(plan, regions, olds):
-                changed = self._apply_delta(m, plan, region, regions, olds)
-            else:
-                changed = self._recompute(m, region, diff=True)
-            if changed is not None:
-                regions[m.name] = changed
-
-    def _recompute(self, m: Metric, region: Restrict, diff: bool = False) -> Restrict | None:
-        """m の region を式から計算し直す。差分集計する SUM は、各グループの件数も求め直す。"""
-        plan = self._delta.get(m.name)
-        if plan is not None and plan.count is not None:
-            value, counts = self.engine.evaluate_with_count(m.formula, plan.count, self, region)
-            changed = self._replace(m, region, value, diff)
-            counts = self.engine.reorder(counts, m.dims)
-            self._counts[m.name] = self.engine.replace(self._counts[m.name], region, counts, self)
-            return changed
-        return self._replace(m, region, self.engine.evaluate(m.formula, self, region), diff)
-
-    def _recalc_all(self) -> None:
-        """全体を計算し直す。同じ段の Metric はまとめて評価し、差分集計する SUM は件数も同時に求める。
-        差分再計算の段取りを持つエンジン（Rust）では、すべての計算 Metric を全体について計算し直す指示で
-        同じ段取りを使う（段ごとに並列に評価し、件数も一緒に求め、scan は空から 1 時点ずつ書く）。"""
-        fast = getattr(self.engine, "recalc_changes", None)
-        if fast is not None:
-            forced = {n: {} for n, m in self.metrics.items() if m.formula is not None}
-            done, named = fast(self.compiled(), self._values, self._counts, self, {}, {}, {}, forced, full=True)
-            self.eval_log.extend(n for n, _ in done)
-            self.slice_log.extend_later(named)
-            return
-        for level in self._levels:
-            batch = [self.metrics[s.names[0]] for s in level
-                     if s.scan_dim is None and self.metrics[s.names[0]].formula is not None]
-            fused = [m for m in batch if m.name in self._delta and self._delta[m.name].count is not None]
-            plain = [m for m in batch if m not in fused]
-            for m, result in zip(plain, self.engine.evaluate_many([(m.formula, {}) for m in plain], self)):
-                self._replace(m, {}, result)
-            for m in fused:
-                value, count = self.engine.evaluate_with_count(m.formula, self._delta[m.name].count, self, {})
-                self._replace(m, {}, value)
-                count = self.engine.reorder(count, m.dims)
-                self._counts[m.name] = self.engine.replace(self._counts[m.name], {}, count, self)
-            for step in level:
-                if step.scan_dim is not None:
-                    self._scan(step, {n: {} for n in step.names}, True)
+        self._pending.forced = {}
+        done, named = self.engine.planner.recalc(self.compiled(), self._values, self._counts, self, regions,
+                                                 added, olds, forced, full)
+        self.eval_log.extend(n for n, _ in done)
+        self.delta_log.extend(n for n, delta in done if delta)
+        self.slice_log.extend_later(named)
 
     def _old_input_slice(self, name: str, region: Restrict) -> Any:
         """入力 Metric の region の、変更前の値。今の値から、触れたセルだけ覚えておいた値に戻す。"""
@@ -1508,193 +1395,9 @@ class Model:
             old = self.engine.write(old, key, value, self)
         return old
 
-    @staticmethod
-    def _delta_range(plan: DeltaPlan, regions: dict[str, Restrict]) -> Restrict | None:
-        """集計元と対応表の変更範囲を合わせた範囲。どれも変わっていなければ None。"""
-        r = None
-        for n in (plan.source, *plan.aux):
-            if n in regions:
-                r = union_region(r, regions[n])
-        return r
-
-    def _delta_applicable(self, plan: DeltaPlan, regions: dict[str, Restrict], olds: dict[str, Any]) -> bool:
-        changed = [n for n in (plan.source, *plan.aux) if n in regions]
-        # 範囲が Metric 全体に広がるなら、差分より計算し直すほうが速い
-        return bool(changed) and all(n in olds for n in changed) and bool(self._delta_range(plan, regions))
-
-    def _apply_delta(self, m: Metric, plan: DeltaPlan, region: Restrict,
-                     regions: dict[str, Restrict], olds: dict[str, Any]) -> Restrict | None:
-        """集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込む。
-
-        集計元と対応表を、変更範囲を合わせた範囲 r で切り出す。変更後はそのまま、変更前は
-        変わった部分だけ変更前の値に戻したもの。両者で同じ集計をして引けば、変わった行の寄与の差になる。
-        """
-        eng = self.engine
-        r = self._delta_range(plan, regions)
-        d_count_f, d_value_f = self.delta_exprs(m, plan)
-        work, types = {}, {}
-        for i, n in enumerate((plan.source, *plan.aux)):
-            new = eng.filter(self._values[n], r, self)
-            old = new
-            if n in regions:
-                # 変更前の値は、実際に変わった範囲（regions[n]）の分だけ戻す。格納全体ではなく、
-                # 切り出したばかりの小さな new から複製して作る
-                before = eng.filter(olds[n], regions[n], self)
-                old = eng.replace(eng.filter(new, r, self), regions[n], before, self)
-            work[f"__new{i}"], work[f"__old{i}"] = new, old
-            types[f"__new{i}"] = types[f"__old{i}"] = self.metric_type(n)
-
-        old_value = eng.filter(self._values[m.name], region or None, self)
-        old_count = (eng.filter(self._counts[m.name], region or None, self)
-                     if plan.count is not None else old_value)
-        own = Type(m.dims, "number")
-        self._work = work
-        self._temp_types = types | {"__old_value": own, "__old_count": own, "__d_value": own,
-                                    "__d_count": own, "__new_count": own}
-        try:
-            d_count = eng.evaluate(d_count_f, self, None)
-            d_value = eng.evaluate(d_value_f, self, None) if plan.count is not None else d_count
-            self._work = {"__old_value": old_value, "__old_count": old_count,
-                          "__d_value": d_value, "__d_count": d_count}
-            new_count = eng.evaluate(_NEW_COUNT, self, None)
-            self._work["__new_count"] = new_count
-            # 件数が 0 になったグループは空にする
-            new_value = eng.evaluate(_NEW_VALUE, self, None)
-            kept_count = eng.evaluate(_KEPT_COUNT, self, None)
-        finally:
-            self._work = {}
-            self._temp_types = {}
-
-        self._values[m.name], changed = eng.replace_diff(self._values[m.name], region,
-                                                         eng.reorder(new_value, m.dims), self)
-        changed = self._widened(changed)
-        if plan.count is not None:
-            self._counts[m.name] = eng.replace(self._counts[m.name], region,
-                                               eng.reorder(kept_count, m.dims), self)
-        self.eval_log.append(m.name)
-        self.slice_log.append((m.name, region))
-        self.delta_log.append(m.name)
-        return changed
-
-    def delta_exprs(self, m: Metric, plan: DeltaPlan) -> tuple[Expr, Expr]:
-        """件数と値の差分を求める式。Metric ごとに一度だけ作る（エンジンが変換結果をキャッシュできるように）。
-        式が読む __new{i} と __old{i} は、集計元と対応表（plan.source、plan.aux）の変更後と変更前の値。"""
-        cached = self._delta_cache.get(m.name)
-        if cached is None or cached[0] is not plan:
-            names = (plan.source, *plan.aux)
-            new = {n: f"__new{i}" for i, n in enumerate(names)}
-            old = {n: f"__old{i}" for i, n in enumerate(names)}
-
-            def diff(f: Expr) -> Expr:
-                return BinOp("-", rename(f, new), rename(f, old))
-
-            count_f = plan.count if plan.count is not None else m.formula
-            cached = self._delta_cache[m.name] = (plan, diff(count_f), diff(m.formula))
-        return cached[1], cached[2]
-
-    def _widened(self, changed: Restrict | None) -> Restrict | None:
-        """値が変わったセルの範囲から、全メンバーにわたる軸を外す（その軸は「全体」として扱う）。
-        範囲が全体になれば、下流の書き戻しは並べ直すだけで済み、差分集計より計算し直しを選べる。
-        Rust のエンジンは、大きな Metric では範囲が大半を占めるときも全体にする（plan.rs）。"""
-        if changed is None:
-            return None
-        return {d: ms for d, ms in changed.items() if len(ms) < len(self.dimensions[d].members)}
-
-    def _replace(self, m: Metric, region: Restrict, new: Any, diff: bool = False) -> Restrict | None:
-        """Metric の region 内のセルを new で置き換える。region 外のセルはそのまま残す。
-
-        diff なら、値が実際に変わったセルを囲む範囲を返す（変化なしなら None）。
-        """
-        new = self.engine.reorder(new, m.dims)
-        changed = None
-        if diff:
-            self._values[m.name], changed = self.engine.replace_diff(self._values[m.name], region, new, self)
-            changed = self._widened(changed)
-        else:
-            self._values[m.name] = self.engine.replace(self._values[m.name], region, new, self)
-        self.eval_log.append(m.name)
-        self.slice_log.append((m.name, region))
-        return changed
-
-    def _scan(self, step: Step, active: dict[str, Restrict], full: bool) -> None:
-        """active（scan に含まれる Metric -> 計算し直す範囲）を、時間軸に沿って 1 時点ずつ計算する。"""
-        dim = step.scan_dim
-        if full:
-            for n in step.names:
-                m = self.metrics[n]
-                self._values[n] = self.engine.empty(m.dims, m.kind, self.layout.get(n), cat=self)
-
-        # 格納データにその場で 1 時点ずつ書き込む。次の時点の PREVIOUS は、書き込んだばかりの
-        # 前の時点（範囲の外なら元のまま）を読む
-        for t in self.dimension(dim).members:
-            for n, r in active.items():
-                if dim in r and t not in r[dim]:
-                    continue
-                m = self.metrics[n]
-                sub = {**r, dim: frozenset([t])}
-                sliced = self.engine.reorder(self.engine.evaluate(m.formula, self, sub), m.dims)
-                self._values[n] = self.engine.replace(self._values[n], sub, sliced, self)
-        for n, r in active.items():
-            self.eval_log.append(n)
-            self.slice_log.append((n, r))
+def _bits(size: int) -> int:
+    """size 個のメンバーの番号に要るビット数（Rust の key.rs の bits_for と同じ）。"""
+    return max(1, (size - 1).bit_length())
 
 
 _KEPT_ON_RESTORE = frozenset({"eval_log", "slice_log", "delta_log", "journal", "last_record"})
-
-# 差分集計の後半で使う式（名前は _apply_delta の作業データ）
-_ALIVE = BinOp(">", Ref("__new_count"), Const(0.0))
-_NEW_COUNT = Ref("__old_count") + Ref("__d_count")
-_NEW_VALUE = Filter(Ref("__old_value") + Ref("__d_value"), _ALIVE)
-_KEPT_COUNT = Filter(Ref("__new_count"), _ALIVE)
-
-
-def _levels(plan: list[Step], edges: dict[str, list[Edge]]) -> list[list[Step]]:
-    """計画を依存関係の段に分ける。同じ段のステップは互いに依存しない。"""
-    level_of: dict[str, int] = {}
-    levels: list[list[Step]] = []
-    for step in plan:  # plan は依存先が先の順
-        deps = {e.target for n in step.names for e in edges[n]} - set(step.names)
-        level = max((level_of[d] + 1 for d in deps), default=0)
-        for n in step.names:
-            level_of[n] = level
-        while len(levels) <= level:
-            levels.append([])
-        levels[level].append(step)
-    return levels
-
-
-def _tarjan(graph: dict[str, list[Edge] | set[str]]) -> list[list[str]]:
-    """強連結成分を「依存先が先」の順で返す。"""
-    def targets(v):
-        return [e.target if isinstance(e, Edge) else e for e in graph[v]]
-
-    index: dict[str, int] = {}
-    low: dict[str, int] = {}
-    stack: list[str] = []
-    on_stack: set[str] = set()
-    out: list[list[str]] = []
-
-    def visit(v: str) -> None:
-        index[v] = low[v] = len(index)
-        stack.append(v)
-        on_stack.add(v)
-        for w in targets(v):
-            if w not in index:
-                visit(w)
-                low[v] = min(low[v], low[w])
-            elif w in on_stack:
-                low[v] = min(low[v], index[w])
-        if low[v] == index[v]:
-            comp = []
-            while True:
-                w = stack.pop()
-                on_stack.discard(w)
-                comp.append(w)
-                if w == v:
-                    break
-            out.append(comp)
-
-    for v in graph:
-        if v not in index:
-            visit(v)
-    return out

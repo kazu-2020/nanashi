@@ -8,9 +8,11 @@
     cell_change  書き換えた入力セルごとに 1 行（Metric の ID、座標のメンバーの ID の配列、変更前後の値）。
                  セルの履歴を索引で引ける
     snapshot     スナップショットの置き場所とハッシュ（ファイルはオブジェクトストレージに置き、
-                 置き終えてから登録する。ハッシュは読むときに確かめ、合わなければ 1 つ前のものを使う）
+                 各ファイル、manifest.json の順に置き終えてから登録する。ハッシュは読むときに確かめ、
+                 合わなければ 1 つ前のものを使う）
 
 ファイルの置き場所（objects.py）は S3 互換のオブジェクトストレージ（s3://…）か、ローカルのディレクトリ。
+表には置き場所の中の相対的なキーだけを保存するので、置き場所を移しても（ディレクトリから S3 へなど）読める。
 
 大量のセルを書き換えた記録（bulk_cells を超えるもの）は、変更前後の値を Metric ごとに Parquet の
 ファイルにしてオブジェクトストレージに置いてから確定し、operation にはその置き場所とハッシュだけを
@@ -29,25 +31,31 @@ cell_change への書き込み（と索引の更新）は確定の後で行う�
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
+import logging
 import os
 import socket
 import threading
 import time
 import uuid
-from typing import Iterator, NamedTuple
+from typing import Iterator
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from .engine import native
-from .journal import (BrokenSnapshot, Journal, Stale, _shown, as_block, cell_count, read_cell_files,
-                      write_cell_files)
+from .journal import (Fenced, Journal, Snapshot, _shown, as_block, cell_count, put_snapshot, read_cell_files,
+                      read_snapshot, write_cell_files)
 from .objects import open_objects
-from .storage import dump, read
 
-SCHEMA = """
+log = logging.getLogger(__name__)
+
+# スキーマの版ごとの変更（migrate が順に流す）。版は nanashi_schema に持つ。接続のたびには流さない
+# （DDL は表のロックを取るので、書き込み中の別のプロセスと競り合う）
+MIGRATIONS: list[tuple[int, str]] = [
+    (1, """
 create table if not exists nanashi_model (
     model_id      text primary key,
     head_seq      bigint not null default 0,
@@ -87,20 +95,48 @@ create table if not exists nanashi_snapshot (
     meta     jsonb not null,
     primary key (model_id, seq)
 );
-"""
+"""),
+    (2, """
+alter table nanashi_operation alter column at type timestamptz using at::timestamptz;
+delete from nanashi_cell_change a using nanashi_cell_change b
+    where a.ctid < b.ctid and a.model_id = b.model_id and a.seq = b.seq and a.metric_id = b.metric_id
+      and a.coords = b.coords;
+drop index if exists nanashi_cell_change_by_cell;
+create unique index nanashi_cell_change_by_cell on nanashi_cell_change (model_id, metric_id, coords, seq);
+"""),
+]
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+
+class SchemaError(Exception):
+    """データベースのスキーマの版が、このプログラムの版と合わない（migrate を流す）。"""
+
+
+def schema_version(conn) -> int:
+    """データベースのスキーマの版。版の表がなければ 0（以前の版が作った表があっても）。"""
+    if conn.execute("select to_regclass('nanashi_schema')").fetchone()[0] is None:
+        return 0
+    row = conn.execute("select version from nanashi_schema").fetchone()
+    return 0 if row is None else row[0]
+
+
+def migrate(dsn: str) -> tuple[int, int]:
+    """スキーマを最新の版にする（(前の版, 今の版) を返す）。複数のプロセスが同時に流しても 1 回だけ流す。
+    書き込み中のプロセスがあれば、表のロックを待つ。"""
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.transaction():
+        conn.execute("select pg_advisory_xact_lock(hashtextextended('nanashi_schema', 0))")
+        conn.execute("create table if not exists nanashi_schema (version integer not null)")
+        before = schema_version(conn)
+        for version, sql in MIGRATIONS:
+            if version > before:
+                conn.execute(sql)
+        conn.execute("delete from nanashi_schema")
+        conn.execute("insert into nanashi_schema (version) values (%s)", (SCHEMA_VERSION,))
+    return before, SCHEMA_VERSION
 
 
 # 確定の後の反映でこの行数より多く入れたら、セルの履歴の表の統計を取り直す
 ANALYZE_ROWS = 100_000
-
-
-class Fenced(Stale):
-    """書き込むためのリースを持っていないか、別のプロセスが先に書き込んでいた。"""
-
-
-class Snapshot(NamedTuple):
-    uri: str               # ファイルの置き場所の接頭辞（<uri>/<ファイルの名前>）
-    files: dict[str, str]  # ファイルの名前 -> SHA-256
 
 
 class PgJournal(Journal):
@@ -121,14 +157,21 @@ class PgJournal(Journal):
         self._lock = threading.RLock()
         self._index_conn = None
         self._index_lock = threading.Lock()
+        self._listen_conn = None  # 確定の通知を待つ接続（wait で初めて使うときにつなぐ）
+        self._listen_lock = threading.Lock()
         self.lease_ttl = lease_ttl
         self.acquire_wait = lease_ttl if acquire_wait is None else acquire_wait
         self.holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.epoch: int | None = None  # 取ったリースの世代番号（まだ取っていなければ None）
+        self.lease_until: float | None = None  # リースの期限（time.monotonic の値。延長できた時点から数える）
+        self.lease_error: BaseException | None = None  # 最後に延長できなかった理由（延長できたら None）
         self.conn = psycopg.connect(dsn, autocommit=True)  # 複数の文は transaction() で囲む
-        with self.conn.transaction():
-            self.conn.execute(SCHEMA)
-            self.conn.execute("insert into nanashi_model (model_id) values (%s) on conflict do nothing", (model_id,))
+        version = schema_version(self.conn)
+        if version != SCHEMA_VERSION:
+            self.conn.close()
+            raise SchemaError(f"データベースのスキーマの版が {version} で、このプログラムは {SCHEMA_VERSION} を使う。"
+                              f"python -m sparse_engine.pg_journal migrate <DSN> で最新にする")
+        self.conn.execute("insert into nanashi_model (model_id) values (%s) on conflict do nothing", (model_id,))
         self.head = self._db_head()
         self._stop = threading.Event()
         self._heartbeat: threading.Thread | None = None
@@ -145,8 +188,9 @@ class PgJournal(Journal):
             self.release()
         finally:
             self.conn.close()
-            if self._index_conn is not None:
-                self._index_conn.close()
+            for c in (self._index_conn, self._listen_conn):
+                if c is not None:
+                    c.close()
 
     def release(self) -> None:
         """持っているリースを手放す。持っていなければ何もしない。"""
@@ -162,6 +206,20 @@ class PgJournal(Journal):
         """記録先の最新の状態を開く（手元の通し番号が古くても、表の通し番号から開き直す）。"""
         self.head = self._db_head()
         return super().open(engine)
+
+    def refresh(self) -> int:
+        self.head = self._db_head()
+        return self.head
+
+    def wait(self, timeout: float) -> None:
+        """確定のたびに書き手が送る通知（NOTIFY nanashi_head）を、専用の接続で待つ。"""
+        with self._listen_lock:
+            if self._listen_conn is None:
+                self._listen_conn = psycopg.connect(self.dsn, autocommit=True)
+                self._listen_conn.execute("listen nanashi_head")
+            for n in self._listen_conn.notifies(timeout=timeout):
+                if n.payload == self.model_id:
+                    return
 
     def _db_head(self) -> int:
         with self._lock:
@@ -198,6 +256,7 @@ class PgJournal(Journal):
                 raise Fenced(f"{self.model_id}: 別のプロセス（{holder}）が書き込み中（リースの期限内）")
             time.sleep(min(remaining, max(0.05, min(float(left or 0) + 0.05, 1.0))))
         epoch, head = row
+        self.lease_until = time.monotonic() + self.lease_ttl
         if head != self.head:
             raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
         self.epoch = epoch
@@ -212,14 +271,26 @@ class PgJournal(Journal):
                 with self._lock:
                     if self.epoch is None:
                         continue
+                    started = time.monotonic()
                     cur = self.conn.execute(
                         "update nanashi_model set lease_expires = now() + make_interval(secs => %s)"
                         " where model_id = %s and writer_epoch = %s and lease_holder = %s",
                         (self.lease_ttl, self.model_id, self.epoch, self.holder))
                     if cur.rowcount != 1:
-                        self.epoch = None
-            except Exception:  # 接続の一時的な失敗。次の確定で改めて確かめる
-                pass
+                        self.epoch, self.lease_until = None, None
+                        log.warning("%s: リースを失った（別のプロセスが書き込みを始めた）", self.model_id)
+                    else:
+                        self.lease_until = started + self.lease_ttl
+                    self.lease_error = None
+            except Exception as e:  # 接続の一時的な失敗。期限までに延長できなければ、次の確定で締め出される
+                self.lease_error = e
+                log.warning("%s: リースを延長できなかった", self.model_id, exc_info=True)
+
+    def lease(self) -> dict:
+        """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
+        left = None if self.lease_until is None else self.lease_until - time.monotonic()
+        return {"held": self.epoch is not None, "expires_in": left,
+                "error": None if self.lease_error is None else repr(self.lease_error)}
 
     # ------------------------------------------------ 記録
 
@@ -238,7 +309,7 @@ class PgJournal(Journal):
                     " where model_id = %s and head_seq = %s and writer_epoch = %s and lease_holder = %s",
                     (seqs[-1], self.lease_ttl, self.model_id, self.head, self.epoch, self.holder))
                 if cur.rowcount != 1:
-                    self.epoch = None
+                    self.epoch, self.lease_until = None, None
                     raise Fenced(f"{self.model_id}: リースを失ったか、別のプロセスが先に書き込んだ")
                 with cur.copy("copy nanashi_operation (model_id, seq, at, user_name, reason, client_op_id, record,"
                               " cells_uri, indexed) from stdin") as copy:
@@ -255,6 +326,8 @@ class PgJournal(Journal):
                     for rec, seq, blob in zip(records, seqs, blobs):
                         if blob is None:
                             _copy_cells(copy, self.model_id, seq, rec["changes"].get("cells", []))
+                # 追従する読み手（Replica）に知らせる。確定したときに届く
+                self.conn.execute("select pg_notify('nanashi_head', %s)", (self.model_id,))
             self.head = seqs[-1]
             return seqs
 
@@ -263,8 +336,12 @@ class PgJournal(Journal):
     def _write_blob(self, record: dict) -> dict:
         """記録のセルの変更を Metric ごとの Parquet にして置き、置き場所、ハッシュ、件数を返す。"""
         prefix = f"{self.model_id}/cells/{uuid.uuid4().hex}"
-        files = write_cell_files(record, lambda name, data: self.objects.put(f"{prefix}-{name}", data))
-        return {"format": "parquet", "prefix": self.objects.uri(prefix), "files": files, "cells": cell_count(record)}
+
+        def put(name: str, data: bytes) -> str:
+            self.objects.put(f"{prefix}-{name}", data)
+            return f"{prefix}-{name}"
+        files = write_cell_files(record, put)
+        return {"format": "parquet", "prefix": prefix, "files": files, "cells": cell_count(record)}
 
     def _read_blob(self, blob: dict) -> list[dict]:
         """_write_blob で置いたセルの変更を読む（Metric ごとの変更の塊）。以前の版の npz も読む。"""
@@ -280,30 +357,44 @@ class PgJournal(Journal):
 
     def index_pending(self) -> int:
         """確定の後に回した大量のセルの変更を、cell_change に書き込む（専用の接続で行うので、
-        書き込みを止めない）。書き込んだ記録の数を返す。"""
+        書き込みを止めない）。書き込んだ記録の数を返す。
+
+        複数のプロセスが同時に呼んでも、同じ記録を二重に書かない。モデルごとの advisory lock で順に並べ、
+        記録ごとに「まだ反映していない」印を先に外してから書く（印を外せなければ、ほかが書いた）。"""
         with self._index_lock:
             if self._index_conn is None:
                 self._index_conn = psycopg.connect(self.dsn, autocommit=True)
             conn = self._index_conn
-            pending = conn.execute("select seq, record->'cells_blob' from nanashi_operation"
-                                   " where model_id = %s and not indexed order by seq", (self.model_id,)).fetchall()
-            loaded = 0
-            core = native() if pending else None
-            for seq, blob in pending:
-                cells = self._read_blob(blob)
-                with conn.transaction():
-                    with conn.cursor().copy("copy nanashi_cell_change (model_id, seq, metric_id, coords,"
-                                            " old_value, new_value) from stdin") as copy:
-                        for c in cells:  # COPY のテキストは Rust で作る（行ごとに Python を通さない）
-                            copy.write(as_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
-                    conn.execute("update nanashi_operation set indexed = true where model_id = %s and seq = %s",
-                                 (self.model_id, seq))
-                loaded += blob["cells"]
-            if loaded > ANALYZE_ROWS:
-                # 大量に入れた直後は表の統計が古く、セルの索引を使わない実行計画になりうる
-                # （300 万行で、1 つのセルの履歴に 250 ms かかった。統計を取り直すと 0.2 ms）
-                conn.execute("analyze nanashi_cell_change")
-            return len(pending)
+            conn.execute("select pg_advisory_lock(hashtextextended(%s, 0))", ("nanashi_index:" + self.model_id,))
+            try:
+                return self._index_locked(conn)
+            finally:
+                conn.execute("select pg_advisory_unlock(hashtextextended(%s, 0))", ("nanashi_index:" + self.model_id,))
+
+    def _index_locked(self, conn) -> int:
+        pending = conn.execute("select seq, record->'cells_blob' from nanashi_operation"
+                               " where model_id = %s and not indexed order by seq", (self.model_id,)).fetchall()
+        loaded, done = 0, 0
+        core = native() if pending else None
+        for seq, blob in pending:
+            cells = self._read_blob(blob)
+            with conn.transaction():
+                claimed = conn.execute("update nanashi_operation set indexed = true"
+                                       " where model_id = %s and seq = %s and not indexed",
+                                       (self.model_id, seq)).rowcount
+                if not claimed:
+                    continue  # ほかのプロセスが先に反映した
+                with conn.cursor().copy("copy nanashi_cell_change (model_id, seq, metric_id, coords,"
+                                        " old_value, new_value) from stdin") as copy:
+                    for c in cells:  # COPY のテキストは Rust で作る（行ごとに Python を通さない）
+                        copy.write(as_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
+            loaded += blob["cells"]
+            done += 1
+        if loaded > ANALYZE_ROWS:
+            # 大量に入れた直後は表の統計が古く、セルの索引を使わない実行計画になりうる
+            # （300 万行で、1 つのセルの履歴に 250 ms かかった。統計を取り直すと 0.2 ms）
+            conn.execute("analyze nanashi_cell_change")
+        return done
 
     def seq_of(self, client_op_id: str) -> int | None:
         with self._lock:
@@ -350,7 +441,7 @@ class PgJournal(Journal):
             " from nanashi_cell_change c join nanashi_operation o on o.model_id = c.model_id and o.seq = c.seq"
                 " where c.model_id = %s and c.metric_id = %s and c.coords = %s::bigint[] order by c.seq",
                 (self.model_id, m.id, key)).fetchall()
-        return _shown(model, m, [{"seq": s, "at": a, "user": u, "reason": r, "old": o, "new": n}
+        return _shown(model, m, [{"seq": s, "at": _iso(a), "user": u, "reason": r, "old": o, "new": n}
                                  for s, a, u, r, o, n in rows])
 
     # ------------------------------------------------ スナップショット
@@ -358,16 +449,12 @@ class PgJournal(Journal):
     def save_snapshot(self, model) -> str:
         # 同じ通し番号で取り直しても、登録済みのファイルを書き換えないよう、置き場所ごとに乱数を付ける
         prefix = f"{self.model_id}/snapshots/{model.seq:020d}-{uuid.uuid4().hex[:8]}"
-        files = {}
-        for name, data in dump(model).items():
-            self.objects.put(f"{prefix}/{name}", data)
-            files[name] = hashlib.sha256(data).hexdigest()
-        uri, meta = self.objects.uri(prefix), {"seq": model.seq, "files": files}
-        with self._lock, self.conn.transaction():  # ファイルを置き終えてから登録する
+        meta = put_snapshot(self.objects, prefix, model)
+        with self._lock, self.conn.transaction():  # ファイルと manifest を置き終えてから登録する
             self.conn.execute("insert into nanashi_snapshot (model_id, seq, uri, meta) values (%s, %s, %s, %s)"
                               " on conflict (model_id, seq) do update set uri = excluded.uri, meta = excluded.meta",
-                              (self.model_id, model.seq, uri, Jsonb(meta)))
-        return uri
+                              (self.model_id, model.seq, prefix, Jsonb(meta)))
+        return prefix
 
     def snapshots(self) -> list[tuple[int, Snapshot]]:
         """登録したスナップショット（新しい順）。ファイルのハッシュは読むときに確かめる
@@ -378,17 +465,43 @@ class PgJournal(Journal):
         return [(seq, Snapshot(uri, meta["files"])) for seq, uri, meta in rows]
 
     def load_snapshot(self, place: Snapshot, engine):
-        def file(name: str) -> bytes:
-            if name not in place.files:
-                raise BrokenSnapshot(f"{place.uri}: {name} が登録されていない")
-            try:
-                data = self.objects.get(f"{place.uri}/{name}")
-            except FileNotFoundError:
-                raise BrokenSnapshot(f"{place.uri}: {name} がない") from None
-            if hashlib.sha256(data).hexdigest() != place.files[name]:
-                raise BrokenSnapshot(f"{place.uri}: {name} のハッシュが合わない")
-            return data
-        return read(file, engine)
+        return read_snapshot(self.objects, place, engine)
+
+    def prune(self, keep: int = 2, op_window: int = 100_000) -> dict:
+        """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットを消す。残す一番古い
+        スナップショットより前の記録の、大量の変更のファイルも消す（セルの履歴の表に反映してから消すので、
+        記録の再生とセルの履歴はその表から読める）。最後の op_window 件より古い記録の client_op_id は忘れる
+        （再送しても二重に確定しないと保証する範囲を決める）。消した数を返す。"""
+        self.index_pending()  # 消すファイルの分は、先にセルの履歴に反映しておく
+        out = {"snapshots": 0, "cells": 0, "client_op_ids": 0}
+        snaps = self.snapshots()
+        if len(snaps) > keep:
+            oldest = snaps[keep - 1][0]
+            for seq, place in snaps[keep:]:
+                with self._lock:
+                    self.conn.execute("delete from nanashi_snapshot where model_id = %s and seq = %s",
+                                      (self.model_id, seq))
+                for name in (*place.files, "manifest.json"):
+                    self.objects.delete(f"{place.uri}/{name}")
+                out["snapshots"] += 1
+            with self._lock:
+                rows = self.conn.execute("select seq, record from nanashi_operation where model_id = %s"
+                                         " and seq <= %s and cells_uri is not null and indexed",
+                                         (self.model_id, oldest)).fetchall()
+            for seq, rec in rows:
+                blob = rec.pop("cells_blob")
+                for f in blob.get("files", [blob] if "uri" in blob else []):
+                    if not os.path.isabs(f["uri"]) and not f["uri"].startswith("s3://"):
+                        self.objects.delete(f["uri"])
+                    out["cells"] += 1
+                with self._lock:
+                    self.conn.execute("update nanashi_operation set record = %s, cells_uri = null"
+                                      " where model_id = %s and seq = %s", (Jsonb(rec), self.model_id, seq))
+        with self._lock:
+            out["client_op_ids"] = self.conn.execute(
+                "update nanashi_operation set client_op_id = null where model_id = %s and seq <= %s"
+                " and client_op_id is not null", (self.model_id, self._db_head() - op_window)).rowcount
+        return out
 
     def drop(self) -> None:
         """このモデルの記録をすべて消す（テスト用）。"""
@@ -420,3 +533,24 @@ def _read_npz(raw: bytes) -> list[dict]:
         cells.append({"metric": data[f"metric{i}"][0], "rows": [list(r) for r in zip(data[f"coords{i}"], old, new)]})
         i += 1
     return cells
+
+
+def _iso(at) -> str:
+    """記録の時刻（timestamptz）を、記録の JSON と同じ形の文字列（UTC、ミリ秒まで）にする。"""
+    return at.astimezone(datetime.timezone.utc).isoformat(timespec="milliseconds")
+
+
+def main(argv=None) -> None:
+    import argparse
+    ap = argparse.ArgumentParser(description="PostgreSQL の記録先の管理")
+    sub = ap.add_subparsers(dest="command", required=True)
+    m = sub.add_parser("migrate", help="スキーマを最新の版にする")
+    m.add_argument("dsn")
+    args = ap.parse_args(argv)
+    if args.command == "migrate":
+        before, after = migrate(args.dsn)
+        print(f"スキーマの版: {before} → {after}")
+
+
+if __name__ == "__main__":
+    main()

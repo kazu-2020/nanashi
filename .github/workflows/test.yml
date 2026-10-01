@@ -52,8 +52,8 @@ jobs:
           NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
           NANASHI_S3_ENDPOINT: http://127.0.0.1:59000
       - name: Rust の単体テスト
-        run: cargo test --release --manifest-path native/Cargo.toml
+        run: cargo test --release --workspace --manifest-path native/Cargo.toml
       - name: 静的検査
         run: |
           pyflakes sparse_engine tests examples bench*.py
-          cargo clippy --release --all-targets --manifest-path native/Cargo.toml -- -D warnings
+          cargo clippy --release --workspace --all-targets --manifest-path native/Cargo.toml -- -D warnings

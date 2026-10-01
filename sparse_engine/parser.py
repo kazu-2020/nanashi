@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from typing import Callable, TypeVar
 
 from .evaluate import FormulaError
-from .expr import (AGGREGATORS, BinOp, By, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
+from .expr import (PUBLIC_AGGREGATIONS, BinOp, By, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 
 KEYWORDS = {"AND", "OR", "NOT", "TRUE", "FALSE"}
@@ -76,7 +76,7 @@ class ParseError(FormulaError):
         line = text[start:end if end != -1 else len(text)]
         caret = " " * _width(text[start:pos]) + "^"
         row = text.count("\n", 0, pos) + 1
-        super().__init__(f"{row} 行 {pos - start + 1} 文字目: {message}\n  {line}\n  {caret}")
+        super().__init__("syntax", row=row, col=pos - start + 1, detail=message, line=line, caret=caret)
         self.pos = pos
 
 
@@ -311,8 +311,8 @@ class _Parser:
         word = self.advance().text.upper()
         agg = None
         if word in ("BY", "REMOVE") and not self.at_op(":"):
-            if self.tok.kind != "ident" or self.tok.text.lower() not in AGGREGATORS:
-                names = ", ".join(a.upper() for a in AGGREGATORS)
+            if self.tok.kind != "ident" or self.tok.text.lower() not in PUBLIC_AGGREGATIONS:
+                names = ", ".join(a.upper() for a in PUBLIC_AGGREGATIONS)
                 self.error(f"集計関数（{names}）か ':' が必要だが {self.tok.describe()} がある")
             agg = self.advance().text.lower()
         self.expect_op(":")

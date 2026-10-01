@@ -5,9 +5,9 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::core::{eval, Agg, Catalog, Cube, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store, PAR_MIN};
+use crate::{eval_with, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
 use std::sync::Arc;
 
 // ------------------------------------------------------------------ 影響範囲
@@ -498,8 +498,6 @@ struct Done {
 /// 値が変わった範囲がセル全体のこの割合以上なら、全体が変わったものとして下流へ伝える
 /// （この行数以上の Metric だけ。小さな Metric では範囲を細かく伝えても安い）。
 pub const WIDEN_SHARE: f64 = 0.5;
-pub static WIDEN_MIN_ROWS: AtomicUsize = AtomicUsize::new(4096);
-
 /// 再計算した Metric の記録: (Metric の番号, 差分集計なら true, 範囲)。
 pub type Log = Vec<(usize, bool, Reg)>;
 
@@ -531,6 +529,29 @@ struct Run<'a> {
     regions: Vec<Option<Reg>>,
     olds: Vec<Option<Src>>,
     log: Log,
+}
+
+/// 並列に計算する仕事を、メモリの予算 max を等分して収まる組（順は保つ）に分ける。1 つの仕事の見積もりは、
+/// 計算し直す範囲の行数の見積もり × 1 セルのバイト数 × 途中結果の倍率（入力を読んだものと結果など）。
+fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
+    const INTERMEDIATE: usize = 4;
+    let need = |t: &Task| t.weight.saturating_mul(CELL_BYTES * INTERMEDIATE);
+    let mut out: Vec<Vec<&Task>> = Vec::new();
+    let mut most = 0;
+    for t in tasks {
+        let n = need(t);
+        match out.last_mut() {
+            Some(w) if (w.len() + 1).saturating_mul(most.max(n)) <= max => {
+                w.push(t);
+                most = most.max(n);
+            }
+            _ => {
+                out.push(vec![t]);
+                most = n;
+            }
+        }
+    }
+    out
 }
 
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
@@ -592,10 +613,22 @@ impl<'a> Run<'a> {
         // 小さな仕事ばかりなら、並列にする受け渡しの費用のほうが大きいので順に計算する
         let weight: usize = tasks.iter().map(|t| t.weight).sum();
         let run: &Self = self;
-        let done: Vec<Result<Done>> = if tasks.len() > 1 && (self.full || weight >= PAR_MIN.load(Ordering::Relaxed)) {
-            tasks.par_iter().map(|t| run.compute(t)).collect()
+        let max = self.cat.cfg.max_bytes;
+        let done: Vec<Result<Done>> = if tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min) {
+            // 並列に計算する仕事は、メモリの予算を等分して持つ。見積もりが等分した額に収まる仕事だけを
+            // 一度に並べ、収まらない仕事は予算をすべて持って 1 つずつ計算する
+            let mut done = Vec::with_capacity(tasks.len());
+            for wave in waves(&tasks, max) {
+                if wave.len() == 1 {
+                    done.push(run.compute(wave[0], max));
+                } else {
+                    let share = max / wave.len();
+                    done.extend(wave.par_iter().map(|t| run.compute(t, share)).collect::<Vec<_>>());
+                }
+            }
+            done
         } else {
-            tasks.iter().map(|t| run.compute(t)).collect()
+            tasks.iter().map(|t| run.compute(t, max)).collect()
         };
         for d in done {
             self.apply(d?)?;
@@ -615,12 +648,12 @@ impl<'a> Run<'a> {
         plan.metrics[m].formula.as_ref().expect("計算 Metric")
     }
 
-    fn eval(&self, f: &Formula, work: Option<&[Src]>, r: &Restrict) -> Result<Cube> {
+    fn eval(&self, f: &Formula, work: Option<&[Src]>, r: &Restrict, b: &Budget) -> Result<Cube> {
         let src: Vec<Src> = match work {
             Some(w) => f.refs.iter().map(|&i| w[i].clone()).collect(),
             None => f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect(),
         };
-        eval(&f.node, self.cat, &src, r)
+        eval_with(&f.node, self.cat, &src, r, b)
     }
 
     fn slice(&self, m: usize, r: &Reg) -> Src {
@@ -645,8 +678,8 @@ impl<'a> Run<'a> {
         Some(Task { m, region, delta, weight })
     }
 
-    /// 計算する（格納データは読むだけなので、同じ段の Metric を並列に計算できる）。
-    fn compute(&self, t: &Task) -> Result<Done> {
+    /// 計算する（格納データは読むだけなので、同じ段の Metric を並列に計算できる）。limit はメモリの予算。
+    fn compute(&self, t: &Task, limit: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
         // 集計元なら、書き戻す前の値を下流の差分集計のために取っておく。全体を計算し直すなら、
@@ -659,20 +692,25 @@ impl<'a> Run<'a> {
             }
         });
         let (value, count) = match (&metric.delta, t.delta) {
-            (Some(d), true) => self.compute_delta(t.m, d, &t.region)?,
+            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::new(limit))?,
             _ => {
                 let r = t.region.restrict(self.cat);
                 match &metric.count {
-                    // 件数の式は値の式と同じ集計元を読むので、仕事が大きければ並列に評価する
-                    Some(c) if self.full || t.weight >= PAR_MIN.load(Ordering::Relaxed) => {
-                        let (value, count) = rayon::join(|| self.eval(self.formula(t.m), None, &r), || self.eval(c, None, &r));
+                    // 件数の式は値の式と同じ集計元を読むので、仕事が大きければ並列に評価する（予算に限りが
+                    // あれば、値を持ったまま件数を評価する順の計算にして、値の分も予算に数える）
+                    Some(c) if (self.full || t.weight >= self.cat.cfg.par_min) && limit == usize::MAX => {
+                        let (value, count) = rayon::join(
+                            || self.eval(self.formula(t.m), None, &r, &Budget::new(limit)),
+                            || self.eval(c, None, &r, &Budget::new(limit)),
+                        );
                         (value?, Some(count?))
                     }
                     Some(c) => {
-                        let value = self.eval(self.formula(t.m), None, &r)?;
-                        (value, Some(self.eval(c, None, &r)?))
+                        let b = Budget::new(limit);
+                        let value = self.eval(self.formula(t.m), None, &r, &b)?;
+                        (value, Some(self.eval(c, None, &r, &b)?))
                     }
-                    None => (self.eval(self.formula(t.m), None, &r)?, None),
+                    None => (self.eval(self.formula(t.m), None, &r, &Budget::new(limit))?, None),
                 }
             }
         };
@@ -703,6 +741,11 @@ impl<'a> Run<'a> {
     /// 計算した値を書き戻し、値が実際に変わったセルの範囲を下流への影響範囲にする。
     fn apply(&mut self, done: Done) -> Result<()> {
         let Done { m, region, delta, value, count, old } = done;
+        match self.cat.cfg.fail_at {
+            Some((f, false)) if f == m => return Err(format!("書き戻しの失敗（テスト用、Metric {m}）")),
+            Some((f, true)) if f == m => panic!("書き戻しの panic（テスト用、Metric {m}）"),
+            _ => {}
+        }
         let r = region.restrict(self.cat);
         let sets = match value {
             Write::Whole(store, sets) => {
@@ -735,7 +778,7 @@ impl<'a> Run<'a> {
         let dims = &store.metric_dims;
         let size = |d: DimId| self.cat.dims[d].size as usize;
         let share: f64 = dims.iter().zip(&sets).map(|(&d, ms)| ms.len() as f64 / size(d).max(1) as f64).product();
-        if share >= WIDEN_SHARE && store.rows_hint() >= WIDEN_MIN_ROWS.load(Ordering::Relaxed) {
+        if share >= WIDEN_SHARE && store.rows_hint() >= self.cat.cfg.widen_min_rows {
             return Reg::default();
         }
         Reg::new(dims.iter().copied().zip(sets).filter(|(d, ms)| ms.len() < size(*d)).collect())
@@ -755,7 +798,7 @@ impl<'a> Run<'a> {
     }
 
     /// 集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込んだ値と件数。
-    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg) -> Result<(Cube, Option<Cube>)> {
+    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, b: &Budget) -> Result<(Cube, Option<Cube>)> {
         let cat = self.cat;
         let all = Restrict::all(cat.dims.len());
         let range = self.delta_range(d).expect("変更範囲").restrict(cat);
@@ -766,7 +809,7 @@ impl<'a> Run<'a> {
                 // 変更前の値は、実際に変わった範囲の分だけ戻す
                 Some(changed) => {
                     let rn = changed.restrict(cat);
-                    let before = self.olds[n].as_ref().expect("変更前の値").read(&rn);
+                    let before = self.olds[n].as_ref().expect("変更前の値").read(&self.cat.cfg, &rn);
                     let mut old = new.clone();
                     old.replace(&rn, &before)?;
                     Arc::new(old)
@@ -784,16 +827,16 @@ impl<'a> Run<'a> {
             (Some(_), Some(c)) => Src::Store(Arc::new(c.slice(&r))),
             _ => old_value.clone(),
         };
-        let d_count = self.eval(&d.d_count, Some(&work), &all)?;
+        let d_count = self.eval(&d.d_count, Some(&work), &all, b)?;
         let d_value = match &d.d_value {
-            Some(f) => self.eval(f, Some(&work), &all)?,
+            Some(f) => self.eval(f, Some(&work), &all, b)?,
             None => d_count.clone(),
         };
-        let count = Arc::new(eval(&new_count(), cat, &[old_count, Src::Cube(Arc::new(d_count))], &all)?);
-        let value = eval(&new_value(), cat, &[old_value, Src::Cube(Arc::new(d_value)), Src::Cube(count.clone())], &all)?;
+        let count = Arc::new(eval_with(&new_count(), cat, &[old_count, Src::Cube(Arc::new(d_count))], &all, b)?);
+        let value = eval_with(&new_value(), cat, &[old_value, Src::Cube(Arc::new(d_value)), Src::Cube(count.clone())], &all, b)?;
         // 件数が 0 になったグループは消す
         let kept = match metric.count {
-            Some(_) => Some(eval(&kept_count(), cat, &[Src::Cube(count)], &all)?),
+            Some(_) => Some(eval_with(&kept_count(), cat, &[Src::Cube(count)], &all, b)?),
             None => None,
         };
         Ok((value, kept))
@@ -823,7 +866,7 @@ impl<'a> Run<'a> {
                     continue;
                 }
                 let sub = r.set(dim, vec![t]).restrict(self.cat);
-                let value = self.eval(self.formula(*n), None, &sub)?;
+                let value = self.eval(self.formula(*n), None, &sub, &Budget::new(self.cat.cfg.max_bytes))?;
                 Arc::make_mut(&mut self.stores[*n]).replace(&sub, &value)?;
             }
         }

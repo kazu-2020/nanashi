@@ -21,6 +21,7 @@ Metric の格納データは複製前と同じものを指しているので比�
 """
 from __future__ import annotations
 
+import collections
 import dataclasses
 import datetime
 import fcntl
@@ -28,16 +29,17 @@ import hashlib
 import json
 import logging
 import os
-import shutil
+import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, NamedTuple
 
 from .core import Dimension
 from .engine import native, parquet_value
 
 BLOCK_MIN = 1000  # 書き換えたセルがこれ以上なら、行の列でなく変更の塊で持つ（Rust のエンジン）
 from .expr import Expr
+from .objects import LocalObjects
 from .parser import parse, to_formula
 
 LOG_VERSION = 1
@@ -49,8 +51,17 @@ class Stale(Exception):
     """手元のモデルが記録先より古い（別のプロセスが書き込んだ）。開き直せば続けられる。"""
 
 
+class Fenced(Stale):
+    """書き込みの権利（FileJournal のロック、PgJournal のリース）を取れないか、失った。"""
+
+
 class BrokenSnapshot(Exception):
     """スナップショットのファイルが欠けているか、ハッシュが合わない。"""
+
+
+class Snapshot(NamedTuple):
+    uri: str               # ファイルの置き場所のキーの接頭辞（<uri>/<ファイルの名前>）
+    files: dict[str, str]  # ファイルの名前 -> SHA-256
 
 
 class AlreadyCommitted(Exception):
@@ -194,17 +205,12 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
         olds = [before.dimension(d) for d in m.dims] + ([_value_dim(before, o)] if vdim is not None else [])
         news = dims + ([vdim] if vdim is not None else [])
         comparable = all(a.ids == b.ids[:len(a.ids)] for a, b in zip(olds, news))
-    if hasattr(eng, "diff_block") and (old_store is None or comparable):
-        diff = eng.diff_block(old_store, new_store)
-        if diff is not None:
-            if len(diff) >= BLOCK_MIN:
-                return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
-            return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
-    elif comparable:
-        diff = eng.diff(old_store, new_store)
-        if diff is not None:
-            return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff]
-    # 名前から ID に直して比べる（メンバーを消したときなど）
+    diff = eng.diff_block(old_store, new_store) if old_store is None or comparable else None
+    if diff is not None:
+        if len(diff) >= BLOCK_MIN:
+            return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
+        return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
+    # 名前から ID に直して比べる（メンバーを消したときや、位置で比べられないエンジン）
     new = _by_id(after, m, new_store)
     old = {} if old_store is None else _by_id(before, o, old_store)
     return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
@@ -224,9 +230,21 @@ def _by_id(model, m, store) -> dict:
 
 # ---------------------------------------------------------------- 再生
 
-def apply(model, record: dict) -> None:
-    """記録の結果を model に書き込む（計算し直さない。再生のあとで全体を計算し直す）。"""
+STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")
+
+
+def apply(model, record: dict, *, incremental: bool = False) -> None:
+    """記録の結果を model に書き込む（計算し直さない）。
+
+    incremental でなければ、再生のあとで全体を計算し直す（開くときに多くの記録を再生する）。incremental なら、
+    入力セルだけを変えた記録は入力の変更として書き込み、次の recalc は影響範囲だけを計算し直す（ほかの
+    プロセスの書き込みに追いつくとき）。軸、メンバー、プロパティ、Metric の定義を変えた記録は、どちらでも
+    全体を計算し直す。"""
     ch = record["changes"]
+    if incremental and model._plan is not None and not any(k in ch for k in STRUCTURAL):
+        _apply_cells(model, ch.get("cells", []))
+        model._next_id = ch["next_id"]
+        return
     dims_by_id = model.dimensions_by_id()  # 軸はこの記録で足すものもあるので、足したら入れる
     dim_of = lambda i: dims_by_id[i] if i in dims_by_id else next(d for d in model.dimensions.values() if d.id == i)
     metric_of = lambda i: model.metrics_by_id().get(i)
@@ -251,7 +269,7 @@ def apply(model, record: dict) -> None:
     for i in ch.get("metrics_removed", []):
         m = metric_of(i)
         model.metrics.pop(m.name)
-        model._values.pop(m.name, None)
+        model._state.pop(m.name, None)
     defs = ch.get("metrics", [])
     for spec in defs:  # 名前を入れ替える変更もあるので、一度仮の名前にする
         m = metric_of(spec["id"])
@@ -277,10 +295,12 @@ def apply(model, record: dict) -> None:
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
         store = model._values[m.name]
-        if not isinstance(c["rows"], list) and hasattr(model.engine, "apply_block"):  # 変更の塊はまとめて書く
-            model._values[m.name] = model.engine.apply_block(store, c["rows"], [d.ids for d in dims],
-                                                             None if vdim is None else vdim.ids)
-            continue
+        if not isinstance(c["rows"], list):  # 変更の塊は、書けるエンジンならまとめて書く
+            written = model.engine.apply_block(store, c["rows"], [d.ids for d in dims],
+                                               None if vdim is None else vdim.ids)
+            if written is not None:
+                model._values[m.name] = written
+                continue
         for ids, _, new in c["rows"]:
             if len(ids) != len(dims) or not all(i in d._by_id for d, i in zip(dims, ids)):
                 continue  # このトランザクションで消したメンバーのセル（メンバーと一緒に消えている）
@@ -296,12 +316,45 @@ def apply(model, record: dict) -> None:
     model._invalidate()
 
 
+def _apply_cells(model, cells: list[dict]) -> None:
+    """記録のセルの変更を、入力の変更として書き込む（変更範囲を Model の Pending に積む）。"""
+    by_id = model.metrics_by_id()
+    for c in cells:
+        m = by_id[c["metric"]]
+        dims = [model.dimension(d) for d in m.dims]
+        vdim = _value_dim(model, m)
+        rows = c["rows"]
+        if not isinstance(rows, list):
+            if model._plan is not None and m.name in model._delta_sources():
+                model._keep_old(m.name)  # 差分集計には変更前の値が要る
+            written = model.engine.apply_block(model._values[m.name], rows, [d.ids for d in dims],
+                                               None if vdim is None else vdim.ids)
+            if written is not None:
+                model._values[m.name] = written
+                model._pending.changed[m.name] = {}  # 変わったセルを数えずに、Metric 全体を変わったとする
+                continue
+        cols: list[list[int]] = [[] for _ in dims]
+        values = []
+        for ids, _, new in rows:
+            if len(ids) != len(dims) or not all(i in d._by_id for d, i in zip(dims, ids)):
+                continue
+            for col, d, i in zip(cols, dims, ids):
+                col.append(d._index[d.member_of(i)])
+            if new is not None and vdim is not None:
+                new = float(vdim._index[vdim.member_of(int(new))])
+            elif new is not None and m.kind == "boolean":
+                new = bool(new)
+            values.append(new)
+        if values:
+            model._write_many(m.name, cols, values)
+
+
 def _rename_metric_raw(model, old: str, new: str) -> None:
     m = model.metrics.pop(old)
     m.name = new
     model.metrics[new] = m
-    if old in model._values:
-        model._values[new] = model._values.pop(old)
+    if old in model._state:
+        model._state[new] = model._state.pop(old)
 
 
 def _define(model, spec: dict) -> None:
@@ -339,13 +392,42 @@ class Journal:
         snapshots()                スナップショットの (通し番号, 置き場所) を新しい順に
         load_snapshot(place)       置き場所のスナップショットを読む。壊れていれば BrokenSnapshot
                                    （open は 1 つ前のスナップショットから記録を多く再生する）
-        release()                  書き込みの権利（PgJournal のリース）を手放す。次の書き手が待たずに済む
+        acquire()                  書き込みの権利（FileJournal のロック、PgJournal のリース）を取る
+        release()                  書き込みの権利を手放す。次の書き手が待たずに済む
+        refresh()                  記録先の最新の通し番号を読み直す
+        wait(timeout)              記録が増えたかもしれないときまで待つ
     """
 
     head: int = 0
 
+    def acquire(self) -> None:
+        """書き込みの権利を取る。取れなければ Fenced。"""
+
+    def lease(self) -> dict:
+        """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
+        return {"held": False, "expires_in": None, "error": None}
+
+    def refresh(self) -> int:
+        """記録先の最新の通し番号を読み直して head にする（ほかのプロセスの書き込みに追いつくとき）。"""
+        raise NotImplementedError
+
+    def wait(self, timeout: float) -> None:
+        """記録が増えたかもしれないときか、timeout 秒たったときに戻る。"""
+        raise NotImplementedError
+
+    def catch_up(self, model) -> bool:
+        """model（通し番号 model.seq の時点）を、記録先の最新の状態まで進める。入力セルだけを変えた記録は
+        入力の変更として書き込むので、次の recalc は影響範囲だけを計算し直す。進めたら True。"""
+        self.refresh()
+        if self.head <= model.seq:
+            return False
+        for rec in self.records(after=model.seq):
+            apply(model, rec, incremental=True)
+            model.seq = rec["seq"]
+        return True
+
     def release(self) -> None:
-        """書き込みの権利を手放す。権利を持たない記録先（FileJournal）では何もしない。"""
+        """書き込みの権利を手放す。"""
 
     def append(self, record: dict) -> int:
         """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
@@ -395,10 +477,6 @@ class Journal:
         model.journal = self
         return model
 
-    def load_snapshot(self, place, engine):
-        from .storage import load
-        return load(place, engine)
-
     def start(self, model) -> None:
         """記録のない新しい記録先に、model の今の状態を最初のスナップショットとして置き、
         以後の変更を記録する。"""
@@ -425,86 +503,227 @@ def _shown(model, m, history: list[dict]) -> list[dict]:
     return history
 
 
-def write_snapshot(model, final: Path, *, fsync: bool) -> dict:
-    """model のスナップショット（Model.save の形式と、ファイルのハッシュを持つ meta.json）を、
-    一時ディレクトリに書いてから名前を変えて final に置く（途中のものは見えない）。meta を返す。"""
-    tmp = final.parent / f".tmp-{final.name}-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    from .storage import save
-    save(model, tmp)
-    meta = {"seq": model.seq, "files": {p.name: _sha256(p) for p in sorted(tmp.iterdir())}}
-    (tmp / "meta.json").write_text(json.dumps(meta))
-    if fsync:
-        for p in tmp.iterdir():
-            with open(p, "rb") as f:
-                _sync(f.fileno())
-    shutil.rmtree(final, ignore_errors=True)
-    os.rename(tmp, final)
-    if fsync:
-        _fsync_dir(final.parent)
-    return meta
+MANIFEST = "manifest.json"
 
 
-def snapshot_ok(path: Path, meta: dict) -> bool:
-    """スナップショットのファイルがそろっていて、ハッシュが合うか。"""
-    return all((path / name).exists() and _sha256(path / name) == h for name, h in meta["files"].items())
+def put_snapshot(blobs, prefix: str, model) -> dict:
+    """model のスナップショット（Model.save の形式）を blobs の prefix/ に置き、manifest（通し番号と
+    ファイルのハッシュ）を返す。各ファイルを置いてから最後に manifest.json を置くので、manifest がある
+    スナップショットはファイルがそろっている（途中で落ちれば、manifest のないファイルが残るだけ）。"""
+    from .storage import dump
+    files = {}
+    for name, data in dump(model).items():
+        blobs.put(f"{prefix}/{name}", data)
+        files[name] = hashlib.sha256(data).hexdigest()
+    manifest = {"seq": model.seq, "files": files}
+    blobs.put(f"{prefix}/{MANIFEST}", json.dumps(manifest).encode())
+    return manifest
+
+
+def read_snapshot(blobs, place: Snapshot, engine):
+    """put_snapshot で置いたスナップショットを読む。ファイルが欠けているかハッシュが合わなければ BrokenSnapshot。"""
+    from .storage import read
+
+    def file(name: str) -> bytes:
+        if name not in place.files:
+            raise BrokenSnapshot(f"{place.uri}: {name} が登録されていない")
+        try:
+            data = blobs.get(f"{place.uri}/{name}")
+        except FileNotFoundError:
+            raise BrokenSnapshot(f"{place.uri}: {name} がない") from None
+        if hashlib.sha256(data).hexdigest() != place.files[name]:
+            raise BrokenSnapshot(f"{place.uri}: {name} のハッシュが合わない")
+        return data
+    return read(file, engine)
 
 
 class FileJournal(Journal):
     """ディレクトリに記録とスナップショットを置く。
 
-        path/log.jsonl                 1 行 1 トランザクションの記録。追記して fsync する
+        path/log/<最初の通し番号>.jsonl   1 行 1 トランザクションの記録（区切り）。追記して fsync する
         path/cells/<乱数>-<Metric>.parquet   bulk_cells を超えるセルを書き換えた記録の、セルの変更
-        path/snapshots/<通し番号>/     その時点のモデル（Model.save の形式）と meta.json（通し番号、ハッシュ）
+        path/snapshots/<通し番号>-<乱数>/   その時点のモデル（Model.save の形式）と manifest.json（通し番号、ハッシュ）
 
-    最後の行が途中で切れていれば（書いている途中で落ちた）、開くときに捨てる。
-    スナップショットは一時ディレクトリに書いてから名前を変えるので、途中のものは見えない。
+    記録はスナップショットを置いたあと（か、区切りが segment_bytes を超えたら）、次の追記から新しい区切りに
+    書く。開くときは最後の区切りと、client_op_id を覚えておく範囲（最後の op_window 件）だけを読み、
+    記録の再生はスナップショットより後の区切りだけを読む。prune で、古いスナップショットと、それより前の
+    区切りと大量の変更のファイルを消せる。以前の版の path/log.jsonl は、最初の区切りとして読む。
+
+    書き込むプロセスは 1 つに限る。最初に追記するときに path/lock の排他ロックを取り、release まで持つ。
+    最後の行が途中で切れていれば（書いている途中で落ちた）、読むときは無視し、ロックを取ったときに捨てる。
+    追記に失敗すれば、ファイルを追記の前の長さに戻す。
+    ファイルは置き場所（objects.LocalObjects）に置く。スナップショットは各ファイルを置いてから最後に
+    manifest.json を置くので、manifest のないもの（途中で落ちたもの）は使わない。ハッシュは読むときに
+    確かめ、合わなければ 1 つ前のスナップショットから開く。
     大量のセルの変更は、JSON の行にせず Metric ごとの Parquet に書き（PgJournal と同じ形式）、記録の行には
     ファイルの名前とハッシュだけを入れる。ファイルを書き出してから行を追記するので、確定した記録の
     ファイルは必ずそろっている（行を書く前に落ちれば、参照されないファイルが残るだけ）。
+
+    client_op_id は最後の op_window 件の記録の分だけ覚える（再送しても二重に確定しないと保証する範囲）。
     """
 
-    def __init__(self, path, *, fsync: bool = True, bulk_cells: int = 10_000):
+    def __init__(self, path, *, fsync: bool = True, bulk_cells: int = 10_000, op_window: int = 100_000,
+                 segment_bytes: int = 256 << 20):
         self.path = Path(path)
         self.fsync = fsync
         self.bulk_cells = bulk_cells
-        (self.path / "snapshots").mkdir(parents=True, exist_ok=True)
-        self.cells_dir = self.path / "cells"
-        self.log_path = self.path / "log.jsonl"
-        self.head = 0  # 最後の記録の通し番号
-        self._by_client_op: dict[str, int] = {}
+        self.op_window = op_window
+        self.segment_bytes = segment_bytes
+        self.path.mkdir(parents=True, exist_ok=True)
+        self.objects = LocalObjects(self.path, fsync=fsync)
+        self._lock_file = None  # 書き込みの権利（path/lock の排他ロック）。最初に書くときに取る
+        self._broken: BaseException | None = None  # 追記の失敗を取り消せなかった（以後は書かない）
+        self._rotate = False  # 次の追記から新しい区切りに書く（スナップショットを置いた）
         self._scan()
+
+    @property
+    def log_path(self) -> Path:
+        """今追記している区切りのファイル。"""
+        return self._segments[-1][1]
+
+    # ------------------------------------------------ 書き込みの権利
+
+    def acquire(self) -> None:
+        """書き込みの権利（path/lock の排他ロック）を取る。別のプロセスが持っていれば Fenced。
+        読み込んだあとに別のプロセスが書き込んでいたら、手元が古いので Fenced（開き直せば続けられる）。"""
+        if self._lock_file is not None:
+            return
+        f = open(self.path / "lock", "a+b")
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            f.close()
+            raise Fenced(f"{self.path}: 別のプロセスが書き込み中") from None
+        head = self.head
+        self._scan(repair=True)  # ロックを取ってから読み直す（途中で切れた最後の行は、ここで捨てる）
+        if self.head != head:
+            f.close()
+            raise Fenced(f"{self.path}: 読み込んだあとに別のプロセスが書き込んだ（{head} → {self.head}）。開き直す")
+        self._lock_file = f
+
+    def lease(self) -> dict:
+        return {"held": self._lock_file is not None, "expires_in": None, "error": None}
+
+    def release(self) -> None:
+        if self._lock_file is not None:
+            self._lock_file.close()  # 閉じればロックも外れる
+            self._lock_file = None
 
     # ------------------------------------------------ 記録
 
-    def _scan(self) -> None:
-        """記録を 1 行ずつ読んで、最後の通し番号と client_op_id の表を作る（ログ全体をメモリに置かない）。"""
-        if not self.log_path.exists():
+    def _list_segments(self) -> list[tuple[int, Path]]:
+        """記録の区切り（最初の通し番号, ファイル）を古い順に。まだなければ最初の区切りを 1 つ返す。"""
+        segs = [(int(p.stem), p) for p in (self.path / "log").glob("*.jsonl") if p.stem.isdigit()]
+        legacy = self.path / "log.jsonl"
+        if legacy.exists():
+            segs.append((1, legacy))
+        segs.sort()
+        return segs or [(1, self.path / "log" / f"{1:020d}.jsonl")]
+
+    def _read_segment(self, first: int, path: Path, start: int = 0, *, strict: bool = False):
+        """区切りの start バイト目からの完全な記録を読み、(記録, 行のバイト数) を順に返す。最後の行が途中で
+        切れていれば読まない。strict なら、途中の壊れた行を ValueError にする。"""
+        try:
+            f = open(path, "rb")
+        except FileNotFoundError:
             return
-        size = self.log_path.stat().st_size
-        good = 0
-        with open(self.log_path, "rb") as f:
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            f.seek(start)
+            pos = start
             for line in f:
                 try:
                     if not line.endswith(b"\n"):
                         raise ValueError("途中で切れた行")
                     rec = json.loads(line)
                 except ValueError:
-                    if good + len(line) < size:
-                        raise ValueError(f"{self.log_path}: {good} バイト目の記録が壊れている") from None
-                    break  # 最後の行だけが壊れているなら、書いている途中で落ちた。捨てる
-                if rec["seq"] != self.head + 1:
-                    raise ValueError(f"{self.log_path}: 通し番号が {self.head} の次でなく {rec['seq']}")
-                self.head = rec["seq"]
-                if rec.get("client_op_id") is not None:
+                    if strict and pos + len(line) < size:
+                        raise ValueError(f"{path}: {pos} バイト目の記録が壊れている") from None
+                    return
+                pos += len(line)
+                yield rec, len(line)
+
+    def _remember(self, client_op_id: str | None, seq: int) -> None:
+        if client_op_id is not None:
+            self._by_client_op[client_op_id] = seq
+        oldest = self.head - self.op_window
+        while self._by_client_op:  # 覚えておく範囲より古い client_op_id は捨てる（古い順に並んでいる）
+            k, q = next(iter(self._by_client_op.items()))
+            if q > oldest:
+                break
+            del self._by_client_op[k]
+
+    def _scan(self, repair: bool = False) -> None:
+        """最後の区切りを読んで最後の通し番号を求め、client_op_id を覚えておく範囲の記録を読む（ログ全体を
+        読まない）。最後の行が途中で切れていれば、書いている途中で落ちたか、別のプロセスが書いている途中なので
+        読まない。repair（書き込みの権利を持っているとき）なら、その行をファイルから切り捨てる。"""
+        self._segments = self._list_segments()
+        self._by_client_op: collections.OrderedDict[str, int] = collections.OrderedDict()
+        first, path = self._segments[-1]
+        self.head, self._size = first - 1, 0
+        for rec, n in self._read_segment(first, path, strict=True):
+            if rec["seq"] != self.head + 1:
+                raise ValueError(f"{path}: 通し番号が {self.head} の次でなく {rec['seq']}")
+            self.head = rec["seq"]
+            self._size += n
+        # client_op_id を覚えておく範囲が前の区切りにかかれば、そこから読む
+        oldest = self.head - self.op_window
+        start = len(self._segments) - 1
+        while start > 0 and self._segments[start][0] > oldest + 1:
+            start -= 1
+        for i in range(start, len(self._segments)):
+            for rec, _ in self._read_segment(*self._segments[i]):
+                if rec["seq"] > oldest and rec.get("client_op_id") is not None:
                     self._by_client_op[rec["client_op_id"]] = rec["seq"]
-                good += len(line)
-        if good < size:
-            with open(self.log_path, "r+b") as f:
-                f.truncate(good)
+        if repair and path.exists() and path.stat().st_size > self._size:
+            with open(path, "r+b") as f:
+                f.truncate(self._size)
+                if self.fsync:
+                    _sync(f.fileno())
+
+    def refresh(self) -> int:
+        """最後に読んだところより後に追記された記録を読む（全体を読み直さない）。別のプロセスが新しい区切りに
+        書き始めていれば、そちらも読む。"""
+        while True:
+            first, path = self._segments[-1]
+            for rec, n in self._read_segment(first, path, self._size):
+                if rec["seq"] != self.head + 1:
+                    raise ValueError(f"{path}: 通し番号が {self.head} の次でなく {rec['seq']}")
+                self.head = rec["seq"]
+                self._size += n
+                self._remember(rec.get("client_op_id"), rec["seq"])
+            nxt = self.path / "log" / f"{self.head + 1:020d}.jsonl"
+            if self.head + 1 == first or not nxt.exists():
+                return self.head
+            self._segments.append((self.head + 1, nxt))
+            self._size = 0
+
+    def wait(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if self.log_path.stat().st_size > self._size:
+                    return
+            except FileNotFoundError:
+                pass
+            if (self.path / "log" / f"{self.head + 1:020d}.jsonl").exists() and self.head + 1 != self._segments[-1][0]:
+                return
+            time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
 
     def append_many(self, records: list[dict]) -> list[int]:
-        """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。"""
+        """複数の記録を追記して、1 回の書き出しでまとめて確定する（グループコミット）。通し番号の列を返す。
+        書き出しか fsync に失敗したら、ファイルを追記の前の長さに戻してから例外を投げる（書きかけの行が
+        残ると、次の記録と通し番号が重なって開けなくなる）。戻せなければ、以後の書き込みを拒否する。"""
+        if self._broken is not None:
+            raise OSError(f"{self.log_path}: 以前の追記の失敗を取り消せなかったので、書き込まない"
+                          "（ファイルを確かめてから開き直す）") from self._broken
+        if not records:
+            return []
+        self.acquire()
+        if self._size > 0 and (self._rotate or self._size >= self.segment_bytes):
+            self._segments.append((self.head + 1, self.path / "log" / f"{self.head + 1:020d}.jsonl"))
+            self._size = 0
+        self._rotate = False
         seqs = list(range(self.head + 1, self.head + 1 + len(records)))
         lines = []
         for r, q in zip(records, seqs):
@@ -513,19 +732,33 @@ class FileJournal(Journal):
                 line["changes"] = {k: v for k, v in r["changes"].items() if k != "cells"}
                 line["cells_blob"] = self._write_cells(r)
             lines.append(json.dumps(line, ensure_ascii=False, separators=(",", ":"), default=_json_rows) + "\n")
-        if self.fsync and any("cells_blob" in line for line in lines):
-            _fsync_dir(self.cells_dir)  # ファイルの名前の変更も、記録の行より先にディスクへ
-        lines = "".join(lines)
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(lines)
-            f.flush()
-            if self.fsync:
-                _sync(f.fileno())
-        if seqs:
-            self.head = seqs[-1]
+        data = "".join(lines).encode("utf-8")
+        path = self.log_path
+        new = not path.exists()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            try:
+                _write_all(fd, data)
+                if self.fsync:
+                    _sync(fd)
+                    if new:
+                        _fsync_dir(path.parent)  # 新しい区切りのファイルの名前もディスクへ
+            except BaseException as e:
+                try:
+                    os.ftruncate(fd, self._size)
+                    if self.fsync:
+                        _sync(fd)
+                except BaseException as undo:
+                    self._broken = undo
+                    log.critical("%s: 追記の失敗を取り消せなかった", path, exc_info=True)
+                raise e
+        finally:
+            os.close(fd)
+        self._size += len(data)
+        self.head = seqs[-1]
         for r, q in zip(records, seqs):
-            if r.get("client_op_id") is not None:
-                self._by_client_op[r["client_op_id"]] = q
+            self._remember(r.get("client_op_id"), q)
         return seqs
 
     def seq_of(self, client_op_id: str) -> int | None:
@@ -535,54 +768,81 @@ class FileJournal(Journal):
         return {i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op}
 
     def _write_cells(self, record: dict) -> dict:
-        """記録のセルの変更を cells/ の Parquet に書き、記録の行に入れる参照（名前は path からの相対）を返す。"""
-        self.cells_dir.mkdir(exist_ok=True)
-        prefix = uuid.uuid4().hex
+        """記録のセルの変更を cells/ の Parquet に置き、記録の行に入れる参照（キーは path からの相対）を返す。"""
+        prefix = f"cells/{uuid.uuid4().hex}"
 
-        def put(name: str, data: bytes) -> str:  # 一時ファイルに書いてから名前を変える
-            final = self.cells_dir / f"{prefix}-{name}"
-            tmp = final.with_suffix(".tmp")
-            with open(tmp, "wb") as f:
-                f.write(data)
-                f.flush()
-                if self.fsync:
-                    _sync(f.fileno())
-            os.rename(tmp, final)
-            return final.relative_to(self.path).as_posix()
+        def put(name: str, data: bytes) -> str:
+            self.objects.put(f"{prefix}-{name}", data)
+            return f"{prefix}-{name}"
         return {"format": "parquet", "files": write_cell_files(record, put), "cells": cell_count(record)}
 
     def records(self, after: int = 0) -> Iterator[dict]:
-        if not self.log_path.exists():
-            return
-        with open(self.log_path, encoding="utf-8") as f:
-            for line in f:
-                rec = json.loads(line)
+        segs = self._list_segments()
+        for i, (first, path) in enumerate(segs):
+            if i + 1 < len(segs) and segs[i + 1][0] <= after + 1:
+                continue  # この区切りの記録は、すべて after 以前
+            if first > after + 1 and i == 0 and first > 1:
+                raise ValueError(f"{self.path}: 通し番号 {after + 1} からの記録は prune で消した")
+            for rec, _ in self._read_segment(first, path):
+                if rec["seq"] > self.head:
+                    return  # 読み込んだあとに別のプロセスが書いた記録（開き直すまで見ない）
                 if rec["seq"] > after:
                     if "cells_blob" in rec:  # 大量のセルはファイルから、変更の塊として読む
                         rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"],
-                                                                   lambda uri: (self.path / uri).read_bytes())
+                                                                   self.objects.get)
                     yield rec
+
+    def prune(self, keep: int = 2) -> dict:
+        """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットと、残す一番古い
+        スナップショットより前の記録の区切りと、その記録の大量の変更のファイルを消す。消した数を返す。
+        記録を消すので、残すスナップショットより前へは戻れなくなる（セルの履歴もそこから後だけになる）。"""
+        self.acquire()
+        snaps = self.snapshots()
+        if len(snaps) <= keep:
+            return {"snapshots": 0, "segments": 0, "cells": 0}
+        oldest = snaps[keep - 1][0]
+        out = {"snapshots": 0, "segments": 0, "cells": 0}
+        for _, place in snaps[keep:]:
+            for key in self.objects.list(place.uri + "/"):
+                self.objects.delete(key)
+            out["snapshots"] += 1
+        segs = self._list_segments()
+        for i, (first, path) in enumerate(segs[:-1]):
+            if segs[i + 1][0] > oldest + 1:
+                break  # この区切りには、残すスナップショットより後の記録がある
+            for rec, _ in self._read_segment(first, path):
+                for f in rec.get("cells_blob", {}).get("files", []):
+                    self.objects.delete(f["uri"])
+                    out["cells"] += 1
+            path.unlink()
+            out["segments"] += 1
+        return out
 
     # ------------------------------------------------ スナップショット
 
-    def save_snapshot(self, model) -> Path:
-        """model（通し番号 model.seq の時点）のスナップショットを原子的に置く。"""
-        final = self.path / "snapshots" / f"{model.seq:020d}"
-        write_snapshot(model, final, fsync=self.fsync)
-        return final
+    def save_snapshot(self, model) -> str:
+        """model（通し番号 model.seq の時点）のスナップショットを置く。同じ通し番号で取り直しても、置いた
+        ファイルを書き換えないよう、置き場所ごとに乱数を付ける。次の追記から、記録を新しい区切りに書く。"""
+        prefix = f"snapshots/{model.seq:020d}-{uuid.uuid4().hex[:8]}"
+        put_snapshot(self.objects, prefix, model)
+        self._rotate = True
+        return prefix
 
-    def snapshots(self) -> list[tuple[int, Path]]:
-        """壊れていないスナップショット（通し番号が記録の最後以下のもの）を新しい順に。"""
+    def snapshots(self) -> list[tuple[int, Snapshot]]:
+        """置き終えたスナップショット（通し番号が記録の最後以下のもの）を新しい順に。ハッシュは読むときに
+        確かめる（開くたびにすべてのファイルを読まない）。以前の版の snapshots/<通し番号>/meta.json も読む。"""
         out = []
-        for p in (self.path / "snapshots").iterdir():
-            if p.name.startswith(".") or not (p / "meta.json").exists():
+        for key in self.objects.list("snapshots/"):
+            prefix, _, name = key.rpartition("/")
+            if name not in (MANIFEST, "meta.json"):
                 continue
-            meta = json.loads((p / "meta.json").read_text())
-            if meta["seq"] > self.head:
-                continue  # 記録より新しい（記録を過去に戻したとき）ものは使わない
-            if snapshot_ok(p, meta):
-                out.append((meta["seq"], p))
-        return sorted(out, reverse=True)
+            meta = json.loads(self.objects.get(key))
+            if meta["seq"] <= self.head:  # 記録より新しい（記録を過去に戻したとき）ものは使わない
+                out.append((meta["seq"], Snapshot(prefix, meta["files"])))
+        return sorted(out, key=lambda x: (x[0], x[1].uri), reverse=True)
+
+    def load_snapshot(self, place: Snapshot, engine):
+        return read_snapshot(self.objects, place, engine)
 
 
 def cell_count(record: dict) -> int:
@@ -635,6 +895,12 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 def _sync(fd: int) -> None:

@@ -4,20 +4,21 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+# Python から使う薄い層（pyo3）。計算は engine/（nanashi-engine、Python に依存しない）が行う
 [lib]
 name = "nanashi_core"
 crate-type = ["cdylib"]
 
 [dependencies]
+nanashi-engine = { path = "engine" }
 pyo3 = "0.29"
 numpy = "0.29"
 rayon = "1.12"
 rustc-hash = "2.1"
-imbl = "7.0"
-parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
-arrow-array = "60"
-arrow-schema = "60"
 bytes = "1"
+
+[workspace]
+members = ["engine"]
 
 [profile.release]
 lto = "thin"

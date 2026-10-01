@@ -24,6 +24,8 @@ def _pg_available() -> bool:
         importlib.import_module("nanashi_core")  # 保存形式（Parquet）の読み書きに使う
         import psycopg
         psycopg.connect(DSN, connect_timeout=2).close()
+        from sparse_engine.pg_journal import migrate
+        migrate(DSN)  # テストのデータベースのスキーマを最新にする
         return True
     except Exception:
         return False

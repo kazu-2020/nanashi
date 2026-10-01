@@ -28,9 +28,10 @@ from itertools import product
 from typing import Iterator, Mapping, Protocol
 
 from .core import Cube, Dimension
-from .expr import (AGGREGATORS, ARITH, COMPARE, LOGIC, AsAxis, BinOp, By, Coalesce, Const, DimRef,
+from .expr import (AGGREGATIONS, AGGREGATORS, ARITH, COMPARE, LOGIC, AsAxis, BinOp, By, Coalesce, Const, DimRef,
                    Expand, Expr, Filter, If, IfBlank, IsBlank, Member, Not, On, Ref, Remove, Select,
                    Shift)
+from .messages import Msg, msg, render
 
 Restrict = dict[str, frozenset[str]]
 # "number" / "boolean"、または軸のメンバー "member:<軸名>"（式の途中だけで使い、Metric には格納しない）
@@ -42,7 +43,11 @@ def member_kind(dim: str) -> Kind:
 
 
 class FormulaError(Exception):
-    pass
+    """式の誤り。code は messages.MESSAGES のキーで、params は文言に埋める値。"""
+
+    def __init__(self, code: str, **params):
+        super().__init__(render(code, params))
+        self.code, self.params = code, params
 
 
 @dataclass(frozen=True)
@@ -72,28 +77,27 @@ def _replace(dims: tuple[str, ...], old: str, new: str) -> tuple[str, ...]:
 def _property(cat: Catalog, dim: str, prop: str) -> tuple[str, dict[str, str]]:
     props = cat.dimension(dim).properties
     if prop not in props:
-        raise FormulaError(f"{dim} にプロパティ {prop} がない")
+        raise FormulaError("no_property", dim=dim, prop=prop)
     return props[prop]
 
 
 # ---------------------------------------------------------------- 型推論
 
-def _need(t: Type, kind: Kind, what: str) -> None:
+def _need(t: Type, kind: Kind, what: Msg) -> None:
     if t.kind != kind:
-        raise FormulaError(f"{what} には {kind} が必要だが {t.kind} が渡された")
+        raise FormulaError("need_kind", what=what, want=kind, got=t.kind)
 
 
-def _agg_kind(agg: str, t: Type, what: str) -> Kind:
-    if agg not in AGGREGATORS:
-        raise FormulaError(f"未知の集計関数 {agg}")
-    if agg == "first":
-        return t.kind
-    if agg != "count":
-        _need(t, "number", f"{what} の {agg}")
-    return "number"
+def _agg_kind(agg: str, t: Type, what: Msg) -> Kind:
+    if agg not in AGGREGATIONS:
+        raise FormulaError("unknown_agg", agg=agg)
+    a = AGGREGATIONS[agg]
+    if a.numeric:
+        _need(t, "number", msg("agg_of", what=what, agg=agg))
+    return t.kind if a.kind is None else a.kind
 
 
-def _check_expand(warnings: list[str], what: str, dims: tuple[str, ...],
+def _check_expand(warnings: list[str], what: Msg, dims: tuple[str, ...],
                   covered: tuple[str, ...], own: tuple[str, ...]) -> None:
     """結果の軸 dims のうち covered にない軸へ、この項の値が複製されるかを調べる。
 
@@ -104,11 +108,8 @@ def _check_expand(warnings: list[str], what: str, dims: tuple[str, ...],
     if not missing:
         return
     if own:
-        names = ", ".join(missing)
-        raise FormulaError(
-            f"{what}（軸 {list(own)}）に {missing} 軸がない。全メンバーへ展開するなら [EXPAND: {names}]、"
-            f"相手に値があるセルだけなら [ON: 相手] を付ける（Python の DSL では .expand / .on）")
-    warnings.append(f"{what}が {missing} 方向に全メンバーへ展開される（密化）")
+        raise FormulaError("not_expanded", what=what, own=list(own), missing=missing)
+    warnings.append(render("densify", {"what": what, "missing": missing}))
 
 
 def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
@@ -126,55 +127,56 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
 
         case Member(dim, member):
             if member not in cat.dimension(dim):
-                raise FormulaError(f'{dim}."{member}": {dim} にメンバー {member!r} がない')
+                raise FormulaError("unknown_member", dim=dim, member=member)
             return Type((), member_kind(dim))
 
         case BinOp(op, left, right):
             lt, rt = infer(left, cat, warnings), infer(right, cat, warnings)
             dims = _merge(lt.dims, rt.dims)
+            left_, right_ = msg("left", op=op), msg("right", op=op)
             if op in ARITH:
-                _need(lt, "number", f"'{op}' の左辺")
-                _need(rt, "number", f"'{op}' の右辺")
+                _need(lt, "number", left_)
+                _need(rt, "number", right_)
                 kind: Kind = "number"
             elif op in COMPARE:
                 if op in ("=", "<>"):
                     if lt.kind != rt.kind:
-                        raise FormulaError(f"'{op}' の両辺の種類が違う: {lt.kind} と {rt.kind}")
+                        raise FormulaError("operand_kinds", op=op, left=lt.kind, right=rt.kind)
                 elif lt.kind.startswith("member:") or rt.kind.startswith("member:"):
                     # メンバーの大小は、順序付きの軸（時間など）で、並び順で比べる
                     if lt.kind != rt.kind:
-                        raise FormulaError(f"'{op}' の両辺の種類が違う: {lt.kind} と {rt.kind}")
+                        raise FormulaError("operand_kinds", op=op, left=lt.kind, right=rt.kind)
                     d = lt.kind.removeprefix("member:")
                     if not cat.dimension(d).ordered:
-                        raise FormulaError(f"'{op}': {d} は順序付きの軸ではないので大小を比べられない（= と <> は使える）")
+                        raise FormulaError("unordered_compare", op=op, dim=d)
                 else:
-                    _need(lt, "number", f"'{op}' の左辺")
-                    _need(rt, "number", f"'{op}' の右辺")
+                    _need(lt, "number", left_)
+                    _need(rt, "number", right_)
                 kind = "boolean"
             elif op in LOGIC:
-                _need(lt, "boolean", f"'{op}' の左辺")
-                _need(rt, "boolean", f"'{op}' の右辺")
+                _need(lt, "boolean", left_)
+                _need(rt, "boolean", right_)
                 kind = "boolean"
             else:
-                raise FormulaError(f"未知の演算子 {op}")
+                raise FormulaError("unknown_op", op=op)
             if op in {"+", "-"} | LOGIC:  # 片側だけのセルも結果に残る演算
-                _check_expand(warnings, f"'{op}' の左辺", dims, lt.dims, lt.dims)
-                _check_expand(warnings, f"'{op}' の右辺", dims, rt.dims, rt.dims)
+                _check_expand(warnings, left_, dims, lt.dims, lt.dims)
+                _check_expand(warnings, right_, dims, rt.dims, rt.dims)
             return Type(dims, kind)
 
         case Not(child):
             t = infer(child, cat, warnings)
-            _need(t, "boolean", "NOT")
+            _need(t, "boolean", msg("not"))
             return t
 
         case If(cond, then, else_):
             ct = infer(cond, cat, warnings)
-            _need(ct, "boolean", "IF の条件")
-            branches = [("IF の THEN", infer(then, cat, warnings))]
+            _need(ct, "boolean", msg("if_cond"))
+            branches = [(msg("if_then"), infer(then, cat, warnings))]
             if else_ is not None:
-                branches.append(("IF の ELSE", infer(else_, cat, warnings)))
+                branches.append((msg("if_else"), infer(else_, cat, warnings)))
             if len({t.kind for _, t in branches}) > 1:
-                raise FormulaError(f"IF の THEN と ELSE の種類が違う: {[t.kind for _, t in branches]}")
+                raise FormulaError("if_kinds", kinds=[t.kind for _, t in branches])
             dims = _merge(ct.dims, *(t.dims for _, t in branches))
             for what, t in branches:
                 _check_expand(warnings, what, dims, _merge(ct.dims, t.dims), t.dims)
@@ -182,9 +184,9 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
 
         case Filter(child, cond):
             t, ct = infer(child, cat, warnings), infer(cond, cat, warnings)
-            _need(ct, "boolean", "FILTER の条件")
+            _need(ct, "boolean", msg("filter_cond"))
             if extra := [d for d in ct.dims if d not in t.dims]:
-                raise FormulaError(f"FILTER の条件が対象にない軸 {extra} を持っている")
+                raise FormulaError("filter_dims", extra=extra)
             return t
 
         case Expand(child, dims):
@@ -192,9 +194,9 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
             for d in dims:
                 cat.dimension(d)
                 if d in t.dims:
-                    raise FormulaError(f"EXPAND {d}: すでに軸にある")
+                    raise FormulaError("expand_present", dim=d)
             if len(set(dims)) != len(dims):
-                raise FormulaError(f"EXPAND {list(dims)}: 軸が重複している")
+                raise FormulaError("expand_repeated", dims=list(dims))
             return Type(t.dims + tuple(dims), t.kind)
 
         case On(child, other):
@@ -204,64 +206,67 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
         case Coalesce(first, second):
             ft, st = infer(first, cat, warnings), infer(second, cat, warnings)
             if set(ft.dims) != set(st.dims) or ft.kind != st.kind:
-                raise FormulaError(f"上書きの軸と種類が式と一致しない: {ft} と {st}")
+                raise FormulaError("coalesce_mismatch", first_dims=ft.dims, first_kind=ft.kind,
+                                   second_dims=st.dims, second_kind=st.kind)
             return st
 
         case IsBlank(child):
             t = infer(child, cat, warnings)
             if t.dims:
-                warnings.append(f"ISBLANK が {list(t.dims)} の全組み合わせに展開される（密化）")
+                warnings.append(render("isblank_dense", {"dims": list(t.dims)}))
             return Type(t.dims, "boolean")
 
         case By(child, dim, prop, agg):
             t = infer(child, cat, warnings)
             target, _ = _property(cat, dim, prop)
+            what = msg("by", dim=dim, prop=prop)
             if dim in t.dims:
                 if target in t.dims:
-                    raise FormulaError(f"BY {dim}.{prop}: 集約先の {target} がすでに軸にある")
-                kind = _agg_kind(agg or "sum", t, f"BY {dim}.{prop}")
+                    raise FormulaError("by_target_present", what=what, target=target)
+                kind = _agg_kind(agg or "sum", t, what)
                 return Type(_replace(t.dims, dim, target), kind)
             if target in t.dims:
                 if agg is not None:
-                    raise FormulaError(f"BY {dim}.{prop}: 引き下ろし（lookup）に集計関数は指定できない")
+                    raise FormulaError("by_lookup_agg", what=what)
                 return Type(_replace(t.dims, target, dim), t.kind)
-            raise FormulaError(f"BY {dim}.{prop}: 式の軸 {t.dims} に {dim} も {target} もない")
+            raise FormulaError("by_no_dims", what=what, dims=t.dims, dim=dim, target=target)
 
         case Remove(child, dim, agg):
             t = infer(child, cat, warnings)
+            what = msg("remove", dim=dim)
             if dim not in t.dims:
-                raise FormulaError(f"REMOVE {dim}: 式の軸 {t.dims} にない")
-            kind = _agg_kind(agg, t, f"REMOVE {dim}")
+                raise FormulaError("remove_absent", what=what, dims=t.dims)
+            kind = _agg_kind(agg, t, what)
             return Type(tuple(x for x in t.dims if x != dim), kind)
 
         case Shift(child, dim, _):
             t = infer(child, cat, warnings)
             if dim not in t.dims:
-                raise FormulaError(f"PREVIOUS {dim}: 式の軸 {t.dims} にない")
+                raise FormulaError("previous_absent", dim=dim, dims=t.dims)
             if not cat.dimension(dim).ordered:
-                raise FormulaError(f"PREVIOUS {dim}: 順序付きの軸ではない")
+                raise FormulaError("previous_unordered", dim=dim)
             return t
 
         case AsAxis(child, dim):
             t = infer(child, cat, warnings)
-            _need(t, member_kind(dim), "対応表")
+            _need(t, member_kind(dim), msg("edges"))
             return Type(t.dims + (dim,), "number")
 
         case Select(child, dim, member):
             t = infer(child, cat, warnings)
             if dim not in t.dims:
-                raise FormulaError(f'SELECT {dim}."{member}": 式の軸 {t.dims} に {dim} がない')
+                raise FormulaError("select_absent", dim=dim, member=member, dims=t.dims)
             if member not in cat.dimension(dim):
-                raise FormulaError(f'SELECT {dim}."{member}": {dim} にメンバー {member!r} がない')
+                raise FormulaError("select_member", dim=dim, member=member)
             return Type(tuple(d for d in t.dims if d != dim), t.kind)
 
         case IfBlank(child, value):
             t = infer(child, cat, warnings)
             vkind = "boolean" if isinstance(value, bool) else "number"
             if vkind != t.kind:
-                raise FormulaError(f"IFBLANK の既定値は {t.kind} でなければならない")
+                raise FormulaError("ifblank_kind", kind=t.kind)
             if t.dims:
-                warnings.append(f"IFBLANK が {list(t.dims)} の全組み合わせに展開される（密化）")
+                warnings.append(render("ifblank_dense", {"dims": list(t.dims)}))
             return t
     raise TypeError(expr)
 
@@ -380,26 +385,27 @@ def _by_metric(e: By, cat) -> Expr:
       引き下ろし: child ⋈ 対応表 から T を外す（各行の T は 1 つ） -> T が D（と V の軸）に置き換わる
     """
     if e.prop not in getattr(cat, "metrics", {}):
-        raise FormulaError(f"{e.dim} にプロパティ {e.prop} がなく、同じ名前の Metric もない")
+        raise FormulaError("no_property_or_metric", dim=e.dim, prop=e.prop)
+    what = msg("by", dim=e.dim, prop=e.prop)
     vt = cat.metric_type(e.prop)
     if not vt.kind.startswith("member:"):
-        raise FormulaError(f"BY {e.dim}.{e.prop}: {e.prop} はメンバー型の Metric ではない（{vt.kind}）")
+        raise FormulaError("by_not_member", what=what, prop=e.prop, kind=vt.kind)
     target = vt.kind.removeprefix("member:")
     if e.dim not in vt.dims:
-        raise FormulaError(f"BY {e.dim}.{e.prop}: {e.prop} の軸 {vt.dims} に {e.dim} がない")
+        raise FormulaError("by_metric_no_dim", what=what, prop=e.prop, dims=vt.dims, dim=e.dim)
     ct = infer(e.child, cat, [])
     edges = AsAxis(Ref(e.prop), target)
     if e.dim in ct.dims:
         if target in ct.dims:
-            raise FormulaError(f"BY {e.dim}.{e.prop}: 集約先の {target} がすでに軸にある")
+            raise FormulaError("by_target_present", what=what, target=target)
         if missing := [d for d in vt.dims if d not in ct.dims]:
-            raise FormulaError(f"BY {e.dim}.{e.prop}: 式が {e.prop} の軸 {missing} を持っていない")
+            raise FormulaError("by_metric_missing", what=what, prop=e.prop, missing=missing)
         return Remove(On(e.child, edges), e.dim, e.agg or "sum")
     if target in ct.dims:
         if e.agg is not None:
-            raise FormulaError(f"BY {e.dim}.{e.prop}: 引き下ろし（lookup）に集計関数は指定できない")
+            raise FormulaError("by_lookup_agg", what=what)
         return Remove(On(e.child, edges), target, "first")
-    raise FormulaError(f"BY {e.dim}.{e.prop}: 式の軸 {ct.dims} に {e.dim} も {target} もない")
+    raise FormulaError("by_no_dims", what=what, dims=ct.dims, dim=e.dim, target=target)
 
 
 # ---------------------------------------------------------------- 依存関係

@@ -5,7 +5,7 @@
 //! 循環は「全員が同じ順序付き軸を持ち、循環が必ず正のずらし（PREVIOUS）を通る」場合だけ許し、
 //! その軸に沿った scan として 1 時点ずつ計算する。それ以外の循環はエラーにする。
 
-use crate::core::{Catalog, DimId, Node, Result};
+use crate::{Arg, Catalog, DimId, Diag, Node};
 use crate::plan::Formula;
 
 /// Metric -> 参照先 Metric。lags は参照経路上での各軸方向のずらし量の合計、
@@ -119,15 +119,15 @@ fn tarjan(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
     s.out
 }
 
-/// Python の sorted(members) の表示（['A', 'B']）。
-fn sorted_names(members: &[usize], names: &[String]) -> String {
+/// 名前順の Metric の名前（Python の参照実装の sorted(members)）。
+fn sorted_names(members: &[usize], names: &[String]) -> Arg {
     let mut ns: Vec<&String> = members.iter().map(|&m| &names[m]).collect();
     ns.sort();
-    format!("[{}]", ns.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "))
+    Arg::List(ns.into_iter().map(Arg::from).collect())
 }
 
 /// 強連結成分 1 つを計算の段階にする。循環がなければ 1 Metric の段階、あれば scan の段階。
-fn make_step(cat: &Catalog, scc: &[usize], edges: &[Vec<Edge>], names: &[String], dims: &[Vec<DimId>]) -> Result<(Vec<usize>, Option<DimId>)> {
+fn make_step(cat: &Catalog, scc: &[usize], edges: &[Vec<Edge>], names: &[String], dims: &[Vec<DimId>]) -> Result<(Vec<usize>, Option<DimId>), Diag> {
     let internal: Vec<(usize, &Edge)> = scc.iter().flat_map(|&src| edges[src].iter().filter(|e| scc.contains(&e.target)).map(move |e| (src, e))).collect();
     if internal.is_empty() {
         return Ok((vec![scc[0]], None));
@@ -141,20 +141,21 @@ fn make_step(cat: &Catalog, scc: &[usize], edges: &[Vec<Edge>], names: &[String]
         }
     }
     if lag_dims.len() != 1 {
-        return Err(format!("循環参照: {}（時間方向のずらしを通らない循環がある）", sorted_names(scc, names)));
+        return Err(Diag::new("cycle_no_lag").arg("members", sorted_names(scc, names)));
     }
     let dim = lag_dims[0];
     let mut same_time: Vec<Vec<usize>> = vec![Vec::new(); scc.len()]; // scc 内の位置 -> 同じ時点で読む相手（位置）
     let pos = |m: usize| scc.iter().position(|&x| x == m).unwrap();
+    let dim_name = &cat.dims[dim].name;
     for (src, e) in &internal {
         if !dims[*src].contains(&dim) {
-            return Err(format!("循環参照: {} が scan 軸 {} を持たない", names[*src], cat.dims[dim].name));
+            return Err(Diag::new("cycle_scan_dim").arg("src", &names[*src]).arg("dim", dim_name));
         }
         if e.broken.contains(&dim) {
-            return Err(format!("循環参照: {} -> {} の経路で {} を集約・付け替えている", names[*src], names[e.target], cat.dims[dim].name));
+            return Err(Diag::new("cycle_broken").arg("src", &names[*src]).arg("target", &names[e.target]).arg("dim", dim_name));
         }
         if e.lag(dim) < 0 {
-            return Err(format!("循環参照: {} が {} の未来の値を参照している", names[*src], names[e.target]));
+            return Err(Diag::new("cycle_future").arg("src", &names[*src]).arg("target", &names[e.target]));
         }
         if e.lag(dim) == 0 {
             let (s, t) = (pos(*src), pos(e.target));
@@ -166,7 +167,7 @@ fn make_step(cat: &Catalog, scc: &[usize], edges: &[Vec<Edge>], names: &[String]
     // 同じ時点どうしの依存（ずらし 0）は非循環でなければならない
     let order = tarjan(&same_time);
     if order.iter().any(|c| c.len() > 1 || same_time[c[0]].contains(&c[0])) {
-        return Err(format!("循環参照: {} が同じ時点で循環している", sorted_names(scc, names)));
+        return Err(Diag::new("cycle_same_time").arg("members", sorted_names(scc, names)));
     }
     Ok((order.iter().map(|c| scc[c[0]]).collect(), Some(dim)))
 }
@@ -178,7 +179,7 @@ pub type Edges = Vec<Vec<(usize, Vec<(DimId, i64)>, Vec<DimId>)>>;
 /// 返すのは、依存先が先の順の段階 (Metric の番号の列, scan の軸) と、互いに依存しない段階を段ごとに
 /// まとめた段階の番号の列と、依存グラフの辺。
 #[allow(clippy::type_complexity)]
-pub fn plan(cat: &Catalog, formulas: &[Option<Formula>], names: &[String], dims: &[Vec<DimId>]) -> Result<(Vec<(Vec<usize>, Option<DimId>)>, Vec<Vec<usize>>, Edges)> {
+pub fn plan(cat: &Catalog, formulas: &[Option<Formula>], names: &[String], dims: &[Vec<DimId>]) -> Result<(Vec<(Vec<usize>, Option<DimId>)>, Vec<Vec<usize>>, Edges), Diag> {
     let n = formulas.len();
     let mut edges: Vec<Vec<Edge>> = vec![Vec::new(); n];
     for (m, f) in formulas.iter().enumerate() {

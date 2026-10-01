@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -45,15 +46,6 @@ def s3_client():
         return client
     except Exception:
         return None
-
-
-def overwrite(journal, uri: str, data: bytes) -> None:
-    """置いたファイルを書き換える（壊れたファイルを作る）。"""
-    if uri.startswith("s3://"):
-        bucket, _, key = uri.removeprefix("s3://").partition("/")
-        journal.objects.client.put_object(Bucket=bucket, Key=key, Body=data)
-    else:
-        Path(uri).write_bytes(data)
 
 
 AVAILABLE = PG_AVAILABLE
@@ -122,7 +114,7 @@ class PgJournalTests(unittest.TestCase):
                                 (self.model_id,)).fetchone()
         (f,) = rec["cells_blob"]["files"]
         v = m.metrics["V"]
-        self.assertTrue(f["uri"].startswith(self.objects.uri(f"{self.model_id}/cells/")))
+        self.assertTrue(f["uri"].startswith(f"{self.model_id}/cells/"))  # 置き場所の中の相対的なキー
         self.assertTrue(f["uri"].endswith(f"-{v.id}.parquet"))
         data = self.objects.get(f["uri"])
         meta = dict(nanashi_core.parquet_metadata(data))
@@ -154,7 +146,8 @@ class PgJournalTests(unittest.TestCase):
                 arrays[f"{name}_null{i}"] = npy("|b1", [r[j_] is None for r in rows])
         path = Path(self.tmp.name) / "legacy.npz"
         write_npz(path, arrays)
-        uri = self.objects.put(f"{self.model_id}/cells/legacy.npz", path.read_bytes())
+        self.objects.put(f"{self.model_id}/cells/legacy.npz", path.read_bytes())
+        uri = self.objects.uri(f"{self.model_id}/cells/legacy.npz")  # 以前の版は URI を保存していた
         rec["cells_blob"] = {"uri": uri, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                              "cells": rec["cells_blob"]["cells"]}
         j.conn.execute("update nanashi_operation set record = %s, cells_uri = %s where model_id = %s and seq = %s",
@@ -162,6 +155,29 @@ class PgJournalTests(unittest.TestCase):
         for e in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
             check_same_state(self, m, self.journal().open(e()))
         history = self.journal().cell_history(m, "Cost", Product="C", Month="Feb")
+        self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
+
+    def test_concurrent_indexing_does_not_duplicate_history(self):
+        m = build_with(ReferenceEngine())
+        j = self.journal(bulk_cells=3)
+        j.start(m)
+        with m.transaction(user="etl"):
+            m.spread("Cost", 100, Product="C")  # 5 セル。確定の後で反映する
+        others = [self.journal() for _ in range(4)]  # 別々のプロセスが、同時に反映しようとする
+        barrier = threading.Barrier(len(others))
+
+        def index(o):
+            barrier.wait()
+            o.index_pending()
+        threads = [threading.Thread(target=index, args=(o,)) for o in others]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        rows = j.conn.execute("select count(*) from nanashi_cell_change where model_id = %s",
+                              (self.model_id,)).fetchone()[0]
+        self.assertEqual(rows, 5)
+        history = j.cell_history(m, "Cost", Product="C", Month="Feb")
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
 
     def test_bulk_history_is_indexed_later(self):
@@ -219,6 +235,30 @@ class PgJournalTests(unittest.TestCase):
         with self.assertRaises(Fenced):  # 通し番号は合っていても、世代番号が古いので締め出される
             m.set_cell("Price", 13, Product="A")
 
+    def test_prune_removes_old_snapshots_and_bulk_files(self):
+        m = build_with(ReferenceEngine())
+        j = self.journal(bulk_cells=3)
+        j.start(m)
+        with m.transaction(user="etl", client_op_id="bulk"):
+            m.spread("Cost", 100, Product="C")  # 大量の変更のファイル
+        m.checkpoint()
+        m.set_cell("Price", 12, Product="A")
+        m.checkpoint()
+        files = lambda: sorted(self.objects.list(f"{self.model_id}/"))
+        before = files()
+        out = j.prune(keep=1, op_window=0)
+        self.assertEqual(out, {"snapshots": 2, "cells": 1, "client_op_ids": 1})
+        after = files()
+        self.assertEqual(len([k for k in after if k.endswith("/manifest.json")]), 1)
+        self.assertFalse(any("/cells/" in k for k in after))
+        self.assertLess(len(after), len(before))
+        check_same_state(self, m, self.journal().open(ReferenceEngine()))
+        # 消したファイルの記録も、セルの履歴の表から再生できる
+        self.assertEqual([r["seq"] for r in self.journal().records()], [1, 2])
+        history = self.journal().cell_history(m, "Cost", Product="C", Month="Feb")
+        self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
+        self.assertIsNone(self.journal().seq_of("bulk"))  # 覚えておく範囲の外
+
     def test_heartbeat_keeps_the_lease_while_idle(self):
         m = build_with(ReferenceEngine())
         first = self.journal(lease_ttl=0.6)  # 書き込みがなくても延長する
@@ -274,7 +314,7 @@ class PgJournalTests(unittest.TestCase):
         m.checkpoint()
         m.set_cell("Price", 13, Product="A")
         snap = dict(j.snapshots())[1]
-        overwrite(j, f"{snap.uri}/{next(n for n in snap.files if n.startswith('inputs.'))}", b"broken")
+        j.objects.put(f"{snap.uri}/{next(n for n in snap.files if n.startswith('inputs.'))}", b"broken")
         with self.assertLogs("sparse_engine.journal", "WARNING") as logs:  # 1 つ前（0）から開く
             check_same_state(self, m, self.journal().open(ReferenceEngine()))
         self.assertIn("スナップショット 1 が壊れている", logs.output[0])
@@ -309,24 +349,96 @@ class PgJournalS3Tests(PgJournalTests):
         keys = self.keys()
         self.assertEqual({k.split("/")[1] for k in keys}, {"snapshots", "cells"})
         self.assertEqual(len({k.split("/")[2] for k in keys if "/snapshots/" in k}), 2)  # 通し番号 0 と 1
-        self.assertTrue(all(uri.startswith(f"s3://{S3_BUCKET}/{self.model_id}/snapshots/")
-                            for _, (uri, _) in self.journal().snapshots()))
+        self.assertTrue(all(uri.startswith(f"{self.model_id}/snapshots/") for _, (uri, _) in self.journal().snapshots()))
+        self.assertEqual(sum(k.endswith("/manifest.json") for k in keys), 2)
         self.assertEqual(list(Path(self.tmp.name).iterdir()), [])  # ローカルには何も置かない
         check_same_state(self, m, self.journal().open(ReferenceEngine()))
 
-    def test_reads_files_placed_in_a_local_directory_before(self):
-        # ローカルのディレクトリに置いていた記録先を、オブジェクトストレージに移しても開ける
-        m = build_with(ReferenceEngine())
+    def local_journal(self, m):
+        """ローカルのディレクトリにファイルを置く記録先に、大量の変更とスナップショットを残す。"""
         local = PgJournal(DSN, self.model_id, LocalObjects(self.tmp.name), bulk_cells=3)
         self.journals.append(local)
         local.start(m)
         with m.transaction(user="etl"):
             m.spread("Cost", 100, Product="C")
+        m.checkpoint()
         local.close()
         m.journal = None
+        return local
+
+    def test_moved_files_are_read_by_their_keys(self):
+        # 表にはキーだけを保存するので、ファイルをオブジェクトストレージへ写せば、そのまま開ける
+        m = build_with(ReferenceEngine())
+        local = self.local_journal(m)
+        for key in local.objects.list(f"{self.model_id}/"):
+            self.objects.put(key, local.objects.get(key))
+        self.tmp.cleanup()
+        check_same_state(self, m, self.journal().open(ReferenceEngine()))
+
+    def test_reads_files_placed_in_a_local_directory_before(self):
+        # 以前の版は、置き場所の絶対パスを表に保存していた。オブジェクトストレージに移ったあとも読める
+        m = build_with(ReferenceEngine())
+        self.local_journal(m)
+        j = self.journal()
+        with j.conn.transaction():
+            j.conn.execute("update nanashi_snapshot set uri = %s || '/' || uri where model_id = %s",
+                           (self.tmp.name, self.model_id))
+            for seq, rec in j.conn.execute("select seq, record from nanashi_operation where model_id = %s"
+                                           " and cells_uri is not null", (self.model_id,)).fetchall():
+                for f in rec["cells_blob"]["files"]:
+                    f["uri"] = f"{self.tmp.name}/{f['uri']}"
+                j.conn.execute("update nanashi_operation set record = %s where model_id = %s and seq = %s",
+                               (Jsonb(rec), self.model_id, seq))
         check_same_state(self, m, self.journal().open(ReferenceEngine()))
         self.assertEqual(self.keys(), [])
 
-
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(AVAILABLE, "PostgreSQL（NANASHI_PG_DSN）と psycopg、nanashi_core が必要")
+class Schema(unittest.TestCase):
+    """スキーマの版。接続のたびに DDL を流さず、migrate で上げる。"""
+
+    def setUp(self):
+        import psycopg
+        self.db = f"nanashi_schema_{uuid.uuid4().hex[:8]}"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(f"create database {self.db}")
+        self.dsn = DSN.rsplit("/", 1)[0] + "/" + self.db
+        self.addCleanup(self.drop)
+
+    def drop(self):
+        import psycopg
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(f"drop database if exists {self.db} with (force)")
+
+    def test_old_schema_is_refused_until_migrated(self):
+        import psycopg
+        from sparse_engine.pg_journal import MIGRATIONS, SchemaError, migrate
+        with psycopg.connect(self.dsn, autocommit=True) as conn:  # 以前の版が作った表（版の表はない）
+            conn.execute(MIGRATIONS[0][1])
+            conn.execute("insert into nanashi_model (model_id) values ('old')")
+            conn.execute("insert into nanashi_operation (model_id, seq, at, record) values"
+                         " ('old', 1, '2026-01-02T03:04:05.678+00:00', '{}')")
+            for _ in range(2):  # 以前の版は、同じセルの履歴を二重に書くことがあった
+                conn.execute("insert into nanashi_cell_change values ('old', 1, 5, '{1,2}', null, 3)")
+        with self.assertRaisesRegex(SchemaError, "migrate"):
+            PgJournal(self.dsn, "old", tempfile.mkdtemp())
+        self.assertEqual(migrate(self.dsn), (0, 2))
+        self.assertEqual(migrate(self.dsn), (2, 2))  # 何度流してもよい
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            self.assertEqual(conn.execute("select data_type from information_schema.columns"
+                                          " where table_name = 'nanashi_operation' and column_name = 'at'").fetchone()[0],
+                             "timestamp with time zone")
+            self.assertEqual(conn.execute("select count(*) from nanashi_cell_change").fetchone()[0], 1)
+            with self.assertRaises(psycopg.errors.UniqueViolation):
+                conn.execute("insert into nanashi_cell_change values ('old', 1, 5, '{1,2}', null, 3)")
+        j = PgJournal(self.dsn, "new", tempfile.mkdtemp(), heartbeat=False)
+        m = build_with(ReferenceEngine())
+        j.start(m)
+        with m.transaction(user="alice"):
+            m.set_cell("Price", 12, Product="A")
+        (h,) = j.cell_history(m, "Price", Product="A")
+        self.assertEqual(h["at"], m.last_record["at"])  # 時刻は記録の JSON と同じ形の文字列で返す
+        j.close()
