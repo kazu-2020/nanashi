@@ -271,6 +271,39 @@ class PgJournalTests(unittest.TestCase):
         m.set_cell("Price", 14, Product="A")  # 自分は書ける
         self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 14)
 
+    def test_take_does_not_wait_and_records_the_endpoint(self):
+        m = build_with(ReferenceEngine())
+        self.journal(heartbeat=False).start(m)
+        a = self.journal(lease_ttl=0.6, heartbeat=False, endpoint="http://a:1")
+        b = self.journal(lease_ttl=0.6, heartbeat=False, endpoint="http://b:2")
+        self.assertIsNone(b.leader())  # まだ誰も持っていない
+        self.assertTrue(a.take())
+        t = time.perf_counter()
+        self.assertFalse(b.take())  # 期限内は取れず、待たない
+        self.assertLess(time.perf_counter() - t, 0.3)
+        self.assertEqual((a.leader(), b.leader()), ("http://a:1", "http://a:1"))
+        a.release()
+        self.assertIsNone(b.leader())  # 手放したら書き手はいない
+        self.assertTrue(b.take())
+        self.assertEqual(a.leader(), "http://b:2")
+        time.sleep(0.7)
+        self.assertIsNone(a.leader())  # 期限が切れたら書き手はいない
+        self.assertTrue(a.take())  # 切れたリースは取れる（世代番号が進む）
+        m.journal = b
+        with self.assertRaises(Fenced):  # 古い持ち主の確定は締め出される
+            m.set_cell("Price", 12, Product="A")
+
+    def test_release_wakes_a_waiting_follower(self):
+        m = build_with(ReferenceEngine())
+        self.journal(heartbeat=False).start(m)
+        a, b = self.journal(heartbeat=False), self.journal(heartbeat=False)
+        a.acquire()
+        b.wait(0.0)  # 通知を待つ接続をつないでおく
+        threading.Timer(0.2, a.release).start()
+        t = time.perf_counter()
+        b.wait(5.0)  # 手放したときの通知で、間隔を待たずに戻る
+        self.assertLess(time.perf_counter() - t, 2.0)
+
     def test_acquire_waits_for_a_dead_writers_lease(self):
         m = build_with(ReferenceEngine())
         dead = self.journal(lease_ttl=0.6, heartbeat=False)  # 落ちたプロセス（延長しない）
@@ -425,8 +458,8 @@ class Schema(unittest.TestCase):
                 conn.execute("insert into nanashi_cell_change values ('old', 1, 5, '{1,2}', null, 3)")
         with self.assertRaisesRegex(SchemaError, "migrate"):
             PgJournal(self.dsn, "old", tempfile.mkdtemp())
-        self.assertEqual(migrate(self.dsn), (0, 2))
-        self.assertEqual(migrate(self.dsn), (2, 2))  # 何度流してもよい
+        self.assertEqual(migrate(self.dsn), (0, 3))
+        self.assertEqual(migrate(self.dsn), (3, 3))  # 何度流してもよい
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             self.assertEqual(conn.execute("select data_type from information_schema.columns"
                                           " where table_name = 'nanashi_operation' and column_name = 'at'").fetchone()[0],
