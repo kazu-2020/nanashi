@@ -408,10 +408,17 @@ class Server(ThreadingHTTPServer):
             raise
 
     def process_request_thread(self, request, client_address) -> None:
+        """ThreadingMixIn のものと同じだが、接続を閉じる前に枠を返す。
+
+        閉じたのを見てすぐにつなぎ直した要求が、まだ返していない枠のせいで 503 にならないようにする。
+        """
         try:
-            super().process_request_thread(request, client_address)
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
         finally:
             self._slots.release()
+            self.shutdown_request(request)
 
     @property
     def url(self) -> str:

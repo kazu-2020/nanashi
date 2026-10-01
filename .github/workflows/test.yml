@@ -2,7 +2,12 @@ name: test
 
 on:
   push:
+    branches: [main]  # ほかのブランチは pull_request で回す（push と二重に回さない）
   pull_request:
+
+concurrency:  # 同じ PR に続けて push したら、古いほうの実行は止める
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -28,15 +33,24 @@ jobs:
         ports: ["59000:9000"]
         options: >-
           --health-cmd "curl -fsS http://127.0.0.1:9000/health" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
+      NANASHI_S3_ENDPOINT: http://127.0.0.1:59000
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - uses: dtolnay/rust-toolchain@stable
+      - name: ビルドした Rust のエンジンを取り出す  # native/ が変わっていなければ、ビルドを省く
+        id: wheel
+        uses: actions/cache@v6
         with:
-          components: clippy
+          path: wheelhouse
+          key: nanashi-core-${{ runner.os }}-py${{ matrix.python }}-${{ hashFiles('native/Cargo.toml', 'native/Cargo.lock', 'native/pyproject.toml', 'native/src/**', 'native/engine/Cargo.toml', 'native/engine/src/**') }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.wheel.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.wheel.outputs.cache-hit != 'true'
         with:
           workspaces: native
       - uses: actions/setup-go@v7  # ルーター（router/）
@@ -47,24 +61,38 @@ jobs:
         run: |
           sudo apt-get install -y libpq5  # 純 Python 版の psycopg が使う
           python -m pip install -e ".[dev]"
-          python -m pip install --no-build-isolation ./native  # maturin でビルドして入れる（仮想環境は要らない）
+          if [ ! -d wheelhouse ]; then
+            python -m pip wheel --no-build-isolation --no-deps ./native -w wheelhouse  # maturin でビルドする
+          fi
+          python -m pip install wheelhouse/nanashi_core-*.whl
+      # テストはモジュールごとに別のプロセスで並べて回す（tests/parallel.py）。待ち時間が多いので、順に回すより速い
       - name: 参照実装でテストする
-        run: SPARSE_ENGINE=reference python -m unittest discover -s tests -t .
+        run: SPARSE_ENGINE=reference python -m tests.parallel
       - name: Rust のエンジンでテストする
-        run: SPARSE_ENGINE=rust python -m unittest discover -s tests -t .
-        env:
-          NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
-          NANASHI_S3_ENDPOINT: http://127.0.0.1:59000
+        run: SPARSE_ENGINE=rust python -m tests.parallel
       - name: ルーターのテスト  # PgResolver のテストは、Python のテストが作った nanashi_model の表を使う
         working-directory: router
         run: |
           go vet ./...
-          go test ./...
-        env:
-          NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
+          go test -count=1 ./...  # 表の中身はテストのキャッシュの鍵に入らないので、キャッシュを使わない
+      - name: 静的検査（Python）
+        run: pyflakes sparse_engine tests examples bench*.py
+
+  # Rust の単体テストと clippy は Python の版によらないので、Python のテストと並べて 1 回だけ回す
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7  # pyo3（nanashi_core）のビルドに使う
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
       - name: Rust の単体テスト
         run: cargo test --release --workspace --manifest-path native/Cargo.toml
-      - name: 静的検査
-        run: |
-          pyflakes sparse_engine tests examples bench*.py
-          cargo clippy --release --workspace --all-targets --manifest-path native/Cargo.toml -- -D warnings
+      - name: 静的検査（Rust）
+        run: cargo clippy --release --workspace --all-targets --manifest-path native/Cargo.toml -- -D warnings
