@@ -12,3 +12,7 @@ parquet = { version = "60", default-features = false, features = ["arrow", "zstd
 arrow-array = "60"
 arrow-schema = "60"
 bytes = "1"
+
+[dev-dependencies]
+# examples/out_of_core.rs の mmap、posix_fadvise、proc_pid_rusage
+libc = "0.2"
