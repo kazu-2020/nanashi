@@ -88,8 +88,8 @@ class Standby(JournalCase):
                     move("p2", "p3", "Jan", 7)(m)  # a が権利を持っている間は Fenced（何もしない）
                     other.release()
                     committed.set()
-                except Fenced:
-                    pass
+                except Fenced:  # まだ a が持っている。ここで取らせると、a が手放した直後なら確定なしで取れてしまう
+                    return False
             return real_take()
         self.b.journal.take = take
         self.a.write(move("p0", "p1", "Jan", 5))

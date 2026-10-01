@@ -401,9 +401,12 @@ class Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
+        # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（SIGTERM）は
+        # スレッドを起こしたあとにも届き、そのスレッドも枠を返す。ここでも返すと 2 度返して ValueError になり、
+        # socketserver がそれを握りつぶして止まらなくなる（止まるので、枠が 1 つ減っても困らない）
         try:
             super().process_request(request, client_address)
-        except BaseException:
+        except Exception:
             self._slots.release()
             raise
 
