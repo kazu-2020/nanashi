@@ -25,6 +25,9 @@ python3.14t -m venv .venv-ft
 VIRTUAL_ENV=$PWD/.venv-ft .venv-ft/bin/maturin develop --release -m native/Cargo.toml
 ```
 GitHub Actions（`.github/workflows/test.yml`）が、両方のエンジンでテストと静的検査を回す。
+Python のテストは Python の版ごとのジョブで、Rust の単体テストと clippy は別のジョブで並べて回す。
+ビルドした `nanashi_core` は `native/` の中身ごとにキャッシュし、`native/` を変えていなければビルドを省く。
+`main` 以外のブランチは、push ではなく pull request で回す。
 
 テストは次のように実行する。
 `SPARSE_ENGINE` で既定のエンジンを選ぶ（`reference` または `rust`。指定しなければ `reference`）。
@@ -33,11 +36,14 @@ CI は両方で回す。
 ```bash
 SPARSE_ENGINE=rust .venv/bin/python -m unittest discover -s tests -t .
 SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads   # 1 つのファイル（クラスやテストまで指定もできる）
+SPARSE_ENGINE=rust .venv/bin/python -m tests.parallel   # モジュールごとに別のプロセスで並べて回す（CI はこれを使う）
 cargo test --release --workspace --manifest-path native/Cargo.toml   # Rust の単体テスト
 ```
 
 `native/` を変えたら、Python のテストの前に `maturin develop` でビルドし直す（テストは `.venv` に入った `nanashi_core` を読む）。
 `nanashi_core` をビルドしていないと、Rust のエンジンのテストは失敗せずにスキップされるので、スキップの数も見る。
+テストの多くは PostgreSQL への往復やサーバーの起動、リースの期限を待つ時間が占めるので、`tests.parallel` で並べると順に回すより 3 倍ほど速い（4 コアで 137 秒が 37 秒）。
+最後にモジュールごとの件数とスキップの数、全体の合計を出す。
 
 静的検査は CI と同じく次の 2 つである。
 

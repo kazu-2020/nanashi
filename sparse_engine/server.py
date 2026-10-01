@@ -401,17 +401,27 @@ class Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
+        # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（SIGTERM）は
+        # スレッドを起こしたあとにも届き、そのスレッドも枠を返す。ここでも返すと 2 度返して ValueError になり、
+        # socketserver がそれを握りつぶして止まらなくなる（止まるので、枠が 1 つ減っても困らない）
         try:
             super().process_request(request, client_address)
-        except BaseException:
+        except Exception:
             self._slots.release()
             raise
 
     def process_request_thread(self, request, client_address) -> None:
+        """ThreadingMixIn のものと同じだが、接続を閉じる前に枠を返す。
+
+        閉じたのを見てすぐにつなぎ直した要求が、まだ返していない枠のせいで 503 にならないようにする。
+        """
         try:
-            super().process_request_thread(request, client_address)
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
         finally:
             self._slots.release()
+            self.shutdown_request(request)
 
     @property
     def url(self) -> str:

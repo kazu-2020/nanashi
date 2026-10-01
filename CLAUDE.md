@@ -21,6 +21,9 @@ docker compose up -d
 SPARSE_ENGINE=reference .venv/bin/python -m unittest discover -s tests -t .
 SPARSE_ENGINE=rust .venv/bin/python -m unittest discover -s tests -t .
 
+# モジュールごとに別のプロセスで並べて回す（CI はこれを使う。待ち時間が多いので、順に回すより 3 倍ほど速い）
+SPARSE_ENGINE=rust .venv/bin/python -m tests.parallel
+
 # 1 つのファイル、クラス、テストだけ
 SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads
 SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads.<クラス>.<テスト>

@@ -246,6 +246,39 @@ class Limits(unittest.TestCase):
                 s.close()
             server.stop()
 
+    def test_interrupt_while_starting_a_request_thread_stops_the_server(self):
+        # SIGTERM（KeyboardInterrupt）が、要求のスレッドを起こしている途中に届いても握りつぶさずに止まる。
+        # 起こしたスレッドは自分で枠を返すので、ここで返すと 2 度返して ValueError になり、割り込みが消えていた
+        server = Server(self.ws, "127.0.0.1", 0, max_threads=1, request_timeout=5)
+        raised = []
+
+        def serve():
+            try:
+                server.serve_forever(poll_interval=0.05)
+            except BaseException as e:
+                raised.append(e)
+        serving = threading.Thread(target=serve, daemon=True)
+        serving.start()
+        real_start = threading.Thread.start
+
+        def start(t):
+            real_start(t)
+            t.join()  # 要求を処理し終えて枠を返してから、割り込みが届く
+            raise KeyboardInterrupt
+        try:
+            with mock.patch.object(threading.Thread, "start", start):
+                with socket.create_connection(server.server_address[:2]) as s:
+                    s.sendall(b"GET /health HTTP/1.0\r\n\r\n")
+                    s.settimeout(5)
+                    self.assertTrue(s.recv(100).startswith(b"HTTP/1.0 200"))
+                serving.join(timeout=5)
+            self.assertEqual([type(e) for e in raised], [KeyboardInterrupt])
+            self.assertTrue(server._slots.acquire(blocking=False))  # 枠は 1 度だけ返っている
+        finally:
+            if serving.is_alive():
+                server.shutdown()
+            server.server_close()
+
     def test_stalled_connection_is_dropped(self):
         server = Server(self.ws, "127.0.0.1", 0, max_threads=1, request_timeout=0.2).start()
         try:

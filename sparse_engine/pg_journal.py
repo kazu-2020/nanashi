@@ -317,8 +317,9 @@ class PgJournal(Journal):
                         self.lease_until = started + self.lease_ttl
                     self.lease_error = None
             except Exception as e:  # 接続の一時的な失敗。期限までに延長できなければ、次の確定で締め出される
-                self.lease_error = e
+                # 先にログを出す。lease() で理由が見えた時点で、ログも出ているようにする
                 log.warning("%s: リースを延長できなかった", self.model_id, exc_info=True)
+                self.lease_error = e
 
     def lease(self) -> dict:
         """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
