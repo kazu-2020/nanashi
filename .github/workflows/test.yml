@@ -39,6 +39,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
+      - uses: actions/setup-go@v7  # ルーター（router/）
+        with:
+          go-version-file: router/go.mod
+          cache-dependency-path: router/go.sum
       - name: 依存を入れて Rust のエンジンをビルドする
         run: |
           sudo apt-get install -y libpq5  # 純 Python 版の psycopg が使う
@@ -51,6 +55,13 @@ jobs:
         env:
           NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
           NANASHI_S3_ENDPOINT: http://127.0.0.1:59000
+      - name: ルーターのテスト  # PgResolver のテストは、Python のテストが作った nanashi_model の表を使う
+        working-directory: router
+        run: |
+          go vet ./...
+          go test ./...
+        env:
+          NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
       - name: Rust の単体テスト
         run: cargo test --release --workspace --manifest-path native/Cargo.toml
       - name: 静的検査

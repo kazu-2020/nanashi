@@ -1,4 +1,5 @@
 """書き手のサーバーのプロセスを止めて、もう一方のサーバーに引き継がせる（tests/failover.py）。"""
+import shutil
 import signal
 import unittest
 
@@ -20,6 +21,23 @@ class Failover(unittest.TestCase):
         report = run(signal.SIGKILL)
         self.assertEqual(violations(report), [])
         self.assertLess(report.gap, LEASE_TTL + 3.0, report.failures)
+
+    @unittest.skipUnless(shutil.which("go"), "ルーターのビルドに Go が要る")
+    def test_router_sigterm_handover(self):
+        # 送り手はルーターにだけ送り、書き手を探して送り直すのはルーターに任せる
+        from .failover import run, violations
+        report = run(signal.SIGTERM, via_router=True)
+        self.assertEqual(violations(report), [])
+        self.assertLess(report.gap, 2.0)
+        self.assertEqual(report.failures, {})  # ルーターは 200 以外を返さず、つながらないこともない
+
+    @unittest.skipUnless(shutil.which("go"), "ルーターのビルドに Go が要る")
+    def test_router_sigkill_handover(self):
+        from .failover import LEASE_TTL, run, violations
+        report = run(signal.SIGKILL, via_router=True)
+        self.assertEqual(violations(report), [])
+        self.assertLess(report.gap, LEASE_TTL + 3.0)
+        self.assertEqual(report.failures, {})
 
     def test_sigterm_releases_lease(self):
         import psycopg

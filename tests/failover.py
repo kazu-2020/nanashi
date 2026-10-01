@@ -1,10 +1,12 @@
 """書き手のサーバーを止めても、確定を返した書き込みが失われず二重にもならないことを、2 つのサーバーのプロセスで確かめる。
 
-    python -m tests.failover --signal TERM
+    python -m tests.failover --signal TERM [--via-router]
 
 同じモデルを 2 つのサーバーで開く。先に起こした A が書き手（leader）になり、B は待機系（standby）になる。
 複数の送り手が A に書き込み続ける中で、A にシグナルを送る。送り手は確定を受け取るまで、同じ client_op_id の
 まま再送する（接続できないときと 503 のときはもう一方のサーバーへ、421 のときは応答にある書き手へ送る）。
+--via-router なら、送り手はルーター（router/）の /models/<モデルの ID>/writes にだけ送り、送り先を変えない。
+書き手を探して送り直すのはルーターの役目なので、ルーターが 200 以外を返せば失敗として数える。
 両方のサーバーを止めたあと、記録先の記録と開き直したモデルの値を、送り手が受け取った確定と突き合わせる。
 リースの期限は短くして（--lease-ttl、既定 3 秒）、SIGKILL の引き継ぎもすぐ測れるようにする。
 PostgreSQL（NANASHI_PG_DSN）を使う。
@@ -17,6 +19,7 @@ import http.client
 import itertools
 import json
 import math
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,7 +31,7 @@ import urllib.error
 import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -48,7 +51,7 @@ WARMUP = 50            # A を止める前に受け取る確定の数
 AFTER = 50             # A を止めたあとに受け取る確定の数
 SETTLE = 2.0           # A を止めたあとの最初の確定から、さらに書き込み続ける秒数
 GIVE_UP = 120.0        # 1 つの書き込みの確定を諦めるまでの秒数
-CLIENT_TIMEOUT = 70.0  # サーバーが確定を待つ長さ（30 秒）より長くして、504 を受け取れるようにする
+CLIENT_TIMEOUT = 100.0  # サーバーが確定を待つ長さ（30 秒）とルーターが送り直す期限（90 秒）より長くする
 BACKOFF = 0.1
 LEASE_TTL = 3.0        # サーバーに渡すリースの期限（秒）。SIGKILL の引き継ぎはこの長さを待つ
 
@@ -133,6 +136,36 @@ def serving(model_id: str, tmp: Path, name: str, *, lease_ttl: float = LEASE_TTL
         proc.wait()
 
 
+@contextmanager
+def routing(tmp: Path) -> Iterator[Server]:
+    """ルーターをビルドして起こし、/healthz が 200 を返すまで待つ。抜けるときに止める。"""
+    go = shutil.which("go")
+    if go is None:
+        raise RuntimeError("ルーターのビルドに Go が要る")
+    binary = tmp / "nanashi-router"
+    subprocess.run([go, "build", "-o", str(binary), "./cmd/nanashi-router"], cwd=ROOT / "router", check=True)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    log = tmp / "router.log"
+    with open(log, "wb") as out:
+        proc = subprocess.Popen([str(binary), "--pg", DSN, "--listen", f"127.0.0.1:{port}"], stdout=out, stderr=out)
+    router = Server(proc, f"http://127.0.0.1:{port}", log)
+    try:
+        deadline = time.monotonic() + 30
+        while not healthy(router.url + "/healthz"):
+            if proc.poll() is not None:
+                raise RuntimeError(f"ルーターが終了した（{proc.returncode}）:\n{log.read_text()}")
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{router.url} が 30 秒で起きなかった")
+            time.sleep(0.05)
+        yield router
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+        proc.wait(timeout=10)
+
+
 def wait_ready(server: Server, timeout: float = 60.0, role: str | None = None) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -146,6 +179,13 @@ def wait_ready(server: Server, timeout: float = 60.0, role: str | None = None) -
             pass
         time.sleep(0.1)
     raise TimeoutError(f"{server.url} が {timeout} 秒で要求を受けられる{role or ''}にならなかった")
+
+
+def healthy(url: str) -> bool:
+    try:
+        return get(url)[0] == 200
+    except OSError:
+        return False
 
 
 def get(url: str) -> tuple[int, dict]:
@@ -187,14 +227,14 @@ def deliver(write: Write, urls: list[str], target: int, report: Report, lock: th
             if status == 200:
                 return Ack(write, body["seq"], time.monotonic(), attempt), target
             failure = f"{status} {body.get('error')}"
-            if status == 421:  # 待機系。応答にある書き手へ送る（分からなければ、もう一方へ）
-                target = urls.index(body["leader"]) if body.get("leader") in urls else 1 - target
+            if status == 421:  # 待機系。応答にある書き手へ送る（分からなければ、次へ）
+                target = urls.index(body["leader"]) if body.get("leader") in urls else (target + 1) % len(urls)
             elif status == 503:
-                target = 1 - target
+                target = (target + 1) % len(urls)
             elif status < 500 and status != 429:
                 raise AssertionError(f"{write}: {failure}")
         except (OSError, http.client.HTTPException) as e:  # 応答の途中で切れれば IncompleteRead
-            failure, target = type(getattr(e, "reason", e)).__name__, 1 - target
+            failure, target = type(getattr(e, "reason", e)).__name__, (target + 1) % len(urls)
         with lock:
             report.failures[failure] += 1
         if time.monotonic() > deadline:
@@ -228,8 +268,8 @@ def wait_until(cond, clients: list[Future], timeout: float = GIVE_UP + 30) -> No
         time.sleep(0.05)
 
 
-def run(sig: signal.Signals, lease_ttl: float = LEASE_TTL) -> Report:
-    """A に書き込み続ける中で A に sig を送り、B に引き継がせる。"""
+def run(sig: signal.Signals, lease_ttl: float = LEASE_TTL, via_router: bool = False) -> Report:
+    """A に書き込み続ける中で A に sig を送り、B に引き継がせる。via_router なら送り手はルーターにだけ送る。"""
     report, lock, stop = Report(), threading.Lock(), threading.Event()
 
     def acked(after: float) -> list[float]:
@@ -241,9 +281,12 @@ def run(sig: signal.Signals, lease_ttl: float = LEASE_TTL) -> Report:
         return len(after) >= AFTER and time.monotonic() >= min(after) + SETTLE
 
     with (seeded_model() as (model_id, tmp), serving(model_id, tmp, "a", lease_ttl=lease_ttl, role="leader") as a,
-          serving(model_id, tmp, "b", lease_ttl=lease_ttl, role="standby") as b):
+          serving(model_id, tmp, "b", lease_ttl=lease_ttl, role="standby") as b, ExitStack() as stack):
+        urls = [a.url, b.url]
+        if via_router:
+            urls = [f"{stack.enter_context(routing(tmp)).url}/models/{model_id}"]
         with ThreadPoolExecutor(CLIENTS) as pool:
-            clients = [pool.submit(client, k, [a.url, b.url], report, lock, stop) for k in range(CLIENTS)]
+            clients = [pool.submit(client, k, urls, report, lock, stop) for k in range(CLIENTS)]
             try:
                 wait_until(lambda: len(acked(0.0)) >= WARMUP, clients)
                 report.killed_at = time.monotonic()
@@ -304,8 +347,9 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="書き手のサーバーを止めて、もう一方のサーバーに引き継がせる")
     ap.add_argument("--signal", choices=["TERM", "KILL"], default="TERM", help="A に送るシグナル")
     ap.add_argument("--lease-ttl", type=float, default=LEASE_TTL, help="サーバーに渡すリースの期限（秒）")
+    ap.add_argument("--via-router", action="store_true", help="送り手はルーターにだけ送る（Go が要る）")
     args = ap.parse_args(argv)
-    report = run(signal.Signals[f"SIG{args.signal}"], args.lease_ttl)
+    report = run(signal.Signals[f"SIG{args.signal}"], args.lease_ttl, args.via_router)
     problems = violations(report)
     print(f"送った書き込み {len(report.issued)}、確定 {len(report.acks)}、"
           f"再送した書き込み {sum(a.attempts > 1 for a in report.acks)}")
