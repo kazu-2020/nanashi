@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,35 +18,38 @@ import (
 func TestDecide(t *testing.T) {
 	tests := []struct {
 		name   string
+		method string // POST unless set
 		status int
 		head   string
 		want   decision
 	}{
-		{"ok", 200, `{"seq": 3}`, decision{action: deliver}},
-		{"bad request", 400, `{"error": "bad_request"}`, decision{action: deliver}},
-		{"unauthorized", 401, `{"error": "unauthorized"}`, decision{action: deliver}},
-		{"not found", 404, `{"error": "not_found"}`, decision{action: deliver}},
-		{"method", 405, `{"error": "read_only"}`, decision{action: deliver}},
-		{"conflict", 409, `{"error": "conflict", "seq": 4}`, decision{action: deliver}},
-		{"length required", 411, `{"error": "length_required"}`, decision{action: deliver}},
-		{"too large", 413, `{"error": "too_large"}`, decision{action: deliver}},
-		{"not leader", 421, `{"error": "not_leader", "leader": "http://a:8080"}`, decision{action: redirect, leader: "http://a:8080"}},
-		{"not leader, unknown leader", 421, `{"error": "not_leader", "leader": null}`, decision{action: reresolve}},
-		{"not leader, not a URL", 421, `{"error": "not_leader", "leader": "a:8080"}`, decision{action: reresolve}},
-		{"not leader, no body", 421, ``, decision{action: reresolve}},
-		{"overloaded", 429, `{"error": "overloaded"}`, decision{action: retrySame}},
-		{"internal", 500, `{"error": "internal"}`, decision{action: reresolve}},
-		{"busy", 503, `{"error": "busy"}`, decision{action: reresolve}},
-		{"stale", 503, `{"error": "stale"}`, decision{action: reresolve}},
-		{"closed", 503, `{"error": "closed"}`, decision{action: reresolve}},
-		{"not ready", 503, `{"ready": false, "reasons": ["x"]}`, decision{action: deliver}},
-		{"timeout", 504, `{"error": "timeout"}`, decision{action: reresolve}},
-		{"no response", 0, ``, decision{action: reresolve}},
+		{"ok", "", 200, `{"seq": 3}`, decision{action: deliver}},
+		{"bad request", "", 400, `{"error": "bad_request"}`, decision{action: deliver}},
+		{"unauthorized", "", 401, `{"error": "unauthorized"}`, decision{action: deliver}},
+		{"not found", "", 404, `{"error": "not_found"}`, decision{action: deliver}},
+		{"method", "", 405, `{"error": "read_only"}`, decision{action: deliver}},
+		{"conflict", "", 409, `{"error": "conflict", "seq": 4}`, decision{action: deliver}},
+		{"length required", "", 411, `{"error": "length_required"}`, decision{action: deliver}},
+		{"too large", "", 413, `{"error": "too_large"}`, decision{action: deliver}},
+		{"not leader", "", 421, `{"error": "not_leader", "leader": "http://a:8080"}`, decision{action: redirect, leader: "http://a:8080"}},
+		{"not leader, unknown leader", "", 421, `{"error": "not_leader", "leader": null}`, decision{action: reresolve}},
+		{"not leader, not a URL", "", 421, `{"error": "not_leader", "leader": "a:8080"}`, decision{action: reresolve}},
+		{"not leader, no body", "", 421, ``, decision{action: reresolve}},
+		{"overloaded", "", 429, `{"error": "overloaded"}`, decision{action: retrySame}},
+		{"internal", "", 500, `{"error": "internal"}`, decision{action: reresolve}},
+		{"internal on a read", "GET", 500, `{"error": "internal"}`, decision{action: deliver}},
+		{"busy", "", 503, `{"error": "busy"}`, decision{action: reresolve}},
+		{"stale", "", 503, `{"error": "stale"}`, decision{action: reresolve}},
+		{"closed", "", 503, `{"error": "closed"}`, decision{action: reresolve}},
+		{"not ready", "", 503, `{"ready": false, "reasons": ["x"]}`, decision{action: deliver}},
+		{"timeout", "", 504, `{"error": "timeout"}`, decision{action: reresolve}},
+		{"no response", "", 0, ``, decision{action: reresolve}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := decide(tt.status, []byte(tt.head)); got != tt.want {
-				t.Errorf("decide(%d, %s) = %+v, want %+v", tt.status, tt.head, got, tt.want)
+			method := cmp.Or(tt.method, http.MethodPost)
+			if got := decide(method, tt.status, []byte(tt.head)); got != tt.want {
+				t.Errorf("decide(%s, %d, %s) = %+v, want %+v", method, tt.status, tt.head, got, tt.want)
 			}
 		})
 	}

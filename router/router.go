@@ -127,7 +127,7 @@ func (rt *Router) forward(ctx context.Context, model string, out outgoing) write
 		pause := true
 		if target != "" {
 			last = send(ctx, target, out)
-			d := decide(last.status(), last.head)
+			d := decide(out.method, last.status(), last.head)
 			switch d.action {
 			case deliver:
 				return last
@@ -276,15 +276,20 @@ type decision struct {
 
 // decide maps one attempt's outcome to what the router does next. status 0 means no complete response.
 // Every resend is safe because the body is unchanged and the engine deduplicates client_op_id.
-func decide(status int, head []byte) decision {
+// A 500 is resent only for writes, where the commit may have succeeded; on a read it is the answer.
+func decide(method string, status int, head []byte) decision {
 	var body struct {
 		Error  string  `json:"error"`
 		Leader *string `json:"leader"`
 	}
 	json.Unmarshal(head, &body)
 	switch status {
-	case 0, http.StatusInternalServerError, http.StatusGatewayTimeout:
+	case 0, http.StatusGatewayTimeout:
 		return decision{action: reresolve}
+	case http.StatusInternalServerError:
+		if method == http.MethodPost {
+			return decision{action: reresolve}
+		}
 	case http.StatusMisdirectedRequest:
 		if body.Leader != nil && isHTTPURL(*body.Leader) {
 			return decision{action: redirect, leader: *body.Leader}
