@@ -35,7 +35,7 @@
 
 同じモデルを複数のサーバーで開くと、書き込みの権利（リース）を持つ 1 つが書き手になり、ほかは待機系として追従する（`Workspace(standby=True)`。[同時の読み書き](concurrency.md)）。
 待機系は読み出しを受け、書き込みは 421 と `{"error": "not_leader", "leader": <書き手の番地>}` で拒むので、送り手は `leader` へ送り直す。
-ルーターは `nanashi_model.lease_endpoint` でも書き手を見つけられる。
+ルーター（[router.md](router.md)）は `nanashi_model.lease_endpoint` で書き手を見つける。
 書き手としてほかのプロセスに知らせる自分の番地は `--advertise`（既定は `http://<host>:<port>`。`0.0.0.0` で待ち受けるときは必須）、リースの期限は `--lease-ttl`（既定 30 秒）で決める。
 
 SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き込みを確定させ、リースを手放してから止まる（ECS などのコンテナは SIGTERM で止める）。

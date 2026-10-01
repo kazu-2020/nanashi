@@ -98,6 +98,8 @@ PostgreSQL は `NANASHI_PG_DSN`（既定は手元の 55432 番）で指定し、
 送り手は確定を受け取るまで同じ `client_op_id` で再送し、つながらないときと 503 のときはもう一方へ、421 のときは応答にある書き手へ送る。
 両方を止めたあと、記録先の記録と開き直したモデルの値を、受け取った確定と突き合わせ、確定が途切れた最も長い間も測る（`python -m tests.failover --signal TERM`。PostgreSQL が要る。リースの期限は 3 秒にして回す）。
 SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限と待機系が権利を試す間隔の分（約 3.2 秒）途切れる。
+`--via-router` なら、送り手はルーターにだけ送り、送り先を変えない（ルーターが 200 以外を返せば失敗として数える）。
+ルーターの送り直しの判断は、Go のテスト（`router/` で `go test ./...`）で、偽のエンジンと偽の書き手の引き先を使って確かめる。
 待機系が書き手の番地を返して書き込みを拒むこと、起動し直したプロセスが待機系として追従することも、同じ仕組みで確かめる（`tests/test_failover.py`）。
 待機系の役割の変わり方そのもの（昇格、降格、降格の直前に列に入った書き込み）は、1 つのプロセスの中の 2 つの `Workspace` で確かめる（`tests/test_standby.py`）。
 
@@ -117,6 +119,7 @@ SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限と待機系が権�
 | `sparse_engine/pg_journal.py` | PostgreSQL の記録先（リースと締め出し、大量の変更の後からの反映） |
 | `sparse_engine/objects.py` | ファイルの置き場所（`put`、`get`、`list`、`delete` を持つ BlobStore。S3 互換か、ローカルのディレクトリ）。記録先のスナップショットと大量の変更のファイルを置く |
 | `sparse_engine/server.py` | HTTP サーバー（Workspace を JSON の API で公開する） |
+| `router/` | ルーター（Go）。`router.go` が書き手への送り直し（応答ごとの次の動きは `decide`）、`pg.go` が記録先から書き手を引く `PgResolver`、`cmd/nanashi-router/` がコマンド |
 | `native/engine/` | Rust のエンジン（`nanashi-engine`、Python に依存しない）。`key.rs` がキーの詰め方、`store.rs` が格納、`ast.rs` が式の構文木、`eval/` が評価（`join.rs` が突き合わせ、`agg.rs` が集計）、`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き、`config.rs` が速さのための調整値。`tests/` に格納の性質テスト（BTreeMap と突き合わせる） |
 | `native/src/lib.rs` | Python から使う薄い層（`nanashi_core`、PyO3）。受け取った番号と長さはここで検査する |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |

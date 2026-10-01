@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-nanashi は、Pigment のような計画ツールのための疎な多次元計算エンジンである。Python のパッケージ `sparse_engine` と、Rust のエンジン `nanashi_core`（`native/`）の 2 層からなる。
+nanashi は、Pigment のような計画ツールのための疎な多次元計算エンジンである。Python のパッケージ `sparse_engine` と、Rust のエンジン `nanashi_core`（`native/`）の 2 層からなる。サーバーの前に置く Go のルーター（`router/`）もある。
 コメント、docstring、エラーの文言、ドキュメント、コミットメッセージはすべて日本語で書く。
 仕様は `docs/` にある（一覧は README.md の「ドキュメント」）。振る舞いや性能を変えたら、該当する `docs/` の文書と表も直す。
 
@@ -27,6 +27,9 @@ SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads.<クラス>.<�
 
 # Rust の単体テスト（native/engine/tests/ の性質テストを含む）
 cargo test --release --workspace --manifest-path native/Cargo.toml
+
+# ルーター（Go）。PgResolver のテストは、Python のテストが作った nanashi_model の表を使う
+(cd router && go vet ./... && go test ./...)
 
 # 静的検査（CI と同じ）
 .venv/bin/pyflakes sparse_engine tests examples bench*.py
@@ -84,6 +87,7 @@ cargo clippy --release --workspace --all-targets --manifest-path native/Cargo.to
 - `Model` を複数のスレッドから直接使わない。同時に使うときは `Workspace` か `Replica` を通す。
 - HTTP の書き込みは `client_op_id` が必須で、再送しても二重に確定しない。
 - 本番の記録先は `PgJournal` で、`FileJournal` は主に開発と検証に使う。
+- ルーター（`docs/router.md`）は書き込みを送り直す。送り直しても二重に確定しないのは `client_op_id` があるためで、応答ごとの次の動き（`router.go` の `decide`）を変えるときはこの前提を崩さない。
 
 ## テストの考え方
 

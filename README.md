@@ -60,6 +60,7 @@ Metric の軸と値の種類は登録時に決め、あとから変えない。
 | [docs/persistence.md](docs/persistence.md) | 保存と読み込み、トランザクションと記録、PostgreSQL の記録先 |
 | [docs/concurrency.md](docs/concurrency.md) | 同時の読み書き（`Workspace`、`Replica`、待機系への引き継ぎ） |
 | [docs/server.md](docs/server.md) | HTTP サーバーの API、認証、制限、止め方 |
+| [docs/router.md](docs/router.md) | 書き手へ要求を送り直す Go のルーター（`router/`） |
 | [docs/performance.md](docs/performance.md) | 性能の測定値（再計算、読み出し、free-threaded、メモリ、記録先、保存の形式） |
 | [docs/development.md](docs/development.md) | 開発環境、テストの方針、ソースの構成と、式のノードを足すときに直す場所 |
 | [docs/limitations.md](docs/limitations.md) | 制約と今後 |
