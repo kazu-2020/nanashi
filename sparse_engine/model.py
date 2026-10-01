@@ -747,10 +747,15 @@ class Model:
     # ------------------------------------------------ メンバーの追加
 
     @_operation
-    def add_member(self, dim: str, member: str, **properties: str) -> None:
-        """軸 dim の末尾にメンバーを足す。properties でプロパティの値も設定できる。
+    def add_member(self, dim: str, member: str, *, at: int | None = None, **properties: str) -> None:
+        """軸 dim にメンバーを足す。properties でプロパティの値も設定できる。
 
             m.add_member("Product", "p2000", Category="c03")
+            m.add_member("Account", "粗利", at=2)  # 並び順の 2 番目（0 から）に入れる
+
+        at を省くと並び順の最後に入る。順序のない軸では途中にも入れられる（エンジンの番号は末尾に振り、
+        並び順だけを変えるので、ほかのセルには触れない）。順序付きの軸（時系列）は最後にしか入れられない。
+        at という名前のプロパティは、ここでは設定できない（足したあとで add_property で設定する）。
 
         新しいメンバーはどの Metric でも空で始まる。全メンバーへ値を広げる演算（X + 1、IFBLANK、
         引き下ろし、前月参照など）は新しいメンバーにも値を作るので、次の再計算でその範囲を計算する。
@@ -762,7 +767,7 @@ class Model:
             if value not in self.dimension(d.properties[prop][0]):
                 raise ValueError(f"{dim}.{prop}: {d.properties[prop][0]} に {value!r} がない")
         bits = _bits(len(d.members))
-        d.add_member(member, self._new_id())
+        d.add_member(member, self._new_id(), at)
         if self.engine.key_bits is not None and _bits(len(d.members)) > bits:
             try:  # 軸のビット幅が増えた。キーに収まらなくなる Metric や式があれば、足さずにエラーにする
                 self.engine.dimension_changed(self, dim)
@@ -775,6 +780,17 @@ class Model:
             d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
         self._member_added(dim)
         self._pending.added.setdefault(dim, set()).add(member)
+
+    @_operation
+    def move_member(self, dim: str, member: str, at: int) -> None:
+        """軸 dim のメンバー member を、並び順の at 番目（0 から）に移す。
+
+            m.move_member("Account", "粗利", 2)
+
+        並び順は rows() や一覧の表示の順で、エンジンの番号もセルも変えないので、何も計算し直さない。
+        順序付きの軸（時系列）は並び順が計算の意味を持つので、並び替えられない。
+        """
+        self.dimension(dim).move_member(member, at)
 
     def _check_widths(self, dim: str) -> None:
         """軸 dim のビット幅が増えたあとも、dim を持つ Metric と、すべての式の途中の結果が、エンジンの

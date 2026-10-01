@@ -64,7 +64,7 @@ Metric の軸と値の種類は登録時に決め、あとから変えない。
 | [docs/performance.md](docs/performance.md) | 性能の測定値（再計算、読み出し、free-threaded、メモリ、記録先、保存の形式） |
 | [docs/development.md](docs/development.md) | 開発環境、テストの方針、ソースの構成と、式のノードを足すときに直す場所 |
 | [docs/limitations.md](docs/limitations.md) | 制約と今後 |
-| [docs/member-numbering.md](docs/member-numbering.md) | 設計メモ：メンバーの名前、ID、番号、順位、削除の tombstone、キーの幅の拡張、View の組み替え（未実装） |
+| [docs/member-numbering.md](docs/member-numbering.md) | 設計メモ：メンバーの名前、ID、番号、順位、削除の tombstone、キーの幅の拡張、View の組み替え（番号と順位の分離の第 1 段は実装済み） |
 
 ## ライセンス
 

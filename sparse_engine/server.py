@@ -27,7 +27,7 @@
     POST /writes                              {"client_op_id", "reason", "expect", "ops": [...]}
 
 ops の各要素は {"op": 操作名, "args": [...], "kwargs": {...}} で、Model の操作（set_cell、spread、
-add_member、rename_member、remove_member、add_formula、add_input、add_property、add_dimension、
+add_member、move_member、rename_member、remove_member、add_formula、add_input、add_property、add_dimension、
 remove_metric、rename_metric）を順に呼ぶ。add_input の cells は [[座標の列, 値], ...] で渡す。
 
 応答は JSON。失敗は {"error": 種類, "message": 文言} で、400（式や引数の誤り）、401（認証）、404、
@@ -74,7 +74,7 @@ from .workspace import Conflict, NotLeader, Overloaded, Replica, Role, Workspace
 
 log = logging.getLogger(__name__)
 
-WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "rename_member", "remove_member", "add_formula",
+WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "move_member", "rename_member", "remove_member", "add_formula",
                        "add_input", "add_property", "add_dimension", "remove_metric", "rename_metric"})
 READ_PARAMS = frozenset({"offset", "limit", "keep", "agg"})
 
@@ -220,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["stats"]:
             return 200, _Text(stats_text(self.server.workspace))
         if not parts:
-            dims = {d.name: {"id": d.id, "members": list(d.members), "ordered": d.ordered,
+            dims = {d.name: {"id": d.id, "members": d.in_order(), "ordered": d.ordered,
                              "properties": {p: t for p, (t, _) in d.properties.items()}}
                     for d in v.dimensions.values()}
             metrics = {m.name: {"id": m.id, "dims": list(m.dims), "kind": m.kind, "overridable": m.overridable,

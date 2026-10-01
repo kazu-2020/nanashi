@@ -1,12 +1,13 @@
 """Model の保存と読み込み。
 
 ディレクトリに次の 2 種類を置く。
-- model.json: 軸（メンバーの並び、ID、順序、プロパティ）と Metric（ID、軸、値の種類、分割軸、式の文字列）
+- model.json: 軸（番号の順のメンバー、ID、並び順、順序、プロパティ）と Metric（ID、軸、値の種類、分割軸、式の文字列）
 - inputs.<Metric の ID>.parquet: 入力 Metric ごとに 1 つ。軸ごとのメンバー番号の列（d<軸の ID>）と、
   値の列 v（number は Float64、boolean は Boolean、メンバー型はメンバー番号の UInt32）
 
-メンバー番号は model.json のメンバーの並びでの位置。メンバー型の値も番号で持つ。
+メンバー番号は model.json のメンバーの列での位置。メンバー型の値も番号で持つ。
 位置ごとのメンバーの ID も model.json に持つので、番号から変わらない ID を引ける。
+並び順が番号の順と違う軸は、並び順に並べた番号の列（member_order）も持つ（版 4 から）。
 計算 Metric の値は保存せず、読み込み後の最初の再計算で求め直す。
 Parquet の読み書きは nanashi_core が行う（参照実装のエンジンでも）。
 
@@ -23,8 +24,8 @@ from typing import Callable
 from .engine import Store, default_engine, native, parquet_columns, parquet_value
 from .parser import to_formula
 
-FORMAT_VERSION = 3
-READABLE = (1, 2, 3)
+FORMAT_VERSION = 4
+READABLE = (1, 2, 3, 4)
 
 
 def save(model, path) -> None:
@@ -41,6 +42,8 @@ def dump(model) -> dict[str, bytes]:
         props = {prop: {"target": target, "mapping": mapping} for prop, (target, mapping) in d.properties.items()}
         dims.append({"name": d.name, "id": d.id, "members": d.members, "member_ids": d.ids,
                      "ordered": d.ordered, "properties": props})
+        if d.rank_table() is not None:
+            dims[-1]["member_order"] = d.order()
     metrics = []
     files: dict[str, bytes] = {}
     for m in model.metrics.values():
@@ -82,6 +85,8 @@ def read(file: Callable[[str], bytes], engine: Store | None = None):
         if meta["format"] >= 2:  # Parquet の列の名前が軸の ID なので、入力を読む前に保存した ID に戻す
             m.dimensions[d["name"]].id = d["id"]
             m.dimensions[d["name"]].set_ids(d["member_ids"])
+        if "member_order" in d:
+            m.dimensions[d["name"]].set_order(d["member_order"])
     for d in meta["dimensions"]:  # 参照先の軸がそろってからプロパティを付ける
         for prop, spec in d["properties"].items():
             m.add_property(d["name"], prop, spec["target"], spec["mapping"])

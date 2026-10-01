@@ -497,14 +497,16 @@ impl Store {
         self.value_at(self.encode(key))
     }
 
-    /// r の範囲の行を、宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す
-    /// （軸ごとのメンバー番号の列、値の列、範囲の全行数）。分割軸が宣言の先頭なら並べ直さずに済む。
-    pub fn rows_in(&self, r: &Restrict, offset: usize, limit: Option<usize>) -> (Vec<Vec<u32>>, Vec<f64>, usize) {
+    /// r の範囲の行を、宣言した軸の順に各軸のメンバーの並び順で並べ、offset 件目から limit 件だけ返す
+    /// （軸ごとのメンバー番号の列、値の列、範囲の全行数）。ranks は宣言した軸ごとの「番号 -> 並び順の
+    /// 位置」の表で、None の軸は番号の順に並ぶ。どの軸も番号の順で、分割軸が宣言の先頭なら並べ直さずに済む。
+    pub fn rows_in(&self, r: &Restrict, ranks: &[Option<Vec<u32>>], offset: usize, limit: Option<usize>) -> (Vec<Vec<u32>>, Vec<f64>, usize) {
         let mut cells = Vec::new();
         self.for_each_in(r, |k, v| cells.push((k, v)));
         let pos: Vec<usize> = self.metric_dims.iter().map(|d| self.pack.pos(*d).unwrap()).collect();
-        if pos.windows(2).any(|w| w[0] > w[1]) {
-            cells.sort_by_cached_key(|c| pos.iter().map(|&p| self.pack.get(c.0, p)).collect::<Vec<u32>>());
+        if pos.windows(2).any(|w| w[0] > w[1]) || ranks.iter().any(Option::is_some) {
+            let rank = |i: usize, m: u32| ranks.get(i).and_then(Option::as_ref).map_or(m, |t| t[m as usize]);
+            cells.sort_by_cached_key(|c| pos.iter().enumerate().map(|(i, &p)| rank(i, self.pack.get(c.0, p))).collect::<Vec<u32>>());
         }
         let total = cells.len();
         let start = offset.min(total);

@@ -58,6 +58,14 @@ class Follow(JournalCase):
         self.assertEqual(self.replica.version.get("Triple", Product="p99", Month="Feb"), 21.0)
         check_same_state(self, self.ws.version.model, self.replica.version.model)
 
+    def test_member_order_is_followed_without_recalculating(self):
+        self.ws.write(lambda m: m.move_member("Product", "p3", 0))
+        self.replica.refresh()
+        v = self.replica.version
+        self.assertEqual(v.model.dimensions["Product"].in_order()[0], "p3")
+        self.assertEqual(list(v.model.slice_log), [])  # 並び順だけなら何も計算し直さない
+        check_same_state(self, self.ws.version.model, v.model)
+
     def test_replica_follows_in_the_background(self):
         for i in range(5):
             self.ws.write(move("p0", f"p{i + 1}", "Mar", 1))

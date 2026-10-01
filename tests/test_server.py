@@ -191,6 +191,16 @@ class Api:
         self.assertEqual(self.c.get("/metrics/Ratio/cell?Region=S")[1]["value"], 0.75)
         self.assertEqual(self.c.get("/")[1]["dimensions"]["Region"]["members"], ["N", "S", "W"])
 
+    def test_member_order_through_the_api(self):
+        ops = [{"op": "add_member", "args": ["Product", "p_new"], "kwargs": {"at": 1}},
+               {"op": "move_member", "args": ["Product", "p2", 0]}]
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "o", "ops": ops})[0], 200)
+        self.assertEqual(self.c.get("/")[1]["dimensions"]["Product"]["members"][:4], ["p2", "p0", "p_new", "p1"])
+        rows = self.c.get("/metrics/Stock/rows?Month=Jan&limit=3")[1]["rows"]
+        self.assertEqual([r[0] for r in rows], ["p2", "p0", "p1"])  # p_new には値がない
+        status, err = self.c.post("/writes", {"client_op_id": "o2", "ops": [{"op": "move_member", "args": ["Month", "Mar", 0]}]})
+        self.assertEqual((status, err["error"]), (400, "bad_request"))
+
 
 class ReferenceApi(Api, unittest.TestCase):
     pass

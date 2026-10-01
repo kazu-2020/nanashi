@@ -121,19 +121,26 @@ def changes(before, after) -> dict:
     out: dict[str, Any] = {"next_id": after._next_id}
     old_dims = {d.id: d for d in before.dimensions.values()}
 
-    added_dims, members = [], []
+    added_dims, members, orders = [], [], []
     for d in after.dimensions.values():
         o = old_dims.get(d.id)
         if o is None:
             added_dims.append({"id": d.id, "name": d.name, "ordered": d.ordered,
                                "members": [[i, n] for i, n in zip(d.ids, d.members)]})
-        elif o.ids != d.ids or o.members != d.members:
+            if d.rank_table() is not None:
+                orders.append({"dim": d.id, "order": _ids_in_order(d)})
+            continue
+        if o.ids != d.ids or o.members != d.members:
             old_names = dict(zip(o.ids, o.members))
             members.append({"dim": d.id,
                             "removed": [i for i in o.ids if i not in d._by_id],
                             "added": [[i, n] for i, n in zip(d.ids, d.members) if i not in old_names],
                             "renamed": [[i, n] for i, n in zip(d.ids, d.members)
                                         if i in old_names and old_names[i] != n]})
+        # 並び順は、消したメンバーを除き、足したメンバーを最後に並べただけなら記録しない（再生で同じになる）
+        expected = [i for i in _ids_in_order(o) if i in d._by_id] + [i for i in d.ids if i not in o._by_id]
+        if _ids_in_order(d) != expected:
+            orders.append({"dim": d.id, "order": _ids_in_order(d)})
 
     props = []
     for d in after.dimensions.values():
@@ -174,11 +181,24 @@ def changes(before, after) -> dict:
         if len(rows):
             cells.append({"metric": m.id, "dims": [after.dimension(d).id for d in m.dims], "rows": rows})
 
-    for key, value in (("dimensions", added_dims), ("members", members), ("properties", props),
+    for key, value in (("dimensions", added_dims), ("members", members), ("member_order", orders),
+                       ("properties", props),
                        ("metrics", defs), ("metrics_removed", removed), ("cells", cells)):
         if value:
             out[key] = value
     return out
+
+
+def _ids_in_order(d) -> list[int]:
+    """軸 d のメンバーの ID を並び順に並べたもの。"""
+    return [d.ids[i] for i in d.order()]
+
+
+def _apply_orders(model, orders: list, dim_of) -> None:
+    """記録の並び順（並び順に並べた ID の列）を軸に書き込む。番号もセルも変えないので計算し直さない。"""
+    for e in orders:
+        d = dim_of(e["dim"])
+        d.set_order([d._by_id[i] for i in e["order"]])
 
 
 def _value_dim(model, m):
@@ -230,7 +250,7 @@ def _by_id(model, m, store) -> dict:
 
 # ---------------------------------------------------------------- 再生
 
-STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")
+STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # 並び順（member_order）は含まない
 
 
 def apply(model, record: dict, *, incremental: bool = False) -> None:
@@ -241,12 +261,13 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     プロセスの書き込みに追いつくとき）。軸、メンバー、プロパティ、Metric の定義を変えた記録は、どちらでも
     全体を計算し直す。"""
     ch = record["changes"]
+    dims_by_id = model.dimensions_by_id()  # 軸はこの記録で足すものもあるので、足したら入れる
+    dim_of = lambda i: dims_by_id[i] if i in dims_by_id else next(d for d in model.dimensions.values() if d.id == i)
     if incremental and model._plan is not None and not any(k in ch for k in STRUCTURAL):
+        _apply_orders(model, ch.get("member_order", []), dim_of)
         _apply_cells(model, ch.get("cells", []))
         model._next_id = ch["next_id"]
         return
-    dims_by_id = model.dimensions_by_id()  # 軸はこの記録で足すものもあるので、足したら入れる
-    dim_of = lambda i: dims_by_id[i] if i in dims_by_id else next(d for d in model.dimensions.values() if d.id == i)
     metric_of = lambda i: model.metrics_by_id().get(i)
 
     for d in ch.get("dimensions", []):
@@ -265,6 +286,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             d.add_member(n, i)
         if e["added"]:
             model._member_added(d.name)
+    _apply_orders(model, ch.get("member_order", []), dim_of)
 
     for i in ch.get("metrics_removed", []):
         m = metric_of(i)

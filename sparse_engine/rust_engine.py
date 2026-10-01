@@ -328,7 +328,7 @@ class RustEngine:
         return store
 
     def columns(self, store, restrict, cat):
-        cols, values, is_bool, _ = self.core.rows_in(store, self._region(cat, restrict), 0, None)
+        cols, values, is_bool, _ = self.core.rows_in(store, self._region(cat, restrict))
         return cols, [v != 0.0 for v in values] if is_bool else values
 
     def evaluate(self, expr, cat, restrict):
@@ -404,8 +404,9 @@ class RustEngine:
         return v if v is None or not self._is_bool(store) else v != 0.0
 
     def rows(self, store, restrict, cat, offset=0, limit=None):
-        cols, values, is_bool, total = self.core.rows_in(store, self._region(cat, restrict), offset, limit)
         dims = [self._names[i] for i in self.core.metric_dims(store)]
+        ranks = [cat.dimension(d).rank_table() for d in dims]
+        cols, values, is_bool, total = self.core.rows_in(store, self._region(cat, restrict), ranks, offset, limit)
         members = [cat.dimension(d).members for d in dims]
         rows = [(tuple(members[j][cols[j][i]] for j in range(len(dims))), values[i] != 0.0 if is_bool else values[i])
                 for i in range(len(values))]
