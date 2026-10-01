@@ -352,6 +352,9 @@ fn infer_node(node: &mut Node, env: &Env<'_>, warnings: &mut Vec<Diag>) -> Resul
             let t = infer(child, env, warnings)?;
             let edges_dims = [vt.dims.as_slice(), &[target]].concat();
             let joined = merge(&t.dims, &edges_dims); // On(child, AsAxis(V)) の軸
+            // 書き換えたあとの結合は D と T の両方を持つ。結果の軸が収まっても結合が収まらなければ、
+            // 評価の途中でなくここで拒否する（書き換えたノードは型検査を通らないので、ここで確かめる）
+            key_fits(&joined, cat)?;
             let (remove, agg, ty) = if t.dims.contains(&src) {
                 if t.dims.contains(&target) {
                     return Err(Diag::new("by_target_present").arg("what", what).arg("target", name(target, cat)));
