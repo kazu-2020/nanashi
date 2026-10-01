@@ -393,6 +393,8 @@ class Journal:
         load_snapshot(place)       置き場所のスナップショットを読む。壊れていれば BrokenSnapshot
                                    （open は 1 つ前のスナップショットから記録を多く再生する）
         acquire()                  書き込みの権利（FileJournal のロック、PgJournal のリース）を取る
+        take()                     書き込みの権利を、待たずに取れるなら取る（待機系が使う）
+        leader()                   書き込みの権利を持っているプロセスが公開している番地
         release()                  書き込みの権利を手放す。次の書き手が待たずに済む
         refresh()                  記録先の最新の通し番号を読み直す
         wait(timeout)              記録が増えたかもしれないときまで待つ
@@ -402,6 +404,19 @@ class Journal:
 
     def acquire(self) -> None:
         """書き込みの権利を取る。取れなければ Fenced。"""
+
+    def take(self) -> bool:
+        """書き込みの権利を、待たずに取れるなら取って True。別のプロセスが持っているか、読み込んだあとに
+        書き込まれていれば False。"""
+        try:
+            self.acquire()
+        except Fenced:
+            return False
+        return True
+
+    def leader(self) -> str | None:
+        """書き込みの権利を持っているプロセスが公開している番地（分からない記録先は None）。"""
+        return None
 
     def lease(self) -> dict:
         """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""

@@ -9,9 +9,16 @@
 書き込みには client_op_id を必ず付ける。読んだ版の通し番号を expect に付けると、その後に同じセルを
 変えた書き込みがあれば 409 で拒否する（楽観的な排他）。
 
+同じモデルを複数のサーバーで開くと、記録先の書き込みの権利（リース）を持つ 1 つが書き手（leader）になり、
+ほかは待機系（standby）として追従する（Workspace(standby=True)）。待機系は読み出しを受け、書き込みは
+421 と書き手の番地（leader）で拒む。書き手が止まれば（SIGTERM で権利を手放す、落ちて期限が切れる）
+待機系の 1 つが権利を取って書き手になる。ほかのプロセスに知らせる自分の番地は --advertise で決める
+（既定は http://<host>:<port>。0.0.0.0 で待ち受けるときは必須）。リースの期限は --lease-ttl（秒）。
+
     GET  /                                    モデルの定義（軸、Metric）と公開中の版の通し番号
-    GET  /health                              生きているか（通し番号。認証なしで読める）
-    GET  /ready                               要求を受けられるか（受けられなければ 503 と理由。認証なしで読める）
+    GET  /health                              生きているか（通し番号と役割 role。認証なしで読める）
+    GET  /ready                               要求を受けられるか（受けられなければ 503 と理由。役割 role も返す。
+                                              認証なしで読める）
     GET  /stats                               観察用の数（Prometheus のテキスト形式）
     GET  /metrics/<name>/cell?<軸>=<メンバー>   1 セル（{"value": ..., "seq": ...}）
     GET  /metrics/<name>/slice?<軸>=a,b        範囲（{"dims": [...], "cells": [[座標..., 値], ...]}）
@@ -24,7 +31,8 @@ add_member、rename_member、remove_member、add_formula、add_input、add_prope
 remove_metric、rename_metric）を順に呼ぶ。add_input の cells は [[座標の列, 値], ...] で渡す。
 
 応答は JSON。失敗は {"error": 種類, "message": 文言} で、400（式や引数の誤り）、401（認証）、404、
-409（Conflict）、413（本文や読み出しが大きすぎる）、429（Overloaded）、503（閉じている、混んでいる）を使う。
+409（Conflict）、413（本文や読み出しが大きすぎる）、421（待機系。leader に書き手の番地）、429（Overloaded）、
+503（閉じている、混んでいる）を使う。
 500 の文言は固定で、原因はサーバーのログに error_id と一緒に残す。
 
 利用者（監査に残す user）は、要求の本文ではなく認証で決める。
@@ -62,7 +70,7 @@ from typing import Any
 
 from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
-from .workspace import Conflict, Overloaded, Replica, Workspace
+from .workspace import Conflict, NotLeader, Overloaded, Replica, Role, Workspace
 
 log = logging.getLogger(__name__)
 
@@ -203,10 +211,11 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in url.path.split("/") if p]
         v = self.server.workspace.version
         if parts == ["health"]:
-            return 200, {"seq": v.seq}
+            return 200, {"seq": v.seq, "role": role_of(self.server.workspace)}
         if parts == ["ready"]:
             reasons = self.server.workspace.ready()
-            return (503 if reasons else 200), {"seq": v.seq, "ready": not reasons, "reasons": reasons}
+            return (503 if reasons else 200), {"seq": v.seq, "ready": not reasons, "role": role_of(self.server.workspace),
+                                               "reasons": reasons}
         self._user()
         if parts == ["stats"]:
             return 200, _Text(stats_text(self.server.workspace))
@@ -294,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
                 client_op_id=body["client_op_id"], expect=body.get("expect"), timeout=self.server.write_timeout)
         except Conflict as e:
             raise ApiError(409, "conflict", str(e), seq=e.seq, user=e.user) from None
+        except NotLeader as e:
+            raise ApiError(421, "not_leader", str(e), leader=e.leader) from None
         except AlreadyCommitted as e:
             return 200, {"seq": e.seq, "resent": True}
         except Overloaded as e:
@@ -311,6 +322,11 @@ class _Text(str):
     """JSON でなく、テキストのまま返す応答の本文。"""
 
 
+def role_of(ws) -> str:
+    """このプロセスの役割（leader、standby、--follow なら follower）。"""
+    return "follower" if isinstance(ws, Replica) else ws.role.value
+
+
 def stats_text(ws) -> str:
     """Workspace か Replica の観察用の数を、Prometheus のテキスト形式にする。"""
     st, now = ws.stats, time.monotonic()
@@ -319,6 +335,7 @@ def stats_text(ws) -> str:
     if isinstance(ws, Workspace):
         lease = ws.journal.lease() if ws.journal is not None else {"held": False, "expires_in": None}
         rows += [
+            ("nanashi_leader", "書き手か（書き込みを受けるか）", "gauge", int(ws.role is Role.LEADER)),
             ("nanashi_commits_total", "確定した書き込み", "counter", st.commits),
             ("nanashi_commit_batches_total", "記録の書き出し（まとめて確定した回数）", "counter", st.batches),
             ("nanashi_commit_seconds_sum", "記録の書き出しと確定にかかった時間の合計", "counter", st.commit_seconds),
@@ -353,12 +370,13 @@ def _formula(written) -> str:
 
 
 class Server(ThreadingHTTPServer):
-    """Workspace を公開する HTTP サーバー。serve_forever を別のスレッドで回すか、start() を使う。"""
+    """Workspace を公開する HTTP サーバー。serve_forever を別のスレッドで回すか、start() を使う。
+    workspace は、待ち受ける番地が決まってから開くときは None で作り、serve_forever の前に入れる。"""
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, workspace: Workspace | Replica, host: str = "127.0.0.1", port: int = 8080, *,
+    def __init__(self, workspace: Workspace | Replica | None, host: str = "127.0.0.1", port: int = 8080, *,
                  write_timeout: float | None = 30.0, tokens: dict[str, str] | None = None,
                  user_header: str | None = None, max_body: int = 16 << 20, max_cells: int = 100_000,
                  max_threads: int = 64, request_timeout: float | None = 30.0):
@@ -437,6 +455,9 @@ def main(argv=None) -> None:
     ap.add_argument("--max-bytes", type=int, help="Rust のエンジンで、1 つの式の評価が持つ途中結果の上限（バイト）")
     ap.add_argument("--follow", action="store_true",
                     help="書き込まず、記録先に追従する読み出し専用のサーバーにする（読み手を増やすとき）")
+    ap.add_argument("--advertise", metavar="URL",
+                    help="--pg のとき、書き手としてほかのプロセスに知らせる自分の番地（既定は http://<host>:<port>）")
+    ap.add_argument("--lease-ttl", type=float, default=30.0, help="--pg のとき、書き込みの権利（リース）の期限（秒）")
     args = ap.parse_args(argv)
     tokens = None
     if args.tokens:
@@ -444,6 +465,8 @@ def main(argv=None) -> None:
             tokens = json.load(f)
     if tokens is None and args.user_header is None and not args.insecure and not _loopback(args.host):
         ap.error(f"{args.host} で待ち受けるには --tokens か --user-header で認証する（試すだけなら --insecure）")
+    if args.pg and not args.follow and args.advertise is None and _unspecified(args.host):
+        ap.error(f"{args.host or '(空)'} で待ち受けるときは、ほかのプロセスに知らせる自分の番地を --advertise で指定する")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     sys.setswitchinterval(args.switch_interval)
     if args.engine == "rust":
@@ -452,21 +475,26 @@ def main(argv=None) -> None:
     else:
         from .engine import ReferenceEngine
         engine = ReferenceEngine()
+    # 先に待ち受けて番地を決める（--port 0 でも、知らせる番地に実際の番号が入る）。要求は serve_forever まで受けない
+    server = Server(None, args.host, args.port, tokens=tokens, user_header=args.user_header, max_body=args.max_body,
+                    max_cells=args.max_cells, max_threads=args.max_threads)
     if args.pg:
         from .pg_journal import PgJournal, migrate
         if args.migrate:
             migrate(args.pg)
-        journal = PgJournal(args.pg, args.model_id, args.path, heartbeat=not args.follow)
+        advertise = args.advertise or f"http://{args.host}:{server.server_address[1]}"
+        journal = PgJournal(args.pg, args.model_id, args.path, heartbeat=not args.follow, lease_ttl=args.lease_ttl,
+                            endpoint=advertise)
     else:
         from .journal import FileJournal
         journal = FileJournal(args.path)
     if args.follow:
         ws = Replica(journal, engine)
     else:
-        ws = Workspace.open(journal, engine, checkpoint_every=args.checkpoint_every, max_queue=args.max_queue)
-    server = Server(ws, args.host, args.port, tokens=tokens, user_header=args.user_header, max_body=args.max_body,
-                    max_cells=args.max_cells, max_threads=args.max_threads)
-    log.info("公開中の版 %d、%s で待ち受ける", ws.seq, server.url)
+        ws = Workspace.open(journal, engine, checkpoint_every=args.checkpoint_every, max_queue=args.max_queue,
+                            standby=True)
+    server.workspace = ws
+    log.info("公開中の版 %d、%s で待ち受ける（%s）", ws.seq, server.url, role_of(ws))
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         server.serve_forever()
@@ -484,6 +512,16 @@ def _loopback(host: str) -> bool:
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _unspecified(host: str) -> bool:
+    """すべてのインターフェースで待ち受ける番地（0.0.0.0、::、空）。ほかのプロセスはこの番地ではつなげない。"""
+    if not host:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_unspecified
     except ValueError:
         return False
 

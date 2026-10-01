@@ -19,6 +19,14 @@ Workspace はモデルを 1 つ預かり、確定した状態を「版」とし�
 列の長さ（max_queue）を決めると、溢れたときは submit が Overloaded を投げる（過負荷を上流に伝える）。
 checkpoint_every か checkpoint_interval を決めると、その間隔でスナップショットを別のスレッドで取る。
 
+standby=True にすると、同じモデルを開いた複数のプロセスのうち 1 つだけが書き込みを受ける。各プロセスは
+2 つの役割（Role）のどちらかにいる。書き手（LEADER）は記録先の書き込みの権利（リース）を持ち、書き込みを
+受ける。待機系（STANDBY）は見張りのスレッド（nanashi-standby）で記録先に追従して読み出しだけを受け、
+書き込みは NotLeader で拒む（leader に書き手の番地）。権利が空けば（書き手が close で手放した、落ちて
+期限が切れた）取り、記録に追いついてから書き手になる。書き手は権利を失えば（確定が締め出された、
+延長できなかった）待機系に戻る。役割を変えるのは _promote と _demote だけで、ライターはまとまりごとに
+同じロック（_role_lock）を持つので、まとまりの途中で役割は変わらない。
+
 格納データの本体は版どうしで共有するので、版を作る費用は差分の分だけで済む。古い版は、
 読んでいる人がいなくなれば捨てられる。
 """
@@ -26,6 +34,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import enum
 import logging
 import queue
 import threading
@@ -49,6 +58,22 @@ class Conflict(Exception):
 
 class Overloaded(Exception):
     """書き込みの列が満杯（max_queue）で、timeout の間に空かなかった。"""
+
+
+class Role(enum.Enum):
+    """書き手のプロセスの役割。LEADER は書き込みの権利を持ち、書き込みを受ける。STANDBY は記録先に追従して
+    読み出しだけを受け、権利が空いたら取って LEADER になる。"""
+    LEADER = "leader"
+    STANDBY = "standby"
+
+
+class NotLeader(Exception):
+    """この Workspace は待機系で、書き込みを受けない。leader は書き手が公開している番地（分からなければ None）。"""
+
+    def __init__(self, leader: str | None):
+        super().__init__("この書き手は待機系（書き込みは書き手へ送る）" if leader is None
+                         else f"この書き手は待機系（書き込みは {leader} へ送る）")
+        self.leader = leader
 
 
 @dataclasses.dataclass
@@ -214,9 +239,13 @@ class Workspace:
 
     def __init__(self, model, journal: Journal | None = None, *, max_batch: int = 64,
                  keep_recent: int = 10_000, max_queue: int = 0, checkpoint_every: int | None = None,
-                 checkpoint_interval: float | None = None):
+                 checkpoint_interval: float | None = None, standby: bool = False, interval: float = 1.0):
+        """standby なら、記録先の書き込みの権利を取れたときだけ書き手になり、取れなければ待機系として追従する
+        （モジュールの説明）。interval は待機系が権利を試す間隔と、書き手が権利を確かめる間隔（秒）。"""
         self.journal = journal
         self.max_batch = max_batch
+        self.standby = standby
+        self.interval = interval
         self._publish(model)
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         # 排他の確認に使う、最近の書き込み (通し番号, 利用者, 書き換えたセル)。これより古い版を
@@ -234,6 +263,21 @@ class Workspace:
         self._checkpointing: threading.Thread | None = None
         self.stats = Stats()
         self._degraded: str | None = None  # 記録先に追いつけず、開き直しにも失敗した（古い版を公開している）
+        self._role = Role.LEADER
+        self._role_lock = threading.RLock()  # 役割の変更と、まとまりの処理を順に並べる
+        self._stop = threading.Event()
+        self._watch_error: BaseException | None = None  # 見張りのスレッドが最後に失敗した理由（成功したら None）
+        self._watcher: threading.Thread | None = None
+        if standby:
+            if journal is None:
+                raise ValueError("待機系にするには記録先（journal）が要る")
+            if hasattr(journal, "acquire_wait"):
+                journal.acquire_wait = 0  # 権利を失った書き手は、別のプロセスのリースを待たずに待機系に戻る
+            self._role = Role.STANDBY
+            if journal.take():
+                self._promote()
+            self._watcher = threading.Thread(target=self._watch, name="nanashi-standby", daemon=True)
+            self._watcher.start()
         self._thread = threading.Thread(target=self._run, name="nanashi-writer", daemon=True)
         self._thread.start()
 
@@ -267,6 +311,11 @@ class Workspace:
         """公開中の版の通し番号。"""
         return self._version.seq
 
+    @property
+    def role(self) -> Role:
+        """書き手（LEADER）か待機系（STANDBY）か。standby でなければいつも LEADER。"""
+        return self._role
+
     # ------------------------------------------------ 書き込み
 
     def submit(self, fn: Callable[[Any], Any], *, user: str | None = None, reason: str | None = None,
@@ -278,9 +327,12 @@ class Workspace:
         expect に読んだ版の通し番号を渡すと、それより後に同じセルを変えた書き込みがあれば Conflict にする
         （比べるのは、この書き込みが実際に書き換えた入力セル）。client_op_id が確定済みなら、
         適用せずに元の通し番号を返す。列が満杯（max_queue）なら timeout の間だけ待ち、Overloaded を投げる。
+        待機系なら NotLeader（leader に書き手の番地）。
         """
         if self._closed:
             raise RuntimeError("Workspace は閉じている")
+        if self._role is Role.STANDBY:
+            raise self._not_leader()
         future: Future = Future()
         try:
             self._queue.put(_Request(fn, user, reason, client_op_id, expect, future), timeout=timeout)
@@ -315,9 +367,13 @@ class Workspace:
             reasons.append("閉じている")
         elif not self._thread.is_alive():
             reasons.append("ライターのスレッドが止まっている")
+        elif self._watcher is not None and not self._watcher.is_alive():
+            reasons.append("待機系の見張りのスレッドが止まっている")
+        if self._watch_error is not None:
+            reasons.append(f"待機系の見張りに失敗した: {type(self._watch_error).__name__}: {self._watch_error}")
         if self._degraded is not None:
             reasons.append(self._degraded)
-        if self.journal is not None and (err := self.journal.lease()["error"]) is not None:
+        if self._role is Role.LEADER and self.journal is not None and (err := self.journal.lease()["error"]) is not None:
             reasons.append(f"書き込みの権利を延長できない: {err}")
         return reasons
 
@@ -325,10 +381,13 @@ class Workspace:
         return self._queue.qsize()
 
     def close(self) -> None:
-        """列に入っている書き込みを処理し終えてから、ライターを止める。取りかけのスナップショットも待つ。
+        """見張りを止め、列に入っている書き込みを処理し終えてから、ライターを止める。取りかけのスナップショットも待つ。
         記録先の書き込みの権利（PgJournal のリース）も手放すので、次に開く書き手は期限を待たずに書ける。"""
         if not self._closed:
             self._closed = True
+            self._stop.set()
+            if self._watcher is not None:
+                self._watcher.join()
             self._queue.put(None)
             self._thread.join()
             if self._checkpointing is not None:
@@ -361,7 +420,8 @@ class Workspace:
                     break
                 batch.append(nxt)
             try:
-                self._process(batch)
+                with self._role_lock:  # まとまりの途中で役割が変わらないようにする
+                    self._process(batch)
             except Exception as e:  # 想定外の失敗でも、待っている利用者に知らせてから続ける
                 log.exception("書き込みのまとまりの処理に失敗した")
                 for req in batch:
@@ -374,6 +434,12 @@ class Workspace:
                 raise
 
     def _process(self, batch: list[_Request]) -> None:
+        if self._role is Role.STANDBY:  # 待機系に戻る直前に列に入った書き込み
+            err = self._not_leader()
+            for req in batch:
+                if req.future.set_running_or_notify_cancel():
+                    req.future.set_exception(err)
+            return
         working = self._version_model.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
         aliases: list[tuple[_Request, _Request]] = []  # 同じまとまりで同じ client_op_id を送ったもの
@@ -417,7 +483,10 @@ class Workspace:
         except Exception as e:  # 記録できなければ、まとまり全体を捨てる（公開中の版は変えない）
             self.stats.add(journal_errors=1)
             self.stats.set(last_error=f"{type(e).__name__}: {e}")
-            if isinstance(e, Stale):
+            if isinstance(e, Stale) and self.standby:  # 権利を失った。追いつくのは見張りに任せる
+                e = self._not_leader()
+                self._demote()
+            elif isinstance(e, Stale):
                 self._reload()  # 別のプロセスが書き込んでいた。知らせる前に、記録先から最新の版を開き直す
             for req, _ in applied:
                 req.future.set_exception(e)
@@ -491,6 +560,63 @@ class Workspace:
         for cells in pending:  # 同じまとまりで先に適用した書き込み（まだ通し番号がない）
             if mine.overlaps(cells):
                 raise Conflict(f"読んだ版（{req.expect}）の後に、同じセルを変えた書き込みがある")
+
+    # ------------------------------------------------ 待機系
+
+    def _not_leader(self) -> NotLeader:
+        try:
+            leader = self.journal.leader()
+        except Exception:  # 記録先が使えなくても、待機系であることは伝える
+            leader = None
+        return NotLeader(leader)
+
+    def _promote(self) -> None:
+        """リースを取ったあとに呼ぶ（_role_lock の中で）。ほかのプロセスの記録に追いついてから書き手になる。
+        書き手になれなければリースを手放す（持ったまま待機系でいると、どのプロセスも書き手になれない）。"""
+        try:
+            self._reload()
+            if self._degraded is None:
+                self._publish(self._version_model)  # 版が同じでも、expect を確かめる基準は今の版にする
+        except BaseException:
+            self.journal.release()
+            raise
+        if self._degraded is not None:  # 追いつけない版で書くと、ほかの書き手の記録を上書きしてしまう
+            self.journal.release()
+            return
+        self._recent.clear()
+        self._ops.clear()
+        self._role = Role.LEADER
+        log.info("書き手になった（版 %d）", self.seq)
+
+    def _demote(self) -> None:
+        """書き込みの権利を失ったときに呼ぶ（_role_lock の中で）。待機系に戻り、見張りが追いつき直す。"""
+        if self._role is Role.LEADER:
+            self._role = Role.STANDBY
+            log.warning("書き込みの権利を失ったので、待機系に戻る")
+
+    def _watch(self) -> None:
+        """待機系なら、記録が増えるたびに追いつき、間隔ごとに権利を取れるか試す。書き手なら、間隔ごとに
+        権利を持ち続けているか確かめ、失っていれば（延長できなかった）待機系に戻る。"""
+        while not self._stop.is_set():
+            try:
+                if self._role is Role.LEADER:
+                    self._stop.wait(self.interval)
+                    with self._role_lock:
+                        if self._role is Role.LEADER and not self.journal.lease()["held"]:
+                            self._demote()
+                else:
+                    self.journal.wait(self.interval)
+                    with self._role_lock:
+                        if not self._stop.is_set() and self._role is Role.STANDBY:
+                            self._reload()
+                            if self._degraded is None and self.journal.take():
+                                self._promote()
+                self._watch_error = None
+            except Exception as e:  # 記録先が一時的に使えない。次の間隔で改めて試す
+                self._watch_error = e
+                self.stats.set(last_error=f"{type(e).__name__}: {e}")
+                log.warning("待機系の見張りに失敗した（次の間隔で改めて試す）", exc_info=True)
+                self._stop.wait(self.interval)
 
     # ------------------------------------------------ スナップショット
 

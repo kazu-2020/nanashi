@@ -70,7 +70,7 @@ class Api:
         self.assertEqual(body["seq"], 0)
         self.assertEqual(body["dimensions"]["Month"]["members"], ["Jan", "Feb", "Mar", "Apr"])
         self.assertEqual(body["metrics"]["Total"]["formula"], "ByMonth[REMOVE SUM: Month]")
-        self.assertEqual(self.c.get("/health"), (200, {"seq": 0}))
+        self.assertEqual(self.c.get("/health"), (200, {"seq": 0, "role": "leader"}))
         self.assertEqual(self.c.get("/nothing")[0], 404)
         self.assertEqual(self.c.get("/metrics/Nope/cell")[0], 404)
 

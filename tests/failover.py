@@ -2,10 +2,12 @@
 
     python -m tests.failover --signal TERM
 
-同じモデルを 2 つのサーバー（A と B）で開き、複数の送り手が A に書き込み続ける中で、A にシグナルを送る。
-送り手は確定を受け取るまで、同じ client_op_id のまま再送する（接続できないときと 503 のときは、もう一方の
-サーバーへ送る）。両方のサーバーを止めたあと、記録先の記録と開き直したモデルの値を、送り手が受け取った
-確定と突き合わせる。PostgreSQL（NANASHI_PG_DSN）を使う。
+同じモデルを 2 つのサーバーで開く。先に起こした A が書き手（leader）になり、B は待機系（standby）になる。
+複数の送り手が A に書き込み続ける中で、A にシグナルを送る。送り手は確定を受け取るまで、同じ client_op_id の
+まま再送する（接続できないときと 503 のときはもう一方のサーバーへ、421 のときは応答にある書き手へ送る）。
+両方のサーバーを止めたあと、記録先の記録と開き直したモデルの値を、送り手が受け取った確定と突き合わせる。
+リースの期限は短くして（--lease-ttl、既定 3 秒）、SIGKILL の引き継ぎもすぐ測れるようにする。
+PostgreSQL（NANASHI_PG_DSN）を使う。
 """
 from __future__ import annotations
 
@@ -48,6 +50,7 @@ SETTLE = 2.0           # A を止めたあとの最初の確定から、さら�
 GIVE_UP = 120.0        # 1 つの書き込みの確定を諦めるまでの秒数
 CLIENT_TIMEOUT = 70.0  # サーバーが確定を待つ長さ（30 秒）より長くして、504 を受け取れるようにする
 BACKOFF = 0.1
+LEASE_TTL = 3.0        # サーバーに渡すリースの期限（秒）。SIGKILL の引き継ぎはこの長さを待つ
 
 
 @dataclass(frozen=True)
@@ -107,8 +110,10 @@ def seeded_model() -> Iterator[tuple[str, Path]]:
 
 
 @contextmanager
-def serving(model_id: str, tmp: Path, name: str) -> Iterator[Server]:
-    """サーバーのプロセスを起こし、/ready が 200 を返すまで待つ。抜けるときに残っていれば殺す。"""
+def serving(model_id: str, tmp: Path, name: str, *, lease_ttl: float = LEASE_TTL,
+            role: str | None = None) -> Iterator[Server]:
+    """サーバーのプロセスを起こし、/ready が 200 を返す（role を渡せば、その役割になる）まで待つ。
+    抜けるときに残っていれば殺す。"""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -116,11 +121,11 @@ def serving(model_id: str, tmp: Path, name: str) -> Iterator[Server]:
     with open(log, "wb") as out:
         proc = subprocess.Popen(
             [sys.executable, "-m", "sparse_engine.server", str(tmp / "objects"), "--pg", DSN,
-             "--model-id", model_id, "--port", str(port), "--engine", "rust"],
+             "--model-id", model_id, "--port", str(port), "--engine", "rust", "--lease-ttl", str(lease_ttl)],
             cwd=ROOT, stdout=out, stderr=out)
     server = Server(proc, f"http://127.0.0.1:{port}", log)
     try:
-        wait_ready(server)
+        wait_ready(server, role=role)
         yield server
     finally:
         if proc.poll() is None:
@@ -128,26 +133,49 @@ def serving(model_id: str, tmp: Path, name: str) -> Iterator[Server]:
         proc.wait()
 
 
-def wait_ready(server: Server, timeout: float = 60.0) -> None:
+def wait_ready(server: Server, timeout: float = 60.0, role: str | None = None) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if server.proc.poll() is not None:
             raise RuntimeError(f"サーバーが終了した（{server.proc.returncode}）:\n{server.log.read_text()}")
         try:
-            with urllib.request.urlopen(server.url + "/ready", timeout=2):
+            status, body = get(server.url + "/ready")
+            if status == 200 and role in (None, body["role"]):
                 return
         except OSError:
-            time.sleep(0.1)
-    raise TimeoutError(f"{server.url} が {timeout} 秒で要求を受けられるようにならなかった")
+            pass
+        time.sleep(0.1)
+    raise TimeoutError(f"{server.url} が {timeout} 秒で要求を受けられる{role or ''}にならなかった")
 
 
-def post(url: str, write: Write) -> int:
+def get(url: str) -> tuple[int, dict]:
+    """GET して (状態, JSON の本文) を返す（4xx、5xx でも本文を返す）。"""
+    try:
+        with urllib.request.urlopen(url, timeout=2) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.load(e)
+
+
+def try_post(url: str, write: Write) -> tuple[int, dict]:
+    """write を送り、(状態, JSON の本文) を返す（4xx、5xx でも本文を返す）。"""
     body = {"client_op_id": write.op_id,
             "ops": [{"op": "set_cell", "args": ["Value", write.value], "kwargs": {"Item": write.item}}]}
     req = urllib.request.Request(url + "/writes", data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=CLIENT_TIMEOUT) as r:
-        return json.load(r)["seq"]
+    try:
+        with urllib.request.urlopen(req, timeout=CLIENT_TIMEOUT) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.load(e)
+
+
+def post(url: str, write: Write) -> int:
+    """write を送って確定の通し番号を返す。200 でなければ HTTPError。"""
+    status, body = try_post(url, write)
+    if status != 200:
+        raise urllib.error.HTTPError(url, status, body.get("message", ""), {}, None)
+    return body["seq"]
 
 
 def deliver(write: Write, urls: list[str], target: int, report: Report, lock: threading.Lock) -> tuple[Ack, int]:
@@ -155,19 +183,22 @@ def deliver(write: Write, urls: list[str], target: int, report: Report, lock: th
     deadline = time.monotonic() + GIVE_UP
     for attempt in itertools.count(1):
         try:
-            return Ack(write, post(urls[target], write), time.monotonic(), attempt), target
-        except urllib.error.HTTPError as e:
-            failure, switch = f"{e.code} {json.load(e).get('error')}", e.code == 503
-            if e.code < 500 and e.code != 429:
-                raise AssertionError(f"{write}: {failure}") from None
+            status, body = try_post(urls[target], write)
+            if status == 200:
+                return Ack(write, body["seq"], time.monotonic(), attempt), target
+            failure = f"{status} {body.get('error')}"
+            if status == 421:  # 待機系。応答にある書き手へ送る（分からなければ、もう一方へ）
+                target = urls.index(body["leader"]) if body.get("leader") in urls else 1 - target
+            elif status == 503:
+                target = 1 - target
+            elif status < 500 and status != 429:
+                raise AssertionError(f"{write}: {failure}")
         except (OSError, http.client.HTTPException) as e:  # 応答の途中で切れれば IncompleteRead
-            failure, switch = type(getattr(e, "reason", e)).__name__, True
+            failure, target = type(getattr(e, "reason", e)).__name__, 1 - target
         with lock:
             report.failures[failure] += 1
         if time.monotonic() > deadline:
             raise TimeoutError(f"{write} の確定を {GIVE_UP} 秒受け取れなかった（最後は {failure}）")
-        if switch:
-            target = 1 - target
         time.sleep(BACKOFF)
 
 
@@ -197,7 +228,7 @@ def wait_until(cond, clients: list[Future], timeout: float = GIVE_UP + 30) -> No
         time.sleep(0.05)
 
 
-def run(sig: signal.Signals) -> Report:
+def run(sig: signal.Signals, lease_ttl: float = LEASE_TTL) -> Report:
     """A に書き込み続ける中で A に sig を送り、B に引き継がせる。"""
     report, lock, stop = Report(), threading.Lock(), threading.Event()
 
@@ -209,8 +240,8 @@ def run(sig: signal.Signals) -> Report:
         after = acked(report.killed_at)
         return len(after) >= AFTER and time.monotonic() >= min(after) + SETTLE
 
-    with (seeded_model() as (model_id, tmp), serving(model_id, tmp, "a") as a,
-          serving(model_id, tmp, "b") as b):
+    with (seeded_model() as (model_id, tmp), serving(model_id, tmp, "a", lease_ttl=lease_ttl, role="leader") as a,
+          serving(model_id, tmp, "b", lease_ttl=lease_ttl, role="standby") as b):
         with ThreadPoolExecutor(CLIENTS) as pool:
             clients = [pool.submit(client, k, [a.url, b.url], report, lock, stop) for k in range(CLIENTS)]
             try:
@@ -272,12 +303,13 @@ def violations(report: Report) -> list[str]:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="書き手のサーバーを止めて、もう一方のサーバーに引き継がせる")
     ap.add_argument("--signal", choices=["TERM", "KILL"], default="TERM", help="A に送るシグナル")
+    ap.add_argument("--lease-ttl", type=float, default=LEASE_TTL, help="サーバーに渡すリースの期限（秒）")
     args = ap.parse_args(argv)
-    report = run(signal.Signals[f"SIG{args.signal}"])
+    report = run(signal.Signals[f"SIG{args.signal}"], args.lease_ttl)
     problems = violations(report)
     print(f"送った書き込み {len(report.issued)}、確定 {len(report.acks)}、"
           f"再送した書き込み {sum(a.attempts > 1 for a in report.acks)}")
-    print(f"A を止めてから確定が途切れた最も長い間: {report.gap:.2f} 秒")
+    print(f"A を止めてから確定が途切れた最も長い間: {report.gap:.2f} 秒（リースの期限 {args.lease_ttl} 秒）")
     print(f"失敗した送信: {dict(report.failures.most_common())}")
     print("\n".join(problems) or "確定を返した書き込みはすべて 1 回だけ記録され、値も合っている")
     sys.exit(1 if problems else 0)

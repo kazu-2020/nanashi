@@ -3,7 +3,7 @@
 表は次の 4 つ（接頭辞 nanashi_）。1 つのデータベースに複数のモデルを置ける。
 
     model        モデルごとの、最後の記録の通し番号（head_seq）と、書き込むプロセスのリース
-                 （世代番号 writer_epoch、持ち主、期限）
+                 （世代番号 writer_epoch、持ち主、期限、持ち主が公開している番地 lease_endpoint）
     operation    1 トランザクション 1 行。意図と、セル以外の結果を JSONB で持つ
     cell_change  書き換えた入力セルごとに 1 行（Metric の ID、座標のメンバーの ID の配列、変更前後の値）。
                  セルの履歴を索引で引ける
@@ -28,6 +28,8 @@ cell_change への書き込み（と索引の更新）は確定の後で行う�
 
 リースは書き込みのない間も別のスレッドで延長する（heartbeat）。別のプロセスが期限内のリースを
 持っていれば、acquire は期限が切れるまで待ってから取る（落ちたプロセスのリースを待つ）。
+take は待たずに取れるかだけを試す（待機系が使う）。リースには持ち主が公開している番地（endpoint）も
+書き、leader で引ける。手放すとき（release）は確定と同じ通知を送るので、待機系はすぐ取りに行ける。
 """
 from __future__ import annotations
 
@@ -104,6 +106,9 @@ delete from nanashi_cell_change a using nanashi_cell_change b
 drop index if exists nanashi_cell_change_by_cell;
 create unique index nanashi_cell_change_by_cell on nanashi_cell_change (model_id, metric_id, coords, seq);
 """),
+    (3, """
+alter table nanashi_model add column if not exists lease_endpoint text;
+"""),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -142,14 +147,17 @@ ANALYZE_ROWS = 100_000
 class PgJournal(Journal):
     def __init__(self, dsn: str, model_id: str, objects, *, lease_ttl: float = 30.0,
                  holder: str | None = None, bulk_cells: int = 10_000, heartbeat: bool = True,
-                 acquire_wait: float | None = None):
+                 acquire_wait: float | None = None, endpoint: str | None = None):
         """objects はスナップショットと大量の変更のファイルの置き場所（s3://<バケット>/<接頭辞> か
         ディレクトリ。objects.py）。その下の <model_id>/ に置く。
         lease_ttl はリースの期限（秒）。heartbeat なら、リースを持っている間は期限の 1/3 ごとに延長する。
         acquire_wait は、別のプロセスのリースが切れるのを待つ長さ（既定は lease_ttl）。
-        holder はリースの持ち主の名前（既定はホスト名、プロセス番号、乱数）。"""
+        holder はリースの持ち主の名前（既定はホスト名、プロセス番号、乱数）。
+        endpoint はこのプロセスが公開している番地（HTTP サーバーの URL）。リースと一緒に書き、
+        待機系やルーターが書き手を見つけるのに使う。"""
         self.dsn = dsn
         self.model_id = model_id
+        self.endpoint = endpoint
         self.objects = open_objects(objects)
         self.bulk_cells = bulk_cells
         # 接続はスレッドをまたいで使われうる（ライターと読み出し）。トランザクションの途中に別の文が
@@ -193,13 +201,16 @@ class PgJournal(Journal):
                     c.close()
 
     def release(self) -> None:
-        """持っているリースを手放す。持っていなければ何もしない。"""
+        """持っているリースを手放す。持っていなければ何もしない。待機系（wait で待っている）に知らせるので、
+        次の書き手は間隔を待たずに取りに行ける。"""
         with self._lock:
             if self.epoch is None or self.conn.closed:
                 return
-            self.conn.execute("update nanashi_model set lease_expires = now()"
-                              " where model_id = %s and writer_epoch = %s and lease_holder = %s",
-                              (self.model_id, self.epoch, self.holder))
+            with self.conn.transaction():
+                self.conn.execute("update nanashi_model set lease_expires = now()"
+                                  " where model_id = %s and writer_epoch = %s and lease_holder = %s",
+                                  (self.model_id, self.epoch, self.holder))
+                self.conn.execute("select pg_notify('nanashi_head', %s)", (self.model_id,))
             self.epoch = None
 
     def open(self, engine=None):
@@ -236,12 +247,7 @@ class PgJournal(Journal):
         deadline = time.monotonic() + wait
         while True:
             with self._lock, self.conn.transaction():
-                row = self.conn.execute(
-                    "update nanashi_model set writer_epoch = writer_epoch + 1, lease_holder = %s,"
-                    " lease_expires = now() + make_interval(secs => %s)"
-                    " where model_id = %s and (lease_holder is null or lease_holder = %s or lease_expires < now())"
-                    " returning writer_epoch, head_seq",
-                    (self.holder, self.lease_ttl, self.model_id, self.holder)).fetchone()
+                row = self._take_row()
                 if row is None:
                     other = self.conn.execute(
                         "select lease_holder, head_seq, extract(epoch from lease_expires - now())"
@@ -261,6 +267,34 @@ class PgJournal(Journal):
             raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
         self.epoch = epoch
         return epoch
+
+    def _take_row(self):
+        """リースが空いていれば（誰も持っていない、自分が持っている、期限が切れている）取って世代番号を
+        1 つ進め、(世代番号, 最後の記録の通し番号) を返す。取れなければ None。"""
+        return self.conn.execute(
+            "update nanashi_model set writer_epoch = writer_epoch + 1, lease_holder = %s, lease_endpoint = %s,"
+            " lease_expires = now() + make_interval(secs => %s)"
+            " where model_id = %s and (lease_holder is null or lease_holder = %s or lease_expires < now())"
+            " returning writer_epoch, head_seq",
+            (self.holder, self.endpoint, self.lease_ttl, self.model_id, self.holder)).fetchone()
+
+    def take(self) -> bool:
+        """今すぐリースを取れるなら取る（待たない）。別のプロセスが期限内のリースを持っていれば False。
+        手元の通し番号は確かめない（呼ぶ側はリースを取ってから記録に追いつく。持っている間はほかの
+        プロセスは確定できない）。"""
+        with self._lock:
+            row = self._take_row()
+            if row is None:
+                return False
+            self.epoch, self.lease_until, self.lease_error = row[0], time.monotonic() + self.lease_ttl, None
+            return True
+
+    def leader(self) -> str | None:
+        """期限内のリースを持っているプロセスが公開している番地（なければ None）。"""
+        with self._lock:
+            row = self.conn.execute("select lease_endpoint from nanashi_model"
+                                    " where model_id = %s and lease_expires > now()", (self.model_id,)).fetchone()
+        return None if row is None else row[0]
 
     def _beat(self) -> None:
         """リースを持っている間、期限の 1/3 ごとに延長する。延長できなければ（締め出された）リースを手放す。"""
