@@ -2,13 +2,11 @@
 import signal
 import unittest
 
-from .journals import PG_AVAILABLE
+from .journals import DSN, PG_AVAILABLE
 
 
 @unittest.skipUnless(PG_AVAILABLE, "PostgreSQL（NANASHI_PG_DSN）と psycopg、nanashi_core が必要")
 class Failover(unittest.TestCase):
-    # 止めたサーバーのリースが期限まで残り、B は 30 秒近く書けない。SIGTERM でリースを手放すようにしたら外す
-    @unittest.expectedFailure
     def test_sigterm_handover(self):
         from .failover import run, violations
         report = run(signal.SIGTERM)
@@ -20,3 +18,16 @@ class Failover(unittest.TestCase):
         from .failover import run, violations
         report = run(signal.SIGKILL)
         self.assertEqual(violations(report), [])
+
+    def test_sigterm_releases_lease(self):
+        import psycopg
+
+        from .failover import Write, post, seeded_model, serving
+        with seeded_model() as (model_id, tmp), serving(model_id, tmp, "a") as a:
+            post(a.url, Write("w-1", "i001", 7))
+            a.proc.send_signal(signal.SIGTERM)
+            self.assertEqual(a.proc.wait(timeout=10), 0, a.log.read_text())
+            with psycopg.connect(DSN) as conn:
+                released, = conn.execute("select lease_expires <= now() from nanashi_model where model_id = %s",
+                                         (model_id,)).fetchone()
+            self.assertTrue(released)
