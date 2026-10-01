@@ -469,6 +469,7 @@ export AWS_ENDPOINT_URL=http://127.0.0.1:59000 AWS_ACCESS_KEY_ID=nanashi AWS_SEC
 スキーマには版があり（`nanashi_schema`）、`python -m sparse_engine.pg_journal migrate <DSN>`（サーバーは `--migrate`）で最新にする。
 接続のたびには DDL を流さない（DDL は表のロックを取り、書き込み中の別のプロセスと競り合うため）。版が合わなければ、`PgJournal` は開くときに `SchemaError` で知らせる。
 版 2 で、操作の時刻（`at`）を `timestamptz` にし、セルの履歴の索引を一意にした（以前の版が書いた重複は移すときに消す）。
+版 3 で、リースの持ち主が公開している番地（`lease_endpoint`）を足した。
 `journal.prune(keep=2)` で古いスナップショットと、その前の大量の変更のファイルを消せる（セルの履歴の表に反映してから消すので、記録の再生とセルの履歴は残る）。あわせて、最後の 10 万件より古い記録の `client_op_id` を忘れる。
 
 - **操作**（`nanashi_operation`）：1 トランザクション 1 行。意図とセル以外の結果を JSONB で持つ。
@@ -488,6 +489,12 @@ export AWS_ENDPOINT_URL=http://127.0.0.1:59000 AWS_ACCESS_KEY_ID=nanashi AWS_SEC
 `Workspace.close` も記録先のリースを手放すので、HTTP サーバーを止めてすぐ起動し直しても、最初の書き込みは待たされない。
 落ちたプロセスのリースが残っていれば、`acquire` は期限が切れるまで（既定で `lease_ttl` の長さまで）待ってから取るので、再起動が期限のぶん失敗し続けることはない（`acquire_wait=0` で待たない）。
 `Fenced` は `journal.Stale` の一種で、`Workspace` はこれを受けると記録先の最新の版に追いつく。
+
+リースには、持ち主が公開している番地（`lease_endpoint`。`PgJournal(endpoint=...)` で渡す）も書く。
+`journal.leader()` は期限内のリースの番地を返す（なければ `None`）。待機系が書き込みを拒むときに書き手を教えるのと、ルーターが書き手を見つけるのに使う。
+`journal.take()` は、リースが空いていれば（誰も持っていない、期限が切れている）待たずに取って `True`、別のプロセスが期限内に持っていれば `False` を返す。
+`acquire` と違って手元の通し番号は確かめないので、取った側は記録に追いついてから書く（待機系の昇格。「同時の読み書き」）。
+`release` は確定と同じ通知（`NOTIFY nanashi_head`）を送るので、待機系は間隔を待たずにリースを取りに行ける。
 
 1 万セルを超える変更は、変更前後の値を Metric ごとに Parquet のファイルにしてオブジェクトストレージ（`<モデルの ID>/cells/`）に置いてから確定し、セルの変更の表への書き込みは確定の後に回す（`index_pending`）。
 Parquet の列は、座標のメンバーの ID（`d<軸の ID>`、Int64）と、変更前 `old` と変更後 `new`（空は null）である。
@@ -551,6 +558,32 @@ replica.version.get("Revenue", Product="A", Month="Jan")
 軸、メンバー、Metric の定義を変えた記録は、全体を計算し直す。
 HTTP サーバーでは `--follow` で、書き込みを受けない（405）読み出し専用のサーバーになる。
 
+同じモデルを複数のプロセスで開き、書き手が止まっても別のプロセスが書き込みを引き継ぐには、`Workspace(standby=True)` にする（HTTP サーバーは常にこれで開く）。
+各プロセスは書き手（`Role.LEADER`）か待機系（`Role.STANDBY`）のどちらかで、`ws.role` で分かる。
+
+```python
+from sparse_engine.workspace import NotLeader, Workspace
+
+ws = Workspace.open(PgJournal(dsn, "plan-2027", "s3://nanashi/plans", endpoint="http://plan-b:8080"),
+                    RustEngine(), standby=True)
+ws.role                                          # 書き手がいれば Role.STANDBY
+try:
+    ws.write(lambda m: m.set_cell("Price", 12, Product="A"))
+except NotLeader as e:
+    print(e.leader)                              # 書き手の番地（http://plan-a:8080）。そちらへ送る
+```
+
+- 開くときに記録先の権利を `take` で試す。取れれば記録に追いついて書き手になり、取れなければ待機系になる。
+- 待機系は見張りのスレッド（`nanashi-standby`）で記録先に追従し（`Replica` と同じ仕組み）、読み出しを受ける。書き込みは `NotLeader`（`leader` に書き手の番地）で待たずに拒む。
+- 待機系は間隔（`interval=`、既定 1 秒）ごとに権利を取れるか試す。書き手が `close` で手放せば（SIGTERM）その通知ですぐ、落ちて期限が切れればその間隔で取り、取ってからもう一度記録に追いついて書き手になる。権利を持っている間はほかのプロセスは確定できないので、追いついた版は最新である。
+- 書き手は、確定が締め出された（`Fenced`）か、見張りが権利を持っていないと気づいたら（延長できなかった）待機系に戻る。そのまとまりの書き込みと、その直前に列に入っていた書き込みは `NotLeader` になる。開き直さず、追いつくのは見張りに任せる。
+- 昇格のたびに版を公開し直すので、それより前の版の通し番号を `expect` に付けた書き込みは `Conflict` になる（開き直したときと同じ）。
+- 空いた権利を複数の待機系が同時に取りに行っても、取れるのは 1 つ（記録先の 1 回の条件付き更新）。
+- `/ready` に当たる `ready()` は、待機系でも空（読み出しは受けられる）。見張りが失敗していれば、その理由を返す。
+
+`standby=False`（既定）なら今までと同じで、最初の書き込みで権利を取り、別のプロセスが書いていれば開き直す。
+`FileJournal` でも `standby=True` は使える（権利は `lock` の排他ロック）。
+
 損益計画（490 万セル）で、8 人が 50 件ずつ給与を書き込むと、毎秒約 500 件を確定する（1 件ずつトランザクションで確定すると毎秒約 190 件）。
 応答の時間は中央値 15 ms、95 パーセンタイル 21 ms で、1 回の書き出しで平均 4 件を確定した（手元の macOS、ディスクまで書き出す設定）。
 
@@ -561,7 +594,7 @@ HTTP サーバーでは `--follow` で、書き込みを受けない（405）読
 ```bash
 .venv/bin/python -m sparse_engine.server plan/ --port 8080 --checkpoint-every 1000   # FileJournal
 .venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id plan-2027 \
-    --host 0.0.0.0 --tokens tokens.json                                                # {"<トークン>": "<利用者>"}
+    --host 0.0.0.0 --advertise http://plan-a:8080 --tokens tokens.json                 # {"<トークン>": "<利用者>"}
 ```
 
 | 要求 | 内容 |
@@ -572,9 +605,9 @@ HTTP サーバーでは `--follow` で、書き込みを受けない（405）読
 | `GET /metrics/<name>/rows?<軸>=a&offset=0&limit=50` | 行の列と全行数 |
 | `GET /metrics/<name>/summary?keep=Month&agg=sum&<軸>=a,b` | 集計 |
 | `POST /writes` | `{"client_op_id", "reason", "expect", "ops": [{"op": "set_cell", "args": [...], "kwargs": {...}}, ...]}` |
-| `GET /health` | 生きているか（公開中の版の通し番号。認証なしで読める） |
-| `GET /ready` | 要求を受けられるか。ライターが止まった、記録先からの開き直しに失敗した、リースを延長できない、`Replica` が追いつけない、のどれかなら 503 と理由（認証なしで読める） |
-| `GET /stats` | 観察用の数（Prometheus のテキスト形式。確定の件数と時間、取り消した書き込み、列の長さ、リースの状態、スナップショットからの経過、`Replica` の遅れなど） |
+| `GET /health` | 生きているか（公開中の版の通し番号と役割 `role`。認証なしで読める） |
+| `GET /ready` | 要求を受けられるか。ライターが止まった、記録先からの開き直しに失敗した、リースを延長できない、待機系の見張りが失敗した、`Replica` が追いつけない、のどれかなら 503 と理由。役割 `role`（`leader`、`standby`、`--follow` なら `follower`）も返す（認証なしで読める） |
+| `GET /stats` | 観察用の数（Prometheus のテキスト形式。確定の件数と時間、取り消した書き込み、列の長さ、書き手か（`nanashi_leader`）、リースの状態、スナップショットからの経過、`Replica` の遅れなど） |
 
 監査に残す利用者は、本文ではなく認証で決める。
 `--tokens` なら `Authorization: Bearer <トークン>` を求め、`--user-header X-Forwarded-User` なら、認証を済ませたプロキシが付けた見出しの値を使う。
@@ -585,11 +618,18 @@ HTTP サーバーでは `--follow` で、書き込みを受けない（405）読
 書き込みは 1 要求 1 トランザクションで、`client_op_id` が必須（再送しても二重に確定しない。再起動をまたいでも同じ）。
 `expect` に読んだ版の通し番号を付けると、その後に同じセルを変えた書き込みがあれば 409 で拒否する。
 列が溢れれば 429、確定を待ちきれなければ 504、式や引数の誤りは 400、認証の誤りは 401、大きすぎれば 413 で、いずれも `{"error", "message"}` を返す。
+待機系への書き込みは 421 で、`leader` に書き手の番地を返す（次の段落）。
 式の誤りは `code` も返す（`messages.MESSAGES` のキー。文言でなくこれで見分ける）。
 内部の誤りは 500 で、文言は固定にし、原因はサーバーのログに `error_id` と一緒に残す。
 
+同じモデルを複数のサーバーで開くと、書き込みの権利（リース）を持つ 1 つが書き手になり、ほかは待機系として追従する（`Workspace(standby=True)`。「同時の読み書き」）。
+待機系は読み出しを受け、書き込みは 421 と `{"error": "not_leader", "leader": <書き手の番地>}` で拒むので、送り手は `leader` へ送り直す。
+ルーターは `nanashi_model.lease_endpoint` でも書き手を見つけられる。
+書き手としてほかのプロセスに知らせる自分の番地は `--advertise`（既定は `http://<host>:<port>`。`0.0.0.0` で待ち受けるときは必須）、リースの期限は `--lease-ttl`（既定 30 秒）で決める。
+
 SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き込みを確定させ、リースを手放してから止まる（ECS などのコンテナは SIGTERM で止める）。
-次に書くサーバーは期限を待たずに書ける。
+待機系はその通知ですぐ権利を取って書き手になる。
+落ちたとき（SIGKILL）は、リースの期限が切れてから、待機系が権利を試す間隔（1 秒）までの間に引き継ぐ。
 
 損益計画（大）で、HTTP 経由の 1 セルの読み出しは 0.24 ms、給与を 1 人変える書き込みは 0.9 ms、8 人が休みなく読み続ける中での書き込みは 2.2 ms（`bench_http.py`、手元の loopback、読み出しは毎秒約 2,800 件）。
 サーバーは起動時に Python のスレッド切り替えの間隔を 0.5 ms にする（`--switch-interval`）。
@@ -792,10 +832,12 @@ Rust のエンジンは、並列化、差分のまとめ直し、準結合、転
 PostgreSQL は `NANASHI_PG_DSN`（既定は手元の 55432 番）で指定し、つながらなければその組み合わせのテストはスキップする（CI では PostgreSQL を立てて回す）。
 
 `tests/failover.py` は、書き手を止めても、確定を返した書き込みが失われず二重にもならないことを、2 つのサーバーのプロセスで確かめる。
-同じモデルを開いた 2 つのサーバーの一方に 4 つの送り手が書き込み続ける中で、そのプロセスを止める。
-送り手は確定を受け取るまで同じ `client_op_id` で再送し、つながらないときと 503 のときはもう一方へ送る。
-両方を止めたあと、記録先の記録と開き直したモデルの値を、受け取った確定と突き合わせ、確定が途切れた最も長い間も測る（`python -m tests.failover --signal TERM`）。
-SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限（30 秒）近く途切れる。
+同じモデルを開いた 2 つのサーバー（書き手と待機系）の書き手に 4 つの送り手が書き込み続ける中で、そのプロセスを止める。
+送り手は確定を受け取るまで同じ `client_op_id` で再送し、つながらないときと 503 のときはもう一方へ、421 のときは応答にある書き手へ送る。
+両方を止めたあと、記録先の記録と開き直したモデルの値を、受け取った確定と突き合わせ、確定が途切れた最も長い間も測る（`python -m tests.failover --signal TERM`。リースの期限は 3 秒にして回す）。
+SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限と待機系が権利を試す間隔の分（約 3.2 秒）途切れる。
+待機系が書き手の番地を返して書き込みを拒むこと、起動し直したプロセスが待機系として追従することも、同じ仕組みで確かめる（`tests/test_failover.py`）。
+待機系の役割の変わり方そのもの（昇格、降格、降格の直前に列に入った書き込み）は、1 つのプロセスの中の 2 つの `Workspace` で確かめる（`tests/test_standby.py`）。
 
 ## 構成
 

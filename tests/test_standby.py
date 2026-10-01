@@ -1,6 +1,7 @@
 """待機系と昇格（Workspace(standby=True)）。同じ記録先を開いた 2 つの Workspace のうち、書き込みを受けるのは 1 つ。"""
 import threading
 import unittest
+import urllib.request
 
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.journal import Fenced
@@ -100,6 +101,22 @@ class PgStandby(Standby, unittest.TestCase):
 
     def test_lease_endpoint_names_the_leader(self):
         self.assertEqual((self.leader_of(self.a), self.leader_of(self.b)), ("http://a", "http://a"))
+
+    def test_server_answers_421_with_the_leader(self):
+        from sparse_engine.server import Server
+
+        from .test_server import Client, write
+        server = Server(self.b, "127.0.0.1", 0).start()
+        try:
+            c = Client(server.url, token=None)
+            self.assertEqual(c.get("/ready"), (200, {"seq": 0, "ready": True, "role": "standby", "reasons": []}))
+            self.assertEqual(c.get("/health"), (200, {"seq": 0, "role": "standby"}))
+            status, err = c.post("/writes", {"client_op_id": "x", "ops": [write("Stock", 1, Product="p0", Month="Jan")]})
+            self.assertEqual((status, err["error"], err["leader"]), (421, "not_leader", "http://a"))
+            with urllib.request.urlopen(server.url + "/stats", timeout=5) as r:  # Prometheus のテキスト
+                self.assertIn("nanashi_leader 0\n", r.read().decode())
+        finally:
+            server.stop()
 
     def test_leader_demotes_when_its_write_is_fenced(self):
         self.take_by_force()
