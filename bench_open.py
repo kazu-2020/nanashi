@@ -3,7 +3,9 @@
     python bench_open.py                      # 損益計画（大）の 1 倍と 4 倍、小売モデル（大）
     python bench_open.py --models fpa4,retail --records 0,10
 
-比べるのは次の 2 つで、どちらも手元のディレクトリ（FileJournal）から開く。
+比べるのは次の 2 つで、手元のディレクトリ（FileJournal。既定）か、PostgreSQL の記録先と S3 互換のオブジェクト
+ストレージ（--journal pg。compose.yaml の PostgreSQL と RustFS。NANASHI_PG_DSN と NANASHI_S3_ENDPOINT で変えられる）
+から開く。
 - 入力だけ（Parquet。版 4）: 開くときに全体を計算し直す（以前の形式）
 - 入力と計算 Metric の値（平らな形式。版 5）: 後の記録の変更範囲だけを差分で計算し直す
 
@@ -23,6 +25,33 @@ import tempfile
 import time
 
 MB = 1e6
+DSN = os.environ.get("NANASHI_PG_DSN", "postgresql://postgres@127.0.0.1:55432/nanashi")
+S3_ENDPOINT = os.environ.get("NANASHI_S3_ENDPOINT", "http://127.0.0.1:59000")
+S3_BUCKET = "nanashi-bench"
+
+
+def open_journal(path: str):
+    """記録先。path が pg: で始まれば PostgreSQL の記録先で、ファイルは S3 の pg: の後の接頭辞に置く。"""
+    if path.startswith("pg:"):
+        from sparse_engine.pg_journal import PgJournal
+        model_id = path[3:]
+        return PgJournal(DSN, model_id, f"s3://{S3_BUCKET}/bench-open", heartbeat=False)
+    from sparse_engine.journal import FileJournal
+    return FileJournal(path, fsync=False)
+
+
+def s3_setup() -> None:
+    """boto3 の環境変数（compose.yaml の認証情報）と、バケット。"""
+    os.environ.setdefault("AWS_ENDPOINT_URL", S3_ENDPOINT)
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("NANASHI_S3_ACCESS_KEY", "nanashi"))
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("NANASHI_S3_SECRET_KEY", "nanashi-secret"))
+    os.environ.setdefault("AWS_REGION", "us-east-1")
+    import boto3
+    client = boto3.client("s3")
+    try:
+        client.head_bucket(Bucket=S3_BUCKET)
+    except client.exceptions.ClientError:
+        client.create_bucket(Bucket=S3_BUCKET)
 
 
 def build(name: str):
@@ -40,11 +69,10 @@ def build(name: str):
 
 def prepare(path: str, name: str, records: int, legacy: bool) -> None:
     """記録先 path に、モデルのスナップショットと、その後の records 件の記録を置く。"""
-    from sparse_engine.journal import FileJournal
     from sparse_engine import storage
     m = build(name)
     m.recalc()
-    journal = FileJournal(path, fsync=False)
+    journal = open_journal(path)
     if legacy:  # 以前の形式（入力だけを Parquet で）
         original = storage.dump
         storage.dump = lambda model, snapshot=False: original(model)
@@ -69,11 +97,11 @@ def prepare(path: str, name: str, records: int, legacy: bool) -> None:
 def measure(path: str) -> dict:
     """path の記録先を開き、最初の再計算を終えるまでの時間の内訳。"""
     import nanashi_core
-    from sparse_engine.journal import FileJournal, apply
+    from sparse_engine.journal import apply
     from sparse_engine.rust_engine import RustEngine
 
     nanashi_core.track_heap(True)
-    journal = FileJournal(path)
+    journal = open_journal(path)
     engine = RustEngine()
     t0 = time.perf_counter()
     (base, place), *_ = journal.snapshots()
@@ -105,29 +133,62 @@ def child(args: list[str]) -> dict:
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
+class Place:
+    """測定ごとの記録先の置き場所（一時ディレクトリか、PostgreSQL のモデル）。"""
+
+    def __init__(self, journal: str):
+        self.journal = journal
+
+    def __enter__(self) -> str:
+        if self.journal == "pg":
+            import uuid
+            from sparse_engine.pg_journal import migrate
+            migrate(DSN)
+            self.path = f"pg:bench-open-{uuid.uuid4().hex[:8]}"
+        else:
+            self.tmp = tempfile.TemporaryDirectory()
+            self.path = self.tmp.name
+        return self.path
+
+    def __exit__(self, *exc) -> None:
+        if self.journal == "pg":
+            journal = open_journal(self.path)
+            for key in list(journal.objects.list(f"{journal.model_id}/")):  # S3 に置いたスナップショットも消す
+                journal.objects.delete(key)
+            journal.drop()
+        else:
+            self.tmp.cleanup()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", default="fpa1,fpa4,retail")
     ap.add_argument("--records", default="0,10")
     ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--journal", choices=["file", "pg"], default="file",
+                    help="file は手元のディレクトリ、pg は PostgreSQL の記録先と S3 互換のオブジェクトストレージ")
     ap.add_argument("--child", nargs="*", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.child is not None:
+        if args.child[1].startswith("pg:"):
+            s3_setup()
         if args.child[0] == "prepare":
             prepare(args.child[1], args.child[2], int(args.child[3]), args.child[4] == "legacy")
             print("{}")
         else:
             print(json.dumps(measure(args.child[1])))
         return
+    if args.journal == "pg":
+        s3_setup()
     print("| モデル | 後の記録 | 形式 | 開くまで | スナップショットの読み込み（うちハッシュの検査） | 記録の再生 | 最初の再計算 | スナップショット | 格納データ | うち Rust のヒープ |")
     print("|---|---|---|---|---|---|---|---|---|---|")
     for name in args.models.split(","):
         for records in map(int, args.records.split(",")):
             for legacy in (True, False):
-                with tempfile.TemporaryDirectory() as tmp:
-                    child(["prepare", tmp, name, str(records), "legacy" if legacy else "flat"])
-                    child(["measure", tmp])  # ページキャッシュを暖める
-                    runs = [child(["measure", tmp]) for _ in range(args.repeats)]
+                with Place(args.journal) as place:
+                    child(["prepare", place, name, str(records), "legacy" if legacy else "flat"])
+                    child(["measure", place])  # ページキャッシュを暖める
+                    runs = [child(["measure", place]) for _ in range(args.repeats)]
                 r = min(runs, key=lambda x: x["total_ms"])
                 label = "入力だけ（Parquet）" if legacy else "計算した値も（平らな形式）"
                 print(f"| {name}（{r['cells']:,} セル） | {r['records']} | {label} | {r['total_ms']:,.0f} ms | "
