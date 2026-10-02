@@ -450,8 +450,8 @@ class RustEngine:
         return self.core.size_hint(store)
 
     def memory(self, store) -> dict:
-        rows, base, delta_rows, delta, index = self.core.memory(store)
-        return {"rows": rows, "base": base, "delta_rows": delta_rows, "delta": delta, "index": index}
+        rows, base, base_heap, delta_rows, delta, index = self.core.memory(store)
+        return {"rows": rows, "base": base, "base_heap": base_heap, "delta_rows": delta_rows, "delta": delta, "index": index}
 
     def same(self, a, b) -> bool:
         return self.core.same_store(a, b)

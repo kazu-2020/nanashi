@@ -845,10 +845,12 @@ impl Core {
         Ok(read(store)?.rows_hint())
     }
 
-    /// 格納データが確保しているメモリ（本体の行数、本体、差分の件数、差分、索引。単位はバイト）。
-    fn memory(&self, store: &Bound<'_, StoreHandle>) -> PyResult<(usize, usize, usize, usize, usize)> {
+    /// 格納データが確保しているメモリ（本体の行数、本体、本体のうち Rust のヒープにある分、差分の件数、差分、索引。
+    /// 単位はバイト）。
+    #[allow(clippy::type_complexity)]
+    fn memory(&self, store: &Bound<'_, StoreHandle>) -> PyResult<(usize, usize, usize, usize, usize, usize)> {
         let m = read(store)?.memory();
-        Ok((m.rows, m.base, m.delta_rows, m.delta, m.index))
+        Ok((m.rows, m.base, m.base_heap, m.delta_rows, m.delta, m.index))
     }
 
     fn is_bool(&self, store: &Bound<'_, StoreHandle>) -> PyResult<bool> {

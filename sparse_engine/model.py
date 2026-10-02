@@ -342,8 +342,9 @@ class Model:
     def memory(self) -> dict[str, dict[str, int]]:
         """Metric ごとの格納データが確保しているメモリ（バイト）。計算の途中結果や計画は含まない。
 
-        rows は本体の行数、base・delta・index は本体・差分・索引、counts は差分集計の件数の格納データ
-        （本体と差分と索引の合計）。バイト数を測れないエンジン（参照実装）は rows だけを返す。
+        rows は本体の行数、base・delta・index は本体・差分・索引、base_heap は本体のうち Rust のヒープにある分
+        （本体の置き場所がヒープだけの今は base と同じ）、counts は差分集計の件数の格納データ（本体と差分と索引の
+        合計）。バイト数を測れないエンジン（参照実装）は rows だけを返す。
         """
         mem = self.engine.memory
         out = {}
