@@ -1,101 +1,135 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file gives guidance to Claude Code (claude.ai/code) when it works with the code in this repository.
 
-nanashi は、Pigment のような計画ツールのための疎な多次元計算エンジンである。Python のパッケージ `sparse_engine` と、Rust のエンジン `nanashi_core`（`native/`）の 2 層からなる。サーバーの前に置く Go のルーター（`router/`）もある。
-コメント、docstring、エラーの文言、ドキュメント、コミットメッセージはすべて日本語で書く。
-仕様は `docs/` にある（一覧は README.md の「ドキュメント」）。振る舞いや性能を変えたら、該当する `docs/` の文書と表も直す。
+nanashi is a sparse multidimensional calculation engine for planning tools such as Pigment. It has 2 layers: the Python package `sparse_engine` and the Rust engine `nanashi_core` (`native/`). A Go router (`router/`) is also available. It goes in front of the servers.
+The specifications are in `docs/` (see "Documentation" in README.md for the list). If you change behavior or performance, also update the related document and tables in `docs/`.
 
-## コマンド
+## Language and writing rules
+
+- Write these items in English that follows ASD-STE100 (Simplified Technical English):
+  - Code comments and docstrings (Python, Rust, Go).
+  - Documents (`README.md`, `docs/`, this file).
+  - Commit messages, pull request titles, and pull request descriptions.
+- Apply these ASD-STE100 rules:
+  - Use a maximum of 20 words in an instruction and 25 words in a description.
+  - Write one topic in one paragraph. Use a maximum of 6 sentences in a paragraph.
+  - Use the active voice and simple tenses (present, past, future).
+  - Write instructions in the imperative. Put a condition before the instruction ("If X, do Y.").
+  - Use one word for one meaning. Do not use synonyms for the same thing. Use the terms in the glossary below.
+  - Do not use more than 3 nouns in a row.
+  - Use short, common words ("use", "start", "make sure", "about").
+- Error messages that the user sees (`MESSAGES` in `sparse_engine/messages.py` and the other `raise` texts) stay in Japanese.
+- Some old comments and docstrings are still in Japanese. If you change code, write new comments in English. Also translate the old comments for the code that you change. Do not translate unrelated comments in the same change.
+
+### Glossary
+
+| Term | Meaning |
+|---|---|
+| dimension | A named axis of a Metric (for example, `Employee`, `Month`). |
+| member, member number | An item of a dimension, and its internal number. |
+| partition dimension | The dimension in the high bits of the key. Each Metric has one. |
+| input Metric, formula Metric | A Metric with values that a user enters, and a Metric that a formula calculates. |
+| stored data | The cells that a Store keeps for a Metric. |
+| base, delta | The immutable sorted columns of stored data, and the persistent tree of changes on top of them. |
+| version, published version | A state of the model. Nothing changes a published version. |
+| full recalculation, incremental recalculation | Calculate all formula Metrics again, or only the affected range. |
+| affected range | The cells that a change can make different. |
+| incremental aggregation | Update an aggregation result with only the changed source cells. |
+| journal | The record of transactions (`FileJournal`, `PgJournal`). |
+| reader, writer, standby, failover | The roles of a server process and the change of the writer. |
+| reference implementation | The Python engine (`ReferenceEngine`). It is the standard for correct results. |
+
+## Commands
 
 ```bash
-# 準備（Rust のエンジンは .venv に入れる。psycopg[binary] は手元で libpq なしに PostgreSQL へつなぐため）
+# Setup (install the Rust engine into .venv. psycopg[binary] connects to PostgreSQL without a local libpq)
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]" "psycopg[binary]"
 VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
 
-# PostgreSQL（55432 番）と S3 互換のオブジェクトストレージ RustFS（59000 番）
+# PostgreSQL (port 55432) and the S3-compatible object storage RustFS (port 59000)
 docker compose up -d
 
-# テスト。SPARSE_ENGINE で既定のエンジンを選ぶ（reference / rust。指定しなければ reference）。CI は両方で回す
+# Tests. SPARSE_ENGINE sets the default engine (reference / rust; the default is reference). CI runs both
 SPARSE_ENGINE=reference .venv/bin/python -m unittest discover -s tests -t .
 SPARSE_ENGINE=rust .venv/bin/python -m unittest discover -s tests -t .
 
-# モジュールごとに別のプロセスで並べて回す（CI はこれを使う。待ち時間が多いので、順に回すより 3 倍ほど速い）
+# Run each module in a separate process, in parallel (CI uses this. Tests wait a lot, so this is about 3 times faster than one by one)
 SPARSE_ENGINE=rust .venv/bin/python -m tests.parallel
 
-# 1 つのファイル、クラス、テストだけ
+# Only one file, class, or test
 SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads
-SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads.<クラス>.<テスト>
+SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads.<Class>.<test>
 
-# Rust の単体テスト（native/engine/tests/ の性質テストを含む）
+# Rust unit tests (includes the property tests in native/engine/tests/)
 cargo test --release --workspace --manifest-path native/Cargo.toml
 
-# ルーター（Go）。PgResolver のテストは、Python のテストが作った nanashi_model の表を使う
+# Router (Go). The PgResolver tests use the nanashi_model table that the Python tests make
 (cd router && go vet ./... && go test ./...)
 
-# 静的検査（CI と同じ）
+# Static checks (the same as CI)
 .venv/bin/pyflakes sparse_engine tests examples bench*.py
 cargo clippy --release --workspace --all-targets --manifest-path native/Cargo.toml -- -D warnings
 ```
 
-- `native/` を変えたら、Python のテストの前に `maturin develop` でビルドし直す。テストは `.venv` に入った `nanashi_core` を読む。
-- テストは、前提が欠けると失敗せずにスキップする。スキップの数を必ず見る。
-  - `nanashi_core` が入っていなければ、Rust のエンジンのテストをスキップする。
-  - PostgreSQL（`NANASHI_PG_DSN`）につながらないか、`psycopg` が libpq を見つけられなければ、記録先のテストをスキップする。
-  - RustFS（`NANASHI_S3_ENDPOINT`）につながらなければ、S3 に置くテストをスキップする。
-- 書き手の引き継ぎの試験台は `.venv/bin/python -m tests.failover --signal TERM` で回す。2 つのサーバーのプロセスを立て、PostgreSQL が要る。
-- `examples.fpa` は `--size` を付けないと、large（約 490 万セル）まですべての規模を回す。ベンチマーク（`bench*.py`）とあわせて、メモリを数 GB 使うので 1 本ずつ実行する。
-- 開発環境の詳細（free-threaded の Python 3.14t、`compose.yaml` の認証情報）は `docs/development.md` にある。
+- If you change `native/`, run `maturin develop` again before the Python tests. The tests load the `nanashi_core` in `.venv`.
+- If a prerequisite is missing, a test is skipped. It does not fail. Always look at the number of skipped tests.
+  - If `nanashi_core` is not installed, the Rust engine tests are skipped.
+  - If the tests cannot connect to PostgreSQL (`NANASHI_PG_DSN`), or `psycopg` cannot find libpq, the journal tests are skipped.
+  - If the tests cannot connect to RustFS (`NANASHI_S3_ENDPOINT`), the S3 tests are skipped.
+- To test the writer failover, run `.venv/bin/python -m tests.failover --signal TERM`. It starts 2 server processes and needs PostgreSQL.
+- If you do not give `--size`, `examples.fpa` runs all sizes up to large (about 4.9 million cells). It and the benchmarks (`bench*.py`) use some GB of memory. Run them one at a time.
+- `docs/development.md` gives more data about the development environment (free-threaded Python 3.14t, the credentials in `compose.yaml`).
 
-## アーキテクチャ
+## Architecture
 
-全体像は `docs/engine.md`、ソースの対応表は `docs/development.md` の「構成」にある。作業で外せない点は次のとおり。
+`docs/engine.md` gives the overview. "Structure" in `docs/development.md` gives the map of the source files. These points are important for all work.
 
-### 2 つのエンジンと二重の実装
+### Two engines and two implementations
 
-`Model`（`sparse_engine/model.py`）は、定義、操作、読み出し、トランザクション、分割軸の選択だけを持つ。それ以外はエンジンの 2 つの口に任せる。
+`Model` (`sparse_engine/model.py`) has only the definitions, the operations, the reads, the transactions, and the selection of the partition dimension. It sends all other work to the 2 interfaces of the engine:
 
-- **`engine.Store`**: 格納と評価
-- **`planner.Planner`**: 型検査、計算計画、差分集計の判定、影響範囲、再計算の段取り
+- **`engine.Store`**: storage and evaluation.
+- **`planner.Planner`**: type check, calculation plan, decision for incremental aggregation, affected range, and the schedule of the recalculation.
 
 | | Store | Planner |
 |---|---|---|
-| 参照実装（`ReferenceEngine`） | Python の dict | `PyPlanner`、`evaluate.py`、`delta.py` |
-| Rust（`RustEngine`） | `native/engine/src/store.rs`、`eval/` | `RustPlanner` → `check.rs`、`graph.rs`、`plan.rs` |
+| Reference implementation (`ReferenceEngine`) | Python dict | `PyPlanner`, `evaluate.py`, `delta.py` |
+| Rust (`RustEngine`) | `native/engine/src/store.rs`, `eval/` | `RustPlanner` → `check.rs`, `graph.rs`, `plan.rs` |
 
-- 参照実装は正しさの基準である。
-- Rust の経路で Python が行うのは、構文と名前の解決だけである。
-- Store と Planner の口はすべて必須で、Model は口の有無を調べない。口を足すときは、参照実装と Rust の両方に足す。
-- 計算は `native/engine/`（crate `nanashi-engine`、Python に依存しない）が行う。`native/src/lib.rs`（PyO3）は橋渡しで、Python から受け取った番号と長さはここで検査する。
+- The reference implementation is the standard for correct results.
+- On the Rust path, Python does only the syntax and the name resolution.
+- All methods of Store and Planner are necessary. Model does not examine if a method is available. If you add a method, add it to both the reference implementation and Rust.
+- `native/engine/` (crate `nanashi-engine`, no Python dependency) does the calculation. `native/src/lib.rs` (PyO3) is the bridge. It examines the numbers and lengths that it gets from Python.
 
-### 式のノードを足す・変えるとき
+### Add or change an expression node
 
-直す場所は `docs/development.md` の「構成」に一覧がある。
+"Structure" in `docs/development.md` gives the list of the files to change.
 
-- Python: `expr.py`、`parser.py`、`evaluate.py`、`rust_engine._tree`
-- Rust: `native/src/lib.rs` の `node`、`ast.rs`、`check.rs`、`graph.rs`、`plan.rs`、`eval/`
+- Python: `expr.py`, `parser.py`, `evaluate.py`, `rust_engine._tree`
+- Rust: the `node` function in `native/src/lib.rs`, `ast.rs`, `check.rs`, `graph.rs`, `plan.rs`, `eval/`
 
-そのうえで、`tests/test_expr_coverage.py` のモデルにそのノードを使う式を足す。足し忘れた場所があれば、このテストが落ちる。
+Then add a formula that uses the node to the model in `tests/test_expr_coverage.py`. If you forget a file, this test fails.
 
-- 式の誤りと警告（型検査と循環の検査）は、Rust でも文言を作らない。コードと値（`nanashi_core.Diagnostic`）で返し、Python の `FormulaError.code` と `.params` にする。文言は `sparse_engine/messages.py` の `MESSAGES` だけに持つ。
-- 集計関数は `expr.AGGREGATIONS` の 1 か所に持つ。
+- Formula errors and warnings (from the type check and the cycle check) do not have text in Rust. Rust returns a code and values (`nanashi_core.Diagnostic`). Python changes them into `FormulaError.code` and `.params`. Only `MESSAGES` in `sparse_engine/messages.py` has the message text.
+- `expr.AGGREGATIONS` is the only location for the aggregation functions.
 
-### 壊してはいけない約束
+### Rules that you must not break
 
-- 1 セルのキーは、各軸のメンバー番号を詰めた u64 で表す。軸のビット幅の合計が 64 を超える Metric は、型検査で拒否する。式の途中の結果も、メンバーの追加も同じように確かめる。
-- 公開済みの版は変えない。
-  - 格納データの本体は版どうしで共有し、差分は永続的な木に持つ。
-  - 読み手が古い版を持ったまま書き込めることを前提に、`fork`、トランザクションの取り消し、`Workspace` の版が成り立っている。
-- `Model` を複数のスレッドから直接使わない。同時に使うときは `Workspace` か `Replica` を通す。
-- HTTP の書き込みは `client_op_id` が必須で、再送しても二重に確定しない。
-- 本番の記録先は `PgJournal` で、`FileJournal` は主に開発と検証に使う。
-- ルーター（`docs/router.md`）は書き込みを送り直す。送り直しても二重に確定しないのは `client_op_id` があるためで、応答ごとの次の動き（`router.go` の `decide`）を変えるときはこの前提を崩さない。
+- The key of a cell is a u64 that contains the member numbers of all dimensions. The type check rejects a Metric if the total bit width of its dimensions is more than 64. Do the same check for intermediate results and for new members.
+- Do not change a published version.
+  - Versions share the base of the stored data. A persistent tree keeps the delta.
+  - `fork`, transaction rollback, and the versions of `Workspace` need this: a writer can write while a reader keeps an old version.
+- Do not use a `Model` directly from more than one thread. For concurrent use, use `Workspace` or `Replica`.
+- An HTTP write must have a `client_op_id`. If a client sends the write again, the server does not commit it two times.
+- The production journal is `PgJournal`. `FileJournal` is mainly for development and tests.
+- The router (`docs/router.md`) resends writes. Because of `client_op_id`, a resent write is not committed two times. If you change the next action for each response (`decide` in `router.go`), keep this condition.
 
-## テストの考え方
+## Test policy
 
-- 中心のテストは、ランダムな変更（入力、メンバーの追加・削除・名前の変更、異動など）を数百回加えたあとに、Rust の差分再計算の結果を、参照実装の結果と、全体を計算し直した結果の両方と突き合わせる。
-- 影響範囲の伝搬や差分集計を変えたら、わざと壊した実装でテストが落ちることも確かめる。
-- 速さのための調整値（`native/engine/src/config.rs`）は、`RustEngine(par_min=0, widen_min_rows=0)` のようにエンジンごとに変えられる。大きなモデルでだけ働く経路を、小さなモデルでも働かせるテストに使う（`tests/test_redefine.py`、`tests/test_failures.py`、`native/engine/tests/store_model.rs`）。
-- 記録先を使うテストは、`tests/journals.py` の `JournalCase` を継いで、ファイルと PostgreSQL の両方で回す。`Workspace` と HTTP サーバーのテストには、本番の組み合わせ（Rust のエンジンと `store = PgStore`）のクラスを必ず含める。
-- 上限の検査（`Model(max_cells=...)`、`RustEngine(max_bytes=...)`）を確かめるテストは、検査が効かなかったときに作られる量も小さく収まるように組む。検査が外れると、何十億セルを確保しにいく。
+- The main tests apply hundreds of random changes (inputs, add, delete, or rename of members, transfers, and more). Then they compare the result of the Rust incremental recalculation with the reference implementation and with a full recalculation.
+- If you change the propagation of the affected range or the incremental aggregation, make sure that the tests fail with an intentionally broken implementation.
+- You can set the tuning values (`native/engine/src/config.rs`) for each engine, for example `RustEngine(par_min=0, widen_min_rows=0)`. Tests use this to run, on small models, the paths that usually run only on large models (`tests/test_redefine.py`, `tests/test_failures.py`, `native/engine/tests/store_model.rs`).
+- Tests that use a journal must inherit `JournalCase` in `tests/journals.py`. Then they run with both the file journal and PostgreSQL. Tests for `Workspace` and the HTTP server must include a class with the production combination (the Rust engine and `store = PgStore`).
+- Tests for the limit checks (`Model(max_cells=...)`, `RustEngine(max_bytes=...)`) must stay small also when the check does not work. If the check fails, the engine tries to allocate billions of cells.

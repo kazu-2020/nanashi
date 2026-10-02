@@ -288,7 +288,7 @@ def native():
     try:
         import nanashi_core
     except ImportError:
-        raise ImportError("保存と読み込みには nanashi_core が要る（README の「使い始める」の手順でビルドする）") from None
+        raise ImportError("保存と読み込みには nanashi_core が要る（README の「Getting started」の手順でビルドする）") from None
     return nanashi_core
 
 
