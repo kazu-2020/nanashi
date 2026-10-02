@@ -59,6 +59,7 @@ import inspect
 import ipaddress
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -469,9 +470,6 @@ def main(argv=None) -> None:
                     help="--pg のとき、書き手としてほかのプロセスに知らせる自分の番地（既定は http://<host>:<port>）")
     ap.add_argument("--lease-ttl", type=float, default=30.0, help="--pg のとき、書き込みの権利（リース）の期限（秒）")
     args = ap.parse_args(argv)
-    # SIGTERM と SIGINT は、どのスレッドでも受けずに見張りのスレッドが sigwait で受ける。スレッドを作る前に
-    # 止めておけば、あとで作るスレッド（Rust のエンジンのものも）にも引き継がれる
-    signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     tokens = None
     if args.tokens:
         with open(args.tokens, encoding="utf-8") as f:
@@ -508,7 +506,7 @@ def main(argv=None) -> None:
                             standby=True)
     server.workspace = ws
     log.info("公開中の版 %d、%s で待ち受ける（%s）", ws.seq, server.url, role_of(ws))
-    threading.Thread(target=_stop_on_signal, args=(server,), name="nanashi-signal", daemon=True).start()
+    _stop_on_signal(server)
     try:
         server.serve_forever()
     finally:
@@ -518,18 +516,34 @@ def main(argv=None) -> None:
             journal.close()
 
 
-_STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT}
-
-
 def _stop_on_signal(server: Server) -> None:
-    """SIGTERM か SIGINT を待ち、serve_forever を止める。
+    """SIGTERM と SIGINT で serve_forever を止めるようにする。本線のスレッドで、serve_forever の直前に呼ぶ。
 
     シグナルを KeyboardInterrupt にして本線のスレッドに投げると、どこで割り込むか選べない。要求のスレッドを
     起こしている途中（Thread.start の中のロック）に届くと RuntimeError に化け、socketserver がそれを握りつぶして
-    止まらなくなっていた。sigwait で受ければ、止めるのは serve_forever の区切りになる。"""
-    signum = signal.sigwait(_STOP_SIGNALS)
-    log.info("%s を受けたので止める", signal.Signals(signum).name)
-    server.shutdown()
+    止まらなくなっていた。そこで、受けたシグナルの番号をパイプに書くだけにし（ロックを取らないので、どこに
+    割り込んでもよい）、見張りのスレッドがそれを読んで server.shutdown() を呼ぶ。止まるのは serve_forever の
+    区切りになる。最初のシグナルで KeyboardInterrupt に戻すので、片付けが止まっても 2 度目のシグナルで抜けられる。
+    起動の間（ここより前）は、今までどおり SIGINT は KeyboardInterrupt、SIGTERM は既定の動作で止まる。"""
+    r, w = os.pipe()
+    os.set_blocking(w, False)
+
+    def on_signal(signum, frame) -> None:
+        for s in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(s, signal.default_int_handler)
+        try:
+            os.write(w, bytes([signum]))
+        except OSError:
+            pass
+
+    def watch() -> None:
+        signum = os.read(r, 1)[0]
+        log.info("%s を受けたので止める", signal.Signals(signum).name)
+        server.shutdown()
+
+    threading.Thread(target=watch, name="nanashi-signal", daemon=True).start()
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, on_signal)
 
 
 def _loopback(host: str) -> bool:
