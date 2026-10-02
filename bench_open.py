@@ -41,11 +41,14 @@ def open_journal(path: str):
 
 
 def s3_setup() -> None:
-    """boto3 の環境変数（compose.yaml の認証情報）と、バケット。"""
-    os.environ.setdefault("AWS_ENDPOINT_URL", S3_ENDPOINT)
-    os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("NANASHI_S3_ACCESS_KEY", "nanashi"))
-    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("NANASHI_S3_SECRET_KEY", "nanashi-secret"))
-    os.environ.setdefault("AWS_REGION", "us-east-1")
+    """boto3 の環境変数（compose.yaml の認証情報。NANASHI_S3_ACCESS_KEY、NANASHI_S3_SECRET_KEY で変えられる）と、
+    バケット。ほかの AWS_ の環境変数があっても、この測定ではこちらを使う。"""
+    os.environ["AWS_ENDPOINT_URL"] = S3_ENDPOINT
+    os.environ["AWS_ACCESS_KEY_ID"] = os.environ.get("NANASHI_S3_ACCESS_KEY", "nanashi")
+    os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ.get("NANASHI_S3_SECRET_KEY", "nanashi-secret")
+    os.environ["AWS_REGION"] = "us-east-1"
+    os.environ.pop("AWS_SESSION_TOKEN", None)
+    os.environ.pop("AWS_PROFILE", None)
     import boto3
     client = boto3.client("s3")
     try:
