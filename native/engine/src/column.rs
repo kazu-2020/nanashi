@@ -18,12 +18,17 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 /// 列の持ち主。列のバイト列を、列が生きている間、動かさずに持つ。
-pub trait ColumnOwner: Send + Sync + 'static {
+///
+/// # Safety
+/// `AsRef<[T]>` が返す列は、持ち主が生きている間、同じ場所にあって中身が変わらないこと。
+/// `Column` はこの約束に頼って、持ち主への参照だけを持ったまま列を `&[T]` として読む。
+pub unsafe trait ColumnOwner: Send + Sync + 'static {
     /// Rust のヒープに確保している分（バイト）。ファイルの写像や共有メモリなら 0。
     fn heap_bytes(&self) -> usize;
 }
 
-impl<T: Send + Sync + 'static> ColumnOwner for Box<[T]> {
+// SAFETY: Box<[T]> の中身はヒープにあり、Box が生きている間は動かず、&self からは書き換えられない
+unsafe impl<T: Send + Sync + 'static> ColumnOwner for Box<[T]> {
     fn heap_bytes(&self) -> usize {
         self.len() * std::mem::size_of::<T>()
     }
@@ -169,7 +174,8 @@ mod tests {
     #[test]
     fn custom_owner_off_heap_counts_zero() {
         struct Static(&'static [u64]);
-        impl ColumnOwner for Static {
+        // SAFETY: 'static の列は動かず、変わらない
+        unsafe impl ColumnOwner for Static {
             fn heap_bytes(&self) -> usize {
                 0
             }
