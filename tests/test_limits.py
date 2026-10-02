@@ -245,7 +245,7 @@ class Memory(unittest.TestCase):
         m.recalc()
         mem = m.memory()
         self.assertEqual(mem["V"]["rows"], 24_000)
-        self.assertGreaterEqual(mem["V"]["base"], 24_000 * 16)
+        self.assertEqual(mem["V"]["base"], 24_000 * 16)  # 本体は余分な容量のない列
         self.assertEqual(mem["V"]["delta_rows"], 0)
         m.set_cell("V", 1.0, P="p0", M="m0")
         m.recalc()

@@ -37,16 +37,21 @@ pub struct Mem {
 }
 
 /// Store の本体。作ったら変えない。
+///
+/// キーと値は、隙間のない不変の列（`Box<[T]>`。余分な容量を持たない）で持つ。u64 のキーと f64 の値を
+/// 詰めて並べた形は Arrow の UInt64 / Float64 の配列の本体と同じで、中にポインタを持たないので、
+/// 後でファイルの写像や共有メモリに置くときも同じ並びで置ける（docs/out-of-core.md の進め方 2）。
+/// 索引（postings）はメモリに持つ。
 #[derive(Debug)]
 pub(crate) struct Base {
-    pub(crate) keys: Vec<u64>, // 昇順・重複なし
-    pub(crate) vals: Vec<f64>,
+    pub(crate) keys: Box<[u64]>, // 昇順・重複なし
+    pub(crate) vals: Box<[f64]>,
     pub(crate) postings: Vec<OnceLock<Arc<Postings>>>, // 分割軸以外の軸の索引（詰め方の位置ごと。必要になったら作る）
 }
 
 impl Base {
     pub(crate) fn empty(n_dims: usize) -> Arc<Base> {
-        Arc::new(Base { keys: Vec::new(), vals: Vec::new(), postings: fresh_postings(n_dims) })
+        Arc::new(Base { keys: Box::new([]), vals: Box::new([]), postings: fresh_postings(n_dims) })
     }
 }
 
@@ -219,15 +224,15 @@ impl Store {
         self.merged(0, None, f);
     }
 
-    /// 格納データが確保しているメモリ（バイト）。本体は確保した容量、索引は作ったものだけを数える。
-    /// 差分の木は 1 件の大きさ×件数で、木の節の分を含まない（下限）。本体を版どうしで共有していても、
+    /// 格納データが確保しているメモリ（バイト）。本体はキーと値の列（余分な容量はない）、索引は作ったものだけを
+    /// 数える。差分の木は 1 件の大きさ×件数で、木の節の分を含まない（下限）。本体を版どうしで共有していても、
     /// この Store の分として数える。
     pub fn memory(&self) -> Mem {
         let b = &*self.base;
         let index = b.postings.iter().filter_map(|p| p.get()).map(|p| (p.offsets.capacity() + p.rows.capacity()) * 4).sum();
         Mem {
             rows: b.keys.len(),
-            base: b.keys.capacity() * 8 + b.vals.capacity() * 8,
+            base: (b.keys.len() + b.vals.len()) * 8,
             delta_rows: self.delta.len(),
             delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
             index,
@@ -255,10 +260,15 @@ impl Store {
         }
     }
 
-    /// 並んだセルを本体にする（差分は捨てる）。
+    /// 並んだセルを本体にする（差分は捨てる）。unzip は件数ちょうどの容量で作るので、列にするときに写さない。
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
-        let (keys, vals) = if self.cfg.par(cells.len()) { cells.into_par_iter().unzip() } else { cells.into_iter().unzip() };
-        self.base = Arc::new(Base { keys, vals, postings: fresh_postings(self.pack.dims.len()) });
+        let (keys, vals): (Vec<u64>, Vec<f64>) =
+            if self.cfg.par(cells.len()) { cells.into_par_iter().unzip() } else { cells.into_iter().unzip() };
+        self.base = Arc::new(Base {
+            keys: keys.into_boxed_slice(),
+            vals: vals.into_boxed_slice(),
+            postings: fresh_postings(self.pack.dims.len()),
+        });
         self.delta = OrdMap::new();
     }
 
