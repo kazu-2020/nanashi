@@ -1,150 +1,183 @@
-# 保存と記録
+# Save and journal
 
-## 保存と読み込み
+## Save and load
 
 ```python
-m.save("plan/")                    # 定義は model.json、入力データは入力 Metric ごとの Parquet
+m.save("plan/")                    # The definitions go to model.json. The input data goes to 1 Parquet file for each input Metric.
 m2 = Model.load("plan/", RustEngine())
 ```
 
-計算 Metric の値は保存せず、読み込み後の最初の再計算で求め直す。
-式は利用者が書いた元の文字列で保存する。
-軸、メンバー、Metric の ID も保存する。
+The engine does not save the values of formula Metrics. It calculates them again in the first recalculation after the load.
+The engine saves each formula as the original text that the user wrote.
+It also saves the IDs of dimensions, members, and Metrics.
 
-入力の値は、入力 Metric ごとに `inputs.<Metric の ID>.parquet` に書く（保存形式の版 4）。
-列は、軸ごとのメンバー番号（`d<軸の ID>`、UInt32）と、値の列 `v`（number は Float64、boolean は Boolean、メンバー型はメンバー番号の UInt32）で、zstd で圧縮する。
-列の名前は名前を変えても変わらない軸の ID で付けるので、DuckDB などのほかのツールからも読める（メンバーの名前は `model.json` にある）。
-Rust のエンジンは格納データから直接 Parquet を書き、読み込みも Parquet から直接格納データを作るので、大きなモデルでも Python のオブジェクトを作らない（GIL も外す）。
+The engine writes the input values of each input Metric to `inputs.<Metric ID>.parquet` (save format version 4).
+The columns are the member numbers of each dimension (`d<dimension ID>`, UInt32) and the value column `v`.
+The type of `v` is Float64 for number, Boolean for boolean, and UInt32 (the member number) for a member type. The engine compresses the file with zstd.
+The column names use the dimension IDs, which do not change when you rename a dimension. Thus other tools, for example DuckDB, can also read the files (the member names are in `model.json`).
+The Rust engine writes Parquet directly from the stored data, and it makes the stored data directly from Parquet when it loads.
+Thus it does not make Python objects, also for large models (it also releases the GIL).
 
-メンバー番号は `model.json` のメンバーの列での位置である。
-並び順が番号の順と違う軸（途中に挿入したか並び替えた、順序のない軸）は、並び順に並べた番号の列 `member_order` も `model.json` に持つ（版 4 から）。
+A member number is the position of the member in the member list of `model.json`.
+Some dimensions have an order that is different from the order of the numbers. These are dimensions that have an inserted member or a changed order, and dimensions without order.
+For these dimensions, `model.json` also has `member_order`, the list of numbers in the member order (from version 4).
 
-以前の版の形式（入力の値を `inputs.npz` に持つ版 1 と 2）も、numpy なしで読める。
-ID を持たない版 1 を読むときは、ID を新しく振る。
-版 3 までは `member_order` を持たないので、並び順は番号の順になる。
+The engine can also read the formats of earlier versions (versions 1 and 2 keep the input values in `inputs.npz`) without numpy.
+Version 1 has no IDs. When the engine reads version 1, it gives new IDs.
+Versions up to 3 do not have `member_order`. Thus the member order is the order of the numbers.
 
-## トランザクションと記録
+## Transactions and the journal
 
-複数の操作を `transaction` で 1 つにまとめられる。
-中で例外が起きたり、抜けるときの再計算で式のエラーが出たりしたら、すべての操作を取り消す。
+You can put many operations into 1 `transaction`.
+If an exception occurs in the transaction, or if the recalculation at the end gives a formula error, the engine cancels all operations.
 
 ```python
 with m.transaction(user="alice", reason="予算の見直し") as txn:
     m.set_cell("Budget", 100, Product="A", Month="Jan")
     m.spread("Budget", 1200, Product="B")
-txn.seq, txn.record  # 確定した通し番号と記録
+txn.seq, txn.record  # The sequence number and the journal entry of the commit
 ```
 
-開始時にモデルを複製しておき、取り消すときはその複製に戻す。
-格納データの本体は複製と共有するので、複製は安い（損益計画で 0.2 ms、1000 Metric のモデルで 1 ms）。
+At the start, the engine makes a copy of the model. To cancel, it goes back to that copy.
+The copy shares the base of the stored data. Thus the copy is cheap (0.2 ms in the profit and loss plan, 1 ms in a model with 1000 Metrics).
 
-記録先（`journal`）を付けると、確定したトランザクションごとに記録を 1 件残す。
-トランザクションの外で操作を呼ぶと、1 回の呼び出しを 1 トランザクションとして記録する。
+If you attach a journal (`journal`), the engine keeps 1 journal entry for each committed transaction.
+If you call an operation outside a transaction, the engine records that 1 call as 1 transaction.
 
 ```python
 from sparse_engine.journal import FileJournal
 
-FileJournal("plan/").start(m)           # 今の状態を最初のスナップショットにして、記録を始める
-m.set_cell("Price", 12, Product="A")    # 1 件の記録になる
-m.checkpoint()                          # スナップショットを取る（開くときに読む記録が減る）
+FileJournal("plan/").start(m)           # Make the current state the first snapshot, and start the journal
+m.set_cell("Price", 12, Product="A")    # This becomes 1 journal entry
+m.checkpoint()                          # Make a snapshot (open then reads fewer journal entries)
 
-m2 = FileJournal("plan/").open(RustEngine())  # 最新のスナップショットと、その後の記録から復元する
-m2.journal.cell_history(m2, "Price", Product="A")  # セルの変更の履歴（誰が、いつ、何から何に）
+m2 = FileJournal("plan/").open(RustEngine())  # Restore from the latest snapshot and the journal entries after it
+m2.journal.cell_history(m2, "Price", Product="A")  # The change history of the cell (who, when, from which value to which value)
 ```
 
-記録は次の 2 つを持つ。
+A journal entry has these 2 parts:
 
-- **意図**：呼んだ操作と引数（按分の合計、式の文字列など）。監査のために残す。
-- **結果**：トランザクションの前後のモデルの差。軸とメンバーの追加・削除・名前の変更、メンバーの並び順、プロパティ、Metric の定義、入力セルの変更前後の値を、変わらない ID で表す。
-  並び順（`member_order`）は、並び順に並べたメンバーの ID の列で、消したメンバーを除いて足したメンバーを最後に並べただけでは変わらない軸についてだけ記録する。
-  並び順だけの記録は構造の変更として扱わないので、`Replica` などが追いつくときにも計算し直さない。
+- **Intent**: the called operation and its arguments (the total of a spread, the text of a formula, and so on). The engine keeps it for audits.
+- **Result**: the difference of the model before and after the transaction. It uses IDs that do not change to show these items: added, deleted, and renamed dimensions and members, the member order, properties, Metric definitions, and the values of input cells before and after the change.
+  The member order (`member_order`) is a list of member IDs in the member order.
+  The engine records it only for dimensions where the order changes in a different way than "remove the deleted members and put the added members at the end".
+  A journal entry that changes only the order is not a structural change. Thus `Replica` and other followers do not recalculate when they catch up.
 
-復元では結果だけを再生し、最後に全体を 1 回だけ計算し直す。
-操作を再生すると、按分の浮動小数点の値などがエンジンの版によってずれうるが、結果なら書き込むだけで同じ状態に戻る。
-記録はエンジンに依存しないので、Rust のエンジンで書いた記録を参照実装で開くこともできる。
+The restore replays only the results, and then does 1 full recalculation at the end.
+If the engine replays the operations, values such as the floating-point values of a spread can be different between engine versions.
+But if it replays the results, it only writes them, and it gets the same state again.
+The journal does not depend on the engine. Thus the reference implementation can open a journal that the Rust engine wrote.
 
-結果は、操作を 1 つずつ記録するのでなく、前後のモデルを比べて求める。
-そのため、按分やメンバーの削除のように多くのセルを書き換える操作の結果も漏れなく残る。
-Rust のエンジンでは、書き込んでいない Metric の格納データは複製前と同じものを指しているので比べずに済む。
-書き込んだ Metric も、差分の木の違う部分だけを比べる。
+The engine does not record each operation separately to get the result. It compares the model before and after.
+Thus the journal keeps all results of operations that change many cells, for example a spread or the deletion of a member.
+In the Rust engine, the stored data of a Metric without writes points to the same data as before the copy. Thus the engine does not have to compare it.
+For a Metric with writes, the engine compares only the different parts of the delta tree.
 
-Rust のエンジンでは、1 つの Metric で 1000 セル以上書き換えた記録は、入力セルの変更を行の列でなく変更の塊（`nanashi_core.CellBlock`）のまま持つ。
-行の列と同じく長さを持ち、`[座標の ID の列, 変更前, 変更後]` を順に返すが、Python のオブジェクトは読むときまで作らない。
-変更を比べるのも、PostgreSQL の記録先に書くのも、記録を再生して書き込むのも Rust で行う。
-`Workspace` の楽観的な排他も、変更の塊のまま同じセルがあるかを調べる。
+In the Rust engine, some journal entries change 1000 cells or more in 1 Metric.
+For these entries, the engine keeps the changes to input cells as a change block (`nanashi_core.CellBlock`), not as a list of rows.
+Like a list of rows, a change block has a length and returns `[list of coordinate IDs, before, after]` in sequence. But it does not make Python objects until you read them.
+Rust does the comparison of changes, the write to the PostgreSQL journal, and the write during journal replay.
+The optimistic lock of `Workspace` also uses the change blocks directly to find the same cells.
 
-本番の記録先は `PgJournal`（次の節）で、`FileJournal` は主に開発と検証に使う。
-`FileJournal` はディレクトリに記録とスナップショットを置く。
+The production journal is `PgJournal` (next section). `FileJournal` is mainly for development and verification.
+`FileJournal` keeps the journal and the snapshots in a directory.
 
-- `log/<最初の通し番号>.jsonl`：1 行 1 トランザクションの記録。スナップショットを置いたあとの追記から、新しいファイル（区切り）に書く。開くときは最後の区切りと、`client_op_id` を覚えておく範囲（最後の 10 万件、`op_window`）の区切りだけを読み、再生はスナップショットより後の区切りだけを読む。以前の版の `log.jsonl` は最初の区切りとして読む。追記してディスクまで書き出して（macOS では `F_FULLFSYNC`）から確定する。書き出しか書き出しの確認に失敗したら、ファイルを追記の前の長さに戻す（戻せなければ、以後の書き込みを拒否する）。最後の行が途中で切れていれば（書いている途中で落ちた）、読み手は無視し、次の書き手が切り捨てる。
-- `lock`：書き込むプロセスを 1 つに限る排他ロック（`flock`）。最初に追記するときに取る。別のプロセスが持っていれば `Fenced`。
-- `cells/<乱数>-<Metric の ID>.parquet`：1 万セル（`bulk_cells`）を超えるセルを書き換えた記録の、セルの変更。`PgJournal` と同じ形式で、記録の行にはファイルの名前（ディレクトリからの相対）とハッシュだけを入れる。ファイルを書き出してから行を追記するので、確定した記録のファイルは必ずそろっている。
-- `snapshots/<通し番号>-<乱数>/`：その時点のモデルと、ファイルのハッシュを持つ `manifest.json`。各ファイルを置いてから最後に `manifest.json` を置くので、途中で落ちたものは使わない。ハッシュは開くときに読みながら確かめ、壊れていれば、1 つ前のスナップショットから記録を多く再生する。
+- `log/<first sequence number>.jsonl`: The journal, with 1 transaction on each line.
+  After the engine puts a snapshot, it writes the next entries to a new file (a segment).
+  To open, the engine reads only the last segment and the segments in the range where it remembers `client_op_id` (the last 100 thousand entries, `op_window`).
+  For replay, it reads only the segments after the snapshot. It reads `log.jsonl` of earlier versions as the first segment.
+  The engine appends the entry and writes it to the disk (`F_FULLFSYNC` on macOS), and then commits.
+  If the write or the check of the write fails, the engine makes the file the length from before the append again. If it cannot do this, it refuses all subsequent writes.
+  If the last line is not complete (the process stopped during the write), readers ignore it, and the next writer removes it.
+- `lock`: An exclusive lock (`flock`) that lets only 1 process write. The engine gets it at the first append. If a different process has it, the result is `Fenced`.
+- `cells/<random number>-<Metric ID>.parquet`: The cell changes of a journal entry that changes more than 10 thousand cells (`bulk_cells`).
+  The format is the same as `PgJournal`. The journal line has only the file name (relative to the directory) and the hash.
+  The engine writes the file before it appends the line. Thus the files of a committed journal entry are always complete.
+- `snapshots/<sequence number>-<random number>/`: The model at that time, and `manifest.json` with the hashes of the files.
+  The engine puts each file first, and then puts `manifest.json` last. Thus it does not use a snapshot that stopped before completion.
+  The engine checks the hashes while it reads the files at open. If a file is damaged, it uses the snapshot before that one and replays more journal entries.
 
-`journal.prune(keep=2)` で、新しいほうから 2 つのスナップショットを残し、それより古いスナップショットと、その前の記録と大量の変更のファイルを消せる（残すスナップショットより前には戻れなくなる）。
+`journal.prune(keep=2)` keeps the 2 newest snapshots. It deletes the older snapshots, and the journal and the files for large changes before them.
+(After this, you cannot go back to a time before the kept snapshots.)
 
-`transaction(client_op_id=...)` に送信側の ID を渡すと、同じ ID のトランザクションが確定済みなら `AlreadyCommitted` を投げ、中の操作は実行しない。
-応答を受け取れなかった利用者が再送しても、二重に確定しない。
+If you give the ID from the sender to `transaction(client_op_id=...)`, and a transaction with the same ID is already committed, the engine raises `AlreadyCommitted`. It does not do the operations in the transaction.
+Thus, if a user does not receive the response and sends again, the engine does not commit twice.
 
-### PostgreSQL への記録
+### Journal in PostgreSQL
 
-`PgJournal` は `FileJournal` と同じ口で、記録を PostgreSQL に置く。
+`PgJournal` has the same interface as `FileJournal`, and it keeps the journal in PostgreSQL.
 
 ```python
 from sparse_engine.pg_journal import PgJournal
 
-journal = PgJournal("postgresql://...", "plan-2027", "s3://nanashi/plans")  # モデルの ID と、ファイルの置き場所
+journal = PgJournal("postgresql://...", "plan-2027", "s3://nanashi/plans")  # The model ID, and the location of the files
 ws = Workspace.open(journal, RustEngine())
 ```
 
-ファイルの置き場所は `s3://<バケット>/<接頭辞>` で、その下の `<モデルの ID>/` に置く。
-接続先と認証情報は boto3 の決まりどおり環境変数から読む。
-手元の RustFS なら次のとおりで、バケットは先に作っておく。
+The location of the files is `s3://<bucket>/<prefix>`. The files go into `<model ID>/` below it.
+The engine reads the endpoint and the credentials from environment variables, as boto3 specifies.
+For a local RustFS, use the values below. Make the bucket first.
 
 ```bash
 export AWS_ENDPOINT_URL=http://127.0.0.1:59000 AWS_ACCESS_KEY_ID=nanashi AWS_SECRET_ACCESS_KEY=nanashi-secret AWS_REGION=us-east-1
 .venv/bin/python -c 'import boto3; boto3.client("s3").create_bucket(Bucket="nanashi")'
 ```
 
-`s3://` で始まらなければローカルのディレクトリに置く（オブジェクトストレージを用意しないときのため）。
+If the location does not start with `s3://`, the engine puts the files in a local directory (for when you do not have object storage).
 
-表は 4 つ（`nanashi_model`、`nanashi_operation`、`nanashi_cell_change`、`nanashi_snapshot`）で、1 つのデータベースに複数のモデルを置ける。
-スキーマには版があり（`nanashi_schema`）、`python -m sparse_engine.pg_journal migrate <DSN>`（サーバーは `--migrate`）で最新にする。
-接続のたびには DDL を流さない（DDL は表のロックを取り、書き込み中の別のプロセスと競り合うため）。版が合わなければ、`PgJournal` は開くときに `SchemaError` で知らせる。
-版 2 で、操作の時刻（`at`）を `timestamptz` にし、セルの履歴の索引を一意にした（以前の版が書いた重複は移すときに消す）。
-版 3 で、リースの持ち主が公開している番地（`lease_endpoint`）を足した。
-`journal.prune(keep=2)` で古いスナップショットと、その前の大量の変更のファイルを消せる（セルの履歴の表に反映してから消すので、記録の再生とセルの履歴は残る）。あわせて、最後の 10 万件より古い記録の `client_op_id` を忘れる。
+There are 4 tables (`nanashi_model`, `nanashi_operation`, `nanashi_cell_change`, `nanashi_snapshot`). 1 database can hold many models.
+The schema has a version (`nanashi_schema`). To update it to the latest version, run `python -m sparse_engine.pg_journal migrate <DSN>` (for the server, use `--migrate`).
+The engine does not run DDL at each connection, because DDL gets table locks and competes with other processes that write.
+If the version is not correct, `PgJournal` raises `SchemaError` when it opens.
+Version 2 changed the operation time (`at`) to `timestamptz` and made the index of the cell history unique. The migration removes duplicates that earlier versions wrote.
+Version 3 added the address that the lease owner publishes (`lease_endpoint`).
+`journal.prune(keep=2)` deletes old snapshots and the files for large changes before them.
+The engine first adds those changes to the cell history table and then deletes the files, thus journal replay and the cell history stay available.
+It also forgets the `client_op_id` of journal entries older than the last 100 thousand entries.
 
-- **操作**（`nanashi_operation`）：1 トランザクション 1 行。意図とセル以外の結果を JSONB で持つ。
-- **セルの変更**（`nanashi_cell_change`）：書き換えた入力セルごとに 1 行。Metric とメンバーの ID の配列で持ち、1 つのセルの履歴を索引で引ける。大量の変更を確定の後で反映する処理（`index_pending`）は、複数のプロセスが同時に呼んでも、モデルごとの advisory lock と記録ごとの印で、同じ記録を二重に書かない。
-- **スナップショット**：ファイルはオブジェクトストレージの `<モデルの ID>/snapshots/<通し番号>-<乱数>/` に置き、最後に `manifest.json` を置いてから表に登録する。
-  表には置き場所の中の相対的なキーだけを保存するので、ファイルを別の置き場所へ写せば（ディレクトリから S3 へなど）そのまま開ける。
-  置いたファイルは書き換えない（同じ通し番号で取り直しても別の場所に置く）。
-  ハッシュは開くときに読みながら確かめ、欠けていたり合わなかったりすれば、1 つ前のスナップショットから記録を多く再生する（一覧のためにすべてを読むことはしない）。
+- **Operation** (`nanashi_operation`): 1 row for each transaction. It keeps the intent and the results other than cells as JSONB.
+- **Cell change** (`nanashi_cell_change`): 1 row for each changed input cell. It keeps the Metric ID and an array of member IDs, and an index finds the history of 1 cell.
+  A process (`index_pending`) adds large changes to this table after the commit.
+  If many processes call it at the same time, an advisory lock for each model and a mark on each journal entry prevent duplicate writes of the same entry.
+- **Snapshot**: The engine puts the files in `<model ID>/snapshots/<sequence number>-<random number>/` in the object storage.
+  It puts `manifest.json` last, and then registers the snapshot in the table.
+  The table keeps only the key relative to the location. Thus, if you copy the files to a different location (for example, from a directory to S3), you can open them without changes.
+  The engine does not change a file after it puts it. (If it makes a snapshot again with the same sequence number, it puts it in a different location.)
+  The engine checks the hashes while it reads the files at open.
+  If a file is missing or the hash is not correct, it uses the snapshot before that one and replays more journal entries. (It does not read all files to make a list.)
 
-書き込むプロセスは 1 つに限る。
-最初に書き込むときにリースを取って世代番号を 1 つ進め、確定は「通し番号が読んだとおりで、世代番号が自分のもの」のときだけ通る 1 回のトランザクションで行う。
-リースが切れて別のプロセスがリースを取れば、古いプロセスの確定は、まだ新しいプロセスが書いていなくても拒否される（`Fenced`）。
-読み込んだあとに別のプロセスが書き込んでいれば、手元のモデルが古いので、リースを取るときに拒否する。
+Only 1 process can write.
+At the first write, the process gets the lease and increases the generation number by 1.
+A commit is 1 database transaction. It succeeds only if the sequence number is the same as the process read, and the generation number is the number of this process.
+If the lease expires and a different process gets the lease, the engine refuses commits from the old process (`Fenced`). This is also true when the new process has not written yet.
+If a different process wrote after the load, the local model is old. Thus the engine refuses to give the lease.
 
-リースは、書き込みがない間も別のスレッドが期限の 1/3 ごとに延長する（`heartbeat=False` で止められる）。
-閉じるとき（`close`）はリースを手放すので、次に書くプロセスは期限を待たない。
-`Workspace.close` も記録先のリースを手放すので、HTTP サーバーを止めてすぐ起動し直しても、最初の書き込みは待たされない。
-落ちたプロセスのリースが残っていれば、`acquire` は期限が切れるまで（既定で `lease_ttl` の長さまで）待ってから取るので、再起動が期限のぶん失敗し続けることはない（`acquire_wait=0` で待たない）。
-`Fenced` は `journal.Stale` の一種で、`Workspace` はこれを受けると記録先の最新の版に追いつく。
+While there are no writes, a different thread extends the lease at each 1/3 of the lease time (`heartbeat=False` stops this).
+`close` releases the lease. Thus the next process that writes does not wait for the lease to expire.
+`Workspace.close` also releases the lease of the journal.
+Thus, if you stop the HTTP server and start it again immediately, the first write does not wait.
+If the lease of a stopped process remains, `acquire` waits until the lease expires (by default, up to the length of `lease_ttl`), and then gets it.
+Thus a restart does not continue to fail until the lease expires (with `acquire_wait=0`, it does not wait).
+`Fenced` is a type of `journal.Stale`. When `Workspace` receives it, it catches up to the latest version of the journal.
 
-リースには、持ち主が公開している番地（`lease_endpoint`。`PgJournal(endpoint=...)` で渡す）も書く。
-`journal.leader()` は期限内のリースの番地を返す（なければ `None`）。待機系が書き込みを拒むときに書き手を教えるのと、ルーターが書き手を見つけるのに使う。
-`journal.take()` は、リースが空いていれば（誰も持っていない、期限が切れている）待たずに取って `True`、別のプロセスが期限内に持っていれば `False` を返す。
-`acquire` と違って手元の通し番号は確かめないので、取った側は記録に追いついてから書く（待機系の昇格。[同時の読み書き](concurrency.md)）。
-`release` は確定と同じ通知（`NOTIFY nanashi_head`）を送るので、待機系は間隔を待たずにリースを取りに行ける。
+The lease also contains the address that the owner publishes (`lease_endpoint`, given with `PgJournal(endpoint=...)`).
+`journal.leader()` returns the address of the lease that has not expired (or `None` if there is no such lease).
+A standby uses it to tell the client the writer when it refuses a write. The router uses it to find the writer.
+If the lease is free (no owner, or expired), `journal.take()` gets it without a wait and returns `True`.
+If a different process has the lease and it has not expired, `journal.take()` returns `False`.
+Unlike `acquire`, it does not check the local sequence number. Thus the process that got the lease must catch up to the journal before it writes (promotion of a standby, [Concurrent reads and writes](concurrency.md)).
+`release` sends the same notification as a commit (`NOTIFY nanashi_head`). Thus the standby can try to get the lease without a wait for the interval.
 
-1 万セルを超える変更は、変更前後の値を Metric ごとに Parquet のファイルにしてオブジェクトストレージ（`<モデルの ID>/cells/`）に置いてから確定し、セルの変更の表への書き込みは確定の後に回す（`index_pending`）。
-Parquet の列は、座標のメンバーの ID（`d<軸の ID>`、Int64）と、変更前 `old` と変更後 `new`（空は null）である。
-Parquet の列は、保存の形式も含めて名前で選んで読む（並び順は問わず、知らない列は読まない）ので、あとの版が列を足しても前の版が読める。
-行を 1 件ずつ表に入れる費用が大きく、確定の経路に入れると大量の書き込みの確定が十数倍遅くなるためである。
-セルの履歴を引くときは、先に未反映の分を反映する。
-表に入れる COPY の行は Rust で作る。
-以前の版が書いた npz のファイルも読める。
-ローカルのディレクトリに置いていた記録先を、オブジェクトストレージに移しても、それまでのファイルはそのまま読める（記録にはファイルの置き場所をそのまま持つ）。
-10 万行を超えて反映したら、表の統計を取り直す（大量に入れた直後は統計が古く、セルの索引を使わない実行計画になって、1 つのセルの履歴に 250 ms かかった。取り直すと 0.2 ms）。
+For a change of more than 10 thousand cells, the engine writes the values before and after to 1 Parquet file for each Metric.
+It puts these files in the object storage (`<model ID>/cells/`) and then commits.
+The write to the cell change table occurs after the commit (`index_pending`).
+The Parquet columns are the member IDs of the coordinates (`d<dimension ID>`, Int64), the value before (`old`), and the value after (`new`). A blank value is null.
+The engine selects Parquet columns by name when it reads, also in the save format. The column order is not important, and it does not read unknown columns.
+Thus an earlier version can read files after a later version adds columns.
+The reason for the delay is that it is expensive to insert rows into the table 1 at a time. If this were in the commit path, commits of large writes would become more than 10 times slower.
+Before the engine gets the history of a cell, it first adds the changes that are not in the table yet.
+Rust makes the rows for the COPY into the table.
+The engine can also read npz files that earlier versions wrote.
+If you move a journal from a local directory to object storage, the engine can read the old files without changes (the journal keeps the location of each file as it is).
+After the engine adds more than 100 thousand rows, it updates the statistics of the table.
+(Immediately after a large insert, the statistics are old. Then the query plan does not use the cell index, and the history of 1 cell took 250 ms. After the update of the statistics, it takes 0.2 ms.)

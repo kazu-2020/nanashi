@@ -1,17 +1,20 @@
-# 設計メモ：メンバーの番号とキーの幅
+# Design note: member numbers and key width
 
-この文書は設計の検討である。実装したものはその旨を書く。
-今の振る舞いは [エンジン](engine.md)、[モデルの操作](modeling.md)、[制約と今後](limitations.md) にある。
+This document is a design study. If we implemented a part, the text says so.
+For the current behavior, see [Engine](engine.md), [Model operations](modeling.md), and [Limitations and future work](limitations.md).
 
-## 背景
+## Background
 
-Rust のエンジンは、1 セルのキーを各軸のメンバー番号を詰めた 64 ビット整数で持つ（`native/engine/src/key.rs`）。
-各軸は `ceil(log2(メンバー数))` ビットを取り、収まるなら追加に備えて 1 ビットずつ余裕を足す。
-上限は「メンバー数の積が 2^64 以下」ではなく「切り上げたビット数の合計が 64 以下」である。
+The Rust engine keeps the key of one cell as a 64-bit integer (`native/engine/src/key.rs`).
+The key packs the member number of each dimension.
+Each dimension uses `ceil(log2(number of members))` bits.
+If the bits fit, the engine adds 1 more bit to each dimension for future member additions.
+The limit is not "the product of the member counts is 2^64 or less".
+The limit is "the sum of the rounded-up bit counts is 64 or less".
 
-FP&A でよくある Metric でも、この上限に届く。
+A usual FP&A Metric can also reach this limit.
 
-| 軸 | メンバー数 | ビット |
+| Dimension | Members | Bits |
 |---|---|---|
 | Month | 120 | 7 |
 | Version | 10 | 4 |
@@ -20,374 +23,435 @@ FP&A でよくある Metric でも、この上限に届く。
 | Account | 2,000 | 11 |
 | Product | 20,000 | 15 |
 | Customer | 200,000 | 18 |
-| 合計 | | 72 |
+| Total | | 72 |
 
-`EXPAND` や結合で軸が増えた式の途中の結果も、型検査で同じ上限にかかる（`key_too_wide`）。
+An intermediate result of a formula can have more dimensions because of `EXPAND` or a join.
+The type check applies the same limit to these intermediate results (`key_too_wide`).
 
-ビット数を足し合わせるのは、1 つの Metric（と式の途中の結果）が持つ軸だけで、モデルにある軸の総数ではない。
-軸の数を直接制限しているところはない。
-効くのはビット数の合計だけで、どの軸も最低 1 ビットを使うので、軸を 1 本足すたびに合計は必ず増える。
+The bit sum includes only the dimensions of one Metric (or of one intermediate result).
+It does not include all the dimensions in the model.
+No part of the code limits the number of dimensions directly.
+Only the bit sum is limited.
+Each dimension uses a minimum of 1 bit, thus each new dimension always increases the sum.
 
-詰めたキーは Rust のメモリの中だけで使う。
-Python との受け渡しはメンバー番号の列、記録は変わらない ID、スナップショットは番号の列と `model.json` の組で持つ。
-そのため、キーの形を変えても、影響はエンジンの中と、スナップショットの形式に閉じる。
+Only the Rust memory uses the packed key.
+Python and Rust exchange lists of member numbers.
+The journal keeps IDs, which do not change.
+A snapshot keeps lists of member numbers together with `model.json`.
+Thus, a change to the key format has an effect only on the engine and on the snapshot format.
 
-## メンバーの並びの 3 つの層
+## Three layers of member order
 
-メンバーの並びには、性質の違う 3 つの層がある。
+The order of members has 3 layers with different properties.
 
-| 層 | 何か | 使うところ | 今の実装 |
+| Layer | What it is | Where we use it | Current implementation |
 |---|---|---|---|
-| 番号 | キーに詰める、メンバーの同一性 | 格納と評価 | 順位と同じ数 |
-| 順位（Natural Order） | リスト自体が持つ既定の並び | 時系列の計算、既定の表示順 | 番号と同じ数 |
-| View の表示順 | 画面ごとの並べ替え（名前順、属性順、値の降順、手で並べた順） | 表示だけ | エンジンにはない |
+| Number | The identity of a member. The key packs it | Storage and evaluation | Same value as the rank |
+| Rank (Natural Order) | The default order that the list itself has | Time-series calculation, default display order | Same value as the number |
+| View display order | The sort order of each screen (by name, by attribute, by value in descending order, by manual order) | Display only | Not in the engine |
 
-View の表示順はエンジンの外で持つ。
-値の降順のような並べ替えは、番号をどう振ってもキー順では返せないので、どのみち View の層で並べ替える。
-View の並べ替えでは、エンジンの番号に触れない。
+The View display order is kept outside the engine.
+A sort such as "by value in descending order" cannot come from the key order, for all possible numbers.
+Thus, the View layer must do this sort in all cases.
+A View sort does not touch the member numbers of the engine.
 
-今のエンジンは番号と順位を 1 つの数で兼ねている。
-これが成り立つのは、番号を変える操作が次の 2 つに限られるからである。
+The current engine uses one value for both the number and the rank.
+This is possible because only 2 operations change numbers:
 
-- 追加は末尾だけで、既存の番号は変わらない。
-- 削除は後ろの番号を 1 つずつ詰める。順序は保たれるので、キーを並べ直さずに済む（`Store::remove_member`）。
+- An addition adds a member only at the end. The existing numbers do not change.
+- A removal decreases each number after the removed member by 1. The order stays the same, thus the engine does not sort the keys again (`Store::remove_member`).
 
-兼ねているおかげで、キー順がそのまま既定の表示順になり、`rows()` はキー順に読んで offset と limit を切るだけで済む。
-前期の参照（`PREVIOUS`、`Month - 1`）は番号 - 1、時点の大小比較は番号の比較で済む。
+Because one value is both the number and the rank, the key order is also the default display order.
+Thus, `rows()` only reads in key order and applies the offset and the limit.
+A reference to the previous period (`PREVIOUS`, `Month - 1`) is the number minus 1.
+A comparison of two points in time is a comparison of their numbers.
 
-## 名前、ID、番号、順位
+## Name, ID, number, and rank
 
-今の `Dimension`（`sparse_engine/core.py`）は、1 つのメンバーについて名前、ID、番号の 3 つを持つ。
-この設計では番号を 2 つに分け、4 つにする。
+The current `Dimension` (`sparse_engine/core.py`) keeps 3 values for each member: the name, the ID, and the number.
+This design divides the number into 2 values, thus it keeps 4 values.
 
-| | 何に使うか | 変わるか | 今の持ち方 |
+| | Use | Changes? | Current storage |
 |---|---|---|---|
-| 名前 | 人が読む、式に書く（`Month."Mar"`） | `rename_member` で変わる | `members[位置]` |
-| ID | 記録（ジャーナル、セルの変更の表）、外部とのやり取り | 変わらない。消した ID も再利用しない | `ids[位置]` |
-| 番号 | キーに詰める | 一度振ったら変えない（この設計） | `_index[名前]`（位置） |
-| 順位 | 並び順（Natural Order） | 並び替えや途中への挿入で変わる | 番号と同じ |
+| Name | For people to read, and to write in formulas (`Month."Mar"`) | `rename_member` changes it | `members[position]` |
+| ID | Journal (the journal and the table of cell changes), exchange with external systems | Does not change. A removed ID is not used again | `ids[position]` |
+| Number | The key packs it | Does not change after it is set (this design) | `_index[name]` (position) |
+| Rank | Order (Natural Order) | Changes when you reorder members or insert a member in the middle | Same as the number |
 
-ID と番号は別物である。
-例えば Month の Jan、Feb、Mar（ID 11、12、13）から Feb を消すと、Mar の番号は 2 から 1 に詰まるが、ID は 13 のままである。
+The ID and the number are different values.
+For example, Month has Jan, Feb, and Mar (IDs 11, 12, 13).
+If you remove Feb, the number of Mar changes from 2 to 1, but its ID stays 13.
 
-ID をそのままキーに詰めないのは、ID が軸、メンバー、Metric に共通のモデル全体の通し番号で、増える一方だからである。
-メンバーが 3 つしかない Version の軸でも、ID が 100 万台なら 20 ビットを使う。
-番号なら 2 ビットで済む。
-ID は変わらないことを、番号は詰まっていることを保証する値で、役割が違うので両方を持つ。
+The key does not pack the ID directly for this reason.
+The ID is one sequence for the full model, shared by dimensions, members, and Metrics, and it only increases.
+A Version dimension can have only 3 members, but if their IDs are about 1,000,000, the dimension uses 20 bits.
+With numbers, it uses only 2 bits.
+The ID guarantees that a value does not change.
+The number guarantees that the values have no gaps.
+The roles are different, thus we keep both.
 
-### 番号と順位を分ける
+### Divide the number and the rank
 
-番号はメンバーを識別する数で、一度振ったら変えない。
-順位はリストの中で何番目に並ぶかで、並び替えや途中への挿入で変わる。
+The number identifies a member, and it does not change after it is set.
+The rank is the position of the member in the list.
+It changes when you reorder members or insert a member in the middle.
 
-勘定科目のリスト「売上、原価、販管費」の原価と販管費の間に、粗利を挿入する例を示す。
+This example uses the account list "売上, 原価, 販管費" (Sales, Cost, SG&A).
+It inserts 粗利 (Gross profit) between 原価 and 販管費.
 
-| メンバー | 番号 | 順位 |
+| Member | Number | Rank |
 |---|---|---|
 | 売上 | 0 | 0 |
 | 原価 | 1 | 1 |
-| 粗利 | 3（新しく振る） | 2 |
-| 販管費 | 2（変わらない） | 3（1 つ後ろへ） |
+| 粗利 | 3 (new number) | 2 |
+| 販管費 | 2 (no change) | 3 (moves 1 position back) |
 
-番号を分けていれば、変わるのは順位の表（メンバー数ぶん）だけで、どの Metric のセルにも触れず、再計算も起きない。
-番号と順位を兼ねる今の形では、販管費の番号がずれるので、勘定科目の軸を持つすべての Metric でキーを書き換えて並べ直すことになる。
-古い版を読み手が持っていれば、本体を版どうしで共有できず、メモリも一時的に倍になる。
+If the number and the rank are different values, only the rank table changes (one entry for each member).
+No cell of a Metric changes, and no recalculation occurs.
+In the current format, one value is both the number and the rank, thus the number of 販管費 changes.
+Then the engine must change the keys and sort them again in all Metrics that have the account dimension.
+If a reader keeps an old version, the versions cannot share the base, and the memory temporarily doubles.
 
-## 2 種類のマスター
+## Two types of master (list)
 
-順位が計算に効くかどうかで、軸を 2 種類に分ける。
+We divide dimensions into 2 types.
+The type depends on whether the rank has an effect on the calculation.
 
-| | 時系列のマスター（システムが用意する） | ユーザーのマスター（勘定科目、部門など） |
+| | Time-series master (the system supplies it) | User master (accounts, departments, and so on) |
 |---|---|---|
-| 順位の意味 | 計算そのもの（前期、大小比較、積み上げ） | 既定の表示順だけ |
-| 並び替え | しない | できる |
-| 途中への挿入 | しない（末尾に将来の期間を足すだけ） | できる |
-| 番号と順位 | 兼ねる（今のまま） | 分ける |
-| 削除 | 先頭からだけ（下を参照） | tombstone を置き、後でまとめて詰め直す |
+| Meaning of the rank | The calculation itself (previous period, comparison, cumulative sum) | Default display order only |
+| Reorder | Not possible | Possible |
+| Insert in the middle | Not possible (only add future periods at the end) | Possible |
+| Number and rank | One value (as now) | Different values |
+| Removal | Only from the start (see below) | Put a tombstone, then compact all at a later time |
 
-時系列のマスターでは、順位を引く表を挟むと前期を引くたびに手間が増えるだけなので、番号と順位を兼ねたままにする。
+For a time-series master, a rank table only adds work to each lookup of the previous period.
+Thus, a time-series master keeps one value for both the number and the rank.
 
-`ordered=True` の軸を時系列のマスターとして扱うと決めた。
-コードにシステムが用意するマスターという区別はないので、`ordered=True` の軸では並び替えと途中への挿入を拒否することを、この区別の実体とする。
+We decided that a dimension with `ordered=True` is a time-series master.
+The code has no separate type for "a master that the system supplies".
+Thus, the actual rule is this: a dimension with `ordered=True` rejects a reorder and an insertion in the middle.
 
-## 削除と tombstone
+## Removal and tombstones
 
-### セルは、すでに消した印で消している
+### Cells already use a removal mark
 
-Store は、変えない本体に永続的な木の差分（`OrdMap<u64, Option<f64>>`）を重ね、差分が本体の 1/8 を超えたらまとめ直す。
-差分の `None` は消した印で、セルの削除はすでに印を置いて後でまとめる形になっている。
-メンバーの削除の 1 段目（そのメンバーの入力を空にして差分再計算する）も、この経路を通る。
-セルの単位で足すものはない。
+The Store puts a delta in a persistent tree (`OrdMap<u64, Option<f64>>`) on top of a base that does not change.
+If the delta becomes larger than 1/8 of the base, the Store merges them again.
+A `None` in the delta is a removal mark.
+Thus, a cell removal already puts a mark and merges at a later time.
+Step 1 of a member removal also uses this path: it makes the inputs of that member blank and does an incremental recalculation.
+Nothing more is necessary at the cell level.
 
-### 番号に印を置く
+### Put a mark on the number
 
-重いのは削除の 2 段目で、`Store::remove_member` はその軸を持つすべての Metric の本体を読み、番号を詰めて作り直す。
-これをメンバー 1 つの削除ごとに行う。
+Step 2 of a removal is the slow part.
+`Store::remove_member` reads the base of all Metrics that have the dimension, compacts the numbers, and makes the base again.
+It does this for each removed member.
 
-番号に「消した」と印を付けるだけにして詰め直しを後に回せば、1000 メンバーを消しても本体を作り直すのは 1 回で済む。
-詰め直すのは、次のいずれかのときにする。
+We can only mark a number as removed and compact at a later time.
+Then, if you remove 1000 members, the engine makes the base again only 1 time.
+The engine compacts the numbers at one of these times:
 
-- 消した番号が番号の範囲の 1/8 を超えたとき
-- 追加でビット幅が溢れるとき
-- スナップショットを取るとき
+- When the removed numbers are more than 1/8 of the number range
+- When an addition causes an overflow of the bit width
+- When the engine takes a snapshot
 
-### 空いた番号の再利用は、順位の表があるときだけ
+### Use a free number again only with a rank table
 
-番号と順位を兼ねたまま空いた番号を新しいメンバーに使うと、新しいメンバーがキーの途中に並び、既定の表示順が崩れる。
-矛盾しない形は次の 2 つである。
+Assume that one value is both the number and the rank, and that a new member gets a free number.
+Then the new member is in the middle of the key order, and the default display order becomes incorrect.
+Only these 2 options are consistent:
 
-| | (a) 印を置き、再利用しない | (b) 再利用し、順位の表を持つ |
+| | (a) Put a mark, do not use numbers again | (b) Use numbers again, keep a rank table |
 |---|---|---|
-| 削除 | 印を付けるだけ。詰め直しは後でまとめる | 印を付けるだけ。空きは次の追加で埋める |
-| 既定の表示順 | キー順のまま | 順位の表で決める |
-| 並び替えと途中への挿入 | できない | できる |
-| 変更の量 | 小さい | 大きい |
+| Removal | Only put a mark. Compact all at a later time | Only put a mark. The next addition fills the free number |
+| Default display order | Key order, as now | The rank table sets it |
+| Reorder and insertion in the middle | Not possible | Possible |
+| Size of the change | Small | Large |
 
-(b) で番号を再利用するのは、その番号のセルと、その番号を指すメンバー型の値がすべて消えたあとに限る。
+In (b), a number is used again only after all its cells are removed.
+Also, all values of member type that refer to that number must be removed first.
 
-再利用するのは、番号を詰まったまま保ち、軸のビット幅を「生きているメンバーの数」で決めるためである。
-再利用しなければ番号は増える一方で、足し引きの多い軸ではビット幅が増え続ける。
+We use numbers again for this reason: the numbers stay without gaps, and the number of live members sets the bit width of the dimension.
+If we do not use numbers again, the numbers only increase.
+Then, in a dimension with many additions and removals, the bit width continues to increase.
 
-| 例：顧客の軸で、毎月 1 万件を足して 1 万件を消す | 再利用する | 再利用しない |
+| Example: a customer dimension with 10,000 additions and 10,000 removals each month | Use numbers again | Do not use numbers again |
 |---|---|---|
-| 生きているメンバー | 常に 10 万件 | 常に 10 万件 |
-| 3 年後の最大の番号 | 約 10 万 | 約 46 万 |
-| この軸のビット幅 | 17 ビット | 19 ビット（増え続ける） |
+| Live members | Always 100,000 | Always 100,000 |
+| Largest number after 3 years | About 100,000 | About 460,000 |
+| Bit width of this dimension | 17 bits | 19 bits (continues to increase) |
 
-再利用しなければ、いずれ詰め直しが要る。
-詰め直しは、印を置くことで避けたかった重い処理そのものである。
+If we do not use numbers again, a compaction becomes necessary at some time.
+The compaction is the same slow work that the marks must prevent.
 
-スロットマップは普通、古い参照が新しいメンバーを指さないように、再利用する番号に世代番号を添える。
-ここでは再利用の前に、その番号を指すセルと値をすべて消すので、世代番号は要らない。
+A slot map usually adds a generation number to each number that it uses again.
+This prevents an old reference from pointing to a new member.
+Here, before the engine uses a number again, it removes all cells and values that refer to that number.
+Thus, a generation number is not necessary.
 
-### 時系列のマスターの削除
+### Removal in a time-series master
 
-前期の参照、大小比較、scan は番号の ± 1 と大小で動くので、途中に穴があると正しく動かない。
-先頭から消す場合（直近 36 か月だけ残すなど）は、穴が先頭にしかできず、残る期間どうしの ± 1 は崩れない。
-最初の期間の前期は空になり、意味としても正しい。
-時系列のマスターは途中の期間の削除を禁じ、先頭からの削除だけを許せば、印を置く形にできる。
+The previous-period reference, comparisons, and scan use ±1 and the order of numbers.
+Thus, they do not operate correctly if there is a gap in the middle.
+A removal from the start (for example, keep only the last 36 months) makes a gap only at the start.
+Then ±1 between the remaining periods stays correct.
+The previous period of the first period becomes blank, and this is also correct in meaning.
+Thus, a time-series master can use marks if it prevents a removal in the middle and permits only a removal from the start.
 
-### 印を置くときに分けるもの
+### What to divide when we put marks
 
-今は `DimInfo::size` が 2 つの意味を兼ねており、番号に穴ができると分ける必要がある。
+Now, `DimInfo::size` has 2 meanings.
+If the numbers have gaps, we must divide these meanings:
 
-- 番号の範囲：`Packing::new` のビット幅、`Sel` の大きさ、転置索引、2^22 の判定
-- 生きているメンバーの数：セル数の見積もり、`EXPAND` と `IFBLANK` が値を作る範囲、`AsAxis` の範囲の判定、Python の `len(members)`
+- Number range: the bit width of `Packing::new`, the size of `Sel`, the inverted index, the 2^22 check
+- Number of live members: the estimate of the cell count, the range in which `EXPAND` and `IFBLANK` make values, the range check of `AsAxis`, `len(members)` in Python
 
-スナップショットの `inputs.*.parquet` は番号を `model.json` の並びと組で持つので、穴のある番号と ID の対応を保存する形にし、保存形式の版を上げる。
-記録は ID で持つので変わらない。
+The snapshot file `inputs.*.parquet` keeps numbers together with the order in `model.json`.
+Thus, the snapshot must keep the relation between numbers with gaps and IDs, and the save format version must increase.
+The journal keeps IDs, thus it does not change.
 
-## キーの幅を広げる
+## Make the key wider
 
-番号と順位の扱いを決めたうえで、キーの幅を広げる。
-検討した案は次のとおり。
+After we decide how to use the number and the rank, we make the key wider.
+We examined these options:
 
-| 案 | 広がる幅 | 費用 | 評価 |
+| Option | Width increase | Cost | Result |
 |---|---|---|---|
-| 混合基数で詰める（キー = Σ mᵢ × Π sizeⱼ） | 切り上げの無駄がなくなるだけ。上の例でも約 70 ビットで収まらない | 軸を取り出すのに割り算が要り、追加で詰め直しが増える | 解決にならない |
-| セルごとに可変長のキー（`Vec<u32>`） | 無制限 | 並べ替え、結合、集計が 5〜10 倍遅く、メモリが 2.5〜3.5 倍（下の測定） | 採らない |
-| Metric ごとに、使っているメンバーだけで番号を振り直す | 疎さに応じて広がる | Metric の間でキーを写すたびに変換が要る | 複雑すぎる |
-| キーの型を総称化し、64 ビットの語を N 個並べた固定長配列も持つ | 64 × N ビット | 64 ビットを超えるときだけ、1 語ごとに 1 セル 8 バイト増える | 採る |
+| Pack with mixed radix (key = Σ mᵢ × Π sizeⱼ) | It only removes the waste from rounding up. The example above still needs about 70 bits and does not fit | A division is necessary to get a dimension. Additions cause more compactions | Does not solve the problem |
+| A variable-length key for each cell (`Vec<u32>`) | No limit | Sort, join, and aggregation are 5 to 10 times slower. Memory is 2.5 to 3.5 times larger (see the measurement below) | Rejected |
+| For each Metric, set new numbers only for the members that it uses | Increases with sparsity | Each key copy between Metrics needs a conversion | Too complex |
+| Make the key type generic, and also supply a fixed-length array of N 64-bit words | 64 × N bits | Only above 64 bits, each word adds 8 bytes to each cell | Accepted |
 
-採る案の中身は次のとおり。
+The accepted option has these parts:
 
-- `Key` トレイトを `u64` と `[u64; N]` に実装し、取り出し、設定、クリア、上位からの辞書順を持たせる。
-  `[u64; N]` は Rust の固定長配列で、N は型の引数（const generics）としてコンパイル時に決まり、ヒープを使わない。
-  Rust の `u128` は x86_64 で 16 バイト境界に揃うので `(u128, f64)` は 32 バイトになるが、`[u64; 2]` なら 24 バイトで済む。
-- キーを持つところ（`Packing`、`Proj`、`Cube`、`cells.rs`、`store.rs` の本体と差分と転置索引、`restrict.rs`、`eval/` の結合と集計）を `K` で総称化する。
-  分割軸を上位に置いて二分探索する仕組みは、辞書順の比較のまま成り立つ。
-- 幅はモデル全体で 1 つにする。
-  今の幅に収まらない Metric か途中の結果が初めて現れたとき、すべての格納データを広い幅に詰め直す。
-  小さいモデルは 64 ビットのままで、性能は変わらない。
-- `budget.rs` のメモリの見積もり、型検査の上限（`key_fits`）、Python の `RustEngine.key_bits` を幅に合わせる。
-  `key_fits` は、各軸のビット数の合計ではなく、下の詰め方で何語になるかを数える。
-- 小さなモデルでも広い幅の経路を通せるように、`RustEngine(key_bits=128)` で幅を強制できるようにし、差分再計算を参照実装と全体の再計算に突き合わせるテストを足す。
+- Implement a `Key` trait for `u64` and for `[u64; N]`.
+  The trait has get, set, clear, and lexicographic order from the most significant part.
+  `[u64; N]` is a fixed-length array in Rust.
+  N is a type parameter (const generics), thus the compiler sets it, and the array does not use the heap.
+  On x86_64, the Rust `u128` has 16-byte alignment, thus `(u128, f64)` uses 32 bytes.
+  `[u64; 2]` uses only 24 bytes.
+- Make generic over `K` all the parts that keep keys.
+  These parts are `Packing`, `Proj`, `Cube`, `cells.rs`, the base, the delta, and the inverted index in `store.rs`, `restrict.rs`, and the join and aggregation in `eval/`.
+  The partition dimension is in the most significant position, and the engine uses a binary search on it.
+  This still operates correctly with lexicographic comparison.
+- Use one width for the full model.
+  When a Metric or an intermediate result does not fit the current width for the first time, the engine packs all stored data again with the wider width.
+  A small model stays at 64 bits, and its performance does not change.
+- Change these items to agree with the width: the memory estimate in `budget.rs`, the type check limit (`key_fits`), and `RustEngine.key_bits` in Python.
+  `key_fits` does not count the sum of the bits of each dimension.
+  It counts the number of words that the packing below needs.
+- Add `RustEngine(key_bits=128)` to force the width, so that a small model can also use the wide path.
+  Add tests that match the incremental recalculation with the reference implementation and with a full recalculation.
 
-### 語の数 N
+### Number of words N
 
-N は軸の数ではなく、64 ビットの語の数である。
-1 語には何軸でも入る（測定の 6 軸は 54 ビットで 1 語、7 軸は 72 ビットで 2 語、13 軸は 129 ビットで 3 語）。
+N is not the number of dimensions.
+N is the number of 64-bit words.
+One word can hold any number of dimensions.
+In the measurement, 6 dimensions use 54 bits (1 word), 7 dimensions use 72 bits (2 words), and 13 dimensions use 129 bits (3 words).
 
-N はコンパイル時に決まるので、コードを生成する N はあらかじめ選んでおく。
-最初は N = 1（`u64`）、2、4 を用意し、それを超える軸の組み合わせは今の 64 ビットの検査と同じく型検査で拒否する。
-語数を増やしても、増えるのは生成するコードの量で、測定では 2 語から 3 語で並べ替えが 1.1 倍、1 セルが 24 から 32 バイトにしか増えなかった。
-上限をなくしたくなったら、256 ビットを超えるキーだけを stride（語数を実行時に決める形）で持つ。
-FP&A の Metric が 256 ビット（1,000 メンバーの軸で 25 本ほど）を超えることはまずないので、stride は要るときに足す。
+The compiler sets N, thus we must select in advance the values of N for which the compiler makes code.
+At first, we supply N = 1 (`u64`), 2, and 4.
+For a dimension set that is wider, the type check rejects it, as it does now for 64 bits.
+More words only increase the quantity of generated code.
+In the measurement, from 2 words to 3 words, the sort became only 1.1 times slower, and one cell increased only from 24 to 32 bytes.
+If we want to remove the limit, we can use a stride (the number of words is set at run time) only for keys wider than 256 bits.
+An FP&A Metric almost never uses more than 256 bits (about 25 dimensions of 1,000 members).
+Thus, we will add the stride only when it is necessary.
 
-### 語への詰め方
+### How to pack into words
 
-軸ごとの番号を、先頭の語から順にビット単位で詰める。
+Pack the number of each dimension bit by bit, from the first word.
 
-1. 軸を先頭から順に見て、今の語に収まればその語に入れ、収まらなければ次の語に移る（1 つの軸は 2 つの語にまたがらない）。
-2. 語の中では、先の軸ほど上位のビットに置く。
-3. 先頭の語（`key[0]`）が全体の最上位になる。
+1. Examine the dimensions in sequence from the first. If a dimension fits in the current word, put it there. If not, go to the next word. One dimension does not cross 2 words.
+2. In a word, an earlier dimension goes in more significant bits.
+3. The first word (`key[0]`) is the most significant part of the full key.
 
-背景の 7 軸（72 ビット）は、次のように 2 語に入る。
+The 7 dimensions (72 bits) from the background go into 2 words as follows:
 
 ```text
 key[0]: [未使用 10][Month 7][Version 4][Entity 8][Department 9][Account 11][Product 15]
 key[1]: [未使用 46][Customer 18]
 ```
 
-- 軸の値は、その軸が入っている語をずらしてマスクして取り出す（`(key[word[i]] >> shift[i]) & mask[i]`）。今の `Packing::get` に語の位置が加わるだけである。
-- 比較は配列の辞書順で、先頭の軸ほど上位にあるので、軸の順に並べたのと同じ順序になる。分割軸を先頭に置けば、`key[0]` の上位ビットで範囲を絞れる。
-- 格納データは、今の `Vec<(u64, f64)>` のキーの型を変えた `Vec<([u64; 2], f64)>` で、差分の木と転置索引もキーの型を差し替えるだけである。
+- To get the value of a dimension, shift and mask the word that holds it (`(key[word[i]] >> shift[i]) & mask[i]`). The only difference from the current `Packing::get` is the word position.
+- The comparison uses the lexicographic order of the array. An earlier dimension is more significant, thus the order is the same as a sort by the dimensions in sequence. If the partition dimension is first, the most significant bits of `key[0]` can limit the range.
+- The stored data changes from `Vec<(u64, f64)>` to `Vec<([u64; 2], f64)>`. Only the key type changes. For the delta tree and the inverted index, also only the key type changes.
 
-語にまたがらせないと、語の境目でビットが余る（上の例では 2 語のうち 56 ビット）。
-128 ビットを 1 つの整数とみなして隙間なく詰めれば無駄はなくなるが、境目にかかる軸は 2 語から取り出して組み合わせることになる。
-境目の無駄は数ビットから十数ビットで済むことがほとんどなので、取り出しの単純な、またがない形にする。
+If dimensions do not cross words, some bits at the word boundary are not used (in the example above, 56 bits of the 2 words).
+We can remove this waste if we treat 128 bits as one integer and pack without gaps.
+But then the engine must get a dimension at the boundary from 2 words and combine the parts.
+The waste at the boundary is usually only a few bits to a little more than 10 bits.
+Thus, we use the format in which dimensions do not cross words, because it is simpler to get values.
 
-### 実用上の目安
+### Practical guide
 
-| 各軸のメンバー数 | 1 軸のビット数 | 64 ビットで持てる軸数 | 128 ビットで持てる軸数 |
+| Members in each dimension | Bits for 1 dimension | Dimensions in 64 bits | Dimensions in 128 bits |
 |---|---|---|---|
-| 〜8（Version、Scenario など） | 3 | 21 | 42 |
-| 〜1,000（部門、勘定科目） | 10 | 6 | 12 |
-| 〜100 万（顧客、SKU） | 20 | 3 | 6 |
+| Up to 8 (Version, Scenario, and so on) | 3 | 21 | 42 |
+| Up to 1,000 (departments, accounts) | 10 | 6 | 12 |
+| Up to 1,000,000 (customers, SKUs) | 20 | 3 | 6 |
 
-FP&A の Metric は普通 5〜8 軸で 80〜100 ビットほどなので、128 ビットあればまず足りる。
-測定の 13 軸（Customer 20 万、Employee 5 万、Product 2 万などを含む）でも 129 ビットだった。
-128 ビットに近づくのは、次の 3 つのときである。
+An FP&A Metric usually has 5 to 8 dimensions and uses about 80 to 100 bits, thus 128 bits are almost always sufficient.
+The 13 dimensions of the measurement (including Customer 200,000, Employee 50,000, and Product 20,000) used 129 bits.
+A key comes near 128 bits in these 3 conditions:
 
-- 式の途中の結果：`EXPAND` や結合、メンバー型の Metric を使う `BY` で、途中の結果の軸が最終結果より多くなる。上限には Metric そのものより先に当たる。
-- 元の軸から一意に決まる軸を並べて持つ：Employee × Department のように、Department が Employee から決まっても、セルは増えずにビットだけを使う。
-- 番号を再利用しない (a)：消しても番号の範囲が縮まないので、足し引きの多い軸では詰め直すまでビット幅が増える。
+- Intermediate results of a formula: `EXPAND`, a join, or a `BY` with a Metric of member type gives an intermediate result more dimensions than the final result. Thus, an intermediate result reaches the limit before the Metric itself.
+- A dimension that the original dimension sets is also kept: for example, Employee × Department. Department comes from Employee, thus the cell count does not increase, but the bits are used.
+- Option (a), numbers are not used again: a removal does not decrease the number range. Thus, in a dimension with many additions and removals, the bit width increases until a compaction.
 
-1 軸あたりのメンバー数の上限（u32、約 43 億）は変わらない。
-これは同時に存在するメンバーの数の上限で、払い出した ID の最大値ではない。
+The limit of members in one dimension (u32, about 4.3 billion) does not change.
+This limit applies to the number of members that exist at the same time.
+It does not apply to the largest ID that was issued.
 
-## キーの表し方の測定
+## Measurement of key formats
 
-キーの表し方を変えたときの速さとメモリを、`native/engine/examples/key_layout.rs` で測った。
+We measured the speed and memory of different key formats with `native/engine/examples/key_layout.rs`.
 
 ```bash
 cargo run --release -p nanashi-engine --example key_layout --manifest-path native/Cargo.toml -- [セル数]
 ```
 
-エンジンの本体は使わず、同じ座標の集まりを次の 4 つの表し方で持ち、エンジンの主な操作に当たる 3 つを 1 スレッドで測る。
+The example does not use the engine itself.
+It keeps the same set of coordinates in 4 formats.
+It measures 3 operations that are the main operations of the engine, on 1 thread.
 
-- `u64`：今のエンジン。64 ビットに収まる軸の組み合わせだけで測る
-- `[u64; N]`：語数を型で決める。N = 2 が 128 ビット案
-- stride：Metric ごとに語数を実行時に決め、キーを平たい `Vec<u64>` に語数おきに並べる
-- `Vec<u32>`：セルごとに軸の番号の列をヒープに持つ
+- `u64`: The current engine. We measure it only with dimension sets that fit in 64 bits.
+- `[u64; N]`: The type sets the number of words. N = 2 is the 128-bit option.
+- stride: The number of words is set at run time for each Metric. The keys are in a flat `Vec<u64>`, one key at each interval of that number of words.
+- `Vec<u32>`: Each cell keeps a list of dimension numbers on the heap.
 
-操作は次の 3 つである。
+The 3 operations are:
 
-- 並べ替え：ばらばらの順のセルをキー順に並べる
-- 結合：キー順の 2 列を突き合わせ、両方にあるキーだけを値の積で残す（相手の半分が同じキー）
-- 集計：メンバー数の最も多い軸を外し、並べ直して同じキーを足す
+- Sort: put cells in random order into key order.
+- Join: match 2 lists in key order, and keep only the keys in both lists, with the product of the values (half of the keys in the other list are the same).
+- Aggregation: remove the dimension with the most members, sort again, and add the values of the same key.
 
-座標は各軸から一様に選んだ重ならない 500 万個で、3 回の最小値を取った。
-1 セルのメモリは、並べ終えた列がヒープに確保した量をセル数で割ったもので、アロケーターの管理分を含まない。
-`Vec<u32>` はセルごとに確保するので、実際のメモリはさらに 1 セルあたり 8〜16 バイトほど多い。
-同じ条件で回しても、時間は 1 割から 2 割ほど揺れる。
+The coordinates are 5,000,000 different points, with a uniform selection from each dimension.
+We use the minimum of 3 runs.
+The memory for 1 cell is the heap size of the sorted list divided by the cell count.
+It does not include the management data of the allocator.
+`Vec<u32>` makes an allocation for each cell, thus the actual memory is about 8 to 16 bytes larger for each cell.
+In the same conditions, the time changes by about 10% to 20% between runs.
 
-64 ビットに収まる 6 軸（Month 120、Version 10、Entity 200、Department 500、Account 2,000、Product 20,000。54 ビット、1 語）：
+6 dimensions that fit in 64 bits (Month 120, Version 10, Entity 200, Department 500, Account 2,000, Product 20,000. 54 bits, 1 word):
 
-| 表し方 | 1 セルのメモリ | 並べ替え | 結合 | 集計 |
+| Format | Memory for 1 cell | Sort | Join | Aggregation |
 |---|---|---|---|---|
-| `u64` | 16 バイト | 188 ms | 94 ms | 113 ms |
-| `[u64; 2]` | 24 バイト（1.5 倍） | 300 ms（1.6 倍） | 120 ms（1.3 倍） | 212 ms（1.9 倍） |
-| stride | 16 バイト（1.0 倍） | 906 ms（4.8 倍） | 123 ms（1.3 倍） | 230 ms（2.0 倍） |
-| `Vec<u32>` | 56 バイト（3.5 倍） | 1,625 ms（8.7 倍） | 899 ms（9.6 倍） | 973 ms（8.6 倍） |
+| `u64` | 16 bytes | 188 ms | 94 ms | 113 ms |
+| `[u64; 2]` | 24 bytes (1.5 times) | 300 ms (1.6 times) | 120 ms (1.3 times) | 212 ms (1.9 times) |
+| stride | 16 bytes (1.0 times) | 906 ms (4.8 times) | 123 ms (1.3 times) | 230 ms (2.0 times) |
+| `Vec<u32>` | 56 bytes (3.5 times) | 1,625 ms (8.7 times) | 899 ms (9.6 times) | 973 ms (8.6 times) |
 
-64 ビットを超える 7 軸（上に Customer 200,000 を足す。72 ビット、2 語）：
+7 dimensions that do not fit in 64 bits (add Customer 200,000 to the above. 72 bits, 2 words):
 
-| 表し方 | 1 セルのメモリ | 並べ替え | 結合 | 集計 |
+| Format | Memory for 1 cell | Sort | Join | Aggregation |
 |---|---|---|---|---|
-| `[u64; 2]` | 24 バイト | 309 ms | 124 ms | 209 ms |
-| stride | 24 バイト（1.0 倍） | 1,086 ms（3.5 倍） | 114 ms（0.9 倍） | 265 ms（1.3 倍） |
-| `Vec<u32>` | 60 バイト（2.5 倍） | 1,595 ms（5.2 倍） | 789 ms（6.4 倍） | 1,167 ms（5.6 倍） |
+| `[u64; 2]` | 24 bytes | 309 ms | 124 ms | 209 ms |
+| stride | 24 bytes (1.0 times) | 1,086 ms (3.5 times) | 114 ms (0.9 times) | 265 ms (1.3 times) |
+| `Vec<u32>` | 60 bytes (2.5 times) | 1,595 ms (5.2 times) | 789 ms (6.4 times) | 1,167 ms (5.6 times) |
 
-128 ビットを超える 13 軸（さらに Channel 50、Region 300、Project 5,000、Currency 40、Segment 100、Employee 50,000 を足す。129 ビット、3 語）：
+13 dimensions that do not fit in 128 bits (also add Channel 50, Region 300, Project 5,000, Currency 40, Segment 100, Employee 50,000. 129 bits, 3 words):
 
-| 表し方 | 1 セルのメモリ | 並べ替え | 結合 | 集計 |
+| Format | Memory for 1 cell | Sort | Join | Aggregation |
 |---|---|---|---|---|
-| `[u64; 3]` | 32 バイト | 336 ms | 108 ms | 271 ms |
-| stride | 32 バイト（1.0 倍） | 1,180 ms（3.5 倍） | 125 ms（1.2 倍） | 238 ms（0.9 倍） |
-| `Vec<u32>` | 84 バイト（2.6 倍） | 1,727 ms（5.1 倍） | 1,009 ms（9.3 倍） | 2,090 ms（7.7 倍） |
+| `[u64; 3]` | 32 bytes | 336 ms | 108 ms | 271 ms |
+| stride | 32 bytes (1.0 times) | 1,180 ms (3.5 times) | 125 ms (1.2 times) | 238 ms (0.9 times) |
+| `Vec<u32>` | 84 bytes (2.6 times) | 1,727 ms (5.1 times) | 1,009 ms (9.3 times) | 2,090 ms (7.7 times) |
 
-ここから次のことがわかる。
+The results show these points:
 
-- セルごとに可変長のキーを持つと、どの操作も 5〜10 倍遅く、メモリは 2.5〜3.5 倍になる。
-  今の評価は演算ごとに途中の結果を実体化するので、この費用が演算の数だけ重なる。
-- 128 ビット案（`[u64; 2]`）は、64 ビットに収まるモデルで比べると、並べ替えと集計が 1.6〜1.9 倍、結合が 1.3 倍、メモリが 1.5 倍になる。
-  幅をモデル単位で切り替え、収まるモデルは 64 ビットのまま動かす理由はこれである。
-- 語数を 2 から 3 に増やしても、並べ替えは 1.1 倍、メモリは 24 から 32 バイトにしか増えない。
-  語数を型で決める形なら、128 ビットを超えても同じ作りで広げられる。
-- stride は、結合と集計では語数を型で決める形とほぼ同じだが、並べ替えが 3.5〜4.8 倍遅い。
-  ここでの並べ替えは、添字を並べてから詰め直す素朴な実装で、詰め直しが飛び飛びにメモリを読むためである。
-  基数ソートなどで縮められる余地はあるが、語数ごとに型を作る形のほうが単純で速い。
+- With a variable-length key for each cell, all operations are 5 to 10 times slower, and memory is 2.5 to 3.5 times larger.
+  The current evaluation makes each intermediate result real for each operation, thus this cost occurs again for each operation.
+- In a model that fits in 64 bits, the 128-bit option (`[u64; 2]`) makes sort and aggregation 1.6 to 1.9 times slower, join 1.3 times slower, and memory 1.5 times larger.
+  This is why the width changes for each model, and a model that fits stays at 64 bits.
+- From 2 words to 3 words, the sort becomes only 1.1 times slower, and memory increases only from 24 to 32 bytes.
+  If the type sets the number of words, the same design can extend above 128 bits.
+- For join and aggregation, stride is almost the same as the format in which the type sets the number of words. But the sort is 3.5 to 4.8 times slower.
+  The cause: this sort is a simple implementation that sorts indexes and then copies the keys into the new order. The copy reads memory at random positions.
+  A radix sort or a similar method can decrease this time, but a type for each number of words is simpler and faster.
 
-集計では、外した軸のほかの組み合わせが一様にばらけているので、集計先はほとんど減らない（500 万セルが 500 万セル近くのまま）。
-集計先が少ないときの、読みながら足し込む経路（`docs/engine.md`）は測っていない。
-エンジンは件数が多ければ並べ替えなどを並列に行うが、ここでは 1 スレッドで測った。
+In the aggregation, the other combinations of the removed dimension are uniformly distributed.
+Thus, the aggregation targets almost do not decrease (5,000,000 cells become almost 5,000,000 cells).
+We did not measure the path that adds values while it reads, which the engine uses when there are few aggregation targets (`docs/engine.md`).
+If the cell count is large, the engine does sorts and other operations in parallel, but here we measured on 1 thread.
 
-## View での行と列の組み替え
+## Change rows and columns in a View
 
-Metric の軸の組は固定だが、View で行と列にどの軸を置くかは自由に組み替えられる。
-組み替えは読み出し方の違いで、キーの詰め方、格納データ、再計算には触れない。
-ピボットの View は、どの軸で絞り、どの軸を残し、残りをどう集計するかに分解でき、今の `summarize` で表せる。
+The dimension set of a Metric is fixed, but a View can freely select which dimensions go to rows and columns.
+This change is only a different way to read.
+It does not touch the key packing, the stored data, or the recalculation.
+A pivot View is a combination of these items: which dimensions filter, which dimensions stay, and how to aggregate the others.
+The current `summarize` can show this.
 
-| View の操作 | 読み出しでの意味 | 今の口 |
+| View operation | Meaning when the engine reads | Current interface |
 |---|---|---|
-| ページ（フィルター）に置いた軸 | その軸のメンバーで絞る | `summarize(..., Version="予算")` |
-| 行と列に置いた軸 | 残す軸 | `keep=["Product", "Month"]` |
-| どこにも置かない軸 | 集計して消す | `agg="sum"`（SUM、AVG、MIN、MAX、COUNT） |
-| 行と列を入れ替える | 残す軸は同じで並べ方が違うだけ | 結果は同じで、表への並べ方は View の層が決める |
+| A dimension on the page (filter) | Filter by a member of that dimension | `summarize(..., Version="予算")` |
+| A dimension on rows or columns | A dimension that stays | `keep=["Product", "Month"]` |
+| A dimension that is not on the View | Aggregate it and remove it | `agg="sum"` (SUM, AVG, MIN, MAX, COUNT) |
+| Swap rows and columns | The same dimensions stay. Only the layout is different | The result is the same. The View layer sets the layout of the table |
 
-足りないものは次のとおりで、どれもキーの形とは独立している。
+These items are missing. None of them depends on the key format.
 
-- 大きな表のページ送り：`summarize` は結果を丸ごと返し（HTTP サーバーでは 1 回 10 万セルまで）、`rows()` は宣言した軸の順にしか並べられない。行が数万を超える View には、残す軸の順に並べてページ送りする口が要る。
-- 軸ごとの集計の仕方：`summarize` は消す軸すべてに同じ集計を使う。在庫や残高のように「Month は期末、Product は合計」としたいなら、口を広げる。
+- Pages for a large table: `summarize` returns the full result (the HTTP server returns a maximum of 100,000 cells for each request). `rows()` can sort only in the declared order of the dimensions. For a View with more than tens of thousands of rows, an interface is necessary that sorts by the remaining dimensions and returns the result in pages.
+- An aggregation method for each dimension: `summarize` uses the same aggregation for all removed dimensions. For inventory or balances, you can want "end of period for Month, sum for Product". For this, the interface must be extended.
 
-Metric の軸の組を変えるのは、`add_input` や `add_formula` に同じ名前で別の軸の組を渡す定義の変更で、View の操作ではない（再計算が走る）。
+To change the dimension set of a Metric, give the same name and a different dimension set to `add_input` or `add_formula`.
+This is a change to the definition, not a View operation (a recalculation occurs).
 
-## 用語
+## Terms
 
-この設計の部品は、どれも広く知られた形の組み合わせである。
+All the parts of this design are combinations of well-known methods.
 
-| この設計の部品 | 一般的な呼び名 |
+| Part of this design | Usual name |
 |---|---|
-| メンバーを詰まった整数（番号）に置き換えて持つ | 辞書エンコーディング（dictionary encoding）。番号はそのコードに当たる |
-| 外部向けの変わらない ID と、内部の番号を分ける | サロゲートキー（surrogate key）。名前や業務上のコードはナチュラルキー（natural key） |
-| 各軸の番号をビット単位で詰めて 1 つのキーにする | ビットパッキングした複合キー、多次元配列の線形化（MOLAP） |
-| 消したセルに印を置き、後でまとめる | tombstone と compaction（LSM-tree） |
-| 変えない本体に永続的な木の差分を重ねて版を共有する | 永続データ構造、MVCC |
-| 空いた番号を再利用する | スロットマップ、フリーリスト |
-| 同一性と並び順を分け、順位の表を持つ | 順序キー（order key、rank）の分離 |
+| Replace members with integers without gaps (numbers) | Dictionary encoding. The number is the code |
+| Keep an external ID that does not change, different from the internal number | Surrogate key. The name or business code is the natural key |
+| Pack the number of each dimension bit by bit into one key | Bit-packed composite key, linearization of a multidimensional array (MOLAP) |
+| Put a mark on a removed cell and merge at a later time | Tombstone and compaction (LSM-tree) |
+| Put a delta in a persistent tree on a base that does not change, and share versions | Persistent data structure, MVCC |
+| Use a free number again | Slot map, free list |
+| Keep identity and order as different values, with a rank table | Separate order key (order key, rank) |
 
-## 進め方
+## Plan
 
-ユーザーのマスターでは、リスト自体の並び替えと途中への挿入が要ると決めた。
-そのため (a) は経ずに、次の順に進める。
+We decided that a user master must permit a reorder of the list itself and an insertion in the middle.
+Thus, we skip (a) and do these steps in this sequence:
 
-1. View の表示順はエンジンの外で持つ。エンジンは変えない。
-2. ユーザーのマスターの番号と順位を分ける（(b)）。2 段に分ける。
-   - 第 1 段（実装した）：順位の表だけを足す。番号には穴を作らず、削除では今までどおり番号を詰める（順位の表の番号も詰める）。途中への挿入は末尾の番号を振って順位の表に入れ、並び替えは順位の表だけを変える。`rows()` は順位で並べて返す。番号に穴がないので、`DimInfo::size` を分ける必要も、`EXPAND` などが消した番号にセルを作る心配もない。
-   - 第 2 段（必要になったら）：削除で番号に印を置き、詰め直しを後でまとめ、空いた番号を再利用する。削除の費用を下げるための変更で、上の「印を置くときに分けるもの」が要る。
-3. キーの形が決まってから、キーの幅を広げる（N = 1、2、4）。
+1. Keep the View display order outside the engine. Do not change the engine.
+2. In a user master, divide the number and the rank ((b)). Do this in 2 phases.
+   - Phase 1 (implemented): Add only the rank table. Numbers do not get gaps. A removal compacts the numbers, as before (it also compacts the numbers in the rank table). An insertion in the middle gives the member the next number at the end and puts it into the rank table. A reorder changes only the rank table. `rows()` returns rows in rank order. Numbers have no gaps, thus it is not necessary to divide `DimInfo::size`. Also, `EXPAND` and similar functions cannot make cells for removed numbers.
+   - Phase 2 (when necessary): A removal puts a mark on the number, the compaction occurs at a later time, and free numbers are used again. This change decreases the cost of a removal. It needs the items in "What to divide when we put marks" above.
+3. After the key format is decided, make the key wider (N = 1, 2, 4).
 
-第 1 段の形は次のとおり。
+Phase 1 has this design:
 
-- `Dimension`（`sparse_engine/core.py`）の `members`、`ids`、`_index` は今までどおり番号ごとの値で、並び順（順位 -> 番号）を `_order` に持つ。番号の順のままなら `None` で、表を持たない。
-- 並び順は `in_order()`、`ranks()`（名前 -> 順位）、`rank_table()`（番号 -> 順位）で引く。
-- `Model.add_member(..., at=)` と `Model.move_member` で変える。順序付きの軸では、最後以外の位置を拒否する。
-- Rust の `Store::rows_in` は軸ごとの「番号 -> 順位」の表を受け取って並べる。表がなければ今までどおり。
-- 保存形式は版 4 で、`model.json` の軸に `member_order` を足す。記録は `member_order` に並び順の ID の列を持ち、構造の変更として扱わない。
+- In `Dimension` (`sparse_engine/core.py`), `members`, `ids`, and `_index` keep values for each number, as before. `_order` keeps the order (rank -> number). If the order is the number order, `_order` is `None`, and there is no table.
+- To get the order, use `in_order()`, `ranks()` (name -> rank), and `rank_table()` (number -> rank).
+- To change the order, use `Model.add_member(..., at=)` and `Model.move_member`. In an ordered dimension, these reject all positions other than the last.
+- The Rust `Store::rows_in` receives a "number -> rank" table for each dimension and sorts with it. If there is no table, it operates as before.
+- The save format is version 4. It adds `member_order` to the dimensions in `model.json`. The journal keeps the list of IDs in order in `member_order`, and does not treat it as a structure change.
 
-属性を軸として使う `BY` は元の軸を置き換えるので、結果のキーの幅は普通は増えない。
-元の軸と属性の軸を並べて持つときは、属性の軸が元の軸から一意に決まっても、そのビット数をまるごと使う。
+A `BY` that uses an attribute as a dimension replaces the original dimension.
+Thus, the key width of the result usually does not increase.
+If the original dimension and the attribute dimension are both kept, the attribute dimension uses all its bits.
+This is also true when the original dimension sets the attribute dimension.
 
-## メンバー型の Metric を使う BY の途中の結果（直した）
+## Intermediate result of a BY with a Metric of member type (fixed)
 
-メンバー型の Metric を使う `BY`（`Salary[BY SUM: Employee.DeptOf]`）は、型検査で `Remove(On(x, AsAxis(DeptOf, Department)), Employee)` に書き換える（`check.rs` の `ByMetric`）。
-途中の `On` の結果は Employee と Department の両方の軸を持つが、型検査は最終結果の軸しか `key_fits` で確かめていなかった。
-書き換えたノードは型検査を通らないので、結合が 64 ビットに収まらないモデルは次のようになっていた。
+A `BY` with a Metric of member type (`Salary[BY SUM: Employee.DeptOf]`) is changed by the type check.
+The type check changes it to `Remove(On(x, AsAxis(DeptOf, Department)), Employee)` (`ByMetric` in `check.rs`).
+The intermediate result of `On` has both the Employee dimension and the Department dimension.
+But the type check examined only the dimensions of the final result with `key_fits`.
+The changed nodes do not go through the type check.
+Thus, if the join did not fit in 64 bits, these problems occurred:
 
-- 式の登録：型検査を通り、最初の計算で直し方を示さない `ValueError`（「軸の組み合わせが 64 ビットに収まらない」）になった。
-- メンバーの追加：`_check_widths` が書き換える前の式を型検査し直すが、同じ理由で通り、追加を受け付けた。そのあとは差分再計算も `refresh()` も失敗し続けた。
+- Formula registration: the formula passed the type check. Then the first calculation gave a `ValueError` ("the dimension set does not fit in 64 bits") that did not tell how to correct the problem.
+- Member addition: `_check_widths` does a type check again on the formula before the change. For the same cause, the formula passed, and the addition was accepted. After that, the incremental recalculation and `refresh()` always failed.
 
-`ByMetric` で結合の軸（`joined`）も `key_fits` で確かめるようにした。
-式の登録では型検査が直し方を示して拒否し、メンバーの追加では追加せずにエラーにする（`tests/test_limits.py` の `KeyWidth`）。
-キーの幅を広げるときも、この検査は幅に合わせて同じ場所で行う。
+Now `ByMetric` also examines the dimensions of the join (`joined`) with `key_fits`.
+At formula registration, the type check rejects the formula and tells how to correct it.
+At member addition, the engine does not add the member and gives an error (`KeyWidth` in `tests/test_limits.py`).
+When we make the key wider, this check will also agree with the width and stay in the same location.

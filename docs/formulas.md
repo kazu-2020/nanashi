@@ -1,74 +1,80 @@
-# 式の言語
+# Formula language
 
-式は Pigment に似た構文の文字列で書く。
-Python の DSL（`ref("Salary").by("Employee.Department")` など）でも同じ式を組み立てられる。
+You write a formula as a string with a syntax that is similar to Pigment.
+You can also make the same formula with the Python DSL (for example, `ref("Salary").by("Employee.Department")`).
 
-| 分類 | 書き方 |
+| Category | Syntax |
 |---|---|
-| 演算子 | `+ - * /`、比較 `= <> < <= > >=`、論理 `AND OR NOT`、単項の `-` |
-| 集計 | `X[BY SUM: Employee.Department]`、`X[REMOVE SUM: Product, Month]`（SUM、AVG、MIN、MAX、COUNT） |
-| 引き下ろし | `Rate[BY: Employee.Department]`（部署の値を社員へ配る） |
-| 切り口と絞り込み | `X[SELECT: Version."実績"]`、`X[SELECT: Month - 1]`、`X[FILTER: 条件]` |
-| 軸の追加 | `X[EXPAND: Month]`（全メンバーへ複製）、`X[ON: Y]`（Y に値があるセルへ配る） |
-| 関数 | `IF(条件, a[, b])`、`IFBLANK(x, 定数)`、`ISBLANK(x)`、`PREVIOUS(Month[, n])` |
-| メンバー | `Month`（各セルのメンバー）、`Month."Mar"`（メンバーの定数） |
-| 名前 | `Revenue`、`売上`、`'Unit Price'`（空白を含む名前） |
+| Operators | `+ - * /`, comparisons `= <> < <= > >=`, logic `AND OR NOT`, unary `-` |
+| Aggregation | `X[BY SUM: Employee.Department]`, `X[REMOVE SUM: Product, Month]` (SUM, AVG, MIN, MAX, COUNT) |
+| BY mapping | `Rate[BY: Employee.Department]` (sends the value of the department to each employee) |
+| Slice and filter | `X[SELECT: Version."実績"]`, `X[SELECT: Month - 1]`, `X[FILTER: condition]` |
+| Add a dimension | `X[EXPAND: Month]` (copies to all members), `X[ON: Y]` (sends to the cells where Y has a value) |
+| Functions | `IF(condition, a[, b])`, `IFBLANK(x, constant)`, `ISBLANK(x)`, `PREVIOUS(Month[, n])` |
+| Members | `Month` (the member of each cell), `Month."Mar"` (a member constant) |
+| Names | `Revenue`, `売上`, `'Unit Price'` (a name with a space) |
 
-`PREVIOUS(Month)` はその式を持つ Metric 自身の前月の値を指し、在庫や資金残高のような時間方向の積み上げを書ける。
-`Month <= Month."Mar"` のように軸をメンバーとして比べる式は、順序付きの軸では並び順で比べる。
+`PREVIOUS(Month)` refers to the value of the previous month of the Metric that contains the formula. Thus, you can write a cumulative value over time, for example an inventory or a cash balance.
+A formula that compares a dimension as a member, for example `Month <= Month."Mar"`, uses the member order on an ordered dimension.
 
-`BY` のプロパティには、軸の固定のプロパティのほかに、メンバー型の Metric も指定できる。
-`Salary[BY SUM: Employee.DeptOf]` は、社員ごと月ごとの所属（`DeptOf[Employee, Month]`）に従って部署別に集計する。
-これで異動のような時間で変わる階層を、入力の変更として扱える。
+For the property of `BY`, you can specify a fixed property of a dimension. You can also specify a Metric of a member value kind.
+`Salary[BY SUM: Employee.DeptOf]` aggregates by department. It uses the department of each employee for each month (`DeptOf[Employee, Month]`).
+Thus, a hierarchy that changes over time, for example a transfer, is an input change.
 
-## 型の検査
+## Type check
 
-各式の軸と値の種類は、実行前に検査する。
-値の種類は **number**、**boolean**、**member:<軸名>**（その軸のメンバー）の 3 種類である。
-存在しないメンバーの指定、順序のない軸での大小比較、軸の食い違いは、登録後の最初の計算でエラーになる。
+The engine checks the dimensions and the value kind of each formula before it runs the formula.
+There are 3 value kinds: **number**, **boolean**, and **member:<dimension name>** (a member of that dimension).
+These cause an error at the first calculation after you register the formula: a member that does not exist, a less-than or greater-than comparison on an unordered dimension, and dimensions that do not agree.
 
-軸の違う Metric どうしを `+` でつなぐと、足りない軸へ値が暗黙に展開され、セル数が爆発しうる。
-そのため定数との演算を除き、`[EXPAND: 軸]` か `[ON: 相手]` で意図を明示しないとエラーにする。
-エラーメッセージは、直し方を式の構文で示す。
+If `+` connects Metrics with different dimensions, the engine implicitly expands the values to the missing dimensions. Then the number of cells can become very large.
+Thus, the engine gives an error, except for an operation with a constant. To prevent the error, write `[EXPAND: dimension]` or `[ON: other]` to show what you intend.
+The error message shows the correction in the formula syntax.
 
-## セル数の見積もり
+## Cell count estimate
 
-明示した `EXPAND` や `IFBLANK`、定数との足し算は、軸の全組み合わせに値を作る。
-顧客 10 万 × 商品 2 万の Metric に `IFBLANK(x, 0)` を書くと、実際の取引が少なくても 20 億セルになり、計算を始めた時点でメモリが尽きる。
-そこで、式を登録したあとの最初の計算の前に、各計算 Metric の結果のセル数の上限を見積もり、`Model(max_cells=...)`（既定は 10 億、`None` で検査しない）を超えれば計算せずにエラーにする。
+An explicit `EXPAND`, `IFBLANK`, and an addition with a constant make values for all combinations of the dimensions.
+Example: a Metric has 100,000 customers × 20,000 products, and you write `IFBLANK(x, 0)`. The result has 2,000,000,000 cells, also if there are few real transactions. The memory becomes full when the calculation starts.
+Thus, after you register a formula and before the first calculation, the engine estimates the maximum number of result cells for each formula Metric. If the estimate is more than `Model(max_cells=...)`, the engine does not calculate and gives an error. The default limit is 1,000,000,000. If the value is `None`, the engine does not do the check.
 
 ```text
 Filled: 結果のセル数が最大 2,000,000,000 と見積もられ、上限 1,000,000,000 を超える。密になる演算: IFBLANK が ['Customer', 'SKU'] の全組み合わせに展開される（密化）。値のあるセルだけに絞るなら [ON: 相手] か FILTER を使う。上限は Model(max_cells=...) で変えられる
 ```
 
-見積もりは、入力の今のセル数から計画の順に式をたどって求める。
-`*` や比較のように両側に値があるセルだけが残る演算は小さい側、`+` のように片側だけでも残る演算は和、全組み合わせに値を作る演算は軸の大きさの積とし、どれも結果の軸の全組み合わせで頭打ちにする。
-scan（前の時点の自分を読む Metric）は、値が全時点へ持ち越されうるとして時点の数を掛ける。
-損益計画では、見積もりは実際のセル数の 1.0〜1.9 倍（全体で 1.45 倍）だった。
-見積もりは `m.cell_estimates` で読める。
+The engine calculates the estimate from the current cell counts of the inputs. It goes through the formulas in the order of the plan.
+These are the rules for the estimate:
 
-見積もり直すのは定義を変えたときだけで、変えた Metric と、見積もりが変わった Metric を読む Metric に限る（1000 Metric のモデルで 0.07 ms）。
-入力のセル数や軸のメンバー数が増えただけでは見積もり直さないので、あとから入力が増えて上限を超えても、次に定義を変えるまでは検査しない。
+- For an operation that keeps only cells with values on both sides, for example `*` or comparisons, the estimate is the smaller side.
+- For an operation that keeps cells with a value on one side, for example `+`, the estimate is the sum.
+- For an operation that makes values for all combinations, the estimate is the product of the dimension sizes.
+- All estimates have a maximum: the number of all combinations of the result dimensions.
 
-見積もりは上限なので、見積もりが通っても、途中結果（式の中の `EXPAND` や、`+` で広げたもの）がメモリを使い切ることはありうる。
-Rust のエンジンは、1 つの式の評価が同時に持つ途中結果に予算を設けられる（`RustEngine(max_bytes=8 << 30)`、サーバーは `--max-bytes`）。
-全組み合わせを作る演算（`EXPAND`、`ISBLANK`、`IFBLANK`）は作る前に要る量を確かめ、超えればメモリを確保する前にエラーにする。
-演算を融合して評価する式（[エンジン](engine.md)）は途中結果を作らないので、結果の配列を確保する前に、その大きさだけを予算に数える。
-演算ごとに評価したときに必ず作る途中結果さえ予算を超える式は、融合せずに演算ごとに評価し、上と同じくエラーにする。
-同じ段の Metric を並列に計算するときは、予算を等分し、見積もりが等分した額に収まる Metric だけを一度に並べる（収まらない Metric は予算をすべて持って 1 つずつ計算する）。
+For a scan (a Metric that reads its own value at the previous time period), the engine multiplies by the number of time periods. This is because a value can carry over to all time periods.
+In the profit-and-loss plan, the estimates were 1.0 to 1.9 times the real cell counts (1.45 times for the full model).
+You can read the estimates with `m.cell_estimates`.
 
-## 空の扱い
+The engine estimates again only when you change a definition. It estimates only the changed Metric and the Metrics that read a Metric with a changed estimate. In a model with 1000 Metrics, this takes 0.07 ms.
+The engine does not estimate again if only the input cell counts or the member counts increase. Thus, if the inputs increase later and become more than the limit, the engine does not check until the next definition change.
 
-空のセル（値がないセル）は 0 と区別し、演算ごとに結果の範囲を決めている。
+The estimate is a maximum for the result. Thus, an intermediate result can use all the memory, also if the estimate is in the limit. Examples of intermediate results are an `EXPAND` in the formula and the values that `+` expands.
+The Rust engine can set a budget for the intermediate results that one formula evaluation keeps at the same time (`RustEngine(max_bytes=8 << 30)`; for the server, `--max-bytes`).
+For an operation that makes all combinations (`EXPAND`, `ISBLANK`, `IFBLANK`), the engine checks the necessary size first. If the size is more than the budget, the engine gives an error before it allocates memory.
+A fused formula ([Engine](engine.md)) does not make intermediate results. Thus, the engine counts only the size of the result array against the budget, before it allocates the array.
+The engine does not fuse a formula if the intermediate results that the evaluation of one operation at a time must make are more than the budget. It evaluates one operation at a time and gives an error as above.
+When the engine calculates the Metrics of one stage in parallel, it divides the budget into equal parts. It calculates together only the Metrics with an estimate in one part. Each other Metric gets the full budget, and the engine calculates these Metrics one at a time.
 
-| 演算 | 値が入るセル |
+## Blank cells
+
+A blank cell (a cell with no value) is different from 0. Each operation has a rule for the range of its result.
+
+| Operation | Cells that get a value |
 |---|---|
-| `+ -` | どちらかに値があるセル（空は 0 として扱う） |
-| `* /` と比較 | 両方に値があるセル（0 除算は空） |
-| `AND OR` | 三値論理（`FALSE AND 空 = FALSE`、`TRUE AND 空 = 空`） |
-| `IF(c, a, b)` | c に値があるセルだけ（c が空なら空） |
-| `FILTER(x, c)` | x のうち c が TRUE のセル |
-| `IFBLANK`、`ISBLANK`、`EXPAND` | 対象の軸の全メンバー（密になる） |
+| `+ -` | Cells where one of the two sides has a value (a blank is 0) |
+| `* /` and comparisons | Cells where both sides have a value (division by zero gives a blank) |
+| `AND OR` | Three-valued logic (`FALSE AND blank = FALSE`, `TRUE AND blank = blank`) |
+| `IF(c, a, b)` | Only cells where c has a value (if c is blank, the result is blank) |
+| `FILTER(x, c)` | Cells of x where c is TRUE |
+| `IFBLANK`, `ISBLANK`, `EXPAND` | All members of the applicable dimensions (densifying) |
 
-`IF` の条件が空のとき結果を空にしているのは、`IF` が条件より密にならないようにするためである。
-空を FALSE とみなしたいときは、`IF(IFBLANK(x > 0, FALSE), ...)` のように明示する。
+If the condition of `IF` is blank, the result is blank. This prevents a result of `IF` that is denser than its condition.
+If you want a blank to be FALSE, write it explicitly, for example `IF(IFBLANK(x > 0, FALSE), ...)`.

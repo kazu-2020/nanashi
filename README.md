@@ -1,15 +1,19 @@
 # nanashi
 
-nanashi は、Pigment のような計画ツールのための、疎な多次元計算エンジンである。
-名前付きの軸を持つ **Metric** を単位に値を持ち、式は Excel のようにセルごとではなく Metric 全体に適用する。
-値のあるセルだけを保持し、入力を 1 セル変えたときは影響する範囲だけを計算し直す。
+nanashi is a sparse multidimensional calculation engine for planning tools such as Pigment.
+It keeps values in units of **Metrics**, and each Metric has named dimensions.
+A formula applies to the full Metric, not to each cell as in Excel.
+The engine keeps only the cells that have a value.
+If you change one input cell, the engine calculates again only the affected range.
 
-大規模なモデルでも対話的な速さで応答することを目標にしている。
-たとえば社員 2 万人、商品 5 千、36 か月の損益計画（約 490 万セル、計算 Metric 18 個）では、全体の再計算が約 90 ms、給与や所属の変更は 1 ms 未満で反映される。
+The goal is interactive response speed also for large models.
+An example is a profit and loss plan with 20,000 employees, 5,000 products and 36 months (about 4.9 million cells, 18 formula Metrics).
+In this plan, a full recalculation takes about 90 ms.
+A change to a salary or to a department assignment takes less than 1 ms.
 
-## 使い始める
+## Getting started
 
-Python 3.12 以上と、Rust のツールチェーン（cargo）を使う。
+You need Python 3.12 or later and the Rust toolchain (cargo).
 
 ```bash
 python3 -m venv .venv
@@ -18,11 +22,12 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
 SPARSE_ENGINE=rust .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-最後から 2 行目で、Rust のエンジン（`nanashi_core`）をビルドして `.venv` に入れる。
-Rust のエンジンがなくても参照実装のエンジンだけで計算できるが、保存と読み込み（Parquet）には `nanashi_core` を使う。
-free-threaded の Python、PostgreSQL とオブジェクトストレージを使うテスト、サンプルとベンチマークは [docs/development.md](docs/development.md) にある。
+The second line from the end builds the Rust engine (`nanashi_core`) and installs it in `.venv`.
+Without the Rust engine, you can calculate with only the reference implementation engine.
+But save and load (Parquet) uses `nanashi_core`.
+[docs/development.md](docs/development.md) gives information about the free-threaded Python, the tests that use PostgreSQL and object storage, the examples and the benchmarks.
 
-## 最小の例
+## Minimal example
 
 ```python
 from sparse_engine import Model
@@ -41,32 +46,34 @@ m.add_input("DeptOf", ["Employee", "Month"],
 m.add_formula("Cost", ["Department", "Month"], "Salary[EXPAND: Month][BY SUM: Employee.DeptOf]")
 m.add_formula("Cash", ["Month"], "PREVIOUS(Month) + 500 - Cost[REMOVE SUM: Department]")
 
-m.set_cell("DeptOf", "開発", Employee="bob", Month="Mar")   # bob が 3 月に異動
+m.set_cell("DeptOf", "開発", Employee="bob", Month="Mar")   # bob moves to a different department in March
 print(m.value("Cost").format(m.dimensions))
 ```
 
-入力の Metric は `add_input`、式で決まる Metric は `add_formula` で登録する。
-Metric の軸と値の種類は登録時に決め、あとから変えない。
-値を読むと、変更のあった範囲だけが計算し直される。
+Use `add_input` to add an input Metric.
+Use `add_formula` to add a Metric that a formula calculates.
+You set the dimensions and the value kind of a Metric when you add it.
+You cannot change them later.
+When you read a value, the engine calculates again only the range that changed.
 
-## ドキュメント
+## Documentation
 
-| 文書 | 内容 |
+| Document | Contents |
 |---|---|
-| [docs/modeling.md](docs/modeling.md) | 値の読み出し、軸とメンバー（追加、名前の変更、削除、ID）、計画の入力（上書き、按分）、ホワットイフ分析 |
-| [docs/formulas.md](docs/formulas.md) | 式の言語、型の検査、セル数の見積もり、空の扱い |
-| [docs/recalculation.md](docs/recalculation.md) | 計算計画と差分再計算、差分集計、定義の変更 |
-| [docs/engine.md](docs/engine.md) | エンジンの構成（Store と Planner）、参照実装と Rust のエンジンの作り |
-| [docs/persistence.md](docs/persistence.md) | 保存と読み込み、トランザクションと記録、PostgreSQL の記録先 |
-| [docs/concurrency.md](docs/concurrency.md) | 同時の読み書き（`Workspace`、`Replica`、待機系への引き継ぎ） |
-| [docs/server.md](docs/server.md) | HTTP サーバーの API、認証、制限、止め方 |
-| [docs/router.md](docs/router.md) | 書き手へ要求を送り直す Go のルーター（`router/`） |
-| [docs/performance.md](docs/performance.md) | 性能の測定値（再計算、読み出し、free-threaded、メモリ、記録先、保存の形式） |
-| [docs/development.md](docs/development.md) | 開発環境、テストの方針、ソースの構成と、式のノードを足すときに直す場所 |
-| [docs/limitations.md](docs/limitations.md) | 制約と今後 |
-| [docs/member-numbering.md](docs/member-numbering.md) | 設計メモ：メンバーの名前、ID、番号、順位、削除の tombstone、キーの幅の拡張、View の組み替え（番号と順位の分離の第 1 段は実装済み） |
-| [docs/out-of-core.md](docs/out-of-core.md) | 設計メモ：格納データを NVMe（SSD）に置く案と、pread、mmap、heap の測定（未実装） |
+| [docs/modeling.md](docs/modeling.md) | Read values, dimensions and members (add, rename, delete, ID), plan input (override, spread), what-if analysis |
+| [docs/formulas.md](docs/formulas.md) | The formula language, the type check, the estimate of the number of cells, how blank values work |
+| [docs/recalculation.md](docs/recalculation.md) | The calculation plan and incremental recalculation, incremental aggregation, changes to definitions |
+| [docs/engine.md](docs/engine.md) | The structure of the engine (Store and Planner), the design of the reference implementation and of the Rust engine |
+| [docs/persistence.md](docs/persistence.md) | Save and load, transactions and the journal, the PostgreSQL journal |
+| [docs/concurrency.md](docs/concurrency.md) | Concurrent reads and writes (`Workspace`, `Replica`, failover to a standby) |
+| [docs/server.md](docs/server.md) | The API of the HTTP server, authentication, limits, how to stop the server |
+| [docs/router.md](docs/router.md) | The Go router that resends requests to the writer (`router/`) |
+| [docs/performance.md](docs/performance.md) | Performance measurements (recalculation, reads, free-threaded Python, memory, journals, save formats) |
+| [docs/development.md](docs/development.md) | The development environment, the test policy, the source structure, and the locations to change when you add an expression node |
+| [docs/limitations.md](docs/limitations.md) | Limitations and future work |
+| [docs/member-numbering.md](docs/member-numbering.md) | Design note: member names, IDs, numbers, ranks, tombstones for deleted members, wider keys, reorganization of Views (the first stage of the separation of numbers and ranks is implemented) |
+| [docs/out-of-core.md](docs/out-of-core.md) | Design note: a plan to keep stored data on NVMe (SSD), and measurements of pread, mmap and heap (not implemented) |
 
-## ライセンス
+## License
 
-MIT License（`LICENSE`）。
+MIT License (`LICENSE`).

@@ -1,109 +1,109 @@
-# モデルの操作
+# Model operations
 
-## 値の読み出し
+## Read values
 
-読み出しは、必要な分だけ読む 4 つの口と、全部を読む `value` がある。
-大きな Metric では `value` が Metric 全体を Python の dict に変換するので、表示や API には必要な分だけ読む口を使う。
+There are four interfaces that read only the necessary cells, and `value`, which reads all cells.
+For a large Metric, `value` converts the full Metric to a Python dict. Thus, for display or an API, use the interfaces that read only the necessary cells.
 
 ```python
-m.get("Revenue", Product="p0001", Version="予算", Month="m01")   # 1 セル。空なら None
-m.slice("Revenue", Product="p0001")                              # 範囲を Cube で（軸はメンバー名か、その集まり）
-m.rows("Payroll", Department="営業", offset=0, limit=50)          # 行の列と全行数（宣言した軸の順に並ぶ）
-m.summarize("Revenue", keep=["Month"], Product=["p0001", "p0002"])  # keep の軸だけ残して集計（SUM、AVG、MIN、MAX、COUNT）
+m.get("Revenue", Product="p0001", Version="予算", Month="m01")   # One cell. None if blank
+m.slice("Revenue", Product="p0001")                              # A range as a Cube (each dimension takes a member name or a set of names)
+m.rows("Payroll", Department="営業", offset=0, limit=50)          # A list of rows and the total row count (in the order of the declared dimensions)
+m.summarize("Revenue", keep=["Month"], Product=["p0001", "p0002"])  # Aggregate and keep only the keep dimensions (SUM, AVG, MIN, MAX, COUNT)
 ```
 
-Rust のエンジンでは、これらは格納データを丸ごと読まない。1 セルの `get` 以外は GIL も外して読む。
-490 万セルの損益計画で、137 万セルの Metric の 1 セルを `get` で読むのは 0.01 ms 未満、`value` で丸ごと読むと約 500 ms かかる（[性能](performance.md)の表）。
+In the Rust engine, these interfaces do not read all of the stored data. All of them except the one-cell `get` also release the GIL when they read.
+In the profit-and-loss plan with 4.9 million cells, one Metric has 1.37 million cells. A `get` of one cell of this Metric takes less than 0.01 ms. A `value` of the full Metric takes about 500 ms (see the table in [Performance](performance.md)).
 
-## 軸とメンバー
+## Dimensions and members
 
-軸のメンバーは、実行中に `add_member` で追加できる。
-新しいメンバーはどの Metric でも空で始まり、全メンバーへ値を広げる演算（定数との足し算、`IFBLANK`、引き下ろし、前月参照など）だけが新しいメンバーに値を作る。
-追加も入力の変更と同じく、影響する範囲だけを計算し直す。
+You can add a member to a dimension at run time with `add_member`.
+A new member starts blank in all Metrics. Only operations that expand values to all members make values for the new member. Examples are an addition with a constant, `IFBLANK`, the BY mapping, and a reference to the previous month.
+An addition of a member is like an input change: the engine calculates again only the affected range.
 
 ```python
-m.add_member("Employee", "dave")                         # どの Metric でも空で始まる
+m.add_member("Employee", "dave")                         # Starts blank in all Metrics
 m.set_cell("DeptOf", "開発", Employee="dave", Month="Mar")
-m.add_member("Month", "Apr")                             # 順序付きの軸は最後の時点の次に入る
+m.add_member("Month", "Apr")                             # On an ordered dimension, the member goes after the last time period
 ```
 
-軸にプロパティがあれば、`m.add_member("Product", "p9", Category="ハード")` のように追加と同時に値を設定できる。
+If the dimension has properties, you can set their values when you add the member, for example `m.add_member("Product", "p9", Category="ハード")`.
 
-順序のない軸（勘定科目、部門など）は、途中に挿入（`at`）でき、`move_member` で並び替えられる。
-位置は並び順の何番目か（0 から）で、`rows()` や HTTP の一覧（`GET /`）はこの並び順で返す。
+On an unordered dimension (for example, accounts or departments), you can insert a member at a position (`at`). You can change the order with `move_member`.
+The position is the index in the member order (starts at 0). `rows()` and the HTTP list (`GET /`) return members in this order.
 
 ```python
-m.add_member("Account", "粗利", at=2)    # 並び順の 2 番目に入れる
-m.move_member("Account", "販管費", 0)    # 先頭へ移す
-m.dimensions["Account"].in_order()       # 並び順のメンバーの名前
+m.add_member("Account", "粗利", at=2)    # Insert at position 2 of the order
+m.move_member("Account", "販管費", 0)    # Move to the start
+m.dimensions["Account"].in_order()       # The member names in order
 ```
 
-エンジンの中ではメンバーを番号で持ち、足したメンバーはいつも末尾の番号になる。
-並び順は番号と別に持つので、挿入も並び替えもほかのメンバーの番号とセルに触れず、並び替えは何も計算し直さない。
-順序付きの軸（時系列のマスター）は、並び順が前期の参照や大小比較の意味を持つので、最後の時点の次にしか足せず、並び替えもできない。
+In the engine, each member has a number. A new member always gets the last number.
+The engine keeps the order separately from the numbers. Thus, an insert or a reorder does not change the numbers or the cells of other members. A reorder does not cause a recalculation.
+On an ordered dimension (a time master list), the order sets the meaning of references to the previous period and of less-than or greater-than comparisons. Thus, you can add a member only after the last time period, and you cannot reorder the members.
 
-メンバーの名前は `rename_member` で変えられ、`remove_member` で消せる。
+You can rename a member with `rename_member` and remove it with `remove_member`.
 
 ```python
-m.rename_member("Employee", "dave", "David")  # 値、プロパティ、式の Employee."dave" がすべて新しい名前になる
-m.remove_member("Month", "Feb")               # Mar の前月は Jan になる
+m.rename_member("Employee", "dave", "David")  # Values, properties, and Employee."dave" in formulas all change to the new name
+m.remove_member("Month", "Feb")               # The previous month of Mar becomes Jan
 ```
 
-軸、メンバー、Metric は、モデルの中で一意の **変わらない ID** を持つ。
-名前を変えても ID は変わらず、消した ID は再利用しない。
-エンジンの中ではメンバーを番号で扱い、この番号はメンバーを消すと詰まるので、変更の記録や外部とのやり取りには ID を使う。
+Dimensions, members, and Metrics each have a **permanent ID** that is unique in the model.
+A rename does not change the ID, and the model does not use the ID of a removed item again.
+In the engine, members have numbers, and the numbers become compact when you remove a member. Thus, use IDs for the change journal and for data exchange with external systems.
 
 ```python
-pid = m.dimensions["Product"].id_of("p9")      # メンバーの ID
-m.dimensions["Product"].member_of(pid)         # ID から今の名前
-m.metrics["Revenue"].id, m.metric_name(mid)    # Metric の ID と、ID から今の名前
+pid = m.dimensions["Product"].id_of("p9")      # The ID of a member
+m.dimensions["Product"].member_of(pid)         # The current name from the ID
+m.metrics["Revenue"].id, m.metric_name(mid)    # The ID of a Metric, and the current name from the ID
 ```
 
-複製（`fork`）は同じ番号から ID を振り続けるので、複製と元で別々に足したものが同じ ID になりうる。
+A copy (`fork`) continues to give IDs from the same counter. Thus, an item that you add in the copy and an item that you add in the original can get the same ID.
 
-エンジンの中ではメンバーを番号で持つので、名前を変えても値は変わらず、何も計算し直さない。
+In the engine, members have numbers. Thus, a rename does not change values and does not cause a recalculation.
 
-メンバーを消すと、そのメンバーのセルはすべての Metric から消える。
-プロパティの対応表からも外れ、そのメンバーを参照先にしていたメンバーは参照先なしになる。
-メンバー型の Metric でそのメンバーを指していた値（締め月が Feb など）は空になる。
-式が `Month."Feb"` のようにそのメンバーを書いている場合は、先に式を直さないと消せない。
+When you remove a member, the engine removes the cells of that member from all Metrics.
+The engine also removes the member from the property mapping tables. Members that referred to the removed member then have no reference.
+In a Metric of a member value kind, values that point to the removed member become blank (for example, a close month of Feb).
+If a formula contains the member, for example `Month."Feb"`, you must first correct the formula. Then you can remove the member.
 
-削除は 2 段階で計算し直す。
-まず、入力のうちそのメンバーのセルと、そのメンバーを指す値を空にし、普通の入力の変更として計算し直す。
-こうすると、差分集計と値の変化による絞り込みがそのまま効く。
-次にメンバーそのものを消す。
-空になったメンバーを消してもなお変わるのは、次の 2 つだけである。
+The engine does the recalculation for a removal in two steps.
+First, the engine makes blank the input cells of the member and the values that point to the member. It then does a recalculation as for a usual input change.
+Thus, the incremental aggregation and the filter by changed values apply without changes.
+Then the engine removes the member.
+After the member is blank, only these two items still change when the engine removes it:
 
-- 全メンバーへ値を広げる演算（`X + 1` など）がそのメンバーに作っていたセルと、それを集計した値
-- そのメンバーをまたぐ前月参照
+- The cells that an operation which expands values to all members (for example, `X + 1`) made for the member, and the aggregated values of these cells
+- References to the previous month across the member
 
-この 2 つが届く範囲だけを計算し直す。
+The engine calculates again only the range that these two items affect.
 
-## 計画の入力
+## Plan inputs
 
-計算 Metric を `add_formula(..., overridable=True)` で登録すると、`set_cell` で式の結果を手入力で上書きできる。
-上書きした値は式より優先され、下流の集計にもそのまま伝わる。
-`set_cell` で `None` を入れたセルは、式の結果に戻る。
+If you register a formula Metric with `add_formula(..., overridable=True)`, you can override the formula result manually with `set_cell`.
+An override has priority over the formula. The downstream aggregations also use the override value.
+If you set a cell to `None` with `set_cell`, the cell returns to the formula result.
 
 ```python
 m.add_formula("Bonus", ["Employee"], "Salary * 0.1", overridable=True)
-m.set_cell("Bonus", 8, Employee="alice")   # alice だけ手入力
+m.set_cell("Bonus", 8, Employee="alice")   # Manual input for alice only
 ```
 
-`spread` は、上位の合計値を入力 Metric の範囲へ配る。
-範囲は軸のメンバーと、「軸.プロパティ」の絞り込みで指定する。
-既定では今の値の比率で配り、値がなければ均等に配る（`how="even"` で常に均等）。
-配ったセルは 1 セルずつではなくまとめて書き込むので、22.5 万セルの按分でも数十 ms で終わる。
+`spread` sends a total value to a range of an input Metric.
+You specify the range with members of dimensions and with filters of the form "dimension.property".
+By default, `spread` uses the ratios of the current values. If there are no values, it spreads evenly. With `how="even"`, it always spreads evenly.
+The engine writes the spread cells together, not one cell at a time. Thus, a spread to 225,000 cells takes some tens of ms.
 
 ```python
 m.spread("Budget", 12_000, Version="予算", Month="m01", where={"Product.Category": "ハード"})
 ```
 
-## ホワットイフ分析
+## What-if analysis
 
-`fork` はモデルを複製する。
-複製での入力、上書き、メンバーの追加は元のモデルに影響せず、元の変更も複製に影響しない。
-元の計画を壊さずに「値上げしたら利益はどうなるか」を試し、比べてから捨てられる。
+`fork` makes a copy of the model.
+Inputs, overrides, and member additions in the copy do not change the original model. Changes to the original do not change the copy.
+Thus, you can try a question, for example "what is the profit if we increase the prices?", and keep the original plan. You can compare the results and then discard the copy.
 
 ```python
 what_if = m.fork()
@@ -111,5 +111,5 @@ what_if.set_cell("Salary", 70, Employee="alice")
 print(what_if.value("Cash").cells, m.value("Cash").cells)
 ```
 
-Rust のエンジンでは、格納データの本体（キー順の配列）を複製どうしで共有し、書き換えは古い版を壊さない永続的な木（差分）に入れる。
-複製は Metric の数に比例する時間で済み（490 万セルのモデルで 1 ms 未満）、複製した側で書き換えても本体は写さない。
+In the Rust engine, the copies share the base of the stored data (the array in key order). Changes go into a persistent tree (the delta), which does not break old versions.
+The time for a copy is proportional to the number of Metrics (less than 1 ms for a model with 4.9 million cells). A change in the copy does not copy the base.

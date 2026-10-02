@@ -1,79 +1,79 @@
-# 設計メモ：格納データを NVMe（SSD）に置く
+# Design note: store data on NVMe (SSD)
 
-この文書は設計の検討である。実装したのは、本体を隙間のない不変の列にしたこと（進め方 2 の最初の段）までで、ほかは測定用の example（`native/engine/examples/out_of_core.rs`）だけがある。
+This document is a design study. We implemented only the first step of item 2 of the plan: the base is now an immutable column with no unused capacity. For all other parts, there is only an example for measurement (`native/engine/examples/out_of_core.rs`).
 
-## 結論
+## Conclusion
 
-- メモリの山は格納データではなく、再計算の途中結果である（[性能](performance.md)のメモリの内訳。小売モデルでは格納データの 6 倍を超える）。だから最初に手を付けるのは、ディスクではなく途中結果を減らすこと（要素ごとの演算の融合）である。
-- 格納データの本体は NVMe に置ける。連続して読む処理は pread で 1 セル 4〜7 ns で読め、全体の再計算の 1 セル 15〜100 ns に隠れうる。
-- 置くなら mmap ではなく pread で、決まった量ずつ自前の置き場所へ読む。
-  - mmap は、macOS の冷では pread の 5 分の 1 の速さしか出ない。
-  - mmap のページは RSS に数えられ、メモリの予算（`max_bytes`）から見えない。
-  - 読み出しの失敗は SIGBUS になり、エラーとして返せない。
-- 1 件ずつ引く処理は、ディスクからだと 1 件 20〜120 µs かかり、メモリの 80〜270 倍遅い。索引、フェンス、差分の木はメモリに置き、結合は 1 件ずつ引かずにキー順の突き合わせ（merge）で行う。
-- 軸の順番を変える並べ直し（rekey）は、外部ソートにするとメモリ内の 2〜6 倍かかる。メモリに収まる間はメモリで行い、予算を超えたときだけディスクへ書き出す。
-- 途中結果のファイルには fsync を付けない。落ちたら計算し直せばよく、付けるとマージが 3 倍遅くなった（macOS）。
+- The memory peak is not the stored data. It is the intermediate results of recalculation (see the memory breakdown in [Performance](performance.md)). In the retail model, the intermediate results are more than 6 times the stored data. Thus, the first task is to decrease the intermediate results (fusion of element-wise operations), not to use the disk.
+- You can put the base of the stored data on NVMe. A sequential read with pread takes 4–7 ns for each cell. The full recalculation takes 15–100 ns for each cell, so the read time can be hidden by the calculation.
+- If you put the base on NVMe, use pread, not mmap. Read a fixed quantity at a time into a buffer that the engine owns.
+  - On macOS, mmap in the cold state is only 1/5 of the speed of pread.
+  - The RSS includes the mmap pages, but the memory budget (`max_bytes`) does not see them.
+  - A read failure causes SIGBUS, and the engine cannot return it as an error.
+- A lookup of one key at a time from the disk takes 20–120 µs for each key. This is 80–270 times slower than from memory. Keep the indexes, the fences and the delta tree in memory. Do a join as a match in key order (merge), not as a lookup of one key at a time.
+- A sort that changes the order of the dimensions (rekey) takes 2–6 times longer as an external sort than in memory. Do the sort in memory while the data fits in memory. Write to the disk only when the data is more than the budget.
+- Do not use fsync on the files for intermediate results. If the process stops, the engine can calculate the results again. With fsync, the merge was 3 times slower (macOS).
 
-## 進め方
+## Plan
 
-1. 途中結果を減らす。要素ごとの演算をつないで 1 回で読み、途中の Metric を実体化しない。ディスクは使わない。
-   全体の評価について実装した（[エンジン](engine.md)）。小売モデルの再計算中のヒープの増え幅は 4,275 MB から 1,194 MB（新しい値の約 1.4 倍）になった（[性能](performance.md)の「演算の融合の前後」）。
-2. 入力の Metric の本体を、不変のセグメントファイルに置く。
-   - 公開済みの版は変えないので、セグメントファイルも書いたあとは変えず、版どうしで共有できる。
-   - 差分の木（imbl）、分割軸以外の索引、セグメントごとのフェンスはメモリに置く。
-   - 読むときは pread で、決まった量ずつ読む。
-   - 最初の段として、本体のキーと値を `Vec` ではなく、余分な容量のない不変の列（`Box<[u64]>`、`Box<[f64]>`）にした。u64 と f64 を詰めて並べた形は Arrow の配列の本体と同じで、中にポインタを持たないので、ファイルや共有メモリにも同じ並びで置ける。
-   - 置き場所（ヒープ、ファイルの写像、共有メモリ）を持ち主に任せる型（`Column`。生ポインタと `unsafe` の `Deref` で、どの持ち主でも `&[T]` として読む）も実装して測ったが、採らなかった（[#26](https://github.com/kazu-2020/nanashi/pull/26) のコミット `ecd5ef5` まで）。2 つ目の持ち主を足すまでは約 100 行の `unsafe` を抱える理由がなく、`unsafe` を使わない方針にしたためである。持ち主の抽象は、実際に 2 つ目の置き場所を足すときに、`unsafe` なしでできる形（写像を持つ型が `&[T]` を貸す形など）を考える。
-   - メモリの数え方は、本体の大きさ（`Model.memory()` の `base`）は置き場所によらず数えることにする。`max_bytes` は途中結果だけの予算で、本体の置き場所によらない。ファイルの写像や共有メモリを置き場所に足すときは、Rust のヒープにある分を別の欄で数える。
-   - 速さは、本体を列にした前後で変わらなかった（下の「本体を不変の列にした前後」）。
-   - 次の段として、記録先のスナップショットを本体と同じ平らな形式で置き、計算 Metric の値も入れて開くときの再計算を差分だけにする変更を試し、測ったうえで採らなかった（下の「スナップショットに計算 Metric の値を入れる案」）。
-3. 途中結果が `max_bytes` を超えるときだけ、NVMe へ書き出す。並べ直しは外部ソートにして、併合はキーの範囲ごとに並列に行う（example の `rekey_external`）。
+1. Decrease the intermediate results. Connect the element-wise operations, read the input one time, and do not materialize the intermediate Metrics. Do not use the disk.
+   We implemented this for the full evaluation ([Engine](engine.md)). In the retail model, the heap increase during recalculation changed from 4,275 MB to 1,194 MB (about 1.4 times the new values). See the section "Before and after operation fusion" in [Performance](performance.md).
+2. Put the base of each input Metric in immutable segment files.
+   - A published version does not change. Thus, a segment file also does not change after the engine writes it, and versions can share it.
+   - Keep the delta tree (imbl), the indexes for dimensions other than the partition dimension, and the fences for each segment in memory.
+   - To read, use pread and read a fixed quantity at a time.
+   - As the first step, we changed the keys and values of the base from `Vec` to immutable columns with no unused capacity (`Box<[u64]>`, `Box<[f64]>`). The packed layout of u64 and f64 is the same as the data buffer of an Arrow array. It contains no pointers, so a file or shared memory can hold the same layout.
+   - We also implemented and measured a type that lets an owner decide the location of the data (heap, file mapping, shared memory). This type is `Column`: it uses a raw pointer and an `unsafe` `Deref`, and reads the data as `&[T]` for all owners. We did not keep it (it is in [#26](https://github.com/kazu-2020/nanashi/pull/26) up to commit `ecd5ef5`). Until we add a second owner, there is no reason to keep about 100 lines of `unsafe` code, and our policy is to not use `unsafe`. When we really add a second location, we will design the owner abstraction in a form with no `unsafe` (for example, a type that holds the mapping and lends `&[T]`).
+   - For memory accounting, the engine counts the size of the base (`base` in `Model.memory()`) for all locations. `max_bytes` is a budget for intermediate results only, and it does not change with the location of the base. If we add a file mapping or shared memory as a location, the engine will count the part on the Rust heap in a different field.
+   - The speed did not change after the change to columns (see "Before and after the change to immutable columns for the base" below).
+   - As the next step, we tried a change that puts the journal snapshot in the same flat format as the base. The snapshot also holds the values of the formula Metrics, so the recalculation at open is only incremental. We measured this change and did not keep it (see "Proposal: put formula Metric values in the snapshot" below).
+3. Write to NVMe only when the intermediate results are more than `max_bytes`. Use an external sort for the rekey, and do the merge in parallel for each key range (`rekey_external` in the example).
 
-2 と 3 は、1 のあとに、メモリの山がどこに残るかを測り直してから決める。
+We will decide on items 2 and 3 after item 1. Before the decision, we will measure again where the memory peak stays.
 
-## 測定の方法
+## Measurement method
 
 ```bash
 cargo run --release -p nanashi-engine --example out_of_core --manifest-path native/Cargo.toml -- [セル数] [置き場所] [pread|mmap|heap ...]
 ```
 
-エンジンの本体は使わず、Store の本体と同じ形（昇順の u64 のキーと f64 の値の 2 列）のファイルを作って測る。
+The measurement does not use the engine itself. It makes files in the same layout as the base of the Store (two columns: u64 keys in ascending order and f64 values) and measures them.
 
-- A が 6,711 万セル、B が 8,045 万セル（同じ 4 軸。B は A の 8 割のキーに、隣のキーを足したもの）。ファイルは合わせて 2,252 MB。
-- 持ち方:
-  - heap は今のエンジンと同じで、2 列をヒープに読み込んで持つ。
-  - mmap は、ファイルを読み出し専用で写像する。暖はページキャッシュに載った状態、冷は処理の前にキャッシュから追い出した状態である。
-  - pread は、キャッシュに残さずに 100 万セル（16 MB）ずつ読む。メモリには 16 KB ごとの先頭のキー（フェンス）だけを持つ。
-- 処理:
-  - scan は全セルを読む。
-  - agg は 2 つの軸（12 万グループ）へ足し込む。
-  - merge は A + B をキー順に突き合わせる。heap は結果を Vec に、ほかはファイルに書く。
-  - lookup はキーを 1 つずつ引く。冷は 2 万件、暖と heap は 100 万件引く。
-  - rekey は軸の順番を変えて並べ直す。heap はメモリ内で並べ替え、ほかは外部ソートする。
-- 持ち方ごとに別のプロセスで 3 回ずつ回し、中央値を取った（括弧内は最小〜最大）。検算（合計、セル数、見つかった件数）は、どの環境でも 4 つの持ち方すべてで一致した。
-- 冷の測定がディスクを読んだことは、ディスクから読んだ量（macOS は `ri_diskio_bytesread`、Linux は `/proc/self/io` の `read_bytes`）で確かめた。
+- A has 67.11 million cells, and B has 80.45 million cells. They have the same 4 dimensions. B has 80% of the keys of A, plus the adjacent keys. Together, the files are 2,252 MB.
+- Storage modes:
+  - heap is the same as the current engine. It reads the two columns into the heap and holds them there.
+  - mmap maps the files read-only. "Warm" means that the pages are in the page cache. "Cold" means that we removed the pages from the cache before the operation.
+  - pread reads 1 million cells (16 MB) at a time and does not keep them in the cache. In memory, it holds only the first key of each 16 KB (the fences).
+- Operations:
+  - scan reads all the cells.
+  - agg adds the values into two dimensions (120,000 groups).
+  - merge matches A + B in key order. heap writes the result to a Vec. The other modes write the result to a file.
+  - lookup finds one key at a time. Cold finds 20,000 keys. Warm and heap find 1 million keys.
+  - rekey changes the order of the dimensions and sorts again. heap sorts in memory. The other modes use an external sort.
+- We ran each storage mode 3 times in a different process and used the median (the values in parentheses are the minimum to the maximum). The checks (sum, number of cells, number of keys found) agreed in all 4 storage modes in both environments.
+- We used the quantity read from the disk to make sure that the cold measurements read the disk (`ri_diskio_bytesread` on macOS, `read_bytes` in `/proc/self/io` on Linux).
 
-キャッシュに残さない方法は OS で違う。
+The method to keep data out of the cache is different for each OS.
 
 | | macOS | Linux |
 |---|---|---|
-| pread | ファイルに `F_NOCACHE` を付ける | 読んだ範囲を `posix_fadvise(POSIX_FADV_DONTNEED)` で追い出す |
-| 書き込み | `F_NOCACHE` | `sync_file_range` でデバイスへ送ってから、同じく追い出す |
-| mmap の冷 | `msync(MS_INVALIDATE)` | `madvise(MADV_DONTNEED)` で写像から外し、`posix_fadvise` で追い出す |
-| 使ったメモリ | `proc_pid_rusage` | `/proc/self/status`（`RssAnon`、`VmRSS`） |
+| pread | Set `F_NOCACHE` on the file | Remove the read range with `posix_fadvise(POSIX_FADV_DONTNEED)` |
+| Write | `F_NOCACHE` | Send to the device with `sync_file_range`, then remove the range in the same way |
+| mmap cold | `msync(MS_INVALIDATE)` | Unmap the pages with `madvise(MADV_DONTNEED)`, then remove them with `posix_fadvise` |
+| Memory used | `proc_pid_rusage` | `/proc/self/status` (`RssAnon`, `VmRSS`) |
 
-Linux で `O_DIRECT` を使わないのは、バッファと位置を 4 KB にそろえる必要があるためである。
+We do not use `O_DIRECT` on Linux because it requires 4 KB alignment of the buffer and the offset.
 
-2 つの環境の数字は混ぜずに、別の表にする。
+We do not mix the numbers from the two environments. Each environment has a separate table.
 
-## 結果：手元（Apple M4）
+## Results: local machine (Apple M4)
 
-- Apple M4（10 コア、メモリ 16 GB）、内蔵 SSD。
-- ディスクの空きは 18 GB（使用率 92%）しかなく、何 GB も書き続けると書き込みが遅くなる。
-- 書き込みは単体で毎秒約 2 GB だった（dd と Python で確認）。
-- rekey の外部ソートは、この測定の時点では併合が 1 スレッドで、CPU が律速だった。キーの範囲ごとの並列の併合は、クラウドでだけ測った。
+- Apple M4 (10 cores, 16 GB memory), internal SSD.
+- The disk had only 18 GB of free space (92% used). If the process writes many GB continuously, the writes become slow.
+- A single write stream was about 2 GB per second (we checked this with dd and Python).
+- At the time of this measurement, the merge of the rekey external sort used 1 thread, and the CPU was the limit. We measured the parallel merge for each key range only in the cloud.
 
-| 処理 | 持ち方 | スレッド | ms | ns/単位 | GB/s | 読んだ MB | 書いた MB | ヒープの最大 MB |
+| Operation | Storage mode | Threads | ms | ns/unit | GB/s | MB read | MB written | Max heap MB |
 |---|---|---|---|---|---|---|---|---|
 | scan | pread | 1 | 427 (426–452) | 6.4 | 2.51 | 1024 | 0 | 16 |
 | agg | pread | 1 | 412 (409–422) | 6.1 | 2.61 | 1024 | 0 | 19 |
@@ -84,53 +84,53 @@ Linux で `O_DIRECT` を使わないのは、バッファと位置を 4 KB に�
 | merge | pread | 10 | 1466 (1379–4067) | 9.9 | 1.61 | 1204 | 1433 | 699 |
 | lookup | pread | 10 | 466 (408–513) | 23297 | - | 471 | 0 | 0 |
 | rekey | pread | 10 | 3471 (3118–7621) | 51.7 | 0.31 | 2049 | 2048 | 144 |
-| scan | mmap 冷 | 1 | 1992 (1959–2022) | 29.7 | 0.54 | 1024 | 0 | 0 |
-| agg | mmap 冷 | 1 | 1170 (1167–1195) | 17.4 | 0.92 | 1024 | 0 | 3 |
-| merge | mmap 冷 | 1 | 5745 (5580–8528) | 38.9 | 0.41 | 2253 | 1433 | 40 |
-| lookup | mmap 冷 | 1 | 2243 (2219–2272) | 112138 | - | 493 | 0 | 0 |
-| scan | mmap 冷 | 10 | 546 (532–606) | 8.1 | 1.97 | 1024 | 0 | 0 |
-| agg | mmap 冷 | 10 | 558 (538–619) | 8.3 | 1.92 | 1024 | 0 | 36 |
-| merge | mmap 冷 | 10 | 5751 (3343–6573) | 39.0 | 0.41 | 2252 | 1433 | 328 |
-| lookup | mmap 冷 | 10 | 384 (351–390) | 19213 | - | 492 | 0 | 0 |
-| rekey | mmap 冷 | 10 | 8773 (4374–9692) | 130.7 | 0.12 | 2049 | 2048 | 128 |
-| scan | mmap 冷 SEQUENTIAL | 1 | 2499 (1980–3516) | 37.2 | 0.43 | 1024 | 0 | 0 |
-| scan | mmap 冷 SEQUENTIAL | 10 | 850 (812–2672) | 12.7 | 1.26 | 1024 | 0 | 0 |
-| scan | mmap 暖 | 1 | 41 (41–41) | 0.6 | 26.24 | 0 | 0 | 0 |
-| agg | mmap 暖 | 1 | 36 (35–36) | 0.5 | 29.85 | 0 | 0 | 3 |
-| merge | mmap 暖 | 1 | 1364 (1173–1852) | 9.2 | 1.73 | 0 | 1433 | 40 |
-| merge（Vec へ） | mmap 暖 | 1 | 489 (438–496) | 3.3 | 4.83 | 0 | 0 | 2056 |
-| lookup | mmap 暖 | 1 | 435 (413–449) | 435 | - | 0 | 0 | 0 |
-| scan | mmap 暖 | 10 | 13 (13–14) | 0.2 | 80.92 | 0 | 0 | 0 |
-| agg | mmap 暖 | 10 | 15 (14–15) | 0.2 | 70.99 | 0 | 0 | 41 |
-| merge | mmap 暖 | 10 | 1212 (876–2967) | 8.2 | 1.95 | 0 | 1433 | 328 |
-| merge（Vec へ） | mmap 暖 | 10 | 145 (138–156) | 1.0 | 16.24 | 0 | 0 | 2056 |
-| lookup | mmap 暖 | 10 | 77 (71–79) | 77 | - | 0 | 0 | 0 |
-| rekey | mmap 暖 | 10 | 3702 (2649–8773) | 55.2 | 0.29 | 1024 | 2048 | 128 |
+| scan | mmap cold | 1 | 1992 (1959–2022) | 29.7 | 0.54 | 1024 | 0 | 0 |
+| agg | mmap cold | 1 | 1170 (1167–1195) | 17.4 | 0.92 | 1024 | 0 | 3 |
+| merge | mmap cold | 1 | 5745 (5580–8528) | 38.9 | 0.41 | 2253 | 1433 | 40 |
+| lookup | mmap cold | 1 | 2243 (2219–2272) | 112138 | - | 493 | 0 | 0 |
+| scan | mmap cold | 10 | 546 (532–606) | 8.1 | 1.97 | 1024 | 0 | 0 |
+| agg | mmap cold | 10 | 558 (538–619) | 8.3 | 1.92 | 1024 | 0 | 36 |
+| merge | mmap cold | 10 | 5751 (3343–6573) | 39.0 | 0.41 | 2252 | 1433 | 328 |
+| lookup | mmap cold | 10 | 384 (351–390) | 19213 | - | 492 | 0 | 0 |
+| rekey | mmap cold | 10 | 8773 (4374–9692) | 130.7 | 0.12 | 2049 | 2048 | 128 |
+| scan | mmap cold SEQUENTIAL | 1 | 2499 (1980–3516) | 37.2 | 0.43 | 1024 | 0 | 0 |
+| scan | mmap cold SEQUENTIAL | 10 | 850 (812–2672) | 12.7 | 1.26 | 1024 | 0 | 0 |
+| scan | mmap warm | 1 | 41 (41–41) | 0.6 | 26.24 | 0 | 0 | 0 |
+| agg | mmap warm | 1 | 36 (35–36) | 0.5 | 29.85 | 0 | 0 | 3 |
+| merge | mmap warm | 1 | 1364 (1173–1852) | 9.2 | 1.73 | 0 | 1433 | 40 |
+| merge (to Vec) | mmap warm | 1 | 489 (438–496) | 3.3 | 4.83 | 0 | 0 | 2056 |
+| lookup | mmap warm | 1 | 435 (413–449) | 435 | - | 0 | 0 | 0 |
+| scan | mmap warm | 10 | 13 (13–14) | 0.2 | 80.92 | 0 | 0 | 0 |
+| agg | mmap warm | 10 | 15 (14–15) | 0.2 | 70.99 | 0 | 0 | 41 |
+| merge | mmap warm | 10 | 1212 (876–2967) | 8.2 | 1.95 | 0 | 1433 | 328 |
+| merge (to Vec) | mmap warm | 10 | 145 (138–156) | 1.0 | 16.24 | 0 | 0 | 2056 |
+| lookup | mmap warm | 10 | 77 (71–79) | 77 | - | 0 | 0 | 0 |
+| rekey | mmap warm | 10 | 3702 (2649–8773) | 55.2 | 0.29 | 1024 | 2048 | 128 |
 | load | heap | 1 | 754 (745–789) | 5.1 | 3.13 | 2252 | 0 | 2252 |
 | scan | heap | 1 | 220 (175–277) | 3.3 | 4.89 | 0 | 0 | 0 |
 | agg | heap | 1 | 33 (32–35) | 0.5 | 32.31 | 0 | 0 | 3 |
-| merge（Vec へ） | heap | 1 | 984 (898–1023) | 6.7 | 2.40 | 0 | 0 | 2056 |
+| merge (to Vec) | heap | 1 | 984 (898–1023) | 6.7 | 2.40 | 0 | 0 | 2056 |
 | lookup | heap | 1 | 441 (413–444) | 441 | - | 0 | 0 | 0 |
 | scan | heap | 10 | 14 (12–15) | 0.2 | 76.99 | 0 | 0 | 0 |
 | agg | heap | 10 | 16 (15–18) | 0.2 | 69.04 | 0 | 0 | 37 |
-| merge（Vec へ） | heap | 10 | 251 (190–293) | 1.7 | 9.42 | 0 | 0 | 2056 |
+| merge (to Vec) | heap | 10 | 251 (190–293) | 1.7 | 9.42 | 0 | 0 | 2056 |
 | lookup | heap | 10 | 83 (82–107) | 83 | - | 0 | 0 | 0 |
 | rekey | heap | 10 | 590 (432–801) | 8.8 | 1.82 | 0 | 0 | 1024 |
 
-ns/単位は、lookup では 1 件あたり、ほかは入力のセルあたりである。
-heap の 1 スレッドの scan と merge が mmap 暖より遅く出た原因は確かめていない。
+For lookup, ns/unit is for each key. For the other operations, ns/unit is for each input cell.
+With 1 thread, scan and merge on heap were slower than on mmap warm. We did not find the cause.
 
-## 結果：クラウド（Linux の VM）
+## Results: cloud (Linux VM)
 
-- Claude Code のクラウドの実行環境。Intel Xeon 2.1 GHz の 4 vCPU、メモリ 15 GB、Linux 6.18。
-- ディスクは virtio のブロックデバイス（ext4）で、裏にある装置は分からない。
-  - VM の外（ホスト）のキャッシュに載っていれば、ゲストからは冷でも速く見える。
-  - したがって、冷の数字は NVMe の速さの上限の目安で、NVMe の速さそのものではない。
-- この VM は、新しく確保したメモリに初めて触れるのが遅い。2 GB に初めて触れると 2.1 秒、2 回目は 0.1 秒だった（Python の無名の mmap で 4 KB ごとに 1 バイト書いて測った）。
-  - heap の load と merge（Vec へ）は、ほとんどこの費用である。
-  - このため、heap との比は M4 の表と比べない。
+- The cloud environment of Claude Code. Intel Xeon 2.1 GHz with 4 vCPUs, 15 GB memory, Linux 6.18.
+- The disk is a virtio block device (ext4). We do not know the hardware behind it.
+  - If the data is in the cache outside the VM (on the host), the guest sees fast reads, also in the cold state.
+  - Thus, the cold numbers are an upper limit for the speed of NVMe. They are not the speed of NVMe itself.
+- In this VM, the first access to newly allocated memory is slow. The first access to 2 GB took 2.1 seconds, and the second access took 0.1 seconds. We measured this with an anonymous mmap in Python and wrote 1 byte for each 4 KB.
+  - Almost all of the time for heap load and merge (to Vec) is this cost.
+  - For this reason, do not compare the ratios to heap with the M4 table.
 
-| 処理 | 持ち方 | スレッド | ms | ns/単位 | GB/s | 読んだ MB | 書いた MB | ヒープの最大 MB |
+| Operation | Storage mode | Threads | ms | ns/unit | GB/s | MB read | MB written | Max heap MB |
 |---|---|---|---|---|---|---|---|---|
 | scan | pread | 1 | 300 (288–374) | 4.5 | 3.58 | 1024 | 0 | 16 |
 | agg | pread | 1 | 293 (288–294) | 4.4 | 3.67 | 1024 | 0 | 19 |
@@ -141,115 +141,115 @@ heap の 1 スレッドの scan と merge が mmap 暖より遅く出た原因�
 | merge | pread | 4 | 1387 (1049–2157) | 9.4 | 1.70 | 2048 | 1433 | 315 |
 | lookup | pread | 4 | 464 (446–792) | 23179 | - | 382 | 0 | 0 |
 | rekey | pread | 4 | 4513 (4112–4922) | 67.3 | 0.24 | 2130 | 2048 | 512 |
-| scan | mmap 冷 | 1 | 395 (378–397) | 5.9 | 2.71 | 1024 | 0 | 0 |
-| agg | mmap 冷 | 1 | 352 (307–836) | 5.2 | 3.05 | 1024 | 0 | 3 |
-| merge | mmap 冷 | 1 | 2424 (2164–2430) | 16.4 | 0.97 | 2252 | 1433 | 40 |
-| lookup | mmap 冷 | 1 | 426 (365–438) | 21315 | - | 512 | 0 | 0 |
-| scan | mmap 冷 | 4 | 383 (336–470) | 5.7 | 2.81 | 1024 | 0 | 0 |
-| agg | mmap 冷 | 4 | 368 (351–377) | 5.5 | 2.91 | 1024 | 0 | 17 |
-| merge | mmap 冷 | 4 | 1881 (1846–2147) | 12.7 | 1.25 | 2252 | 1433 | 136 |
-| lookup | mmap 冷 | 4 | 303 (299–393) | 15172 | - | 512 | 0 | 0 |
-| rekey | mmap 冷 | 4 | 4067 (3896–4608) | 60.6 | 0.26 | 2274 | 2048 | 512 |
-| scan | mmap 冷 SEQUENTIAL | 1 | 385 (375–588) | 5.7 | 2.79 | 1024 | 0 | 0 |
-| scan | mmap 冷 SEQUENTIAL | 4 | 435 (353–516) | 6.5 | 2.47 | 1024 | 0 | 0 |
-| scan | mmap 暖 | 1 | 145 (144–151) | 2.2 | 7.38 | 0 | 0 | 0 |
-| agg | mmap 暖 | 1 | 124 (123–128) | 1.9 | 8.63 | 0 | 0 | 3 |
-| merge | mmap 暖 | 1 | 1434 (1282–1555) | 9.7 | 1.65 | 0 | 1433 | 40 |
-| merge（Vec へ） | mmap 暖 | 1 | 6261 (6255–6345) | 42.4 | 0.38 | 0 | 0 | 2056 |
-| lookup | mmap 暖 | 1 | 907 (902–925) | 908 | - | 0 | 0 | 0 |
-| scan | mmap 暖 | 4 | 38 (36–40) | 0.6 | 28.49 | 0 | 0 | 0 |
-| agg | mmap 暖 | 4 | 36 (36–42) | 0.5 | 29.74 | 0 | 0 | 17 |
-| merge | mmap 暖 | 4 | 492 (459–522) | 3.3 | 4.79 | 0 | 1433 | 136 |
-| merge（Vec へ） | mmap 暖 | 4 | 725 (510–793) | 4.9 | 3.26 | 0 | 0 | 2056 |
-| lookup | mmap 暖 | 4 | 244 (219–260) | 244 | - | 0 | 0 | 0 |
-| rekey | mmap 暖 | 4 | 3322 (3181–3405) | 49.5 | 0.32 | 1184 | 2048 | 512 |
+| scan | mmap cold | 1 | 395 (378–397) | 5.9 | 2.71 | 1024 | 0 | 0 |
+| agg | mmap cold | 1 | 352 (307–836) | 5.2 | 3.05 | 1024 | 0 | 3 |
+| merge | mmap cold | 1 | 2424 (2164–2430) | 16.4 | 0.97 | 2252 | 1433 | 40 |
+| lookup | mmap cold | 1 | 426 (365–438) | 21315 | - | 512 | 0 | 0 |
+| scan | mmap cold | 4 | 383 (336–470) | 5.7 | 2.81 | 1024 | 0 | 0 |
+| agg | mmap cold | 4 | 368 (351–377) | 5.5 | 2.91 | 1024 | 0 | 17 |
+| merge | mmap cold | 4 | 1881 (1846–2147) | 12.7 | 1.25 | 2252 | 1433 | 136 |
+| lookup | mmap cold | 4 | 303 (299–393) | 15172 | - | 512 | 0 | 0 |
+| rekey | mmap cold | 4 | 4067 (3896–4608) | 60.6 | 0.26 | 2274 | 2048 | 512 |
+| scan | mmap cold SEQUENTIAL | 1 | 385 (375–588) | 5.7 | 2.79 | 1024 | 0 | 0 |
+| scan | mmap cold SEQUENTIAL | 4 | 435 (353–516) | 6.5 | 2.47 | 1024 | 0 | 0 |
+| scan | mmap warm | 1 | 145 (144–151) | 2.2 | 7.38 | 0 | 0 | 0 |
+| agg | mmap warm | 1 | 124 (123–128) | 1.9 | 8.63 | 0 | 0 | 3 |
+| merge | mmap warm | 1 | 1434 (1282–1555) | 9.7 | 1.65 | 0 | 1433 | 40 |
+| merge (to Vec) | mmap warm | 1 | 6261 (6255–6345) | 42.4 | 0.38 | 0 | 0 | 2056 |
+| lookup | mmap warm | 1 | 907 (902–925) | 908 | - | 0 | 0 | 0 |
+| scan | mmap warm | 4 | 38 (36–40) | 0.6 | 28.49 | 0 | 0 | 0 |
+| agg | mmap warm | 4 | 36 (36–42) | 0.5 | 29.74 | 0 | 0 | 17 |
+| merge | mmap warm | 4 | 492 (459–522) | 3.3 | 4.79 | 0 | 1433 | 136 |
+| merge (to Vec) | mmap warm | 4 | 725 (510–793) | 4.9 | 3.26 | 0 | 0 | 2056 |
+| lookup | mmap warm | 4 | 244 (219–260) | 244 | - | 0 | 0 | 0 |
+| rekey | mmap warm | 4 | 3322 (3181–3405) | 49.5 | 0.32 | 1184 | 2048 | 512 |
 | load | heap | 1 | 4609 (3934–6934) | 31.2 | 0.51 | 2252 | 0 | 2252 |
 | scan | heap | 1 | 138 (135–145) | 2.1 | 7.75 | 0 | 0 | 0 |
 | agg | heap | 1 | 142 (139–144) | 2.1 | 7.58 | 0 | 0 | 3 |
-| merge（Vec へ） | heap | 1 | 7112 (6863–7416) | 48.2 | 0.33 | 0 | 0 | 2056 |
+| merge (to Vec) | heap | 1 | 7112 (6863–7416) | 48.2 | 0.33 | 0 | 0 | 2056 |
 | lookup | heap | 1 | 894 (872–948) | 894 | - | 0 | 0 | 0 |
 | scan | heap | 4 | 36 (36–39) | 0.5 | 29.52 | 0 | 0 | 0 |
 | agg | heap | 4 | 85 (76–86) | 1.3 | 12.64 | 0 | 0 | 18 |
-| merge（Vec へ） | heap | 4 | 601 (579–641) | 4.1 | 3.93 | 0 | 0 | 2056 |
+| merge (to Vec) | heap | 4 | 601 (579–641) | 4.1 | 3.93 | 0 | 0 | 2056 |
 | lookup | heap | 4 | 228 (214–229) | 228 | - | 0 | 0 | 0 |
 | rekey | heap | 4 | 2204 (2182–2752) | 32.8 | 0.49 | 0 | 0 | 1024 |
 
-ヒープとは別に、mmap で触れたページは RSS に数えられる。
-mmap 冷の scan の後の RSS は 1,035 MB、merge の後は 2,263 MB で、どちらも読んだファイルの大きさに等しい（pread は 28〜309 MB）。
+In addition to the heap, the RSS includes the pages that mmap touched.
+After scan on mmap cold, the RSS was 1,035 MB. After merge, it was 2,263 MB. Both values are equal to the size of the files that the operation read (for pread, 28–309 MB).
 
-## スナップショットに計算 Metric の値を入れる案
+## Proposal: put formula Metric values in the snapshot
 
-記録先のスナップショットを本体と同じ平らな形式（ヘッダのあとに u64 のキーと f64 の値の 2 列。圧縮なし）で置き、全体を計算し終えたモデルなら計算 Metric の値と差分集計の件数も入れる案を実装して測った（[#25](https://github.com/kazu-2020/nanashi/issues/25) の 2 段目。実装は [#26](https://github.com/kazu-2020/nanashi/pull/26) のコミット `a3e15fb`（実装とテスト）、`9bac262` と `dc1a5b7`（`bench_open.py` の S3 の測り方）、`164d075`（測定の表）にあり、`e99da61` で取り消した）。
-開くときは読んだバイト列（Python の `bytes`）を持ち主にして本体を参照し、スナップショットの後の記録を入力の変更として再生して、最初の再計算を変更範囲だけの差分にする。
-値は同じエンジンで同じ計算の版が計算したものだけを使い、定義を変えた記録があればそこから全体の再計算に戻す。
+We implemented and measured this proposal: put the journal snapshot in the same flat format as the base (a header, then two columns of u64 keys and f64 values, with no compression). If the model has completed a full calculation, the snapshot also holds the values of the formula Metrics and the counts for incremental aggregation. This was step 2 of [#25](https://github.com/kazu-2020/nanashi/issues/25). The implementation is in [#26](https://github.com/kazu-2020/nanashi/pull/26): commit `a3e15fb` (implementation and tests), `9bac262` and `dc1a5b7` (the S3 measurement in `bench_open.py`), and `164d075` (the measurement table). Commit `e99da61` reverted it.
+At open, the bytes read (a Python `bytes` object) are the owner, and the base refers to them. The engine replays the journal after the snapshot as input changes, so the first recalculation is incremental and covers only the changed range.
+The engine uses the values only if the same engine with the same calculation version calculated them. If the journal contains a definition change, the engine goes back to a full recalculation from that point.
 
-開いて最初の再計算を終えるまでの時間（クラウドの Linux の VM、Intel Xeon 2.1 GHz の 4 vCPU。3 回の最小）。
-「入力だけ」は今の形式（Parquet。開くときに全体を計算し直す）、「値も」は試した形式である。
-手元のディレクトリ（`FileJournal`）と、本番の組み合わせ（`PgJournal`。記録は PostgreSQL、ファイルは S3 互換のオブジェクトストレージ。同じ VM の Docker の RustFS にループバックでつなぐ）の両方で測った。
+The table shows the time to open the model and complete the first recalculation (cloud Linux VM, Intel Xeon 2.1 GHz with 4 vCPUs, minimum of 3 runs).
+"Inputs only" is the current format (Parquet, with a full recalculation at open). "With values" is the format that we tried.
+We measured with a local directory (`FileJournal`) and with the production combination (`PgJournal`). In the production combination, PostgreSQL holds the journal, and S3-compatible object storage holds the files. The object storage is RustFS in Docker on the same VM, connected through loopback.
 
-| モデル | 後の記録 | 手元のディスク: 入力だけ | 手元のディスク: 値も | S3: 入力だけ | S3: 値も | スナップショット: 入力だけ | 値も |
+| Model | Journal entries after the snapshot | Local disk: inputs only | Local disk: with values | S3: inputs only | S3: with values | Snapshot: inputs only | With values |
 |---|---|---|---|---|---|---|---|
-| 損益計画（大）491 万セル | 0 件 | 337 ms | 163 ms | 403 ms | 675 ms | 1.4 MB | 79 MB |
-| | 7 件 | 286 ms | 219 ms | 390 ms | 710 ms | | |
-| 損益計画（大）× 4、1,965 万セル | 0 件 | 1,291 ms | 646 ms | 1,322 ms | 1,966 ms | 5.8 MB | 318 MB |
-| | 7 件 | 1,209 ms | 890 ms | 1,390 ms | 2,092 ms | | |
-| 小売モデル（大）1,705 万セル | 0 件 | 909 ms | 528 ms | 924 ms | 1,882 ms | 10.6 MB | 305 MB |
-| | 10 件 | 882 ms | 583 ms | 1,011 ms | 1,860 ms | | |
+| P&L plan (large), 4.91 million cells | 0 | 337 ms | 163 ms | 403 ms | 675 ms | 1.4 MB | 79 MB |
+| | 7 | 286 ms | 219 ms | 390 ms | 710 ms | | |
+| P&L plan (large) × 4, 19.65 million cells | 0 | 1,291 ms | 646 ms | 1,322 ms | 1,966 ms | 5.8 MB | 318 MB |
+| | 7 | 1,209 ms | 890 ms | 1,390 ms | 2,092 ms | | |
+| Retail model (large), 17.05 million cells | 0 | 909 ms | 528 ms | 924 ms | 1,882 ms | 10.6 MB | 305 MB |
+| | 10 | 882 ms | 583 ms | 1,011 ms | 1,860 ms | | |
 
-- 手元のディスクからなら、開く時間は全体の再計算の半分（数件の記録があっても 2/3〜3/4）になる。読み込みの半分近くはハッシュの検査（sha256）で、本体の作成は損益計画（大）で 40 ms である。
-- オブジェクトストレージから直接取ると、1.5〜2 倍遅い。圧縮しない値を取る時間が、省ける再計算を上回る。損益計画（大）の読み込み 671 ms の内訳は、取得 315 ms（ファイルごとに順に GET。8 並列にすると 196 ms）、ハッシュの検査 201 ms、本体の作成と定義の読み込み 40 ms だった。
-- ファイルの写像（mmap）ではなく読み込みにしたのは、ハッシュの検査でどのみち全バイトを読むためで、写像にしても読む量は減らない。
+- From the local disk, the time to open is half of the full recalculation (2/3 to 3/4 with a small number of journal entries). Almost half of the load time is the hash check (sha256). For P&L plan (large), the construction of the base takes 40 ms.
+- A direct fetch from the object storage is 1.5 to 2 times slower. The time to fetch the uncompressed values is more than the recalculation time that the format saves. For P&L plan (large), the load took 671 ms: 315 ms for the fetch (one GET for each file, in sequence; 196 ms with 8 in parallel), 201 ms for the hash check, and 40 ms for the construction of the base and the load of the definitions.
+- We read the files and did not use a file mapping (mmap) because the hash check reads all the bytes. A mapping does not decrease the quantity of data to read.
 
-採らなかった理由。
+We did not keep this proposal for these reasons:
 
-- 本番の記録先は `PgJournal` で、再起動した書き手も、別のノードの待機系も `Replica` も、スナップショットをオブジェクトストレージから取る。そこでは遅くなり、速くなるのは手元のディスクにファイルがあるときだけである。その条件を満たすキャッシュはまだない。
-- `Workspace` は既定で 1000 件の記録ごとにスナップショットを取る。置く量が 1.4〜10 MB から 79〜318 MB になる。
-- 保存した値を使ってよいかを「計算の版」の番号で決めるので、評価や集計の意味を変えたときに番号を上げ忘れると、古い意味で計算した値の上に差分だけを重ねたモデルが静かに開く。全体を計算し直す今の方式には、この事故がない。
-- 得るものは「同じノードで開き直すときに、開く時間が半分（1 秒前後の範囲）」にとどまり、上の 3 つを引き受けるほどではない。
+- The production journal backend is `PgJournal`. A restarted writer, a standby on a different node, and a `Replica` all fetch the snapshot from the object storage. In that case, the proposal is slower. It is faster only when the files are on the local disk, and there is no cache yet that gives this condition.
+- By default, `Workspace` makes a snapshot after each 1000 journal entries. The stored quantity increases from 1.4–10 MB to 79–318 MB.
+- The engine uses the "calculation version" number to decide if it can use the saved values. If a person changes the meaning of evaluation or aggregation and does not increase the number, the model opens silently. It then has the incremental changes on top of values that the old meaning calculated. The current method does a full recalculation, so this accident cannot occur.
+- The only gain is "half the time to open when the same node opens the model again" (a range of about 1 second). This gain is not sufficient to accept the 3 problems above.
 
-同じノードに手元のキャッシュ（manifest の sha256 をキーにしたファイル）を置く運用が要るようになったら、この測定を前提に測り直す。
-そのときは、取得の並列化、取得しながらのハッシュの検査、値の列の圧縮も候補になるが、取る量が再計算の時間を上回る構図は変わらないと見込む。
+If a local cache on the same node becomes necessary (files with the sha256 of the manifest as the key), measure again with this measurement as the starting point.
+At that time, parallel fetch, hash check during the fetch, and compression of the value columns are also candidates. But we expect that the fetch time will still be more than the recalculation time.
 
-## 本体を不変の列にした前後
+## Before and after the change to immutable columns for the base
 
-本体のキーと値を `Vec` から不変の列に変えたときの速さを、クラウドの Linux の VM（Intel Xeon 2.1 GHz の 4 vCPU）で、変える前のエンジンと変えた後のエンジンを別の仮想環境に入れて交互に回して比べた。
-測ったのは生ポインタで持つ `Column` の版だが、`Box<[T]>` も `&[u64]`、`&[f64]` として読む点は同じで、読む側の機械語は `Vec` のときと同じになるはずである。測った差はどれも実行ごとのばらつきの範囲内だった。
+We changed the keys and values of the base from `Vec` to immutable columns and compared the speed. We used the cloud Linux VM (Intel Xeon 2.1 GHz with 4 vCPUs). We installed the engine before the change and the engine after the change in different virtual environments and ran them in turns.
+We measured the version of `Column` with a raw pointer. `Box<[T]>` also reads the data as `&[u64]` and `&[f64]`, so the machine code for the reads must be the same as with `Vec`. All the measured differences were in the range of the variation between runs.
 
-| 計測 | 元（`Vec`） | 不変の列 |
+| Measurement | Before (`Vec`) | Immutable columns |
 |---|---|---|
-| 損益計画（大）の全体の再計算（`examples.fpa`、5 回） | 248 ms (223–283) | 241 ms (218–249) |
-| 小売モデル（大）の全体の再計算（`bench.py --size large`、3 回の中央値を 2 回） | 594、589 ms | 611、604 ms |
-| 人件費（137 万セル）を `rows` で読む（Rust の部分だけ、10 回の中央値を 3 回） | 133、121、127 ms | 126、142、139 ms |
-| 同じ Metric を `value` で Python の dict にする（5 回の中央値を 3 回） | 1348、1497、1433 ms | 1424、1444、1356 ms |
-| 売上の月別合計（`summarize`） | 4.95、4.47 ms | 4.48、4.36 ms |
-| スナップショットの保存 | 84、78 ms | 91、99 ms |
+| Full recalculation of P&L plan (large) (`examples.fpa`, 5 runs) | 248 ms (223–283) | 241 ms (218–249) |
+| Full recalculation of the retail model (large) (`bench.py --size large`, median of 3 runs, 2 times) | 594, 589 ms | 611, 604 ms |
+| Read personnel cost (1.37 million cells) with `rows` (Rust part only, median of 10 runs, 3 times) | 133, 121, 127 ms | 126, 142, 139 ms |
+| Convert the same Metric to a Python dict with `value` (median of 5 runs, 3 times) | 1348, 1497, 1433 ms | 1424, 1444, 1356 ms |
+| Monthly sum of sales (`summarize`) | 4.95, 4.47 ms | 4.48, 4.36 ms |
+| Save the snapshot | 84, 78 ms | 91, 99 ms |
 
-example（`out_of_core.rs` の heap、A が 839 万セル、2 回）。
+Example (heap in `out_of_core.rs`, A has 8.39 million cells, 2 runs).
 
-| 処理 | スレッド | 元（`Vec`）ms | 不変の列 ms |
+| Operation | Threads | Before (`Vec`) ms | Immutable columns ms |
 |---|---|---|---|
-| scan | 1 | 18、21 | 26、18 |
-| agg | 1 | 19、20 | 23、21 |
-| merge（Vec へ） | 1 | 322、296 | 299、292 |
-| lookup | 1 | 775、657 | 629、641 |
-| scan | 4 | 6、6 | 7、5 |
-| agg | 4 | 27、19 | 22、21 |
-| merge（Vec へ） | 4 | 73、83 | 89、85 |
-| lookup | 4 | 144、167 | 167、155 |
-| rekey | 4 | 196、188 | 206、193 |
+| scan | 1 | 18, 21 | 26, 18 |
+| agg | 1 | 19, 20 | 23, 21 |
+| merge (to Vec) | 1 | 322, 296 | 299, 292 |
+| lookup | 1 | 775, 657 | 629, 641 |
+| scan | 4 | 6, 6 | 7, 5 |
+| agg | 4 | 27, 19 | 22, 21 |
+| merge (to Vec) | 4 | 73, 83 | 89, 85 |
+| lookup | 4 | 144, 167 | 167, 155 |
+| rekey | 4 | 196, 188 | 206, 193 |
 
-格納データのメモリ（`m.memory()` の `base`）は、`Vec` のときに確保した容量で数えていた値と同じ（1 セル 16 B）で、余分な容量はもとからなかった（並べたセルを 2 列に分けるときに、件数ちょうどの容量で作っている）。
+The memory of the stored data (`base` in `m.memory()`) is the same as the value that the engine counted from the allocated capacity of `Vec` (16 B for each cell). There was no unused capacity before the change. When the engine splits the sorted cells into two columns, it allocates exactly the capacity for the number of cells.
 
-## 読み取り
+## Findings
 
-- 連続して読む処理（scan、agg）は、pread で毎秒 2.5〜4 GB（1 セル 4〜7 ns）出る。全体の再計算は 1 セル 15〜100 ns なので、入力を 1 回ずつディスクから読む費用は計算に隠れうる。
-- mmap の冷は環境で大きく違う。
-  - macOS では、1 スレッドだとページフォールトが律速で、pread の 5 分の 1（毎秒 0.5 GB）しか出ず、10 スレッドでも毎秒 2 GB だった。`MADV_SEQUENTIAL` はかえって遅くなった。
-  - Linux では、先読みが効いて pread とほぼ同じ速さが出た。
-  - どちらの OS でも動かすなら、pread のほうが速さを読みやすい。
-- mmap の暖は heap と同じ速さで、メモリが足りていれば費用はない。ただし、触れたページはメモリの予算から見えないまま RSS に載る。
-- 1 件ずつ引く処理（lookup）は、pread の冷で 1 件 70〜120 µs（並列で 20〜23 µs）かかり、同じスレッド数のメモリ内（heap）の 80〜270 倍遅い。
-  - pread は 1 件ごとに、フェンスで決めたキーの 16 KB と値の 1 ページだけを読む。
-  - mmap の冷はフェンスを使わず、2 分探索で多くのページに触れる。先読みが働き、2 万件引く間にキーのファイル全体（512 MB）を読んでいた。そのため 1 件あたりの時間は pread と比べられない。
-- merge を pread で読んでファイルに書き出すと 1 セル 9〜15 ns かかる。
-- rekey の外部ソートは、範囲ごとの並列の併合にしても heap の約 2 倍（クラウド）かかった。M4 の 1 スレッドの併合では約 6 倍だった。外部ソートのヒープは、ラン 1 本分（128 MB）と、並列に併合する範囲の分（4 スレッドで 512 MB）である。
+- Sequential operations (scan, agg) with pread read 2.5–4 GB per second (4–7 ns for each cell). The full recalculation takes 15–100 ns for each cell. Thus, the calculation can hide the cost to read the input from the disk one time.
+- The speed of mmap cold is very different between the environments.
+  - On macOS with 1 thread, page faults are the limit. The speed is only 1/5 of pread (0.5 GB per second). With 10 threads, it was 2 GB per second. `MADV_SEQUENTIAL` made it slower.
+  - On Linux, read-ahead works, and the speed is almost the same as pread.
+  - If the engine must run on both OSes, the speed of pread is easier to predict.
+- mmap warm has the same speed as heap and has no cost if there is sufficient memory. But the touched pages go into the RSS, and the memory budget does not see them.
+- A lookup of one key at a time (lookup) with pread cold takes 70–120 µs for each key (20–23 µs in parallel). This is 80–270 times slower than in memory (heap) with the same number of threads.
+  - For each key, pread reads only the 16 KB of keys that the fence selects and one page of values.
+  - mmap cold does not use fences. Its binary search touches many pages. Read-ahead occurs, and during 20,000 lookups it read the full key file (512 MB). Thus, you cannot compare the time for each key with pread.
+- If merge reads with pread and writes to a file, it takes 9–15 ns for each cell.
+- The rekey external sort took about 2 times as long as heap (cloud), also with a parallel merge for each range. With the 1-thread merge on M4, it took about 6 times as long. The heap of the external sort holds one run (128 MB) plus the ranges that the threads merge in parallel (512 MB with 4 threads).

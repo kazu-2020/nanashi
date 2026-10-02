@@ -36,12 +36,12 @@ pub struct Mem {
     pub index: usize,      // 分割軸以外の軸の索引（バイト）
 }
 
-/// Store の本体。作ったら変えない。
+/// The base of a Store. Nothing changes it after it is made.
 ///
-/// キーと値は、隙間のない不変の列（`Box<[T]>`。余分な容量を持たない）で持つ。u64 のキーと f64 の値を
-/// 詰めて並べた形は Arrow の UInt64 / Float64 の配列の本体と同じで、中にポインタを持たないので、
-/// 後でファイルの写像や共有メモリに置くときも同じ並びで置ける（docs/out-of-core.md の進め方 2）。
-/// 索引（postings）はメモリに持つ。
+/// The keys and values are immutable columns with no gaps (`Box<[T]>`, with no extra capacity).
+/// The packed u64 keys and f64 values have the same layout as the data of Arrow UInt64 / Float64 arrays.
+/// They contain no pointers. Thus a memory-mapped file or shared memory can keep the same layout
+/// (step 2 of "Plan" in docs/out-of-core.md). The index (postings) stays in memory.
 #[derive(Debug)]
 pub(crate) struct Base {
     pub(crate) keys: Box<[u64]>, // 昇順・重複なし
