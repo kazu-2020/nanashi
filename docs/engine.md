@@ -1,69 +1,76 @@
-# エンジン
+# Engine
 
-Model は定義と操作、トランザクション、分割軸の選択を受け持ち、それ以外は **エンジン** に任せる。
-エンジンは 2 つの役を持つ。セルの格納と式の評価（`engine.Store`）と、計画と段取り（`engine.planner`、`planner.Planner`）である。
-Planner は、式の型検査（軸と値の種類、密になる演算の警告、エラーの文言、Metric を使った BY の書き換え）、計算計画（依存グラフ、強連結成分、scan の判定、依存の段）、差分集計の判定と差分の式、影響範囲の計算（入力の変更の伝搬、分割軸の選択、メンバーの削除で変わる範囲）、再計算の段取りを受け持つ。
-Rust のエンジンでは Rust（`check.rs`、`graph.rs`、`plan.rs`）が行い（`RustPlanner`）、参照実装では Python（`planner.PyPlanner`、`evaluate.py`、`delta.py`）が行う。
-どの口も必須で、Model は口の有無を調べない（足りないエンジンは、黙って別の経路で動くのでなく、呼んだところで失敗する）。
-全体の再計算も、差分再計算と同じ段取り（すべての計算 Metric を全体について計算し直す指示）で行う。
-両方の型、誤り、計画、差分集計の判定、範囲が一致することをテストで確かめている（`tests/test_expr_coverage.py`）。
+The Model does the definitions, the operations, the transactions, and the selection of the partition dimension. The **engine** does all other work.
+The engine has two roles. The first role is to store cells and evaluate formulas (`engine.Store`). The second role is to make the plan and the schedule (`engine.planner`, `planner.Planner`).
+The Planner does these tasks:
 
-式の誤り（`FormulaError`）と警告は、コード（`e.code`）と値（`e.params`）で表し、文言は `sparse_engine/messages.py` の表（`MESSAGES`）だけに持つ。
-Rust の型検査と循環の検査も文言を作らずにコードと値を返し（`nanashi_core.Diagnostic`）、Python が同じ表から文言にする。
-集計関数（SUM、AVG、MIN、MAX、COUNT と、BY の引き下ろしの内部で使う first）も `expr.AGGREGATIONS` の 1 か所に持ち、構文、型検査、評価、集計の読み出しがそこから引く。
-エンジンは 2 つある。
+- The type check of formulas: dimensions and value kinds, warnings for densifying operations, error messages, and the rewrite of BY with a Metric.
+- The calculation plan: the dependency graph, strongly connected components, the scan decision, and the stages.
+- The incremental aggregation decision and the delta expression.
+- The calculation of the affected range: the propagation of input changes, the selection of the partition dimension, and the range that a member removal changes.
+- The schedule of the recalculation.
 
-- **参照実装**（`ReferenceEngine`）：Python の dict で持つ。正しさの基準で、テストで他のエンジンの結果と突き合わせる。
-- **Rust**（`RustEngine`、`native/`）：本番用。以下の工夫で、小さな変更を固定コストほぼなしで処理し、大きな再計算は並列に処理する。
+In the Rust engine, Rust (`check.rs`, `graph.rs`, `plan.rs`) does these tasks (`RustPlanner`). In the reference implementation, Python (`planner.PyPlanner`, `evaluate.py`, `delta.py`) does them.
+All interfaces are mandatory, and the Model does not check if an interface is available. If an engine does not have an interface, the call fails. The engine does not silently use a different path.
+The full recalculation uses the same schedule as the incremental recalculation. The schedule tells the engine to calculate all formula Metrics again for all cells.
+Tests make sure that the two engines give the same types, errors, plans, incremental aggregation decisions, and ranges (`tests/test_expr_coverage.py`).
 
-Rust のエンジンは、1 セルのキーを各軸のメンバー番号を詰めた 64 ビット整数で持つ。
-格納は、キー順に並んだ配列（本体）に、小さな書き換えを受ける木（差分）を重ねた形である。
-差分が本体の 1/8 を超えたら、本体にまとめ直す。
-一度に本体の 1/8 を超える量を書き換えるときは、差分の木を通さずに新しい本体を直接作る。
-本体は作ったら変えずに版どうしで共有し、差分は書き換えても古い版を壊さない永続的な木（`imbl` の `OrdMap`）で持つ。
-そのため、公開済みの版を読み手が持ったまま書き込んでも、本体や差分を丸ごと写さずに済む。
-本体のキーと値は、余分な容量のない不変の列（`Box<[u64]>`、`Box<[f64]>`）で、Arrow の UInt64 / Float64 の配列の本体と同じ並びである（`Model.memory()` の `base` は、この 2 列の大きさに等しい）。
-キーの上位ビットには **分割軸** を置き、分割軸で絞った範囲は二分探索で読み書きできる。
-分割軸以外の軸で絞るときは、必要になったときに作る転置索引を使う。
+A formula error (`FormulaError`) or a warning has a code (`e.code`) and values (`e.params`). Only the table in `sparse_engine/messages.py` (`MESSAGES`) contains the messages.
+The Rust type check and the Rust cycle check also do not make messages. They return a code and values (`nanashi_core.Diagnostic`), and Python makes the message from the same table.
+The aggregation functions are in one location, `expr.AGGREGATIONS`. These functions are SUM, AVG, MIN, MAX, COUNT, and `first`, which the BY mapping uses internally. The syntax, the type check, the evaluation, and the aggregated reads get the functions from that location.
+There are two engines:
 
-分割軸は Metric ごとに自動で選ぶ。
-各入力の 1 セルを変えたときの影響範囲を伝え、書き換えで触れる割合が最も小さい軸を選ぶ。
-`add_formula(..., partition="Month")` のように明示もできる。
+- **Reference implementation** (`ReferenceEngine`): It keeps the data in Python dicts. It is the standard for correctness. Tests match the results of the other engine against it.
+- **Rust** (`RustEngine`, `native/`): It is for production. Because of the methods below, it does small changes at almost no fixed cost. It does large recalculations in parallel.
 
-結合（`*`、比較、`ON`、`FILTER`、`IF` の分岐）では、先に評価した側が小さければ、もう片側の読み出しをその側に現れるメンバーに絞る（準結合による絞り込み）。
-同じ軸どうしの結合は、キーの順に並んだセル（格納データから読んだものなど）を並べ直さず、複製もせずに突き合わせる。
-差分のない格納データどうし（全体の再計算での `A * B`、`A > B` など）は、どちらも Cube に写さずに本体を直接突き合わせる。
-全体の再計算では、互いに独立な Metric を並列に評価する。
-計算した値はキー順に並べておき、格納データの形（キーと値の 2 列）へは書き戻すときに 1 つずつ移す（移す間だけ値が 2 つ分になるのを、段の中で 1 つに抑える）。
+The Rust engine keeps the key of one cell as a 64-bit integer. The integer contains the member number of each dimension.
+The storage has two layers. The base is an array in key order. The delta is a tree on top of the base, and it receives small changes.
+If the delta becomes larger than 1/8 of the base, the engine merges the delta into a new base.
+If one change writes more than 1/8 of the base, the engine makes a new base directly and does not use the delta tree.
+The engine does not change a base after it makes it, and versions share the base. The delta is a persistent tree (`OrdMap` of `imbl`), so a change does not break old versions.
+Thus, a writer can write while a reader keeps a published version. The engine does not copy all of the base or the delta.
+The keys and the values of the base are immutable arrays with no extra capacity (`Box<[u64]>`, `Box<[f64]>`). Their layout is the same as the buffers of Arrow UInt64 and Float64 arrays. The `base` value of `Model.memory()` is equal to the size of these two arrays.
+The high bits of the key contain the **partition dimension**. Thus, a binary search can read and write a range that a filter on the partition dimension selects.
+For a filter on a different dimension, the engine uses an inverted index. The engine makes the index when it is necessary.
 
-全体の評価では、要素ごとの演算をつないだ式を融合し、演算ごとの途中結果（Cube）を作らずに評価する（`eval/fuse.rs`）。
-対象は、四則、比較、`AND` / `OR` / `NOT`、`IF`、`FILTER`、`ON`、`EXPAND`、`ISBLANK`、`IFBLANK`、軸の値（`Month`）、`SELECT`、時点のずらし（`[SELECT: Month - 1]`）、引き下ろし（`BY`）と、計算 Metric の手入力の上書きである。
-結果がありうるキーを 1 つずつ走査し、各キーで式の木をたどって値を求め、結果の配列へ直接書く。
-読み出し元はキーを写して引き、`SELECT`、時点のずらし、引き下ろしは子を引くキーを変える。
-各キーでの値は、演算ごとに評価したときと同じ意味になる（空の扱い、0 除算、三値論理、全メンバーへの展開）。
+The engine selects the partition dimension for each Metric automatically.
+For each input, the engine propagates the affected range of a change to one cell. Then it selects the dimension that gives the smallest part of the cells that a change writes.
+You can also specify the dimension, for example `add_formula(..., partition="Month")`.
 
-走査するキーは式の木から決める。
+A join (`*`, comparisons, `ON`, `FILTER`, the branches of `IF`) evaluates one side first. If that side is small, the engine reads only the members of that side from the other side (a semi-join filter).
+For a join of two operands with the same dimensions, the engine matches cells in key order without a sort and without a copy. An example of such cells is cells read from stored data.
+For a join of two stored data with no delta (for example, `A * B` or `A > B` in a full recalculation), the engine matches the two bases directly. It does not copy them to a Cube.
+In a full recalculation, the engine evaluates independent Metrics in parallel.
+The engine keeps the calculated values in key order. When it writes them back, it moves the values one at a time into the format of stored data (two arrays: keys and values). Thus, in one stage, only one Metric at a time has two copies of its values during the move.
 
-- 式の軸をすべて持つ読み出し元のキー（`Volume * Price` なら Volume のキー。`A + B` なら A と B のキーの和）: キー順に突き合わせて走査し、同じ詰め方の読み出し元はカーソルで読む
-- 1 つの読み出し元のキー × 足りない軸の全メンバー、または全組み合わせ（`Month >= HireMonth AND ...` など）: 件数を数えてから結果の配列を確保して書く。走査する数が、演算ごとに評価したときに必ず作る途中結果の 4 倍を超えるなら融合しない（疎な結合を全組み合わせで走査しないため）
+In a full evaluation, the engine fuses a formula that is a chain of element-wise operations. It evaluates the fused formula and does not make an intermediate result (Cube) for each operation (`eval/fuse.rs`).
+Fusion applies to these operations: the four arithmetic operations, comparisons, `AND` / `OR` / `NOT`, `IF`, `FILTER`, `ON`, `EXPAND`, `ISBLANK`, `IFBLANK`, dimension values (`Month`), `SELECT`, time shifts (`[SELECT: Month - 1]`), the BY mapping (`BY`), and manual overrides of formula Metrics.
+The engine scans each key that can be in the result. For each key, it goes through the expression tree, calculates the value, and writes it directly to the result array.
+A source converts the key and looks up the value. `SELECT`, time shifts, and the BY mapping change the key that looks up the child.
+The value at each key has the same meaning as in the evaluation of one operation at a time. This includes blank cells, division by zero, three-valued logic, and the expansion to all members.
 
-範囲を絞った差分再計算、集計、差分のある格納データを読む式は、これまでどおり演算ごとに評価する（集計する式の中身は融合して 1 度作る）。
+The expression tree sets the keys that the engine scans:
 
-集計（`REMOVE`、`BY`）は、集計先が少ない（集計元の件数の 1/(16 × スレッド数) 以下の）ときは、集計元を写さずに読みながら、集計先ごとの途中の値へ足し込む。
-集計元が格納データそのものなら、本体を行の番号で直接読む。
-Metric を使った `BY` の集約（型検査が `On` と `AsAxis` の結合と集計に書き換えたもの）は、全体の評価では対応表（例: 社員・月 → 部署）を全組み合わせの配列にして引き、結合の結果を作らない。
-集計先が多くても、集計先の全組み合わせが小さければ（スレッドごとの配列の合計が、(集計先, 値) の組を集める量の半分以下なら）、全組み合わせの配列へ足し込む。
-行をスレッド数に区切って区切りごとに配列を持ち、最後に順に合わせるので、スレッド数が同じなら結果は実行ごとに同じになる。
-それ以外は（集計先, 値）の組に写して並べ替えてから集計する。組は、集計元を Cube に写さずに 1 つの配列へ直接作る。
+- The keys of a source that has all dimensions of the formula. For `Volume * Price`, these are the keys of Volume. For `A + B`, these are the union of the keys of A and B. The engine matches the keys in key order. It reads a source with the same key layout with a cursor.
+- The keys of one source × all members of the missing dimensions, or all combinations (for example, `Month >= HireMonth AND ...`). The engine counts the keys first, then allocates the result array and writes it. The engine does not fuse if the number of scanned keys is more than 4 times the intermediate results that the evaluation of one operation at a time must make. This prevents a scan of all combinations for a sparse join.
 
-差分再計算の段取り（影響範囲の伝搬、範囲の評価と書き戻し、値の変化による絞り込み、差分集計、scan）も Rust で行う。
-Model は入力の変更範囲を渡して 1 回呼ぶだけで、影響範囲はメンバー名ではなく番号の集合のまま伝える。
-1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
+The engine continues to evaluate one operation at a time for these: an incremental recalculation on a limited range, an aggregation, and a formula that reads stored data with a delta. For an aggregation, the engine fuses the expression inside the aggregation and makes it one time.
 
-差分再計算も、依存の段ごとに並列に行う。
-同じ段の Metric は互いを読まないので、影響範囲を決めてから並列に計算し、順に書き戻す。
-範囲が全体なら、新しい格納データと新旧の比較まで並列の段階で済ませ、書き戻しは差し替えるだけにする。
-段の仕事が小さい（計算し直す行数の見積もりが 16,384 行未満）ときは、並列にする受け渡しの費用のほうが大きいので順に計算する。
-scan は時点ごとに自分の格納データへ書き込むので、段の最後に順に計算する。
-参照実装では、同じ段取りを Python（`Model.recalc`）で行う。
-テストでは 2 つの結果を突き合わせるので、Rust の段取りは Python の段取りと同じ結果になることを確かめている。
+For an aggregation (`REMOVE`, `BY`) with few aggregation targets, the engine does not copy the aggregation source. "Few" means 1/(16 × number of threads) of the source rows or less. The engine reads the source and adds each value to the intermediate value of its target.
+If the aggregation source is stored data, the engine reads the base directly by row number.
+The type check rewrites a `BY` aggregation with a Metric into a join with `On` and `AsAxis` and an aggregation. In a full evaluation, the engine puts the mapping table (for example, employee and month → department) into an array of all combinations. It looks up the targets in this array and does not make the join result.
+If there are many aggregation targets but all their combinations are few, the engine adds the values into an array of all combinations. "Few" means that the total of the arrays for all threads is half or less of the size of the (target, value) pairs.
+The engine divides the rows into one part for each thread, and each part has its own array. At the end, the engine adds the arrays in order. Thus, with the same number of threads, each run gives the same result.
+In other cases, the engine converts the rows to (target, value) pairs, sorts them, and then aggregates them. The engine makes the pairs directly in one array and does not copy the aggregation source to a Cube.
+
+Rust also does the schedule of the incremental recalculation. This includes the propagation of the affected range, the evaluation and write-back of a range, the filter by changed values, the incremental aggregation, and scan.
+The Model sends the changed range of the inputs in one call. The engine propagates the affected range as sets of member numbers, not member names.
+Thus, if one change causes the recalculation of hundreds of Metrics, there is only one call between Python and Rust.
+
+The incremental recalculation also runs in parallel for each stage.
+The Metrics in one stage do not read each other. Thus, the engine sets their affected ranges, calculates them in parallel, and writes them back in order.
+If the range is the full Metric, the parallel step also makes the new stored data and compares the old and new values. The write-back then only replaces the data.
+If the work of a stage is small (the estimate of recalculated rows is less than 16,384), the cost of the parallel handoff is larger. Thus, the engine calculates the stage in sequence.
+A scan writes to its own stored data for each time period. Thus, the engine calculates scans in sequence at the end of the stage.
+In the reference implementation, Python (`Model.recalc`) does the same schedule.
+Tests match the two results. This makes sure that the Rust schedule gives the same result as the Python schedule.

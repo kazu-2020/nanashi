@@ -1,44 +1,44 @@
-# 再計算の仕組み
+# Recalculation
 
-式を登録すると、Metric 単位の依存グラフから **計算計画** を作る。
-`PREVIOUS` による自己参照は依存グラフでは循環になるが、循環が必ず前の時点を通るときに限り、時間軸に沿って 1 時点ずつ計算する **scan** として扱う。
-それ以外の循環はエラーにする。
+When you register a formula, the engine makes a **calculation plan** from the dependency graph of the Metrics.
+A self-reference with `PREVIOUS` is a cycle in the dependency graph. If the cycle always goes through the previous time period, the engine uses it as a **scan**. A scan calculates one time period at a time along the time dimension.
+All other cycles cause an error.
 
-入力を変えたときは、次の順で影響範囲だけを計算し直す。
+When you change an input, the engine calculates again only the affected range, in this sequence:
 
-1. 変わったセルを **影響範囲**（軸ごとのメンバーの集合の直積）として記録する。
-2. 計算計画の順に、各 Metric の式から、値が変わりうる範囲を求める（集計なら所属先へ付け替え、前月参照なら 1 か月後ろへずらす）。
-3. その範囲だけを評価し、書き戻すときに新旧の値を比べる。実際に値が変わったセルだけを、下流への影響範囲にする。
-4. 値が変わらなければ、下流は計算し直さない。
+1. The engine records the changed cells as the **affected range**. The affected range is the direct product of the member sets of each dimension.
+2. In the order of the calculation plan, the engine uses the formula of each Metric to find the range where values can change. For an aggregation, it moves the range to the aggregation target. For a reference to the previous month, it moves the range one month later.
+3. The engine evaluates only that range and compares the old and new values at write-back. Only the cells with changed values become the affected range for the downstream Metrics.
+4. If no value changes, the engine does not calculate the downstream Metrics again.
 
-SUM と COUNT の集計は **差分集計** で更新する。
-集計元の変わった行について「変更前の寄与」を引き、「変更後の寄与」を足すので、集計元全体を読み直さずに済む。
-時間で変わる階層の BY でも、所属が変わった社員について古い所属での寄与を引き、新しい所属での寄与を足す。
-SUM が 0 なのか空なのかを区別するため、各グループの件数を裏で持つ。
+The engine updates SUM and COUNT aggregations with **incremental aggregation**.
+For each changed row of the aggregation source, the engine subtracts the old contribution and adds the new contribution. Thus, it does not read the full aggregation source again.
+This also applies to BY with a hierarchy that changes over time. For each employee with a changed department, the engine subtracts the contribution in the old department and adds the contribution in the new department.
+The engine also keeps the count of each group. This tells if a SUM is 0 or blank.
 
-値が変わった範囲がある軸の全メンバーにわたるときは、その軸を「全体」として下流へ伝える。
-全体を書き戻すときは並べ直すだけで済み、差分集計より計算し直しのほうが速いからである。
-Rust のエンジンでは、大きな Metric（4096 行以上）で範囲がセルの半分以上を占めるときも、全体として伝える。
+If the changed range of a dimension includes all members, the engine propagates that dimension as "full" to the downstream Metrics.
+This is because the write-back of the full Metric only needs a sort, and a recalculation is faster than an incremental aggregation.
+In the Rust engine, the engine also propagates the range as full for a large Metric (4096 rows or more) if the range is half of the cells or more.
 
-## 定義の変更
+## Definition changes
 
-式や入力の定義を変えたときも、変えた Metric とその影響だけを計算し直す。
-`add_formula` や `add_input` に既存の名前を渡すと、その Metric を置き換える。
+When you change a formula or an input definition, the engine also calculates again only the changed Metric and its affected range.
+If you give an existing name to `add_formula` or `add_input`, the new Metric replaces the old Metric.
 
-- **式を足す**：その Metric だけを計算する（まだ誰も参照していないので、下流はない）。
-- **式を置き換える**：その Metric を全体について計算し直し、値が変わったセルだけを下流へ伝える。
-  入力の変更と同じ仕組みなので、`IF` で 1 商品だけ式を変えれば、下流もその商品の分だけ計算し直す。
-- **入力を置き換える**：置き換え前後で値が違うセルだけを、入力の変更として伝える（差分集計も使う）。
-- **プロパティを置き換える**：そのプロパティを使う式（`[BY: 軸.プロパティ]`）を置き換えたものとして扱う。
-- **Metric の名前を変える**（`rename_metric`）：式の中の参照もすべて新しい名前になる。値は変わらないので計算し直さない。
-- **Metric を消す**（`remove_metric`）：どの式からも参照されていない Metric だけを消せる。ほかの値は変わらないので計算し直さない。
+- **Add a formula**: The engine calculates only that Metric. There are no downstream Metrics, because no formula refers to it yet.
+- **Replace a formula**: The engine calculates the full Metric again. It propagates only the cells with changed values to the downstream Metrics.
+  This is the same method as for an input change. Thus, if you use `IF` to change the formula for one product only, the downstream Metrics also calculate again only for that product.
+- **Replace an input**: The engine propagates only the cells with different values before and after the replacement, as an input change. It also uses incremental aggregation.
+- **Replace a property**: The engine handles each formula that uses the property (`[BY: dimension.property]`) as a replaced formula.
+- **Rename a Metric** (`rename_metric`): All references in formulas change to the new name. The values do not change, so the engine does not calculate again.
+- **Remove a Metric** (`remove_metric`): You can remove only a Metric that no formula refers to. No other values change, so the engine does not calculate again.
 
 ```python
-m.rename_metric("Margin", "Profit")  # Margin を参照する式は Profit を参照するようになる
-m.remove_metric("Profit")            # 参照している式があれば ValueError
+m.rename_metric("Margin", "Profit")  # Formulas that refer to Margin now refer to Profit
+m.remove_metric("Profit")            # ValueError if a formula refers to it
 ```
 
-計算計画は、変えた Metric だけ式を検査し直し、依存関係の順序を作り直す。
-分割軸は新しい Metric だけ選び、既存の Metric は今の格納データのまま使う。
+For the calculation plan, the engine checks the formulas of the changed Metrics again and makes the dependency order again.
+The engine selects the partition dimension only for new Metrics. Existing Metrics continue to use their current stored data.
 
-Metric の軸か値の種類を変えたときは、それを参照する式の型検査からやり直すので、全体を計算し直す。
+If you change the dimensions or the value kind of a Metric, the engine starts again from the type check of the formulas that refer to it. Thus, it does a full recalculation.

@@ -1,15 +1,15 @@
-# 制約と今後
+# Limitations and future work
 
-- 順序付きの軸（時系列）は、途中へのメンバーの挿入と並び替えができない（追加は最後の時点の次だけ）。順序のない軸はどちらもできる。
-- 並び順を番号の順から変えた軸を持つ Metric の `rows()` は、範囲を読み出してから並び順で並べ直す（範囲の行数 n に対して O(n log n)）。分割軸が宣言の先頭でない Metric の `rows()` と同じ費用である。
-- 同時に読み書きするときは `Workspace` を通す。`Model` を直接複数のスレッドから使うことはできない（Rust の再計算中に別のスレッドから同じ格納データを使うと、RuntimeError になる）。
-- 古いスナップショットと大量の変更のファイルは `prune` で消せるが、どこからも参照されないファイル（確定に失敗したときに残るもの）の片付けはまだない。オブジェクトストレージへはファイルを 1 つずつ置くので、Metric の多いモデルではスナップショットの保存が往復の回数ぶん遅くなる。
-- ライターは 1 つのまとまりを確定し終えてから次のまとまりを計算する（確定を待つ間に次を計算するパイプライン化はしていない）。重い書き込み（全体の再計算に近いもの）が列にあると、その間ほかの書き込みは待たされる。列の長さ（`max_queue`）と待ち時間で過負荷を上流に伝えることはできる。
-- Rust のエンジンは 1 セルのキーを 64 ビットの整数で持つので、軸のビット幅（メンバー数の対数）の合計が 64 を超える Metric は作れない（登録時に、軸ごとのビット幅と直し方を示して拒否する）。式の途中の結果（`EXPAND` や結合で軸が増えたもの）も、評価の途中でなく型検査で同じように確かめる。メンバーを足して軸のビット幅が増えるときも確かめ直し、収まらなくなるならメンバーを足さずにエラーにする。メンバー数が 2 の 22 乗を超える軸には、分割軸以外の索引を作らない。上限を広げる設計は[設計メモ](member-numbering.md)にある。
-- 要素ごとの演算をつないだ式を融合して途中結果を作らないのは、範囲を絞らない全体の評価だけである（[エンジン](engine.md)）。差分再計算は、範囲を絞った演算ごとに途中結果を作る。集計（`REMOVE`、`BY` の集約）と疎な結合（軸の違う Metric どうしの `*` で、全組み合わせを走査すると大きすぎるもの）は融合せず、集計する式の結果は 1 度作る。全体の再計算の間は、計算し直した Metric の古い値と新しい値を同時に持つ（小売モデルでは、再計算中のヒープの増え幅が新しい値の約 1.4 倍。[性能](performance.md)の「演算の融合の前後」）。
-- セル数の見積もりは定義を変えたときだけ行うので、あとから入力やメンバーが増えて上限を超えても、次に定義を変えるまでは拒否しない。
-- rayon のスレッドプールはプロセス全体で 1 つで、モデルごとには分けられない（並列化の閾値などの調整値はエンジンごとに変えられる）。
-- 楽観的な排他で比べるのは入力セルだけで、定義やメンバーの変更どうしの食い違いは確かめない。
-- 影響範囲は軸ごとの集合の直積で持つので、離れた 2 セルの変更はそれらを囲む範囲に広がる。
-- 差分集計を続けると浮動小数点の誤差が積み上がる。`refresh()` で全体を計算し直すと誤差はなくなる。
-- 1000 Metric 規模の 1 セルの変更にかかる時間は、大半が scan を 1 時点ずつ評価して書き戻す処理である（1 回あたり数マイクロ秒だが、1 回の変更で千回を超える）。
+- You cannot insert a member in the middle of an ordered dimension (a time series), and you cannot change the order of its members. You can add a member only after the last period. An unordered dimension permits both operations.
+- If a Metric has a dimension with a sort order different from the member number order, `rows()` reads the range and then sorts it again in that sort order. This costs O(n log n) for n rows in the range. The cost is the same as `rows()` for a Metric whose partition dimension is not the first dimension in the declaration.
+- To read and write at the same time, use `Workspace`. You cannot use `Model` directly from more than one thread. If a different thread uses the same stored data during a Rust recalculation, a RuntimeError occurs.
+- `prune` can delete old snapshots and files of large changes. But there is no cleanup yet for files that nothing refers to (files that stay after a commit failure). The engine puts files in the object storage one at a time. Thus, for a model with many Metrics, the snapshot save is slower by the number of round trips.
+- The writer completes the commit of one batch before it calculates the next batch. It does not calculate the next batch while it waits for the commit (there is no pipelining). If a heavy write (almost a full recalculation) is in the queue, all other writes wait during that write. The queue length (`max_queue`) and the wait time can tell upstream systems about an overload.
+- The Rust engine holds the key of a cell as a 64-bit integer. Thus, you cannot make a Metric whose dimensions have a total bit width (the logarithm of the number of members) of more than 64. At registration, the engine rejects such a Metric and shows the bit width of each dimension and how to correct it. The type check also does the same check on intermediate results of a formula (results with more dimensions from `EXPAND` or a join), not during evaluation. If an added member increases the bit width of a dimension, the engine does the check again. If the Metric does not fit, the engine does not add the member and returns an error. For a dimension with more than 2 to the power of 22 members, the engine does not make indexes other than for the partition dimension. The [design note](member-numbering.md) gives a design that increases the limit.
+- The engine fuses a formula of connected element-wise operations, with no intermediate results, only in a full evaluation that does not limit the range ([Engine](engine.md)). Incremental recalculation makes an intermediate result for each operation with a limited range. The engine does not fuse aggregations (`REMOVE` and the aggregation of `BY`) or sparse joins (`*` between Metrics with different dimensions, where a scan of all the combinations is too large). It makes the result of an aggregation expression one time. During a full recalculation, the engine holds both the old values and the new values of the recalculated Metrics. In the retail model, the heap increase during recalculation is about 1.4 times the new values (see the section "Before and after operation fusion" in [Performance](performance.md)).
+- The engine estimates the number of cells only when a definition changes. If inputs or members increase later and the number of cells becomes more than the limit, the engine does not reject the model until the next definition change.
+- There is one rayon thread pool for the full process. You cannot have a different pool for each model. You can change the tuning values (for example, the threshold for parallel operation) for each engine.
+- Optimistic concurrency control compares only input cells. It does not find conflicts between definition changes or member changes.
+- The engine holds the affected range as the Cartesian product of a set for each dimension. Thus, a change to two cells that are far apart makes a range that contains both cells.
+- If incremental aggregation continues for a long time, floating-point errors accumulate. A full recalculation with `refresh()` removes the errors.
+- For a change to one cell in a model of about 1000 Metrics, most of the time goes to the evaluation of scan for one period at a time and the write-back of the result. Each evaluation takes a few microseconds, but one change causes more than 1000 evaluations.
