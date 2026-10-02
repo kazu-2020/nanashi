@@ -226,7 +226,8 @@ impl Store {
     }
 
     /// 格納データが確保しているメモリ（バイト）。本体はキーと値の列の大きさを置き場所によらず数え（base）、
-    /// そのうち Rust のヒープにある分を別に数える（base_heap。今は置き場所がヒープだけなので base と同じ）。
+    /// そのうち Rust のヒープにある分を別に数える（base_heap。平らな形式のバイト列を持ち主として参照している
+    /// 本体は、その持ち主の分。キーと値が 1 つの持ち主を共有していれば 1 回だけ数える）。
     /// 索引は作ったものだけを数える。差分の木は 1 件の大きさ×件数で、木の節の分を含まない（下限）。
     /// 本体を版どうしで共有していても、この Store の分として数える。
     pub fn memory(&self) -> Mem {
@@ -235,7 +236,7 @@ impl Store {
         Mem {
             rows: b.keys.len(),
             base: b.keys.bytes() + b.vals.bytes(),
-            base_heap: b.keys.heap_bytes() + b.vals.heap_bytes(),
+            base_heap: if b.keys.same_owner(&b.vals) { b.keys.heap_bytes() } else { b.keys.heap_bytes() + b.vals.heap_bytes() },
             delta_rows: self.delta.len(),
             delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
             index,

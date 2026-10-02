@@ -35,6 +35,13 @@ class Store(Protocol):
     def from_parquet(self, data: bytes, dims: tuple[str, ...], kind: Kind, cat: Catalog,
                      partition: str | None = None) -> Any:
         """to_parquet のバイト列から格納データを作る（読み込み）。"""
+    def to_flat(self, storage: Any, dims: tuple[str, ...], kind: Kind, cat: Catalog) -> bytes:
+        """格納データの本体を平らな形式のバイト列にする（スナップショット用。docs/persistence.md）。
+        キーの詰め方はメンバー数で決まるので、同じモデル定義と組で読む。"""
+    def from_flat(self, data: bytes, dims: tuple[str, ...], kind: Kind, cat: Catalog,
+                  partition: str | None = None) -> Any:
+        """to_flat のバイト列から格納データを作る。詰め方が同じなら data を参照して写さない。"""
+
     def partition_of(self, storage: Any) -> str | None:
         """格納データの分割軸。分割しないエンジンは None。"""
     def repartition(self, storage: Any, partition: str | None, cat: Catalog) -> Any:
@@ -247,14 +254,31 @@ class ReferenceEngine:
         return aggregate_cube(_filter(storage, restrict or None), keep, agg)
 
     def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
-        nanashi_core = native()
+        cols, values = self._columns(storage, dims, cat)
+        return native().write_parquet(parquet_columns(dims, cat), cols, values, parquet_value(kind), list(meta.items()))
+
+    @staticmethod
+    def _columns(storage: Cube, dims, cat) -> tuple[list[list[int]], list[float]]:
+        """軸ごとのメンバー番号の列と値の列。"""
         order = [storage.dims.index(d) for d in dims]
         index = [cat.dimension(d)._index for d in dims]
         keys = list(storage.cells)
         cols = [[index[j][k[i]] for k in keys] for j, i in enumerate(order)]
-        values = [float(v) for v in storage.cells.values()]
-        return nanashi_core.write_parquet(parquet_columns(dims, cat), cols, values, parquet_value(kind),
-                                          list(meta.items()))
+        return cols, [float(v) for v in storage.cells.values()]
+
+    def to_flat(self, storage: Cube, dims, kind, cat) -> bytes:
+        cols, values = self._columns(storage, dims, cat)
+        return native().write_flat(flat_labels(dims, cat), [len(cat.dimension(d).members) for d in dims], None,
+                                   kind == "boolean", cols, values)
+
+    def from_flat(self, data: bytes, dims, kind, cat, partition=None) -> Cube:
+        members = [cat.dimension(d).members for d in dims]
+        cols, values = native().read_flat(data, flat_labels(dims, cat), [len(ms) for ms in members], None,
+                                          kind == "boolean")
+        if kind == "boolean":
+            values = [v != 0.0 for v in values]
+        return Cube(tuple(dims), {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]
+                                  for r in range(len(values))})
 
     def from_parquet(self, data: bytes, dims, kind, cat, partition=None) -> Cube:
         nanashi_core = native()
@@ -298,6 +322,11 @@ def parquet_columns(dims, cat) -> list[str]:
     return [f"d{cat.dimension(d).id}" for d in dims]
 
 
+def flat_labels(dims, cat) -> list[int]:
+    """平らな形式の軸の名札。名前を変えても変わらない軸の ID。"""
+    return [cat.dimension(d).id for d in dims]
+
+
 def parquet_value(kind: Kind) -> str:
     """Parquet の値の列の種類（number、boolean、member）。"""
     return "member" if kind.startswith("member:") else kind
@@ -312,6 +341,11 @@ def aggregate_cube(cube: Cube, keep: Iterable[str], agg: str) -> Cube:
         groups[tuple(k[i] for i in idx)].append(v)
     fn = AGGREGATORS[agg]
     return Cube(keep, {k: fn(vs) for k, vs in groups.items()})
+
+
+# 計算の意味（評価、集計、差分再計算）を変える変更をしたら上げる。スナップショットに保存した計算 Metric の値は、
+# 同じエンジンで同じ版のときだけ使い、違えば全体を計算し直す。
+COMPUTE_VERSION = 1
 
 
 def default_engine() -> Store:
