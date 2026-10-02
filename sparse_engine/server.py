@@ -59,6 +59,7 @@ import inspect
 import ipaddress
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -401,7 +402,7 @@ class Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
-        # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（SIGTERM）は
+        # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（Ctrl-C）は
         # スレッドを起こしたあとにも届き、そのスレッドも枠を返す。ここでも返すと 2 度返して ValueError になり、
         # socketserver がそれを握りつぶして止まらなくなる（止まるので、枠が 1 つ減っても困らない）
         try:
@@ -505,16 +506,44 @@ def main(argv=None) -> None:
                             standby=True)
     server.workspace = ws
     log.info("公開中の版 %d、%s で待ち受ける（%s）", ws.seq, server.url, role_of(ws))
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    _stop_on_signal(server)
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
     finally:
         server.server_close()
         ws.close()
         if hasattr(journal, "close"):  # PgJournal: リースの延長を止めて、接続を閉じる
             journal.close()
+
+
+def _stop_on_signal(server: Server) -> None:
+    """SIGTERM と SIGINT で serve_forever を止めるようにする。本線のスレッドで、serve_forever の直前に呼ぶ。
+
+    シグナルを KeyboardInterrupt にして本線のスレッドに投げると、どこで割り込むか選べない。要求のスレッドを
+    起こしている途中（Thread.start の中のロック）に届くと RuntimeError に化け、socketserver がそれを握りつぶして
+    止まらなくなっていた。そこで、受けたシグナルの番号をパイプに書くだけにし（ロックを取らないので、どこに
+    割り込んでもよい）、見張りのスレッドがそれを読んで server.shutdown() を呼ぶ。止まるのは serve_forever の
+    区切りになる。最初のシグナルで KeyboardInterrupt に戻すので、片付けが止まっても 2 度目のシグナルで抜けられる。
+    起動の間（ここより前）は、今までどおり SIGINT は KeyboardInterrupt、SIGTERM は既定の動作で止まる。"""
+    r, w = os.pipe()
+    os.set_blocking(w, False)
+
+    def on_signal(signum, frame) -> None:
+        for s in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(s, signal.default_int_handler)
+        try:
+            os.write(w, bytes([signum]))
+        except OSError:
+            pass
+
+    def watch() -> None:
+        signum = os.read(r, 1)[0]
+        log.info("%s を受けたので止める", signal.Signals(signum).name)
+        server.shutdown()
+
+    threading.Thread(target=watch, name="nanashi-signal", daemon=True).start()
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, on_signal)
 
 
 def _loopback(host: str) -> bool:
