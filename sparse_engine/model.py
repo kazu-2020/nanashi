@@ -1296,17 +1296,23 @@ class Model:
         return None
 
     def _choose_layout(self) -> dict[str, str | None]:
-        self._samples = {}
+        # 標本は手元の dict に集めてから _samples に入れる。_samples（_per_metric のビュー）は
+        # たどるたびに全 Metric の状態を 1 周するので、Metric ごとに読むと Metric 数の 2 乗になる
+        samples: dict[str, dict[str, Restrict]] = {}
         if self.auto_layout and self.engine.partitions > 1:
             # 各入力 Metric の 1 セルを変えたときの影響範囲を集める
+            plan = self.compiled()
             for src in self.metrics:
                 if (point := self._sample_point(src)) is not None:
-                    self._samples[src] = self._propagate({src: point})
-        return {name: self._pick_partition(name) for name in self.metrics}
+                    samples[src] = self.engine.planner.propagate(plan, self, {src: point})
+        self._samples = samples
+        by_metric = _regions_by_metric(samples)
+        return {name: self._pick_partition(name, by_metric) for name in self.metrics}
 
-    def _pick_partition(self, name: str) -> str | None:
+    def _pick_partition(self, name: str, samples: Mapping[str, list[Restrict]]) -> str | None:
         """name の分割軸。入力の 1 セルの変更で書き換えるときに、触れるパーティションの割合が
-        平均で最も小さい軸を選ぶ（明示されていればそれ）。"""
+        平均で最も小さい軸を選ぶ（明示されていればそれ）。samples は Metric -> 標本の影響範囲の
+        一覧（_regions_by_metric）で、呼び出し元が 1 回だけ作って渡す。"""
         m = self.metrics[name]
         if m.partition is not None or not m.dims:
             return m.partition
@@ -1325,27 +1331,29 @@ class Model:
             # 記録したあとで名前を変えたり消したりしたメンバーは読み飛ばす（分割軸の選び方にしか使わない）
             return len({dim._index[x] // width for x in region[d] if x in dim._index}) / total
 
-        samples = [regions[name] for regions in self._samples.values() if name in regions]
-        if not samples:
+        regions = samples.get(name)
+        if not regions:
             return max(m.dims, key=by_members)
-        return min(m.dims, key=lambda d: (mean(touched(d, r) for r in samples), -by_members(d)))
+        return min(m.dims, key=lambda d: (mean(touched(d, r) for r in regions), -by_members(d)))
 
     def _layout_changed(self, dirty: list[str]) -> None:
         """定義を変えた Metric の分割軸。新しい Metric は選び、既存の Metric は明示されたときだけ変える
         （格納データを持ち直さなければ、計算し直したときに値が変わったセルだけを下流へ伝えられる）。"""
-        if self._samples:
+        samples = dict(self._samples)  # 1 回だけ実体化する（影響範囲の dict は _samples と共有）
+        if samples:
             for n in dirty:  # 分割軸の選択用の影響範囲に、変えた Metric の分を足す（計画の順）
                 m = self.metrics[n]
-                for src, regions in self._samples.items():
+                for src, regions in samples.items():
                     regions.pop(n, None)
                     if m.formula is not None and (r := self._affected(m.formula, regions)) is not None:
                         regions[n] = r
                 if (point := self._sample_point(n)) is not None:
-                    self._samples[n] = {n: point}
+                    samples[n] = self._samples[n] = {n: point}
+        by_metric = _regions_by_metric(samples)
         for n in dirty:
             m = self.metrics[n]
             if n not in self.layout or m.partition is not None:
-                self.layout[n] = self._pick_partition(n)
+                self.layout[n] = self._pick_partition(n, by_metric)
             want = self.layout[n]
             if n not in self._values:
                 self._values[n] = self.engine.empty(m.dims, m.kind, want, cat=self)
@@ -1410,6 +1418,17 @@ class Model:
         for key, value in self._pending.old_cells.get(name, {}).items():
             old = self.engine.write(old, key, value, self)
         return old
+
+
+def _regions_by_metric(samples: Mapping[str, dict[str, Restrict]]) -> dict[str, list[Restrict]]:
+    """入力ごとの標本（入力 -> {Metric: 影響範囲}）を、Metric -> 影響範囲の一覧に組み替える。
+    分割軸を Metric ごとに選ぶときに、標本を Metric ごとに 1 周しないため。"""
+    out: dict[str, list[Restrict]] = {}
+    for regions in samples.values():
+        for n, r in regions.items():
+            out.setdefault(n, []).append(r)
+    return out
+
 
 def _bits(size: int) -> int:
     """size 個のメンバーの番号に要るビット数（Rust の key.rs の bits_for と同じ）。"""

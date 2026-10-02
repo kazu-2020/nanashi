@@ -130,7 +130,7 @@ SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限と待機系が権�
 | `native/engine/` | Rust のエンジン（`nanashi-engine`、Python に依存しない）。`key.rs` がキーの詰め方、`store.rs` が格納、`ast.rs` が式の構文木、`eval/` が評価（`join.rs` が突き合わせ、`agg.rs` が集計）、`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き、`config.rs` が速さのための調整値。`tests/` に格納の性質テスト（BTreeMap と突き合わせる） |
 | `native/src/lib.rs` | Python から使う薄い層（`nanashi_core`、PyO3）。受け取った番号と長さはここで検査する |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
-| `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py`、`bench_http.py`、`bench_memory.py` | ベンチマーク |
+| `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py`、`bench_http.py`、`bench_memory.py`、`bench_layout.py` | ベンチマーク |
 | `tests/test_expr_coverage.py` | すべての種類の式のノードを、すべての実装の場所（構文、型推論、影響範囲、評価、依存、Rust）に通す |
 
 式の意味は、Python の参照実装と Rust の両方に実装している。
