@@ -24,6 +24,14 @@ impl Cube {
         Cube { pack: self.pack.clone(), kind: self.kind, cells }
     }
 
+    /// repack と同じだが、詰め方が同じならセルを写さずにそのまま返す。
+    pub fn into_repacked(self, cfg: &Config, pack: &Packing) -> Cube {
+        if &self.pack == pack {
+            return self;
+        }
+        self.repack(cfg, pack)
+    }
+
     pub fn repack(&self, cfg: &Config, pack: &Packing) -> Cube {
         if &self.pack == pack {
             return self.clone();

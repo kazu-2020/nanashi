@@ -479,10 +479,11 @@ struct Task {
     weight: usize, // 計算し直す行数の見積もり（並列にするかの判断に使う）
 }
 
-/// 計算し終えて、書き戻しを待つ値。範囲が全体なら、新しい格納データまで作っておく
-/// （置き換える前の格納データを読むだけで作れるので、同じ段の Metric と並列に作れる）。
+/// 計算し終えて、書き戻しを待つ値。範囲が全体なら、新しい格納データの本体になるキー順のセルまで作っておく
+/// （置き換える前の格納データを読むだけで作れるので、同じ段の Metric と並列に作れる）。格納データの形
+/// （キーと値の 2 列）に移すのは書き戻すときで、移す間だけ値が 2 つ分になるのを、段の中で 1 つずつに抑える。
 enum Write {
-    Whole(Store, Option<Vec<Vec<u32>>>), // 新しい格納データと、値が変わったセルの範囲
+    Whole(Vec<(u64, f64)>, Option<Vec<Vec<u32>>>), // 新しい本体のセルと、値が変わったセルの範囲
     Part(Cube),                          // 範囲の中の新しい値
 }
 
@@ -715,23 +716,17 @@ impl<'a> Run<'a> {
             }
         };
         let (value, count) = if t.region.is_all() {
-            let (store, sets) = if self.full {
+            let (cells, sets) = if self.full {
                 // 全体の再計算では下流も全体を計算し直すので、値が変わった範囲は求めない
-                let mut s = self.stores[t.m].emptied();
-                s.replace(&Restrict::all(self.cat.dims.len()), &value)?;
-                (s, None)
+                (self.stores[t.m].sorted_cells(value)?, None)
             } else {
-                self.stores[t.m].replaced_all(&value)?
+                self.stores[t.m].replaced_all(value)?
             };
             let count = match count {
-                Some(c) => {
-                    let mut s = self.counts[t.m].as_ref().expect("件数の格納").emptied();
-                    s.replace(&Restrict::all(self.cat.dims.len()), &c)?;
-                    Some(Write::Whole(s, None))
-                }
+                Some(c) => Some(Write::Whole(self.counts[t.m].as_ref().expect("件数の格納").sorted_cells(c)?, None)),
                 None => None,
             };
-            (Write::Whole(store, sets), count)
+            (Write::Whole(cells, sets), count)
         } else {
             (Write::Part(value), count.map(Write::Part))
         };
@@ -748,14 +743,17 @@ impl<'a> Run<'a> {
         }
         let r = region.restrict(self.cat);
         let sets = match value {
-            Write::Whole(store, sets) => {
-                self.stores[m] = Arc::new(store);
+            Write::Whole(cells, sets) => {
+                self.stores[m] = Arc::new(self.stores[m].with_sorted(cells));
                 sets
             }
             Write::Part(value) => Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?,
         };
         match count {
-            Some(Write::Whole(store, _)) => self.counts[m] = Some(Arc::new(store)),
+            Some(Write::Whole(cells, _)) => {
+                let counts = self.counts[m].as_ref().expect("件数の格納").with_sorted(cells);
+                self.counts[m] = Some(Arc::new(counts));
+            }
             Some(Write::Part(c)) => Arc::make_mut(self.counts[m].as_mut().expect("件数の格納")).replace(&r, &c)?,
             None => {}
         }

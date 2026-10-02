@@ -180,9 +180,17 @@ pub(crate) fn remove_rows(rows: Rows, dim: DimId, agg: Agg, cat: &Catalog, r: &R
         let groups = fold_groups(cfg, &rows, |k| Some(proj.apply(rows.pack(), &out, k)));
         return Ok(finish_groups(groups, out, agg));
     }
-    let c = rows.into_cube();
-    let proj = Proj::new(&c.pack, &out);
-    let pairs = map_cells(cfg, &c.cells, |k, v| Some((proj.apply(&c.pack, &out, k), v)));
+    let xp = rows.pack();
+    let proj = Proj::new(xp, &out);
+    if let Some(c) = dense_groups(cfg, &rows, &out, cat, agg, |k| Some(proj.apply(xp, &out, k))) {
+        return Ok(c);
+    }
+    // 集計元を写さずに、(集計先, 値) の組を 1 つの配列へ直接作って並べ替える
+    let pairs = collect_rows(cfg, rows.len(), |i| {
+        let (k, v) = rows.get(i);
+        Some((proj.apply(xp, &out, k), v))
+    });
+    drop(rows);
     Ok(group(cfg, pairs, out, agg))
 }
 
@@ -241,4 +249,82 @@ pub(crate) fn remove_by_table(x: &Rows, dim: DimId, target: DimId, v: &Store, ag
         (t != u32::MAX).then(|| proj.apply(xp, &out, k) | out.put(pt, t))
     });
     Ok(Some(finish_groups(groups, out, agg)))
+}
+
+/// 集計先の全組み合わせの数がこれ以下なら、全組み合わせの配列へ足し込む経路を考える。
+const DENSE_MAX: usize = 1 << 26;
+
+/// 集計先の全組み合わせ（out の各軸の全メンバー）の配列へ足し込む。仕事は行をスレッド数に区切り、
+/// 区切りごとに 1 つの配列（1 組み合わせ 12 B）を持って最後に順に合わせる（スレッド数が同じなら、結果は実行ごとに同じ）。
+/// 配列の合計が、(集計先, 値) の組を集めて並べ替える経路の半分（1 行 8 B）を超えるなら None。
+/// key は行のキーから集計先のキー（out の詰め方）を返す。結果はキー順に並ぶ。
+pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, agg: Agg, key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Cube> {
+    if matches!(agg, Agg::First) {
+        return None;
+    }
+    let n = rows.len();
+    let sizes: Vec<usize> = out.dims.iter().map(|&d| cat.dims[d].size.max(1) as usize).collect();
+    let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
+    let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
+    if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(12) > n.saturating_mul(8) {
+        return None;
+    }
+    // 集計先のキー -> 配列の番号（先頭の軸が最上位の桁なので、番号の順がキーの順になる）
+    let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
+    let init = match agg {
+        Agg::Min => f64::INFINITY,
+        Agg::Max => f64::NEG_INFINITY,
+        _ => 0.0,
+    };
+    let add = |x: &mut f64, v: f64| match agg {
+        Agg::Min => *x = x.min(v),
+        Agg::Max => *x = x.max(v),
+        Agg::Sum | Agg::Avg => *x += v,
+        Agg::Count | Agg::First => {}
+    };
+    let fill = |lo: usize, hi: usize| {
+        let (mut vals, mut cnt) = (vec![init; slots], vec![0u32; slots]);
+        for i in lo..hi {
+            let (k, v) = rows.get(i);
+            if let Some(o) = key(k) {
+                let s = index(o);
+                add(&mut vals[s], v);
+                cnt[s] += 1;
+            }
+        }
+        (vals, cnt)
+    };
+    let step = n.div_ceil(parts).max(1);
+    let mut acc: Vec<(Vec<f64>, Vec<u32>)> = if parts > 1 {
+        (0..parts).into_par_iter().map(|p| fill((p * step).min(n), ((p + 1) * step).min(n))).collect()
+    } else {
+        vec![fill(0, n)]
+    };
+    let (mut vals, mut cnt) = acc.remove(0);
+    for (v2, c2) in acc {
+        for s in 0..slots {
+            if c2[s] > 0 {
+                add(&mut vals[s], v2[s]);
+                cnt[s] += c2[s];
+            }
+        }
+    }
+    let mut cells = Vec::new();
+    for s in 0..slots {
+        if cnt[s] == 0 {
+            continue;
+        }
+        let v = match agg {
+            Agg::Avg => vals[s] / cnt[s] as f64,
+            Agg::Count => cnt[s] as f64,
+            _ => vals[s],
+        };
+        let (mut rest, mut k) = (s, 0u64);
+        for j in (0..sizes.len()).rev() {
+            k |= out.put(j, (rest % sizes[j]) as u32);
+            rest /= sizes[j];
+        }
+        cells.push((k, v));
+    }
+    Some(Cube { pack: out.clone(), kind: Kind::Num, cells })
 }
