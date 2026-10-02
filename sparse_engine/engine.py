@@ -95,8 +95,7 @@ class Store(Protocol):
         """行数の上限（セル数の見積もりに使う）。size が行を数え直すエンジンは、それより安く返す。"""
     def memory(self, storage: Any) -> dict[str, int]:
         """格納データが確保しているメモリ。rows（本体の行数）は必ず返す。バイト数を測れるエンジンは
-        base（本体。置き場所によらない）、base_heap（本体のうち Rust のヒープにある分）、delta_rows（差分の件数）、
-        delta（差分）、index（索引）も返す。"""
+        base（本体）、delta_rows（差分の件数）、delta（差分）、index（索引）も返す。"""
     def same(self, a: Any, b: Any) -> bool:
         """a と b が同じ格納データ（複製しただけで、どちらにも書き込んでいない）か。わからなければ False。"""
     def diff_block(self, old: Any | None, new: Any) -> Any | None:

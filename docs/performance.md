@@ -168,7 +168,7 @@ RSS は、Linux（glibc）と macOS ではアロケータが違うので比べ�
 RSS が Rust のヒープより大きいのは、macOS の標準のアロケータが、解放した大きなブロックを使い回し用に抱えるためである（`vmmap` の MALLOC_LARGE (empty)）。
 集計を読みながら行う前の版では、計算し直すたびに増え（1 回目 1,919 MB、4 回目 2,559 MB）、環境変数 `MallocLargeCache=0` を付けて起動すると 791〜812 MB で止まった（再計算の時間は変わらない）。
 RSS は実行ごとに大きくばらつくので、使っているメモリを比べるときは Rust のヒープで比べる。
-Rust のヒープは `nanashi_core.track_heap(True)` の後の分を `nanashi_core.heap()` で、Metric ごとの格納データは `m.memory()` で読める（`base` は本体の大きさ、`base_heap` はそのうち Rust のヒープにある分。本体の置き場所がヒープだけの今は同じ値）。
+Rust のヒープは `nanashi_core.track_heap(True)` の後の分を `nanashi_core.heap()` で、Metric ごとの格納データは `m.memory()` で読める。
 数えている間は確保のたびに原子的な加減算をするので、既定では数えない（数えると並列の再計算が数 % 遅くなった）。
 
 記録先を比べると次のとおり（`bench_journal.py`、損益計画、PostgreSQL は手元の Docker）。

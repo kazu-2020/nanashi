@@ -13,7 +13,6 @@ use crate::*;
 /// 本体は作ったら変えず、Arc で版どうし（複製したモデルどうし）で共有する。差分は書き換えても
 /// 古い版を壊さない永続的な木で持つ。そのため Store の複製は本体の配列も差分も写さず O(1) で済み、
 /// 公開済みの版を読み手が持っていても、書き込みの費用は変わらない。
-/// 本体のキーと値は、再配置できる不変の平らな列（`Column`）で持つ（Base を参照）。
 #[derive(Clone, Debug)]
 pub struct Store {
     pub metric_dims: Vec<DimId>, // Metric として宣言した軸の順
@@ -31,8 +30,7 @@ pub type Replaced = (Vec<(u64, f64)>, Option<Vec<Vec<u32>>>);
 /// Store が確保しているメモリの内訳（Store::memory）。
 pub struct Mem {
     pub rows: usize,       // 本体の行数
-    pub base: usize,       // 本体のキーと値（バイト。置き場所によらない）
-    pub base_heap: usize,  // 本体のうち Rust のヒープにある分（バイト。ファイルの写像や共有メモリは含まない）
+    pub base: usize,       // 本体のキーと値（バイト）
     pub delta_rows: usize, // 差分の件数
     pub delta: usize,      // 差分（バイト。木の節の分を含まない）
     pub index: usize,      // 分割軸以外の軸の索引（バイト）
@@ -40,19 +38,20 @@ pub struct Mem {
 
 /// Store の本体。作ったら変えない。
 ///
-/// キーと値は、再配置できる不変の平らな列（`Column`）で持つ。Arrow の UInt64 / Float64 の配列と同じ並びで、
-/// ヒープにもファイルの写像にも共有メモリにも同じ形で置け、置き場所が変わっても読む側は `&[u64]`、`&[f64]`
-/// として読む。今の置き場所はヒープだけである。索引（postings）はメモリに持つ。
+/// キーと値は、隙間のない不変の列（`Box<[T]>`。余分な容量を持たない）で持つ。u64 のキーと f64 の値を
+/// 詰めて並べた形は Arrow の UInt64 / Float64 の配列の本体と同じで、中にポインタを持たないので、
+/// 後でファイルの写像や共有メモリに置くときも同じ並びで置ける（docs/out-of-core.md の進め方 2）。
+/// 索引（postings）はメモリに持つ。
 #[derive(Debug)]
 pub(crate) struct Base {
-    pub(crate) keys: Column<u64>, // 昇順・重複なし
-    pub(crate) vals: Column<f64>,
+    pub(crate) keys: Box<[u64]>, // 昇順・重複なし
+    pub(crate) vals: Box<[f64]>,
     pub(crate) postings: Vec<OnceLock<Arc<Postings>>>, // 分割軸以外の軸の索引（詰め方の位置ごと。必要になったら作る）
 }
 
 impl Base {
     pub(crate) fn empty(n_dims: usize) -> Arc<Base> {
-        Arc::new(Base { keys: Column::empty(), vals: Column::empty(), postings: fresh_postings(n_dims) })
+        Arc::new(Base { keys: Box::new([]), vals: Box::new([]), postings: fresh_postings(n_dims) })
     }
 }
 
@@ -225,17 +224,15 @@ impl Store {
         self.merged(0, None, f);
     }
 
-    /// 格納データが確保しているメモリ（バイト）。本体はキーと値の列の大きさを置き場所によらず数え（base）、
-    /// そのうち Rust のヒープにある分を別に数える（base_heap。今は置き場所がヒープだけなので base と同じ）。
-    /// 索引は作ったものだけを数える。差分の木は 1 件の大きさ×件数で、木の節の分を含まない（下限）。
-    /// 本体を版どうしで共有していても、この Store の分として数える。
+    /// 格納データが確保しているメモリ（バイト）。本体はキーと値の列（余分な容量はない）、索引は作ったものだけを
+    /// 数える。差分の木は 1 件の大きさ×件数で、木の節の分を含まない（下限）。本体を版どうしで共有していても、
+    /// この Store の分として数える。
     pub fn memory(&self) -> Mem {
         let b = &*self.base;
         let index = b.postings.iter().filter_map(|p| p.get()).map(|p| (p.offsets.capacity() + p.rows.capacity()) * 4).sum();
         Mem {
             rows: b.keys.len(),
-            base: b.keys.bytes() + b.vals.bytes(),
-            base_heap: b.keys.heap_bytes() + b.vals.heap_bytes(),
+            base: (b.keys.len() + b.vals.len()) * 8,
             delta_rows: self.delta.len(),
             delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
             index,
@@ -263,11 +260,15 @@ impl Store {
         }
     }
 
-    /// 並んだセルを本体にする（差分は捨てる）。
+    /// 並んだセルを本体にする（差分は捨てる）。unzip は件数ちょうどの容量で作るので、列にするときに写さない。
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let (keys, vals): (Vec<u64>, Vec<f64>) =
             if self.cfg.par(cells.len()) { cells.into_par_iter().unzip() } else { cells.into_iter().unzip() };
-        self.base = Arc::new(Base { keys: keys.into(), vals: vals.into(), postings: fresh_postings(self.pack.dims.len()) });
+        self.base = Arc::new(Base {
+            keys: keys.into_boxed_slice(),
+            vals: vals.into_boxed_slice(),
+            postings: fresh_postings(self.pack.dims.len()),
+        });
         self.delta = OrdMap::new();
     }
 

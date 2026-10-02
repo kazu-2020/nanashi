@@ -5,7 +5,7 @@
 //! エンジンの本体は使わず、Store の本体と同じ形（昇順の u64 のキーと f64 の値の 2 列）のファイルを作り、
 //! 次の持ち方で、エンジンの主な操作に当たる処理を測る。macOS と Linux で動く。
 //!
-//! - heap: 今のエンジン。2 列をヒープに読み込み、エンジンの本体と同じ型（不変の平らな列 Column）で持つ
+//! - heap: 今のエンジン。2 列をヒープの Vec に読み込んで持つ
 //! - mmap 暖 / 冷: ファイルを読み出し専用で写像し、ページの出し入れを OS に任せる。
 //!   暖はページキャッシュに載った状態、冷は処理の前にページキャッシュから追い出した状態
 //! - pread: ページキャッシュに残さずに、決まった数のセルずつ読み込む。
@@ -29,7 +29,6 @@
 //! ディスクから実際に読んだ量（macOS は ri_diskio_bytesread、Linux は /proc/self/io の read_bytes）も出すので、
 //! 冷の測定が本当にディスクを読んだかを確かめられる。
 
-use nanashi_engine::Column;
 use rayon::prelude::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cmp::Reverse;
@@ -865,9 +864,6 @@ fn main() {
             "heap" => {
                 let ((ak, av), (bk, bv)) =
                     measure(row("load", "heap", 1, d.n_a + d.n_b, in_ab), || (load(&d.a, d.n_a), load(&d.b, d.n_b)));
-                // エンジンの本体（store.rs の Base）と同じく、Vec ではなく不変の平らな列で持って読む
-                let (ak, av): (Column<u64>, Column<f64>) = (ak.into(), av.into());
-                let (bk, bv): (Column<u64>, Column<f64>) = (bk.into(), bv.into());
                 let (a, b) = (Cols::Mem(&ak, &av), Cols::Mem(&bk, &bv));
                 let (mut s, mut g, mut m) = (0.0, 0.0, 0);
                 for &t in &threads {
