@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -298,6 +299,81 @@ func TestNoAuthStripsClientUserHeader(t *testing.T) {
 	do(t, rt, "GET", "/models/plan/", nil, map[string]string{"X-User": "mallory"})
 	if v := e.requests()[0].header.Values("X-User"); len(v) != 0 {
 		t.Errorf("engine saw X-User %q, want none", v)
+	}
+}
+
+// fromAddr sends one request to rt as if it came from remoteAddr ("host:port").
+func fromAddr(rt *Router, remoteAddr, method, target string, body []byte, header map[string]string) response {
+	req := httptest.NewRequest(method, target, bytes.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	rt.ServeHTTP(rec, req)
+	return response{rec.Code, rec.Body.String(), rec.Header()}
+}
+
+// TestProxyUserThroughRouter covers OIDC proxy -> router -> engine: the router trusts the user header
+// only from the proxy's CIDR, and sends the same header to the engine.
+func TestProxyUserThroughRouter(t *testing.T) {
+	e := newEngine(t, reply{200, `{"seq": 1}`, nil})
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24"), netip.MustParsePrefix("fd00::/8")}
+	rt := &Router{
+		Resolve:    &resolver{answers: []string{e.URL}},
+		Auth:       ProxyUser("X-Forwarded-Email", trusted),
+		UserHeader: "X-Forwarded-Email",
+	}
+	hdr := map[string]string{"X-Forwarded-Email": "alice@example.com", "Authorization": "Bearer id-token",
+		"Content-Type": "application/json"}
+	for _, proxy := range []string{"10.0.0.7:41000", "[::ffff:10.0.0.7]:41000", "[fd00::5]:41000"} {
+		before := len(e.requests())
+		if got := fromAddr(rt, proxy, "POST", "/models/plan/writes", []byte(write), hdr); got.status != 200 {
+			t.Fatalf("from %s: got %d %s", proxy, got.status, got.body)
+		}
+		h := e.requests()[before].header
+		if v := h.Values("X-Forwarded-Email"); len(v) != 1 || v[0] != "alice@example.com" {
+			t.Errorf("from %s: engine saw X-Forwarded-Email %q, want [alice@example.com]", proxy, v)
+		}
+		if h.Get("Authorization") != "" {
+			t.Errorf("from %s: engine saw Authorization %q", proxy, h.Get("Authorization"))
+		}
+	}
+
+	// A sender outside the trusted CIDRs can set any user, so the router does not use or send its header.
+	sent := len(e.requests())
+	for _, sender := range []string{"10.0.1.7:41000", "127.0.0.1:41000", "[::1]:41000", "[fe80::1%eth0]:41000", "bad"} {
+		got := fromAddr(rt, sender, "POST", "/models/plan/writes", []byte(write), hdr)
+		if got.status != 401 || errorKind(t, got.body) != "unauthorized" {
+			t.Errorf("from %s: got %d %s, want 401", sender, got.status, got.body)
+		}
+	}
+	// The trusted proxy must send the header.
+	if got := fromAddr(rt, "10.0.0.7:41000", "GET", "/models/plan/", nil, nil); got.status != 401 {
+		t.Errorf("no header: got %d %s, want 401", got.status, got.body)
+	}
+	if n := len(e.requests()); n != sent {
+		t.Errorf("engine got %d more requests, want 0 (unauthorized must not be forwarded)", n-sent)
+	}
+}
+
+func TestParsePrefix(t *testing.T) {
+	for in, want := range map[string]string{
+		"10.0.1.0/24": "10.0.1.0/24",
+		"10.0.1.5/24": "10.0.1.0/24",
+		" 10.0.1.5 ":  "10.0.1.5/32",
+		"fd00::/8":    "fd00::/8",
+		"::1":         "::1/128",
+	} {
+		got, err := ParsePrefix(in)
+		if err != nil || got.String() != want {
+			t.Errorf("ParsePrefix(%q) = %v, %v, want %s", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "10.0.0.0/33", "host.example", "fe80::1%eth0", "10.0.0.0/8,10.1.0.0/16"} {
+		if _, err := ParsePrefix(in); err == nil {
+			t.Errorf("ParsePrefix(%q) succeeded, want an error", in)
+		}
 	}
 }
 

@@ -1,7 +1,10 @@
 """HTTP サーバー（Workspace を JSON の API で公開する）。"""
+import contextlib
 import http.client
+import io
 import json
 import socket
+import tempfile
 import threading
 import time
 import unittest
@@ -10,7 +13,7 @@ import urllib.request
 from unittest import mock
 
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.server import Server
+from sparse_engine.server import Server, main
 from sparse_engine.workspace import Workspace
 
 from .journals import JournalCase, PgStore
@@ -226,7 +229,7 @@ class Limits(unittest.TestCase):
         self.ws = Workspace(model(ReferenceEngine()))
 
     def test_proxy_header_names_the_user(self):
-        server = Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User").start()
+        server = Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User", trusted_proxies=["127.0.0.1"]).start()
         try:
             self.assertEqual(Client(server.url, token=None).get("/")[0], 401)
             c = Client(server.url, token=None, headers={"X-Forwarded-User": "carol"})
@@ -300,6 +303,93 @@ class Limits(unittest.TestCase):
             self.assertEqual(Client(server.url).get("/health")[0], 200)
         finally:
             server.stop()
+
+
+class ProxyHeader(JournalCase, unittest.TestCase):
+    """The user header counts only on a connection from a trusted proxy (--trusted-proxy)."""
+    engine = staticmethod(ReferenceEngine)
+
+    def setUp(self):
+        super().setUp()
+        self.ws = workspace(self, model(self.engine()))
+
+    def serve(self, trusted: list[str]) -> Server:
+        server = Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User", trusted_proxies=trusted).start()
+        self.addCleanup(server.stop)
+        return server
+
+    def history(self) -> list[str]:
+        """The users in the journal records of the cell that the tests write."""
+        h = self.journals.journal().cell_history(self.ws.version.model, "Stock", Product="p0", Month="Jan")
+        return [r["user"] for r in h]
+
+    def test_user_from_a_trusted_proxy_reaches_the_journal(self):
+        server = self.serve(["10.0.0.0/8", "127.0.0.0/8"])
+        c = Client(server.url, token=None, headers={"X-Forwarded-User": "carol@example.com"})
+        status, body = c.post("/writes", {"client_op_id": "p1", "ops": [write("Stock", 1, Product="p0", Month="Jan")]})
+        self.assertEqual((status, body), (200, {"seq": 1}))
+        self.assertEqual(self.history(), ["carol@example.com"])
+        self.assertEqual(Client(server.url, token=None).get("/")[0], 401)  # the header is necessary
+
+    def test_header_from_an_untrusted_source_is_refused(self):
+        server = self.serve(["10.0.0.0/8", "::1/128"])  # 127.0.0.1 is not trusted automatically
+        c = Client(server.url, token=None, headers={"X-Forwarded-User": "mallory"})
+        status, body = c.post("/writes", {"client_op_id": "p1", "ops": [write("Stock", 1, Product="p0", Month="Jan")]})
+        self.assertEqual((status, body["error"]), (401, "unauthorized"))
+        self.assertEqual(c.get("/metrics/Stock/cell?Product=p0&Month=Jan")[0], 401)
+        self.assertEqual(c.get("/health")[0], 200)  # health and ready need no authentication
+        self.assertEqual(self.ws.seq, 0)
+        self.assertEqual(self.history(), [])
+
+    def test_trusted_addresses(self):
+        server = self.serve(["10.1.2.3", "192.168.0.0/16", "fd00::/8"])
+        for host, want in [("10.1.2.3", True), ("10.1.2.4", False), ("192.168.40.1", True), ("::ffff:192.168.0.9", True),
+                           ("fd12::1", True), ("fe80::1%eth0", False), ("127.0.0.1", False), ("not-an-address", False)]:
+            self.assertEqual(server.trusted(host), want, host)
+
+    def test_options(self):
+        with self.assertRaisesRegex(ValueError, "trusted_proxies"):
+            Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User")
+        with self.assertRaisesRegex(ValueError, "user_header"):
+            Server(self.ws, "127.0.0.1", 0, trusted_proxies=["127.0.0.1"])
+        with self.assertRaisesRegex(ValueError, "CIDR"):
+            Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User", trusted_proxies=["10.0.0.0/33"])
+        with self.assertRaises(TypeError):  # a string is not a list of CIDRs
+            Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User", trusted_proxies="127.0.0.1")
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class PgRustProxyHeader(ProxyHeader):
+    """The production combination: the Rust engine and PgJournal."""
+    engine = staticmethod(RustEngine)
+    store = PgStore
+
+
+class MainOptions(unittest.TestCase):
+    """main refuses the authentication options that leave the user header open to any client."""
+
+    def refused(self, *args: str) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(err):
+            main(["unused-path", *args])
+        self.assertEqual(cm.exception.code, 2)
+        return err.getvalue()
+
+    def test_user_header_needs_a_trusted_proxy(self):
+        self.assertIn("--trusted-proxy", self.refused("--user-header", "X-Forwarded-User"))
+        self.assertIn("--trusted-proxy", self.refused("--host", "0.0.0.0", "--user-header", "X-Forwarded-User"))
+        self.assertIn("--user-header", self.refused("--trusted-proxy", "10.0.0.0/8"))
+        self.assertIn("CIDR", self.refused("--user-header", "X-Forwarded-User", "--trusted-proxy", "10.0.0.0/99"))
+
+    def test_tokens_and_user_header_are_exclusive(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
+            json.dump(TOKENS, f)
+            f.flush()
+            self.assertIn("どちらか一方", self.refused("--tokens", f.name, "--user-header", "X-Forwarded-User",
+                                                    "--trusted-proxy", "10.0.0.0/8"))
+
+    def test_no_authentication_listens_only_on_loopback(self):
+        self.assertIn("--insecure", self.refused("--host", "0.0.0.0"))
 
 
 class Observability(JournalCase, unittest.TestCase):

@@ -53,7 +53,7 @@ var upstream = &http.Client{
 // Router is an http.Handler for /models/{id}/... that forwards to the model's leader.
 type Router struct {
 	Resolve    Resolver
-	Auth       func(*http.Request) (user string, err error) // nil = no auth (loopback dev)
+	Auth       func(*http.Request) (user string, err error) // nil = no auth (loopback dev); see also ProxyUser
 	UserHeader string                                       // header set toward engines, default "X-Forwarded-User"
 	Deadline   time.Duration                                // overall per request, default 90s
 
@@ -178,10 +178,10 @@ func (rt *Router) upstreamHeader(in http.Header, user string) http.Header {
 	if name == "" {
 		name = "X-Forwarded-User"
 	}
-	h.Del(name)
+	h.Del(name) // only the user that Auth found goes to the engine
 	h.Del("Content-Length")
 	if rt.Auth != nil {
-		h.Del("Authorization") // the router consumed the credential
+		h.Del("Authorization") // the router or the proxy before it consumed the credential
 	}
 	if user != "" {
 		h.Set(name, user)
