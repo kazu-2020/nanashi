@@ -401,7 +401,7 @@ class Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
-        # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（SIGTERM）は
+        # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（Ctrl-C）は
         # スレッドを起こしたあとにも届き、そのスレッドも枠を返す。ここでも返すと 2 度返して ValueError になり、
         # socketserver がそれを握りつぶして止まらなくなる（止まるので、枠が 1 つ減っても困らない）
         try:
@@ -469,6 +469,9 @@ def main(argv=None) -> None:
                     help="--pg のとき、書き手としてほかのプロセスに知らせる自分の番地（既定は http://<host>:<port>）")
     ap.add_argument("--lease-ttl", type=float, default=30.0, help="--pg のとき、書き込みの権利（リース）の期限（秒）")
     args = ap.parse_args(argv)
+    # SIGTERM と SIGINT は、どのスレッドでも受けずに見張りのスレッドが sigwait で受ける。スレッドを作る前に
+    # 止めておけば、あとで作るスレッド（Rust のエンジンのものも）にも引き継がれる
+    signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     tokens = None
     if args.tokens:
         with open(args.tokens, encoding="utf-8") as f:
@@ -505,16 +508,28 @@ def main(argv=None) -> None:
                             standby=True)
     server.workspace = ws
     log.info("公開中の版 %d、%s で待ち受ける（%s）", ws.seq, server.url, role_of(ws))
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    threading.Thread(target=_stop_on_signal, args=(server,), name="nanashi-signal", daemon=True).start()
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
     finally:
         server.server_close()
         ws.close()
         if hasattr(journal, "close"):  # PgJournal: リースの延長を止めて、接続を閉じる
             journal.close()
+
+
+_STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT}
+
+
+def _stop_on_signal(server: Server) -> None:
+    """SIGTERM か SIGINT を待ち、serve_forever を止める。
+
+    シグナルを KeyboardInterrupt にして本線のスレッドに投げると、どこで割り込むか選べない。要求のスレッドを
+    起こしている途中（Thread.start の中のロック）に届くと RuntimeError に化け、socketserver がそれを握りつぶして
+    止まらなくなっていた。sigwait で受ければ、止めるのは serve_forever の区切りになる。"""
+    signum = signal.sigwait(_STOP_SIGNALS)
+    log.info("%s を受けたので止める", signal.Signals(signum).name)
+    server.shutdown()
 
 
 def _loopback(host: str) -> bool:
