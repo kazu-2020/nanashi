@@ -23,6 +23,10 @@ pub struct Store {
     pub(crate) cfg: Config,                      // 作ったときの Catalog の調整値
 }
 
+/// 全体を置き換えるための、キー順のセルと、値が変わったセルを囲む範囲（宣言した軸の順の、軸ごとの
+/// メンバー番号。何も変わらなければ None）。
+pub type Replaced = (Vec<(u64, f64)>, Option<Vec<Vec<u32>>>);
+
 /// Store が確保しているメモリの内訳（Store::memory）。
 pub struct Mem {
     pub rows: usize,       // 本体の行数
@@ -324,6 +328,22 @@ impl Store {
         }
     }
 
+    /// new を、この Store の詰め方でキー順に並べたセルにする（全体を置き換える前の準備）。new を受け取るので、
+    /// 詰め方が同じならセルを写さずに並べ替える。置き換えは with_sorted で行う。
+    pub fn sorted_cells(&self, new: Cube) -> Result<Vec<(u64, f64)>> {
+        if !same_set(new.dims(), &self.metric_dims) {
+            return Err("書き戻す結果の軸が Metric の軸と一致しない".into());
+        }
+        Ok(sorted(&self.cfg, new.into_repacked(&self.cfg, &self.pack).cells))
+    }
+
+    /// 同じ軸と分割軸で、本体をキー順のセル cells にした Store（差分はない）。
+    pub fn with_sorted(&self, cells: Vec<(u64, f64)>) -> Store {
+        let mut out = self.empty_like();
+        out.set_sorted(cells);
+        out
+    }
+
     pub fn replace(&mut self, r: &Restrict, new: &Cube) -> Result<()> {
         if !same_set(new.dims(), &self.metric_dims) {
             return Err("書き戻す結果の軸が Metric の軸と一致しない".into());
@@ -386,13 +406,10 @@ impl Store {
         Ok(self.region_of(&changed))
     }
 
-    /// 全体を new に置き換えた新しい Store と、値が変わったセルの範囲（replace_diff と同じ形）。
-    /// 自分は変えないので、置き換える前の Store を複製せずに取っておける。
-    pub fn replaced_all(&self, new: &Cube) -> Result<(Store, Option<Vec<Vec<u32>>>)> {
-        if !same_set(new.dims(), &self.metric_dims) {
-            return Err("書き戻す結果の軸が Metric の軸と一致しない".into());
-        }
-        let cells = sorted(&self.cfg, new.repack(&self.cfg, &self.pack).cells);
+    /// 全体を new に置き換えるための、キー順のセル（sorted_cells と同じ）と、値が変わったセルの範囲
+    /// （replace_diff と同じ形）。自分は変えないので、置き換える前の Store を複製せずに取っておける。
+    pub fn replaced_all(&self, new: Cube) -> Result<Replaced> {
+        let cells = self.sorted_cells(new)?;
         let changed = if self.base_rows().is_some() {
             changed_keys(self, &cells) // 差分がなければ、本体を写さずに突き合わせる
         } else {
@@ -400,10 +417,8 @@ impl Store {
             self.merged(0, None, |k, v| old.push((k, v)));
             changed_keys(&old[..], &cells)
         };
-        let mut out = self.empty_like();
-        out.set_sorted(cells);
         let sets = self.region_of(&changed);
-        Ok((out, sets))
+        Ok((cells, sets))
     }
 
     /// keys を囲む範囲（宣言した軸の順の、軸ごとのメンバー番号）。keys が空なら None。

@@ -94,6 +94,7 @@ Rust のエンジンの速さのための調整値（`native/engine/src/config.r
 大きなモデルでだけ働く経路を小さなモデルでも働かせて、結果が変わらないことを確かめている。
 
 - 並列化と範囲の全体への広げ方（`par_min=0, widen_min_rows=0`）、集計を読みながら行う経路（`stream_always=True`）: `tests/test_redefine.py`
+- 演算の融合（`fuse=False` と突き合わせる）、並列の仕事の単位（`chunk=3`）、集計先の全組み合わせの配列への集計（`dense_always=True`）: `tests/test_fusion.py`
 - メモリの予算で式の評価を分けること（`max_bytes`）: `tests/test_failures.py`
 - 差分のまとめ直しと転置索引（`compact_min`、`postings_min_rows`）: Rust の性質テスト `native/engine/tests/store_model.rs`
 
@@ -128,7 +129,7 @@ SIGTERM なら約 0.1 秒、SIGKILL ならリースの期限と待機系が権�
 | `sparse_engine/objects.py` | ファイルの置き場所（`put`、`get`、`list`、`delete` を持つ BlobStore。S3 互換か、ローカルのディレクトリ）。記録先のスナップショットと大量の変更のファイルを置く |
 | `sparse_engine/server.py` | HTTP サーバー（Workspace を JSON の API で公開する） |
 | `router/` | ルーター（Go）。`router.go` が書き手への送り直し（応答ごとの次の動きは `decide`）、`pg.go` が記録先から書き手を引く `PgResolver`、`cmd/nanashi-router/` がコマンド |
-| `native/engine/` | Rust のエンジン（`nanashi-engine`、Python に依存しない）。`key.rs` がキーの詰め方、`store.rs` が格納、`ast.rs` が式の構文木、`eval/` が評価（`join.rs` が突き合わせ、`agg.rs` が集計）、`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き、`config.rs` が速さのための調整値。`tests/` に格納の性質テスト（BTreeMap と突き合わせる） |
+| `native/engine/` | Rust のエンジン（`nanashi-engine`、Python に依存しない）。`key.rs` がキーの詰め方、`store.rs` が格納、`ast.rs` が式の構文木、`eval/` が評価（`fuse.rs` が要素ごとの演算の融合、`join.rs` が突き合わせ、`agg.rs` が集計）、`check.rs` が型検査と BY の書き換え、`graph.rs` が計算計画、`plan.rs` が差分集計の判定と影響範囲と再計算の段取り、`pq.rs` が Parquet の読み書き、`config.rs` が速さのための調整値。`tests/` に格納の性質テスト（BTreeMap と突き合わせる） |
 | `native/src/lib.rs` | Python から使う薄い層（`nanashi_core`、PyO3）。受け取った番号と長さはここで検査する |
 | `examples/fpa.py` | 損益計画と人員計画のサンプル |
 | `bench.py`、`bench_metrics.py`、`bench_versions.py`、`bench_journal.py`、`bench_reads.py`、`bench_http.py`、`bench_memory.py` | ベンチマーク |

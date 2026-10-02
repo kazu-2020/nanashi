@@ -4,8 +4,10 @@
 use crate::*;
 
 mod agg;
+mod fuse;
 mod join;
 pub(crate) use agg::*;
+pub(crate) use fuse::*;
 pub(crate) use join::*;
 
 #[inline]
@@ -92,6 +94,12 @@ pub fn eval_with(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budg
 fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let ev = |n: &Node| eval_with(n, cat, src, r, bud);
+    // 要素ごとの演算をつないだ式は、演算ごとの途中結果を作らずに 1 回の走査で評価する
+    if cfg.fuse {
+        if let Some(c) = fused(node, cat, src, r, bud)? {
+            return Ok(c);
+        }
+    }
     match node {
         Node::Ref(i) => Ok(src[*i].read(cfg, r)),
 
@@ -240,13 +248,23 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 });
                 return Ok(finish_groups(groups, out, *agg));
             }
-            let c = rows.into_cube();
-            let (ps, pd) = (c.pack.pos(*s).unwrap(), out.pos(*dst).unwrap());
-            let rest = Proj::new(&c.pack, &out);
-            let pairs = map_cells(cfg, &c.cells, |k, v| {
-                let t = mp.fwd[c.pack.get(k, ps) as usize];
-                (t >= 0).then(|| (rest.apply(&c.pack, &out, k) | out.put(pd, t as u32), v))
+            let xp = rows.pack();
+            let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
+            let rest = Proj::new(xp, &out);
+            let target = |k: u64| {
+                let t = mp.fwd[xp.get(k, ps) as usize];
+                (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
+            };
+            if let Some(c) = dense_groups(cfg, &rows, &out, cat, *agg, target) {
+                return Ok(c);
+            }
+            // 集計元を写さずに、(集計先, 値) の組を 1 つの配列へ直接作って並べ替える
+            let pairs = collect_rows(cfg, rows.len(), |i| {
+                let (k, v) = rows.get(i);
+                let t = mp.fwd[xp.get(k, ps) as usize];
+                (t >= 0).then(|| (rest.apply(xp, &out, k) | out.put(pd, t as u32), v))
             });
+            drop(rows);
             Ok(group(cfg, pairs, out, *agg))
         }
 
