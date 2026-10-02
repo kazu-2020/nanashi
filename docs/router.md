@@ -37,9 +37,34 @@ For a model that is not in the journal, it returns 404 `{"error": "no_model"}`.
 At the deadline, the router returns the last response that it received (504 if the deadline came before a response).
 
 With `--tokens`, the router finds the user from `Authorization: Bearer <token>`.
-It adds the user to `X-Forwarded-User` and sends it to the engine (start the engine with `--user-header X-Forwarded-User`).
+It adds the user to `X-Forwarded-User` and sends it to the engine.
 The router removes `X-Forwarded-User` if the sender added it.
-Without `--tokens`, the router does no authentication and refuses to listen on addresses other than 127.0.0.1 (`--insecure` removes this limit).
+Start the engine with `--user-header X-Forwarded-User --trusted-proxy <address of the router>` ([server.md](server.md)).
+
+With `--user-header <name> --trusted-proxy <CIDR>`, the router is behind an authenticating proxy such as oauth2-proxy.
+The rules for these options are the same as for the engine ([server.md](server.md)):
+
+- The router uses the header only on a connection from a trusted network. It examines the TCP address, not `X-Forwarded-For`.
+- For other connections, the router returns 401 and does not send the request to the engine.
+- To give more than 1 network, use `--trusted-proxy` again. A comma-separated list is not permitted.
+- The router does not trust 127.0.0.1 or `::1` automatically.
+- `--user-header` needs `--trusted-proxy`, and `--trusted-proxy` needs `--user-header`.
+- You cannot use `--tokens` and `--user-header` together.
+
+The router sends the user to the engine in the same header, and removes `Authorization`.
+Thus, give the engine the same `--user-header`, and give its `--trusted-proxy` the address of the router.
+Do not give the engine the address of the OIDC proxy. Only the router connects to the engine.
+
+```bash
+# oauth2-proxy (10.0.1.5) -> router (10.0.2.0/24) -> engine
+router/nanashi-router --pg postgresql://... --listen 0.0.0.0:8090 \
+    --user-header X-Forwarded-Email --trusted-proxy 10.0.1.5
+.venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id plan-2027 \
+    --host 0.0.0.0 --advertise http://plan-a:8080 --user-header X-Forwarded-Email --trusted-proxy 10.0.2.0/24
+```
+
+[server.md](server.md) tells which oauth2-proxy header to use for the audit.
+Without `--tokens` or `--user-header`, the router does no authentication and refuses to listen on addresses other than 127.0.0.1 (`--insecure` removes this limit).
 `GET /healthz` shows if the router itself is alive.
 On SIGTERM and SIGINT, the router refuses new requests.
 It waits until the requests that it resends are complete, and then it stops.

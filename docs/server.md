@@ -23,7 +23,45 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 Authentication, not the request body, sets the user that the audit records.
 With `--tokens`, the server requires `Authorization: Bearer <token>`.
 With `--user-header X-Forwarded-User`, the server uses the value of the header that an authenticating proxy added.
+You cannot use `--tokens` and `--user-header` together.
 If neither option is given, the server does no authentication (the user is blank). Then it refuses to listen on an address other than 127.0.0.1 (`--insecure` removes this limit).
+
+### Authentication through a proxy
+
+Any client can send a user header. Thus, the server trusts the header only on a connection from a trusted proxy.
+`--trusted-proxy <CIDR>` sets the addresses of the proxies, for example `10.0.1.0/24`.
+A single address (`10.0.1.5`) is a network of 1 address.
+An IPv4-mapped address (`::ffff:10.0.1.5`), as a dual-stack log shows it, means the IPv4 address.
+To give more than 1 network, use the option again (`--trusted-proxy 10.0.1.0/24 --trusted-proxy 10.0.2.0/24`). A comma-separated list is not permitted.
+`--user-header` needs `--trusted-proxy`, and `--trusted-proxy` needs `--user-header`. Otherwise the server does not start.
+
+The server examines the address of the TCP connection, not a header such as `X-Forwarded-For`.
+If the connection does not come from a trusted network, the server returns 401. It does not use the header in this case.
+If the connection comes from a trusted network but the header is missing, the server also returns 401.
+`GET /health` and `GET /ready` need no authentication, as before.
+
+The server does not trust 127.0.0.1 or `::1` automatically.
+If the proxy runs on the same host, give `--trusted-proxy 127.0.0.1`.
+Do not give a network that contains clients, because each of these clients can then set any user.
+Make sure that clients cannot connect to the server without the proxy (for example, with a security group). The trusted network is the only protection.
+
+```bash
+# oauth2-proxy at 10.0.1.5 -> engine
+.venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id plan-2027 \
+    --host 0.0.0.0 --advertise http://plan-a:8080 --user-header X-Forwarded-Email --trusted-proxy 10.0.1.5
+```
+
+Make sure that the proxy removes the user header that a client sent, and sets it again on each request.
+With `--pass-user-headers` (the default in reverse proxy mode), oauth2-proxy sends these headers:
+
+| Header | Content | Use for the audit |
+|---|---|---|
+| `X-Forwarded-User` | The user ID from the identity provider (with OIDC, usually the `sub` claim). With `--prefer-email-to-user`, the email address | Stable, but people cannot read the ID easily |
+| `X-Forwarded-Email` | The `email` claim | Recommended. People can read it. Make sure that the identity provider does not let users change it |
+| `X-Forwarded-Preferred-Username` | The `preferred_username` claim | Do not use. Some identity providers let users change it, and some do not send it |
+
+Use 1 header for all servers of a model. If you change the header, the same person has 2 different users in the journal.
+If the router is between the proxy and the engine, see [router.md](router.md). Then `--trusted-proxy` of the engine contains the address of the router.
 
 These are the limits:
 

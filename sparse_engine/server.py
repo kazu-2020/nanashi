@@ -35,12 +35,14 @@ remove_metric、rename_metric）を順に呼ぶ。add_input の cells は [[座�
 503（閉じている、混んでいる）を使う。
 500 の文言は固定で、原因はサーバーのログに error_id と一緒に残す。
 
-利用者（監査に残す user）は、要求の本文ではなく認証で決める。
+Authentication, not the request body, sets the user that the audit records (user).
 
-- tokens（{トークン: 利用者}）を渡すと、Authorization: Bearer <トークン> を求める
-- user_header（例: X-Forwarded-User）を渡すと、その見出しの値を利用者にする（認証を済ませた
-  プロキシの後ろに置くとき。プロキシがこの見出しを付け直すこと）
-- どちらもなければ認証せず、利用者は None（手元の開発用。main は 127.0.0.1 以外で待ち受けるのを拒む）
+- With tokens ({token: user}), the server requires Authorization: Bearer <token>.
+- With user_header (for example, X-Forwarded-User), the value of that header is the user. Use this
+  behind an authenticating proxy that sets the header again. The server trusts the header only on a
+  connection from an address in trusted_proxies (CIDR). On other connections, it returns 401.
+- With neither, the server does no authentication and the user is None (for local development).
+  Then main refuses to listen on an address other than 127.0.0.1.
 
 大きさの上限: 本文は max_body バイト、slice、rows、summary で返すセルは max_cells、同時に処理する
 要求は max_threads（超えたら 503）。要求の読み書きが request_timeout 秒止まれば接続を切る。
@@ -66,6 +68,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -190,9 +193,12 @@ class Handler(BaseHTTPRequestHandler):
         self._run(self._get)
 
     def _user(self) -> str | None:
-        """認証した利用者。認証の設定がなければ None。認証できなければ 401。"""
+        """Return the authenticated user, or None without an authentication setting. Raise 401 on failure."""
         srv = self.server
         if srv.user_header is not None:
+            # Do not fall back to the header: a client that bypasses the proxy can set any user.
+            if not srv.trusted(self.client_address[0]):
+                raise ApiError(401, "unauthorized", "信頼するプロキシ（trusted_proxies）からの接続ではない")
             user = self.headers.get(srv.user_header)
             if not user:
                 raise ApiError(401, "unauthorized", f"{srv.user_header} がない")
@@ -371,25 +377,43 @@ def _formula(written) -> str:
 
 
 class Server(ThreadingHTTPServer):
-    """Workspace を公開する HTTP サーバー。serve_forever を別のスレッドで回すか、start() を使う。
-    workspace は、待ち受ける番地が決まってから開くときは None で作り、serve_forever の前に入れる。"""
+    """An HTTP server that publishes a Workspace. Run serve_forever in a different thread, or use start().
+    To open the workspace after the server binds its address, give None and set it before serve_forever.
+    user_header needs trusted_proxies: the CIDRs (or single addresses) of the proxies that set the header."""
 
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, workspace: Workspace | Replica | None, host: str = "127.0.0.1", port: int = 8080, *,
                  write_timeout: float | None = 30.0, tokens: dict[str, str] | None = None,
-                 user_header: str | None = None, max_body: int = 16 << 20, max_cells: int = 100_000,
-                 max_threads: int = 64, request_timeout: float | None = 30.0):
+                 user_header: str | None = None, trusted_proxies: Iterable[str] = (), max_body: int = 16 << 20,
+                 max_cells: int = 100_000, max_threads: int = 64, request_timeout: float | None = 30.0):
         if tokens is not None and user_header is not None:
             raise ValueError("tokens と user_header はどちらか一方")
+        trusted = parse_networks(trusted_proxies)
+        if user_header is not None and not trusted:
+            raise ValueError("user_header には trusted_proxies（見出しを付けるプロキシの番地）が要る")
+        if user_header is None and trusted:
+            raise ValueError("trusted_proxies は user_header と一緒に使う")
         super().__init__((host, port), Handler)
         self.workspace = workspace
         self.write_timeout = write_timeout
-        self.tokens, self.user_header = tokens, user_header
+        self.tokens, self.user_header, self.trusted_proxies = tokens, user_header, trusted
         self.max_body, self.max_cells, self.request_timeout = max_body, max_cells, request_timeout
         self._slots = threading.BoundedSemaphore(max_threads)
         self._thread: threading.Thread | None = None
+
+    def trusted(self, host: str) -> bool:
+        """Return True if host is in one of the trusted_proxies."""
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        if getattr(addr, "scope_id", None):
+            return False  # a link-local address with a zone; the router also refuses it
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped  # a dual-stack socket shows an IPv4 client as ::ffff:a.b.c.d
+        return any(addr in net for net in self.trusted_proxies)
 
     def process_request(self, request, client_address) -> None:
         """同時に処理する要求が max_threads に達していれば、スレッドを作らずに 503 を返す。"""
@@ -458,7 +482,10 @@ def main(argv=None) -> None:
                     help="Python のスレッド切り替えの間隔（秒）。読み手が多いときの書き込みの待ちを減らす")
     ap.add_argument("--tokens", metavar="FILE", help="{トークン: 利用者} の JSON。Bearer トークンで認証する")
     ap.add_argument("--user-header", metavar="NAME",
-                    help="認証を済ませたプロキシが付ける、利用者の見出し（例: X-Forwarded-User）")
+                    help="認証を済ませたプロキシが付ける、利用者の見出し（例: X-Forwarded-User）。--trusted-proxy が要る")
+    ap.add_argument("--trusted-proxy", metavar="CIDR", action="append", default=[],
+                    help="--user-header の見出しを信頼する送信元（例: 10.0.1.0/24、10.0.1.5）。複数なら繰り返す。"
+                    "ほかの送信元には 401 を返す（127.0.0.1 も自動では信頼しない）")
     ap.add_argument("--insecure", action="store_true", help="認証なしで 127.0.0.1 以外でも待ち受ける")
     ap.add_argument("--max-body", type=int, default=16 << 20, help="本文の上限（バイト）")
     ap.add_argument("--max-cells", type=int, default=100_000, help="slice、rows、summary で返すセルの上限")
@@ -474,6 +501,17 @@ def main(argv=None) -> None:
     if args.tokens:
         with open(args.tokens, encoding="utf-8") as f:
             tokens = json.load(f)
+    if tokens is not None and args.user_header is not None:
+        ap.error("--tokens と --user-header はどちらか一方")
+    if args.user_header is not None and not args.trusted_proxy:
+        ap.error("--user-header には、見出しを付けるプロキシの番地を --trusted-proxy で指定する")
+    if args.trusted_proxy and args.user_header is None:
+        ap.error("--trusted-proxy は --user-header と一緒に使う")
+    try:
+        parse_networks(args.trusted_proxy)
+    except ValueError as e:
+        ap.error(str(e))
+    # --user-header always comes with --trusted-proxy (above), so it also allows a non-loopback address.
     if tokens is None and args.user_header is None and not args.insecure and not _loopback(args.host):
         ap.error(f"{args.host} で待ち受けるには --tokens か --user-header で認証する（試すだけなら --insecure）")
     if args.pg and not args.follow and args.advertise is None and _unspecified(args.host):
@@ -487,8 +525,9 @@ def main(argv=None) -> None:
         from .engine import ReferenceEngine
         engine = ReferenceEngine()
     # 先に待ち受けて番地を決める（--port 0 でも、知らせる番地に実際の番号が入る）。要求は serve_forever まで受けない
-    server = Server(None, args.host, args.port, tokens=tokens, user_header=args.user_header, max_body=args.max_body,
-                    max_cells=args.max_cells, max_threads=args.max_threads)
+    server = Server(None, args.host, args.port, tokens=tokens, user_header=args.user_header,
+                    trusted_proxies=args.trusted_proxy, max_body=args.max_body, max_cells=args.max_cells,
+                    max_threads=args.max_threads)
     if args.pg:
         from .pg_journal import PgJournal, migrate
         if args.migrate:
@@ -544,6 +583,24 @@ def _stop_on_signal(server: Server) -> None:
     threading.Thread(target=watch, name="nanashi-signal", daemon=True).start()
     for s in (signal.SIGTERM, signal.SIGINT):
         signal.signal(s, on_signal)
+
+
+def parse_networks(values: Iterable[str]) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse CIDRs. A single address is a network of 1 address. Host bits are set to zero.
+    An IPv4-mapped network (::ffff:10.0.1.0/120) becomes the IPv4 network, as trusted() unmaps the client."""
+    if isinstance(values, str):
+        raise TypeError("trusted_proxies は番地（CIDR）の列で渡す")
+    out = []
+    for v in values:
+        try:
+            net = ipaddress.ip_network(v.strip(), strict=False)
+        except ValueError:
+            raise ValueError(f"{v!r} は番地（CIDR。例: 10.0.1.0/24）ではない") from None
+        mapped = net.network_address.ipv4_mapped if isinstance(net, ipaddress.IPv6Network) else None
+        if mapped is not None and net.prefixlen >= 96:
+            net = ipaddress.IPv4Network((mapped, net.prefixlen - 96))
+        out.append(net)
+    return tuple(out)
 
 
 def _loopback(host: str) -> bool:
