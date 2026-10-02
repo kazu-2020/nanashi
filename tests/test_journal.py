@@ -224,40 +224,6 @@ class Journal(JournalCase, unittest.TestCase):
         self.journals.journal().objects.put(f"{place.uri}/{name}", b"broken")
         check_same_state(self, self.m, self.reopen())
 
-    def test_computed_snapshot_replays_later_records_incrementally(self):
-        """スナップショットに計算 Metric の値があれば、その後の記録は入力の変更として再生し、
-        最初の再計算は差分だけになる。結果は全体の再計算と一致する。"""
-        self.m.set_cell("Price", 12, Product="A")
-        self.m.checkpoint()
-        self.m.set_cell("Price", 13, Product="A")
-        self.m.set_cell("Price", 14, Product="B")
-        reopened = self.reopen()
-        self.assertIsNotNone(reopened._plan)
-        self.assertFalse(reopened._pending.full)  # 差分の経路
-        self.assertTrue(reopened._pending.changed)
-        check_same_state(self, self.m, reopened)
-        check_full(self, reopened)
-
-    def test_structural_record_after_computed_snapshot_recomputes_everything(self):
-        self.m.checkpoint()
-        self.m.set_cell("Price", 13, Product="A")
-        self.m.add_formula("Twice", ["Product"], "Price * 2")
-        reopened = self.reopen()
-        self.assertTrue(reopened._pending.full)
-        check_same_state(self, self.m, reopened)
-
-    def test_snapshot_without_values_is_recomputed(self):
-        """以前の形式（入力だけの Parquet）のスナップショットも開ける（全体を計算し直す）。"""
-        from sparse_engine import storage
-        original = storage.dump
-        with mock.patch.object(storage, "dump", lambda model, snapshot=False: original(model)):
-            self.m.set_cell("Price", 12, Product="A")
-            self.m.checkpoint()
-        self.m.set_cell("Price", 13, Product="A")
-        reopened = self.reopen()
-        self.assertTrue(reopened._pending.full)
-        check_same_state(self, self.m, reopened)
-
     def test_torn_last_line_is_dropped(self):
         self.file_only()
         self.m.set_cell("Price", 12, Product="A")

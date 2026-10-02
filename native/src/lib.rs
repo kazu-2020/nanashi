@@ -3,7 +3,7 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, ColumnOwner, Config, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
+use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -757,37 +757,6 @@ impl Core {
         Ok(StoreHandle { store: Arc::new(store) })
     }
 
-    /// 格納データを平らな形式のバイト列にする（docs/persistence.md。labels は宣言した軸の順の、モデルの軸の ID）。
-    /// GIL を外して行う。
-    #[pyo3(signature = (store, labels))]
-    fn store_to_flat<'py>(&self, py: Python<'py>, store: &Bound<'py, StoreHandle>, labels: Vec<u32>) -> PyResult<Bound<'py, PyBytes>> {
-        let s = read(store)?;
-        let buf = py.detach(move || s.to_flat(&labels)).map_err(err)?;
-        Ok(PyBytes::new(py, &buf))
-    }
-
-    /// store_to_flat で書いたバイト列から格納データを作る。詰め方が今の軸と同じなら、キーと値は data
-    /// （Python の bytes）をそのまま参照して写さない（bytes は格納データが生きている間、持ち続ける）。
-    /// GIL を外して行う。
-    #[allow(clippy::wrong_self_convention)] // Python から呼ぶ名前を保つ
-    #[pyo3(signature = (data, dims, labels, index, is_bool))]
-    fn store_from_flat(
-        &self,
-        py: Python<'_>,
-        data: PyBackedBytes,
-        dims: Vec<DimId>,
-        labels: Vec<u32>,
-        index: Option<DimId>,
-        is_bool: bool,
-    ) -> PyResult<StoreHandle> {
-        self.dims(&dims)?;
-        let cat = self.cat.clone();
-        let store = py
-            .detach(move || Store::from_flat(Arc::new(PyBytesOwner(data)), &dims, &labels, index, kind_of(is_bool), &cat))
-            .map_err(err)?;
-        Ok(StoreHandle { store: Arc::new(store) })
-    }
-
     /// 2 つのハンドルが同じ格納データ（複製しただけで、どちらにも書き込んでいない）を指すか。
     fn same_store(&self, a: &Bound<'_, StoreHandle>, b: &Bound<'_, StoreHandle>) -> PyResult<bool> {
         let (a, b) = (read(a)?, read(b)?);
@@ -1443,90 +1412,6 @@ fn read_parquet(
     py.detach(move || pq::read(Bytes::from_owner(data), &names, value, &sizes)).map_err(err)
 }
 
-/// 平らな形式の持ち主にする Python の bytes。Python のヒープにあるので、Rust のヒープとしては数えない。
-struct PyBytesOwner(PyBackedBytes);
-
-impl AsRef<[u8]> for PyBytesOwner {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl ColumnOwner for PyBytesOwner {
-    fn heap_bytes(&self) -> usize {
-        0
-    }
-}
-
-/// 格納データを持たないエンジン用。dims は軸ごとのメンバー数で、軸の番号は位置。index は分割軸の位置。
-fn flat_catalog(sizes: &[u32]) -> Catalog {
-    Catalog {
-        dims: sizes.iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect(),
-        maps: Vec::new(),
-        cfg: Config::default(),
-    }
-}
-
-/// 軸ごとのメンバー番号の列と値の列を平らな形式のバイト列にする（格納データを持たないエンジン用）。
-/// labels は軸ごとの名札（モデルの軸の ID）、sizes は軸ごとのメンバー数、index は分割軸の位置。
-#[pyfunction]
-#[pyo3(signature = (labels, sizes, index, is_bool, cols, values))]
-fn write_flat<'py>(
-    py: Python<'py>,
-    labels: Vec<u32>,
-    sizes: Vec<u32>,
-    index: Option<usize>,
-    is_bool: bool,
-    cols: Vec<Vec<u32>>,
-    values: Vec<f64>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    if labels.len() != sizes.len() || cols.len() != sizes.len() || cols.iter().any(|c| c.len() != values.len()) {
-        return Err(err("列の数か長さが、軸の数と値の数に合わない".into()));
-    }
-    if index.is_some_and(|i| i >= sizes.len()) {
-        return Err(err("分割軸の位置が軸の数を超える".into()));
-    }
-    let buf = py
-        .detach(move || {
-            let cat = flat_catalog(&sizes);
-            let dims: Vec<DimId> = (0..sizes.len()).collect();
-            let cols: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
-            for (c, &size) in cols.iter().zip(&sizes) {
-                if let Some(&m) = c.iter().find(|&&m| m >= size) {
-                    return Err(format!("メンバー番号 {m} が軸の大きさ {size} を超える"));
-                }
-            }
-            Store::new(&dims, index, kind_of(is_bool), &cat)?.with_rows(&cols, &values)?.to_flat(&labels)
-        })
-        .map_err(err)?;
-    Ok(PyBytes::new(py, &buf))
-}
-
-/// write_flat で書いたバイト列を (列の並び, 値の並び) に戻す。
-#[pyfunction]
-#[pyo3(signature = (data, labels, sizes, index, is_bool))]
-fn read_flat(
-    py: Python<'_>,
-    data: PyBackedBytes,
-    labels: Vec<u32>,
-    sizes: Vec<u32>,
-    index: Option<usize>,
-    is_bool: bool,
-) -> PyResult<(Vec<Vec<u32>>, Vec<f64>)> {
-    if labels.len() != sizes.len() {
-        return Err(err("名札の数が軸の数に合わない".into()));
-    }
-    if index.is_some_and(|i| i >= sizes.len()) {
-        return Err(err("分割軸の位置が軸の数を超える".into()));
-    }
-    py.detach(move || {
-        let cat = flat_catalog(&sizes);
-        let dims: Vec<DimId> = (0..sizes.len()).collect();
-        Ok(Store::from_flat(Arc::new(PyBytesOwner(data)), &dims, &labels, index, kind_of(is_bool), &cat)?.rows())
-    })
-    .map_err(err)
-}
-
 /// Parquet のフッターのキーと値（本体は読まない）。
 #[pyfunction]
 fn parquet_metadata(py: Python<'_>, data: PyBackedBytes) -> PyResult<Vec<(String, String)>> {
@@ -1541,8 +1426,6 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_metadata, m)?)?;
-    m.add_function(wrap_pyfunction!(write_flat, m)?)?;
-    m.add_function(wrap_pyfunction!(read_flat, m)?)?;
     m.add("Diagnostic", m.py().get_type::<Diagnostic>())?;
     m.add_class::<Core>()?;
     m.add_class::<Expr>()?;

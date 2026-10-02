@@ -356,28 +356,6 @@ class Model:
             out[n] = row
         return out
 
-    def _install_computed(self, values: dict[str, Any], counts: dict[str, Any]) -> bool:
-        """保存しておいた計算 Metric の値と差分集計の件数を入れ、次の再計算を差分だけにする（読み込み用）。
-
-        計算計画を作ってから入れる。分割軸が計画の選んだものと違えば持ち直す。計算 Metric の値か、
-        差分集計に要る件数が欠けていれば入れずに、次の再計算で全体を計算し直す（False）。
-        """
-        self._compile()
-        formulas = {n for n, m in self.metrics.items() if m.formula is not None}
-        if set(values) != formulas or not set(self._counts) <= set(counts):
-            return False
-        for name, store in values.items():
-            self._values[name] = self._repartitioned(store, self.layout[name])
-        for name in self._counts:
-            self._counts[name] = self._repartitioned(counts[name], self.layout[name])
-        self._pending = Pending(full=False)
-        return True
-
-    def _repartitioned(self, store: Any, partition: str | None) -> Any:
-        if self.engine.partition_of(store) != partition:
-            return self.engine.repartition(store, partition, self)
-        return store
-
     # ------------------------------------------------ 複製
 
     def fork(self) -> Model:

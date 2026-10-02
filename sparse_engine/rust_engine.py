@@ -16,7 +16,7 @@ import nanashi_core
 
 from .core import Cube
 from .delta import COUNTED, DeltaPlan
-from .engine import flat_labels, parquet_columns, parquet_value
+from .engine import parquet_columns, parquet_value
 from .planner import Step
 from .evaluate import Catalog, Edge, FormulaError, Type, member_kind, resolve
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
@@ -278,16 +278,6 @@ class RustEngine:
     def from_parquet(self, data, dims, kind, cat, partition=None):
         return self.core.store_from_parquet(data, [self._dim(cat, d) for d in dims], self._index(cat, dims, partition),
                                             parquet_value(kind), parquet_columns(dims, cat))
-
-    def to_flat(self, store, dims, kind, cat) -> bytes:
-        stored = [self._names[i] for i in self.core.metric_dims(store)]
-        if stored != list(dims):
-            raise ValueError(f"格納データの軸 {stored} が {list(dims)} と違う")
-        return self.core.store_to_flat(store, flat_labels(dims, cat))
-
-    def from_flat(self, data, dims, kind, cat, partition=None):
-        return self.core.store_from_flat(data, [self._dim(cat, d) for d in dims], flat_labels(dims, cat),
-                                         self._index(cat, dims, partition), kind == "boolean")
 
     def partition_of(self, store):
         i = self.core.index_dim(store)

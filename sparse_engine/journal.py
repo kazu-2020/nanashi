@@ -496,11 +496,7 @@ class Journal:
         return _shown(model, m, out)
 
     def open(self, engine=None):
-        """最新のスナップショットを読み、その後の記録を再生したモデル（記録先はこの Journal）。
-
-        スナップショットに計算 Metric の値があれば（同じエンジンで同じ計算の版が計算したもの）、その後の
-        記録は入力の変更として書き込み、最初の再計算は変更範囲だけを差分で計算する。なければ、再生のあとで
-        全体を計算し直す。"""
+        """最新のスナップショットを読み、その後の記録を再生したモデル（記録先はこの Journal）。"""
         from .engine import default_engine
         from .model import Model
         engine = engine if engine is not None else default_engine()
@@ -512,9 +508,8 @@ class Journal:
                 log.warning("スナップショット %d が壊れている（1 つ前から開く）: %s", base, e)
         else:
             base, model = 0, Model(engine=engine)
-        incremental = model._plan is not None and not model._pending.full  # 計算 Metric の値を読み込んだ
         for rec in self.records(after=base):
-            apply(model, rec, incremental=incremental)
+            apply(model, rec)
         model.seq = self.head
         model.journal = self
         return model
@@ -549,12 +544,12 @@ MANIFEST = "manifest.json"
 
 
 def put_snapshot(blobs, prefix: str, model) -> dict:
-    """model のスナップショット（storage.dump の snapshot の形式）を blobs の prefix/ に置き、manifest（通し番号と
+    """model のスナップショット（Model.save の形式）を blobs の prefix/ に置き、manifest（通し番号と
     ファイルのハッシュ）を返す。各ファイルを置いてから最後に manifest.json を置くので、manifest がある
     スナップショットはファイルがそろっている（途中で落ちれば、manifest のないファイルが残るだけ）。"""
     from .storage import dump
     files = {}
-    for name, data in dump(model, snapshot=True).items():
+    for name, data in dump(model).items():
         blobs.put(f"{prefix}/{name}", data)
         files[name] = hashlib.sha256(data).hexdigest()
     manifest = {"seq": model.seq, "files": files}

@@ -14,7 +14,6 @@ mod config;
 mod cube;
 mod diag;
 mod eval;
-mod flat;
 pub mod graph;
 mod key;
 pub mod plan;

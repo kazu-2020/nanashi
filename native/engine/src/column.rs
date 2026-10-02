@@ -29,16 +29,6 @@ impl<T: Send + Sync + 'static> ColumnOwner for Box<[T]> {
     }
 }
 
-/// どんなビット列も値として正しい型。バイト列（ファイルや共有メモリの中身）をそのまま列として読むのに使う。
-///
-/// # Safety
-/// 実装する型は、任意のバイト列が有効な値で、内部にポインタや不変条件を持たないこと。
-pub unsafe trait Plain: Copy + Send + Sync + 'static {}
-
-unsafe impl Plain for u64 {}
-unsafe impl Plain for f64 {}
-unsafe impl Plain for u32 {}
-
 /// 不変で連続した T の列。`&[T]` として読む。複製は O(1) で、持ち主を共有する。
 pub struct Column<T> {
     ptr: NonNull<T>,
@@ -66,11 +56,6 @@ impl<T: Copy + Send + Sync + 'static> Column<T> {
         Column { ptr, len, owner, _t: PhantomData }
     }
 
-    /// 2 つの列が同じ持ち主を共有しているか（メモリを数えるときに二重に数えないため）。
-    pub fn same_owner<U>(&self, other: &Column<U>) -> bool {
-        std::ptr::addr_eq(Arc::as_ptr(&self.owner), Arc::as_ptr(&other.owner))
-    }
-
     /// 同じ持ち主を共有する、range の部分の列。
     pub fn slice(&self, range: Range<usize>) -> Column<T> {
         assert!(range.start <= range.end && range.end <= self.len, "列の範囲が外れている");
@@ -88,25 +73,6 @@ impl<T: Copy + Send + Sync + 'static> Column<T> {
     /// 列の大きさ（バイト）。置き場所によらない。
     pub fn bytes(&self) -> usize {
         self.len * std::mem::size_of::<T>()
-    }
-}
-
-impl<T: Plain> Column<T> {
-    /// 持ち主 owner のバイト列の offset バイト目から len 個を、T の列として参照する（写さない）。
-    /// その位置が T のそろえ（アラインメント）に合わないか、バイト列の範囲を超えていれば Err。
-    pub fn from_bytes<O: ColumnOwner + AsRef<[u8]>>(owner: &Arc<O>, offset: usize, len: usize) -> Result<Column<T>, String> {
-        let bytes: &[u8] = (**owner).as_ref();
-        let size = std::mem::size_of::<T>();
-        let end = len.checked_mul(size).and_then(|n| n.checked_add(offset)).ok_or("列の長さが大きすぎる")?;
-        if end > bytes.len() {
-            return Err(format!("列がバイト列の範囲を超える（{end} > {}）", bytes.len()));
-        }
-        let ptr = bytes[offset..].as_ptr();
-        if !(ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
-            return Err(format!("列の位置が {} バイトにそろっていない", std::mem::align_of::<T>()));
-        }
-        let owner: Arc<dyn ColumnOwner> = owner.clone();
-        Ok(Column { ptr: NonNull::new(ptr as *mut T).unwrap(), len, owner, _t: PhantomData })
     }
 }
 
@@ -218,24 +184,6 @@ mod tests {
         assert_eq!(&*c, &[7, 8, 9]);
         assert_eq!(c.bytes(), 24);
         assert_eq!(c.heap_bytes(), 0);
-    }
-
-    #[test]
-    fn from_bytes_shares_one_owner_between_columns() {
-        let mut raw: Vec<u64> = vec![0, 1, 2, 3]; // u64 の Vec なので 8 バイトにそろっている
-        raw[2] = 1.5f64.to_bits();
-        let bytes: Vec<u8> = raw.iter().flat_map(|x| x.to_ne_bytes()).collect();
-        let owner = Arc::new(bytes.into_boxed_slice());
-        let keys: Column<u64> = Column::from_bytes(&owner, 0, 2).unwrap();
-        let vals: Column<f64> = Column::from_bytes(&owner, 16, 1).unwrap();
-        assert_eq!(&*keys, &[0, 1]);
-        assert_eq!(&*vals, &[1.5]);
-        assert!(keys.same_owner(&vals));
-        assert!(!keys.same_owner(&Column::<u64>::empty()));
-        assert_eq!(keys.heap_bytes(), 32);
-        assert!(Column::<u64>::from_bytes(&owner, 4, 1).unwrap_err().contains("そろっていない"));
-        assert!(Column::<u64>::from_bytes(&owner, 0, 5).unwrap_err().contains("範囲"));
-        assert!(Column::<u64>::from_bytes(&owner, 0, usize::MAX).unwrap_err().contains("大きすぎる"));
     }
 
     #[test]
