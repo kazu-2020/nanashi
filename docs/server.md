@@ -31,6 +31,7 @@ If neither option is given, the server does no authentication (the user is blank
 Any client can send a user header. Thus, the server trusts the header only on a connection from a trusted proxy.
 `--trusted-proxy <CIDR>` sets the addresses of the proxies, for example `10.0.1.0/24`.
 A single address (`10.0.1.5`) is a network of 1 address.
+An IPv4-mapped address (`::ffff:10.0.1.5`), as a dual-stack log shows it, means the IPv4 address.
 To give more than 1 network, use the option again (`--trusted-proxy 10.0.1.0/24 --trusted-proxy 10.0.2.0/24`). A comma-separated list is not permitted.
 `--user-header` needs `--trusted-proxy`, and `--trusted-proxy` needs `--user-header`. Otherwise the server does not start.
 

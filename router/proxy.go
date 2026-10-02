@@ -10,16 +10,21 @@ import (
 
 // ParsePrefix parses a CIDR such as "10.0.1.0/24". A single address is a prefix of that address only.
 // It sets the host bits to zero, so "10.0.1.5/24" is "10.0.1.0/24".
+// An IPv4-mapped prefix (::ffff:10.0.1.0/120) becomes the IPv4 prefix, as Trusted unmaps the client.
 func ParsePrefix(s string) (netip.Prefix, error) {
 	s = strings.TrimSpace(s)
-	if p, err := netip.ParsePrefix(s); err == nil {
-		return p.Masked(), nil
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		a, err := netip.ParseAddr(s)
+		if err != nil || a.Zone() != "" {
+			return netip.Prefix{}, fmt.Errorf("%q は番地（CIDR。例: 10.0.1.0/24）ではない", s)
+		}
+		p = netip.PrefixFrom(a, a.BitLen())
 	}
-	a, err := netip.ParseAddr(s)
-	if err != nil || a.Zone() != "" {
-		return netip.Prefix{}, fmt.Errorf("%q は番地（CIDR。例: 10.0.1.0/24）ではない", s)
+	if p.Addr().Is4In6() && p.Bits() >= 96 {
+		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 	}
-	return netip.PrefixFrom(a, a.BitLen()), nil
+	return p.Masked(), nil
 }
 
 // Trusted reports whether remoteAddr ("host:port", as in http.Request.RemoteAddr) is in one of trusted.

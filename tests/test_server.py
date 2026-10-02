@@ -342,9 +342,10 @@ class ProxyHeader(JournalCase, unittest.TestCase):
         self.assertEqual(self.history(), [])
 
     def test_trusted_addresses(self):
-        server = self.serve(["10.1.2.3", "192.168.0.0/16", "fd00::/8"])
+        server = self.serve(["10.1.2.3", "192.168.0.0/16", "fd00::/8", "::ffff:172.16.0.5", "::ffff:172.17.0.0/112"])
         for host, want in [("10.1.2.3", True), ("10.1.2.4", False), ("192.168.40.1", True), ("::ffff:192.168.0.9", True),
-                           ("fd12::1", True), ("fe80::1%eth0", False), ("127.0.0.1", False), ("not-an-address", False)]:
+                           ("fd12::1", True), ("fe80::1%eth0", False), ("127.0.0.1", False), ("not-an-address", False),
+                           ("172.16.0.5", True), ("::ffff:172.16.0.5", True), ("172.17.9.9", True), ("172.18.0.1", False)]:
             self.assertEqual(server.trusted(host), want, host)
 
     def test_options(self):

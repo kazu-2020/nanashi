@@ -359,11 +359,13 @@ func TestProxyUserThroughRouter(t *testing.T) {
 
 func TestParsePrefix(t *testing.T) {
 	for in, want := range map[string]string{
-		"10.0.1.0/24": "10.0.1.0/24",
-		"10.0.1.5/24": "10.0.1.0/24",
-		" 10.0.1.5 ":  "10.0.1.5/32",
-		"fd00::/8":    "fd00::/8",
-		"::1":         "::1/128",
+		"10.0.1.0/24":         "10.0.1.0/24",
+		"10.0.1.5/24":         "10.0.1.0/24",
+		" 10.0.1.5 ":          "10.0.1.5/32",
+		"fd00::/8":            "fd00::/8",
+		"::1":                 "::1/128",
+		"::ffff:10.0.1.5":     "10.0.1.5/32",
+		"::ffff:10.0.1.0/120": "10.0.1.0/24",
 	} {
 		got, err := ParsePrefix(in)
 		if err != nil || got.String() != want {

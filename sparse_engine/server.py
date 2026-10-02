@@ -586,15 +586,20 @@ def _stop_on_signal(server: Server) -> None:
 
 
 def parse_networks(values: Iterable[str]) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
-    """Parse CIDRs. A single address is a network of 1 address. Host bits are set to zero."""
+    """Parse CIDRs. A single address is a network of 1 address. Host bits are set to zero.
+    An IPv4-mapped network (::ffff:10.0.1.0/120) becomes the IPv4 network, as trusted() unmaps the client."""
     if isinstance(values, str):
         raise TypeError("trusted_proxies は番地（CIDR）の列で渡す")
     out = []
     for v in values:
         try:
-            out.append(ipaddress.ip_network(v.strip(), strict=False))
+            net = ipaddress.ip_network(v.strip(), strict=False)
         except ValueError:
             raise ValueError(f"{v!r} は番地（CIDR。例: 10.0.1.0/24）ではない") from None
+        mapped = net.network_address.ipv4_mapped if isinstance(net, ipaddress.IPv6Network) else None
+        if mapped is not None and net.prefixlen >= 96:
+            net = ipaddress.IPv4Network((mapped, net.prefixlen - 96))
+        out.append(net)
     return tuple(out)
 
 
