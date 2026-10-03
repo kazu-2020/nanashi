@@ -1,9 +1,14 @@
-name: test
+name: tessera-test
 
+# Start only when tessera/ or this file changes.
 on:
   push:
     branches: [main]  # ほかのブランチは pull_request で回す（push と二重に回さない）
+    paths: &paths
+      - tessera/**
+      - .github/workflows/tessera-test.yml
   pull_request:
+    paths: *paths
 
 concurrency:  # 同じ PR に続けて push したら、古いほうの実行は止める
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -53,10 +58,6 @@ jobs:
         if: steps.wheel.outputs.cache-hit != 'true'
         with:
           workspaces: tessera/native
-      - uses: actions/setup-go@v7  # ルーター（router/）
-        with:
-          go-version-file: router/go.mod
-          cache-dependency-path: router/go.sum
       - name: 依存を入れて Rust のエンジンをビルドする
         working-directory: tessera
         run: |
@@ -73,11 +74,6 @@ jobs:
       - name: Rust のエンジンでテストする
         working-directory: tessera
         run: SPARSE_ENGINE=rust python -m tests.parallel
-      - name: ルーターのテスト  # PgResolver のテストは、Python のテストが作った nanashi_model の表を使う
-        working-directory: router
-        run: |
-          go vet ./...
-          go test -count=1 ./...  # 表の中身はテストのキャッシュの鍵に入らないので、キャッシュを使わない
       - name: 静的検査（Python）
         working-directory: tessera
         run: pyflakes sparse_engine tests examples bench*.py

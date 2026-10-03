@@ -30,7 +30,8 @@ python3.14t -m venv .venv-ft
 .venv-ft/bin/pip install -e ".[dev]"
 VIRTUAL_ENV=$PWD/.venv-ft .venv-ft/bin/maturin develop --release -m native/Cargo.toml
 ```
-GitHub Actions (`.github/workflows/test.yml`) runs the tests and the static checks with the two engines.
+GitHub Actions (`.github/workflows/tessera-test.yml`) runs the tests and the static checks with the two engines.
+The workflow starts only when `tessera/` or the workflow file changes.
 The Python tests run in one job for each Python version.
 The Rust unit tests and clippy run in parallel in a different job.
 The cache keeps the built `nanashi_core` for each content of `native/`.
