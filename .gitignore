@@ -3,7 +3,7 @@ __pycache__/
 bench_progress.log
 bench_stdout.json
 bench_metrics_progress.log
-native/target/
+tessera/native/target/
 bench_*results*.json
 bench_*.jsonl
 bench_metrics_table.md
