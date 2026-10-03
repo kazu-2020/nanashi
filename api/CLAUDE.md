@@ -6,15 +6,18 @@ It uses `connect-go` on `net/http` of the Go standard library. It does not use a
 ## Commands
 
 ```bash
-# Start PostgreSQL first (docker compose up -d in the repository root).
-# If the nanashi_model table is missing, the tests are skipped.
-# Make the table: in tessera/, run .venv/bin/python -m sparse_engine.pg_journal migrate <DSN>
+# Start PostgreSQL first (docker compose up -d in the repository root). Without it, the PostgreSQL tests are skipped.
 (cd api && go vet ./... && go test ./...)
-(cd api && go run ./cmd/nanashi-api --pg postgresql://postgres@127.0.0.1:55432/nanashi)
+# End-to-end check with real engines. It needs PostgreSQL and nanashi-router on 127.0.0.1:8090.
+(cd api && ./e2e.sh)
+# ../dev.sh starts the full stack. nanashi-api starts one engine for each application.
+(cd api && go run ./cmd/nanashi-api --pg postgresql://postgres@127.0.0.1:55432/nanashi --router http://127.0.0.1:8090)
 ```
 
 ## Rules
 
 - `proto/` in the repository root is the contract between `api/` and `web/`. If you change it, run `pnpm generate` in `web/`.
 - Do not edit `gen/`. `buf generate` makes it.
-- The API reads the engine tables (`nanashi_model`). It does not write to them. Only the engine writes to them.
+- The API keeps its own tables (`app_*` in `schema.sql`). It does not write to the engine tables (`nanashi_*`).
+- The API sends all engine requests through the router (`/models/<application ID>/...`).
+- `plan.go` has the calculations (engine operations, queries, imports, access limits). `server.go` and `engine.go` have the actions.

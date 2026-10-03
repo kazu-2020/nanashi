@@ -10,6 +10,7 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 - `web/`: the frontend (SPA). `web/CLAUDE.md` gives the guidance for it.
 - `proto/`: the Connect contract between `api/` and `web/`. `buf.gen.yaml` makes `api/gen/` and `web/src/gen/` from it.
 - `compose.yaml`: PostgreSQL (port 55432) and RustFS (port 59000) for development and tests. Start them with `docker compose up -d`.
+- `dev.sh`: starts the full local stack (PostgreSQL, router, `api/` with the engines, `web/`).
 
 ## Skills for the work
 
@@ -52,7 +53,7 @@ Each directory has its own workflow in `.github/workflows/`. A workflow starts o
 - `tessera-test.yml`: the Python and Rust tests and the static checks of `tessera/`.
 - `router-test.yml`: `go vet` and `go test` of `router/`.
 - `api-test.yml`: `go vet` and `go test` of `api/`.
-- `web-test.yml`: `vp check` and the build of `web/`. It also makes sure that the generated code agrees with `proto/`.
+- `web-test.yml`: `vp check`, `vp test` and the build of `web/`. It also makes sure that the generated code agrees with `proto/`.
 
 ## Router
 

@@ -6,7 +6,6 @@ on:
     branches: [main]
     paths: &paths
       - api/**
-      - tessera/sparse_engine/pg_journal.py  # It makes the nanashi_model table
       - .github/workflows/api-test.yml
   pull_request:
     paths: *paths
@@ -34,21 +33,12 @@ jobs:
       NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       - uses: actions/setup-go@v7
         with:
           go-version-file: api/go.mod
           cache-dependency-path: api/go.sum
-      # The ListModels test reads the nanashi_model table. The engine schema makes it.
-      - name: Make the engine schema
-        working-directory: tessera
-        run: |
-          python -m pip install "psycopg[binary]>=3.2,<4"
-          python -m sparse_engine.pg_journal migrate "$NANASHI_PG_DSN"
       - name: Test
         working-directory: api
         run: |
           go vet ./...
-          go test -count=1 ./...  # The table contents are not in the test cache key, so do not use the cache.
+          go test -count=1 ./...  # The database contents are not in the test cache key, so do not use the cache.

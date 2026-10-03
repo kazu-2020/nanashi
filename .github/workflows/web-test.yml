@@ -52,4 +52,5 @@ jobs:
           test -z "$(git status --porcelain)" || { git status; git diff; exit 1; }
       - run: pnpm exec buf lint ..
       - run: pnpm exec vp check
+      - run: pnpm exec vp test run
       - run: pnpm build
