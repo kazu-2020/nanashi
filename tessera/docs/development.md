@@ -3,6 +3,8 @@
 ## Getting started
 
 You need Python 3.12 or later and the Rust toolchain (cargo).
+Run the commands in this document in the `tessera/` directory.
+`compose.yaml` and the router (`router/`) are at the root of the repository.
 
 ```bash
 python3 -m venv .venv
@@ -139,7 +141,7 @@ It also measures the longest gap in commits (`python -m tests.failover --signal 
 With SIGTERM, the gap is about 0.1 seconds.
 With SIGKILL, the gap is the lease time plus the interval at which the standby tries to get the writer right (about 3.2 seconds).
 With `--via-router`, the senders send only to the router and do not change the destination (if the router returns a status other than 200, the test counts a failure).
-The Go tests (`go test ./...` in `router/`) make sure that the router makes correct resend decisions.
+The Go tests (`go test ./...` in `router/` at the root of the repository) make sure that the router makes correct resend decisions.
 They use a fake engine and a fake writer lookup.
 The same method also makes sure of two other properties (`tests/test_failover.py`).
 A standby rejects writes and returns the address of the writer.
@@ -162,7 +164,7 @@ The role changes of the standby (promotion, demotion, writes that entered the qu
 | `sparse_engine/pg_journal.py` | The PostgreSQL journal (lease and fencing, deferred application of large changes) |
 | `sparse_engine/objects.py` | The file location (a BlobStore with `put`, `get`, `list` and `delete`; S3-compatible or a local directory). It keeps the snapshots and the files of large changes for the journal |
 | `sparse_engine/server.py` | The HTTP server (it makes a Workspace available through a JSON API) |
-| `router/` | The router (Go). `router.go` resends to the writer (`decide` sets the next action for each response). `pg.go` is `PgResolver`, which finds the writer in the journal. `proxy.go` trusts the user header only from `--trusted-proxy`. `cmd/nanashi-router/` is the command |
+| `../router/` | The router (Go). `router.go` resends to the writer (`decide` sets the next action for each response). `pg.go` is `PgResolver`, which finds the writer in the journal. `proxy.go` trusts the user header only from `--trusted-proxy`. `cmd/nanashi-router/` is the command |
 | `native/engine/` | The Rust engine (`nanashi-engine`, no dependency on Python). `key.rs` packs keys. `store.rs` is the storage. `ast.rs` is the syntax tree of formulas. `eval/` is the evaluation (`fuse.rs` fuses element-wise operations, `join.rs` does joins, `agg.rs` does aggregation). `check.rs` does the type check and the BY rewrite. `graph.rs` makes the calculation plan. `plan.rs` does the incremental aggregation decision, the affected range and the recalculation schedule. `pq.rs` reads and writes Parquet. `config.rs` has the tuning values for speed. `tests/` has the property tests for the storage (they match the results with a BTreeMap) |
 | `native/src/lib.rs` | The thin layer for Python (`nanashi_core`, PyO3). It checks the numbers and lengths that it receives |
 | `examples/fpa.py` | The example of a profit and loss plan and a headcount plan |

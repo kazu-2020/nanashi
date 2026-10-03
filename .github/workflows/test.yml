@@ -45,19 +45,20 @@ jobs:
         id: wheel
         uses: actions/cache@v6
         with:
-          path: wheelhouse
-          key: nanashi-core-${{ runner.os }}-py${{ matrix.python }}-${{ hashFiles('native/Cargo.toml', 'native/Cargo.lock', 'native/pyproject.toml', 'native/src/**', 'native/engine/Cargo.toml', 'native/engine/src/**') }}
+          path: tessera/wheelhouse
+          key: nanashi-core-${{ runner.os }}-py${{ matrix.python }}-${{ hashFiles('tessera/native/Cargo.toml', 'tessera/native/Cargo.lock', 'tessera/native/pyproject.toml', 'tessera/native/src/**', 'tessera/native/engine/Cargo.toml', 'tessera/native/engine/src/**') }}
       - uses: dtolnay/rust-toolchain@stable
         if: steps.wheel.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@v2
         if: steps.wheel.outputs.cache-hit != 'true'
         with:
-          workspaces: native
+          workspaces: tessera/native
       - uses: actions/setup-go@v7  # ルーター（router/）
         with:
           go-version-file: router/go.mod
           cache-dependency-path: router/go.sum
       - name: 依存を入れて Rust のエンジンをビルドする
+        working-directory: tessera
         run: |
           sudo apt-get install -y libpq5  # 純 Python 版の psycopg が使う
           python -m pip install -e ".[dev]"
@@ -67,8 +68,10 @@ jobs:
           python -m pip install wheelhouse/nanashi_core-*.whl
       # テストはモジュールごとに別のプロセスで並べて回す（tests/parallel.py）。待ち時間が多いので、順に回すより速い
       - name: 参照実装でテストする
+        working-directory: tessera
         run: SPARSE_ENGINE=reference python -m tests.parallel
       - name: Rust のエンジンでテストする
+        working-directory: tessera
         run: SPARSE_ENGINE=rust python -m tests.parallel
       - name: ルーターのテスト  # PgResolver のテストは、Python のテストが作った nanashi_model の表を使う
         working-directory: router
@@ -76,6 +79,7 @@ jobs:
           go vet ./...
           go test -count=1 ./...  # 表の中身はテストのキャッシュの鍵に入らないので、キャッシュを使わない
       - name: 静的検査（Python）
+        working-directory: tessera
         run: pyflakes sparse_engine tests examples bench*.py
 
   # Rust の単体テストと clippy は Python の版によらないので、Python のテストと並べて 1 回だけ回す
@@ -91,8 +95,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: native
+          workspaces: tessera/native
       - name: Rust の単体テスト
-        run: cargo test --release --workspace --manifest-path native/Cargo.toml
+        run: cargo test --release --workspace --manifest-path tessera/native/Cargo.toml
       - name: 静的検査（Rust）
-        run: cargo clippy --release --workspace --all-targets --manifest-path native/Cargo.toml -- -D warnings
+        run: cargo clippy --release --workspace --all-targets --manifest-path tessera/native/Cargo.toml -- -D warnings

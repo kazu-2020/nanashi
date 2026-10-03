@@ -190,7 +190,7 @@ A scenario is the state of 1 reader. The router sends the requests of a scenario
 Each scenario has a time to live and a cell limit (`max_cells`).
 There is 1 rayon thread pool for each process ([Limitations and future work](limitations.md)). Thus a heavy scenario slows the other reads of the same reader. Isolation is between nodes, not between users.
 
-The router sends reads to readers in this design. Today it sends all requests to the writer ([Router](router.md)), so that a user reads the user's own write.
+The router sends reads to readers in this design. Today it sends all requests to the writer ([Router](../../router/README.md)), so that a user reads the user's own write.
 This stays the default: a read without a sequence number goes to the writer.
 A client that sends the sequence number of a version can get the read from a reader that reached that version. If no reader reached it within a short wait, the router sends the read to the writer.
 

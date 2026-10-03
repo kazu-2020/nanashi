@@ -2,14 +2,20 @@
 
 This file gives guidance to Claude Code (claude.ai/code) when it works with the code in this repository.
 
-nanashi is a sparse multidimensional calculation engine for planning tools such as Pigment. It has 2 layers: the Python package `sparse_engine` and the Rust engine `nanashi_core` (`native/`). A Go router (`router/`) is also available. It goes in front of the servers.
-The specifications are in `docs/` (see "Documentation" in README.md for the list). If you change behavior or performance, also update the related document and tables in `docs/`.
+nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these directories:
+
+- `tessera/`: the sparse multidimensional calculation engine for planning tools such as Pigment. It has 2 layers: the Python package `sparse_engine` and the Rust engine `nanashi_core` (`tessera/native/`).
+- `router/`: a Go router. It goes in front of the engine servers. `router/README.md` is its specification.
+
+The engine specifications are in `tessera/docs/` (see "Documentation" in `tessera/README.md` for the list). If you change behavior or performance, also update the related document and tables in `tessera/docs/`.
+
+All paths in this file below are relative to `tessera/`, except `router/`, `compose.yaml`, and `.github/`.
 
 ## Language and writing rules
 
 - Write these items in English that follows ASD-STE100 (Simplified Technical English):
   - Code comments and docstrings (Python, Rust, Go).
-  - Documents (`README.md`, `docs/`, this file).
+  - Documents (`README.md` files, `tessera/docs/`, this file).
   - Commit messages, pull request titles, and pull request descriptions.
 - Apply these ASD-STE100 rules:
   - Use a maximum of 20 words in an instruction and 25 words in a description.
@@ -42,13 +48,15 @@ The specifications are in `docs/` (see "Documentation" in README.md for the list
 
 ## Commands
 
+Run the Python and Rust commands in `tessera/`.
+
 ```bash
 # Setup (install the Rust engine into .venv. psycopg[binary] connects to PostgreSQL without a local libpq)
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]" "psycopg[binary]"
 VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
 
-# PostgreSQL (port 55432) and the S3-compatible object storage RustFS (port 59000)
+# PostgreSQL (port 55432) and the S3-compatible object storage RustFS (port 59000). compose.yaml is at the root
 docker compose up -d
 
 # Tests. SPARSE_ENGINE sets the default engine (reference / rust; the default is reference). CI runs both
@@ -66,7 +74,7 @@ SPARSE_ENGINE=rust .venv/bin/python -m unittest tests.test_reads.<Class>.<test>
 cargo test --release --workspace --manifest-path native/Cargo.toml
 
 # Router (Go). The PgResolver tests use the nanashi_model table that the Python tests make
-(cd router && go vet ./... && go test ./...)
+(cd ../router && go vet ./... && go test ./...)
 
 # Static checks (the same as CI)
 .venv/bin/pyflakes sparse_engine tests examples bench*.py
@@ -124,7 +132,7 @@ Then add a formula that uses the node to the model in `tests/test_expr_coverage.
 - Do not use a `Model` directly from more than one thread. For concurrent use, use `Workspace` or `Replica`.
 - An HTTP write must have a `client_op_id`. If a client sends the write again, the server does not commit it two times.
 - The production journal is `PgJournal`. `FileJournal` is mainly for development and tests.
-- The router (`docs/router.md`) resends writes. Because of `client_op_id`, a resent write is not committed two times. If you change the next action for each response (`decide` in `router.go`), keep this condition.
+- The router (`router/README.md`) resends writes. Because of `client_op_id`, a resent write is not committed two times. If you change the next action for each response (`decide` in `router.go`), keep this condition.
 
 ## Test policy
 
