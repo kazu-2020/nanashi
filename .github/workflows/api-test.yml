@@ -1,0 +1,53 @@
+name: api-test
+
+# Start only when api/ or this file changes.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - api/**
+      - .github/workflows/api-test.yml
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: nanashi
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+      # The ListModels test reads the nanashi_model table. The engine schema makes it.
+      - name: Make the engine schema
+        working-directory: tessera
+        run: |
+          python -m pip install "psycopg[binary]>=3.2,<4"
+          python -m sparse_engine.pg_journal migrate "$NANASHI_PG_DSN"
+      - name: Test
+        working-directory: api
+        run: |
+          go vet ./...
+          go test -count=1 ./...  # The table contents are not in the test cache key, so do not use the cache.

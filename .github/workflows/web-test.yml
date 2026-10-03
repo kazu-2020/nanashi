@@ -1,0 +1,53 @@
+name: web-test
+
+# Start only when web/, proto/ or this file changes.
+# This workflow also makes sure that the generated code in api/gen/ and web/src/gen/ agrees with proto/.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - web/**
+      - proto/**
+      - api/gen/**
+      - buf.yaml
+      - buf.gen.yaml
+      - .github/workflows/web-test.yml
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      # buf generate runs the Go plugins with "go tool".
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+      - run: pnpm install --frozen-lockfile
+      - name: Make sure that the generated code is up to date
+        run: |
+          pnpm generate
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
+      - run: pnpm exec vp check
+      - run: pnpm build

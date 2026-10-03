@@ -1,3 +1,10 @@
 {
-  "language": "japanese"
+  "language": "japanese",
+  "permissions": {
+    "deny": [
+      "Read(./api/gen/**/*)",
+      "Read(./web/src/gen/**/*)",
+      "Read(./web/dist/**/*)"
+    ]
+  }
 }

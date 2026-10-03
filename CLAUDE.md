@@ -6,6 +6,9 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 
 - `tessera/`: the sparse multidimensional calculation engine. `tessera/CLAUDE.md` gives the guidance for it.
 - `router/`: a Go router. It goes in front of the engine servers. `router/README.md` is its specification.
+- `api/`: the Go application server. `api/CLAUDE.md` gives the guidance for it.
+- `web/`: the frontend (SPA). `web/CLAUDE.md` gives the guidance for it.
+- `proto/`: the Connect contract between `api/` and `web/`. `buf.gen.yaml` makes `api/gen/` and `web/src/gen/` from it.
 - `compose.yaml`: PostgreSQL (port 55432) and RustFS (port 59000) for development and tests. Start them with `docker compose up -d`.
 
 ## Language and writing rules
@@ -31,6 +34,8 @@ Each directory has its own workflow in `.github/workflows/`. A workflow starts o
 
 - `tessera-test.yml`: the Python and Rust tests and the static checks of `tessera/`.
 - `router-test.yml`: `go vet` and `go test` of `router/`.
+- `api-test.yml`: `go vet` and `go test` of `api/`.
+- `web-test.yml`: `vp check` and the build of `web/`. It also makes sure that the generated code agrees with `proto/`.
 
 ## Router
 
