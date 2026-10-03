@@ -159,7 +159,7 @@ The role changes of the standby (promotion, demotion, writes that entered the qu
 | `sparse_engine/parser.py` | Parse of formula text, and conversion from the syntax tree to text |
 | `sparse_engine/delta.py` | The decision about which formulas can use incremental aggregation |
 | `sparse_engine/engine.py`, `rust_engine.py` | The interface for storage and evaluation (`Store`), the reference implementation, the bridge to Rust (`RustEngine` and `RustPlanner`) |
-| `sparse_engine/storage.py`, `npz.py` | Save and load (Parquet), and load of the format of earlier versions (npz) |
+| `sparse_engine/storage.py` | Save and load (Parquet) |
 | `sparse_engine/journal.py` | The transaction journal, the file journal, recovery from a snapshot and journal replay |
 | `sparse_engine/workspace.py` | Publication of versions and the single writer (concurrent reads and writes, group commit, optimistic locking) |
 | `sparse_engine/pg_journal.py` | The PostgreSQL journal (lease and fencing, deferred application of large changes) |

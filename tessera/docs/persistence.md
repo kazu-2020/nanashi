@@ -20,11 +20,7 @@ Thus it does not make Python objects, also for large models (it also releases th
 
 A member number is the position of the member in the member list of `model.json`.
 Some dimensions have an order that is different from the order of the numbers. These are dimensions that have an inserted member or a changed order, and dimensions without order.
-For these dimensions, `model.json` also has `member_order`, the list of numbers in the member order (from version 4).
-
-The engine can also read the formats of earlier versions (versions 1 and 2 keep the input values in `inputs.npz`) without numpy.
-Version 1 has no IDs. When the engine reads version 1, it gives new IDs.
-Versions up to 3 do not have `member_order`. Thus the member order is the order of the numbers.
+For these dimensions, `model.json` also has `member_order`, the list of numbers in the member order.
 
 ## Transactions and the journal
 
@@ -85,7 +81,7 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
 - `log/<first sequence number>.jsonl`: The journal, with 1 transaction on each line.
   After the engine puts a snapshot, it writes the next entries to a new file (a segment).
   To open, the engine reads only the last segment and the segments in the range where it remembers `client_op_id` (the last 100 thousand entries, `op_window`).
-  For replay, it reads only the segments after the snapshot. It reads `log.jsonl` of earlier versions as the first segment.
+  For replay, it reads only the segments after the snapshot.
   The engine appends the entry and writes it to the disk (`F_FULLFSYNC` on macOS), and then commits.
   If the write or the check of the write fails, the engine makes the file the length from before the append again. If it cannot do this, it refuses all subsequent writes.
   If the last line is not complete (the process stopped during the write), readers ignore it, and the next writer removes it.
@@ -129,8 +125,6 @@ There are 4 tables (`nanashi_model`, `nanashi_operation`, `nanashi_cell_change`,
 The schema has a version (`nanashi_schema`). To update it to the latest version, run `python -m sparse_engine.pg_journal migrate <DSN>` (for the server, use `--migrate`).
 The engine does not run DDL at each connection, because DDL gets table locks and competes with other processes that write.
 If the version is not correct, `PgJournal` raises `SchemaError` when it opens.
-Version 2 changed the operation time (`at`) to `timestamptz` and made the index of the cell history unique. The migration removes duplicates that earlier versions wrote.
-Version 3 added the address that the lease owner publishes (`lease_endpoint`).
 `journal.prune(keep=2)` deletes old snapshots and the files for large changes before them.
 The engine first adds those changes to the cell history table and then deletes the files, thus journal replay and the cell history stay available.
 It also forgets the `client_op_id` of journal entries older than the last 100 thousand entries.
@@ -177,7 +171,5 @@ Thus an earlier version can read files after a later version adds columns.
 The reason for the delay is that it is expensive to insert rows into the table 1 at a time. If this were in the commit path, commits of large writes would become more than 10 times slower.
 Before the engine gets the history of a cell, it first adds the changes that are not in the table yet.
 Rust makes the rows for the COPY into the table.
-The engine can also read npz files that earlier versions wrote.
-If you move a journal from a local directory to object storage, the engine can read the old files without changes (the journal keeps the location of each file as it is).
 After the engine adds more than 100 thousand rows, it updates the statistics of the table.
 (Immediately after a large insert, the statistics are old. Then the query plan does not use the cell index, and the history of 1 cell took 250 ms. After the update of the statistics, it takes 0.2 ms.)

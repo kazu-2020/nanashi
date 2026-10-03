@@ -19,7 +19,7 @@
 持つ。Parquet の列は、座標のメンバーの ID（d<軸の ID>、Int64）と、変更前 old と変更後 new（空は null）。
 cell_change への書き込み（と索引の更新）は確定の後で行う（index_pending）。行を 1 件ずつ入れる費用が
 大きく、確定の経路に入れると大量の書き込みの確定が十数倍遅くなるため。セルの履歴を引くときは、
-先に未反映の分を反映する。以前の版が書いた npz のファイルも読める。
+先に未反映の分を反映する。
 
 書き込むプロセスは 1 つに限る。最初に追記するときにリースを取り、世代番号を 1 つ進める。確定は
 「通し番号が読んだとおりで、世代番号が自分のもの」のときだけ通る 1 回のトランザクションで行う。
@@ -34,8 +34,6 @@ take は待たずに取れるかだけを試す（待機系が使う）。リー
 from __future__ import annotations
 
 import datetime
-import hashlib
-import io
 import logging
 import os
 import socket
@@ -58,29 +56,30 @@ log = logging.getLogger(__name__)
 # （DDL は表のロックを取るので、書き込み中の別のプロセスと競り合う）
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
-create table if not exists nanashi_model (
-    model_id      text primary key,
-    head_seq      bigint not null default 0,
-    writer_epoch  bigint not null default 0,
-    lease_holder  text,
-    lease_expires timestamptz
+create table nanashi_model (
+    model_id       text primary key,
+    head_seq       bigint not null default 0,
+    writer_epoch   bigint not null default 0,
+    lease_holder   text,
+    lease_expires  timestamptz,
+    lease_endpoint text
 );
-create table if not exists nanashi_operation (
+create table nanashi_operation (
     model_id     text not null,
     seq          bigint not null,
-    at           text not null,
+    at           timestamptz not null,
     user_name    text,
     reason       text,
     client_op_id text,
     record       jsonb not null,
+    cells_uri    text,
+    indexed      boolean not null default true,
     primary key (model_id, seq)
 );
-alter table nanashi_operation add column if not exists cells_uri text;
-alter table nanashi_operation add column if not exists indexed boolean not null default true;
-create index if not exists nanashi_operation_unindexed on nanashi_operation (model_id, seq) where not indexed;
-create unique index if not exists nanashi_operation_client_op
+create index nanashi_operation_unindexed on nanashi_operation (model_id, seq) where not indexed;
+create unique index nanashi_operation_client_op
     on nanashi_operation (model_id, client_op_id) where client_op_id is not null;
-create table if not exists nanashi_cell_change (
+create table nanashi_cell_change (
     model_id  text not null,
     seq       bigint not null,
     metric_id bigint not null,
@@ -88,26 +87,15 @@ create table if not exists nanashi_cell_change (
     old_value double precision,
     new_value double precision
 );
-create index if not exists nanashi_cell_change_by_seq on nanashi_cell_change (model_id, seq);
-create index if not exists nanashi_cell_change_by_cell on nanashi_cell_change (model_id, metric_id, coords, seq);
-create table if not exists nanashi_snapshot (
+create index nanashi_cell_change_by_seq on nanashi_cell_change (model_id, seq);
+create unique index nanashi_cell_change_by_cell on nanashi_cell_change (model_id, metric_id, coords, seq);
+create table nanashi_snapshot (
     model_id text not null,
     seq      bigint not null,
     uri      text not null,
     meta     jsonb not null,
     primary key (model_id, seq)
 );
-"""),
-    (2, """
-alter table nanashi_operation alter column at type timestamptz using at::timestamptz;
-delete from nanashi_cell_change a using nanashi_cell_change b
-    where a.ctid < b.ctid and a.model_id = b.model_id and a.seq = b.seq and a.metric_id = b.metric_id
-      and a.coords = b.coords;
-drop index if exists nanashi_cell_change_by_cell;
-create unique index nanashi_cell_change_by_cell on nanashi_cell_change (model_id, metric_id, coords, seq);
-"""),
-    (3, """
-alter table nanashi_model add column if not exists lease_endpoint text;
 """),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -118,7 +106,7 @@ class SchemaError(Exception):
 
 
 def schema_version(conn) -> int:
-    """データベースのスキーマの版。版の表がなければ 0（以前の版が作った表があっても）。"""
+    """データベースのスキーマの版。版の表がなければ 0。"""
     if conn.execute("select to_regclass('nanashi_schema')").fetchone()[0] is None:
         return 0
     row = conn.execute("select version from nanashi_schema").fetchone()
@@ -376,19 +364,11 @@ class PgJournal(Journal):
             self.objects.put(f"{prefix}-{name}", data)
             return f"{prefix}-{name}"
         files = write_cell_files(record, put)
-        return {"format": "parquet", "prefix": prefix, "files": files, "cells": cell_count(record)}
+        return {"prefix": prefix, "files": files, "cells": cell_count(record)}
 
     def _read_blob(self, blob: dict) -> list[dict]:
-        """_write_blob で置いたセルの変更を読む（Metric ごとの変更の塊）。以前の版の npz も読む。"""
-        if blob.get("format") != "parquet":
-            return _read_npz(self._get_checked(blob))
+        """_write_blob で置いたセルの変更を読む（Metric ごとの変更の塊）。"""
         return read_cell_files(blob["files"], self.objects.get)
-
-    def _get_checked(self, f: dict) -> bytes:
-        data = self.objects.get(f["uri"])
-        if hashlib.sha256(data).hexdigest() != f["sha256"]:
-            raise ValueError(f"{f['uri']}: セルの変更のファイルが壊れている")
-        return data
 
     def index_pending(self) -> int:
         """確定の後に回した大量のセルの変更を、cell_change に書き込む（専用の接続で行うので、
@@ -524,10 +504,8 @@ class PgJournal(Journal):
                                          " and seq <= %s and cells_uri is not null and indexed",
                                          (self.model_id, oldest)).fetchall()
             for seq, rec in rows:
-                blob = rec.pop("cells_blob")
-                for f in blob.get("files", [blob] if "uri" in blob else []):
-                    if not os.path.isabs(f["uri"]) and not f["uri"].startswith("s3://"):
-                        self.objects.delete(f["uri"])
+                for f in rec.pop("cells_blob")["files"]:
+                    self.objects.delete(f["uri"])
                     out["cells"] += 1
                 with self._lock:
                     self.conn.execute("update nanashi_operation set record = %s, cells_uri = null"
@@ -554,20 +532,6 @@ def _copy_cells(copy, model_id: str, seq: int, cells: list[dict]) -> None:
         for ids, old, new in rows:
             copy.write_row((model_id, seq, c["metric"], list(ids),
                             None if old is None else float(old), None if new is None else float(new)))
-
-
-def _read_npz(raw: bytes) -> list[dict]:
-    """以前の版が書いたセルの変更（1 つの npz に、Metric ごとの配列を持つ）。値は float で返す。"""
-    from . import npz
-    data = npz.load(io.BytesIO(raw))
-    cells = []
-    i = 0
-    while f"metric{i}" in data:
-        old = [None if n else v for v, n in zip(data[f"old{i}"], data[f"old_null{i}"])]
-        new = [None if n else v for v, n in zip(data[f"new{i}"], data[f"new_null{i}"])]
-        cells.append({"metric": data[f"metric{i}"][0], "rows": [list(r) for r in zip(data[f"coords{i}"], old, new)]})
-        i += 1
-    return cells
 
 
 def _iso(at) -> str:

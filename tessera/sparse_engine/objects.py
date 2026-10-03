@@ -16,7 +16,6 @@
     delete(キー)       消す（無くてもよい）
 
 記録先はキーだけを保存する（置き場所の絶対パスや URI を保存しないので、置き場所を移しても読める）。
-以前の版が保存した絶対パスや s3:// の URI も get で読める。
 """
 from __future__ import annotations
 
@@ -58,8 +57,7 @@ class LocalObjects:
             _fsync_dir(final.parent)
 
     def get(self, key: str) -> bytes:
-        # 以前の版は置き場所の絶対パスを保存していた
-        return (Path(key) if os.path.isabs(key) else self.root / key).read_bytes()
+        return (self.root / key).read_bytes()
 
     def list(self, prefix: str) -> list[str]:
         base = self.root / prefix
@@ -100,13 +98,8 @@ class S3Objects:
         self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data)
 
     def get(self, key: str) -> bytes:
-        if os.path.isabs(key):  # オブジェクトストレージに移る前に、ローカルのディレクトリに置いたもの
-            return Path(key).read_bytes()
-        bucket, name = self.bucket, self._key(key)
-        if key.startswith("s3://"):  # 以前の版は URI を保存していた
-            bucket, _, name = key.removeprefix("s3://").partition("/")
         try:
-            return self.client.get_object(Bucket=bucket, Key=name)["Body"].read()
+            return self.client.get_object(Bucket=self.bucket, Key=self._key(key))["Body"].read()
         except self.client.exceptions.NoSuchKey:
             raise FileNotFoundError(self.uri(key)) from None
 

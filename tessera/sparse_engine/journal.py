@@ -584,7 +584,7 @@ class FileJournal(Journal):
     記録はスナップショットを置いたあと（か、区切りが segment_bytes を超えたら）、次の追記から新しい区切りに
     書く。開くときは最後の区切りと、client_op_id を覚えておく範囲（最後の op_window 件）だけを読み、
     記録の再生はスナップショットより後の区切りだけを読む。prune で、古いスナップショットと、それより前の
-    区切りと大量の変更のファイルを消せる。以前の版の path/log.jsonl は、最初の区切りとして読む。
+    区切りと大量の変更のファイルを消せる。
 
     書き込むプロセスは 1 つに限る。最初に追記するときに path/lock の排他ロックを取り、release まで持つ。
     最後の行が途中で切れていれば（書いている途中で落ちた）、読むときは無視し、ロックを取ったときに捨てる。
@@ -651,9 +651,6 @@ class FileJournal(Journal):
     def _list_segments(self) -> list[tuple[int, Path]]:
         """記録の区切り（最初の通し番号, ファイル）を古い順に。まだなければ最初の区切りを 1 つ返す。"""
         segs = [(int(p.stem), p) for p in (self.path / "log").glob("*.jsonl") if p.stem.isdigit()]
-        legacy = self.path / "log.jsonl"
-        if legacy.exists():
-            segs.append((1, legacy))
         segs.sort()
         return segs or [(1, self.path / "log" / f"{1:020d}.jsonl")]
 
@@ -811,7 +808,7 @@ class FileJournal(Journal):
         def put(name: str, data: bytes) -> str:
             self.objects.put(f"{prefix}-{name}", data)
             return f"{prefix}-{name}"
-        return {"format": "parquet", "files": write_cell_files(record, put), "cells": cell_count(record)}
+        return {"files": write_cell_files(record, put), "cells": cell_count(record)}
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
@@ -867,11 +864,11 @@ class FileJournal(Journal):
 
     def snapshots(self) -> list[tuple[int, Snapshot]]:
         """置き終えたスナップショット（通し番号が記録の最後以下のもの）を新しい順に。ハッシュは読むときに
-        確かめる（開くたびにすべてのファイルを読まない）。以前の版の snapshots/<通し番号>/meta.json も読む。"""
+        確かめる（開くたびにすべてのファイルを読まない）。"""
         out = []
         for key in self.objects.list("snapshots/"):
             prefix, _, name = key.rpartition("/")
-            if name not in (MANIFEST, "meta.json"):
+            if name != MANIFEST:
                 continue
             meta = json.loads(self.objects.get(key))
             if meta["seq"] <= self.head:  # 記録より新しい（記録を過去に戻したとき）ものは使わない

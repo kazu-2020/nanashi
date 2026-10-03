@@ -312,21 +312,6 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual([s for s, _ in self.journals.journal().snapshots()], [0])
         check_same_state(self, self.m, self.reopen())
 
-    def test_legacy_snapshot_directory_is_read(self):
-        self.file_only()
-        self.m.set_cell("Price", 12, Product="A")
-        self.m.checkpoint()
-        # 以前の版の置き方（snapshots/<通し番号>/ に、ファイルと meta.json）に直す
-        objects = self.m.journal.objects
-        (seq, place), _ = self.journals.journal().snapshots()
-        for name in place.files:
-            objects.put(f"snapshots/{seq:020d}/{name}", objects.get(f"{place.uri}/{name}"))
-            objects.delete(f"{place.uri}/{name}")
-        objects.put(f"snapshots/{seq:020d}/meta.json", objects.get(f"{place.uri}/manifest.json"))
-        objects.delete(f"{place.uri}/manifest.json")
-        self.assertEqual(self.journals.journal().snapshots()[0][1].uri, f"snapshots/{seq:020d}")
-        check_same_state(self, self.m, self.reopen())
-
     def test_snapshots_split_the_log_and_prune_removes_the_old_part(self):
         self.file_only()
         j = self.m.journal
@@ -353,17 +338,6 @@ class Journal(JournalCase, unittest.TestCase):
                 self.m.set_cell("Price", i, Product="A")
         for j in (self.m.journal, self.journals.journal(op_window=2)):
             self.assertEqual((j.seq_of("a"), j.seq_of("b"), j.seq_of("c")), (None, 2, 3))
-
-    def test_log_written_by_earlier_versions_is_read(self):
-        self.file_only()
-        self.m.set_cell("Price", 12, Product="A")
-        self.m.journal.release()
-        self.m.journal.log_path.rename(self.path / "log.jsonl")  # 以前の版は 1 つのファイルに書いていた
-        reopened = self.reopen()
-        self.assertEqual(reopened.get("Price", Product="A"), 12)
-        reopened.set_cell("Price", 13, Product="A")
-        self.assertEqual(reopened.journal.log_path, self.path / "log.jsonl")  # 区切るまで同じファイルに書く
-        check_same_state(self, reopened, self.reopen())
 
     def test_corruption_in_the_middle_is_an_error(self):
         self.file_only()

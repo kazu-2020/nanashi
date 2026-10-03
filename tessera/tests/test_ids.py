@@ -1,8 +1,6 @@
 """変わらない ID と、Metric の削除と名前の変更。"""
-import json
 import tempfile
 import unittest
-from pathlib import Path
 
 from examples.fpa import build as build_fpa
 from sparse_engine import Model, to_formula
@@ -241,26 +239,6 @@ class Storage(unittest.TestCase):
             self.assertTrue(same(a[name], b[name]), name)
         loaded.add_member("Product", "F")  # 読み込んだあとも、使った ID を振らない
         self.assertEqual(len(set(all_ids(loaded))), len(all_ids(loaded)))
-
-    def test_reads_format_1(self):
-        m = build_with(self.engine())
-        with tempfile.TemporaryDirectory() as tmp:
-            m.save(tmp)
-            from .legacy import to_format2
-            to_format2(tmp, m)  # 版 1 も入力の値は inputs.npz に持つ
-            path = Path(tmp) / "model.json"
-            meta = json.loads(path.read_text())
-            meta["format"] = 1
-            del meta["next_id"]
-            for d in meta["dimensions"]:
-                del d["id"], d["member_ids"]
-            for x in meta["metrics"]:
-                del x["id"]
-            path.write_text(json.dumps(meta))
-            loaded = Model.load(tmp, self.engine())
-        ids = all_ids(loaded)
-        self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(snapshot(loaded).keys(), snapshot(m).keys())
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
