@@ -11,6 +11,14 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 - `proto/`: the Connect contract between `api/` and `web/`. `buf.gen.yaml` makes `api/gen/` and `web/src/gen/` from it.
 - `compose.yaml`: PostgreSQL (port 55432) and RustFS (port 59000) for development and tests. Start them with `docker compose up -d`.
 
+## Skills for the work
+
+- Use the `ponytail` skill and the `pstack:poteto-mode` skill together. One skill does not replace the other skill.
+  - `ponytail` sets the size of the solution. Make the smallest change that works.
+  - `pstack:poteto-mode` sets the process. Plan the work, delegate it to subagents, and verify it.
+- If a task changes more than one file or needs a design decision, invoke `pstack:poteto-mode` before you start the work.
+- If the scope of a task becomes larger during the work, invoke `pstack:poteto-mode` at that time.
+
 ## Language and writing rules
 
 - Write these items in English that follows ASD-STE100 (Simplified Technical English):
