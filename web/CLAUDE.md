@@ -26,7 +26,7 @@ It calls the application server (`api/`) with Connect.
 - Before you use a HeroUI component, read its docs in `.heroui-docs/react/`. The index below shows the files.
 - If `.heroui-docs/` is missing, run `scripts/heroui-docs.sh`. Do not run the command in the index. That command changes this file.
 - The `heroui-react` MCP server (`.mcp.json`) gives the source code, the styles and the theme variables of the components.
-- After a HeroUI upgrade, update the index with `npx -y heroui-cli@3.0.5 agents-md --react --output CLAUDE.md`. Then run `pnpm exec vp check --fix`.
+- After a HeroUI upgrade, update the index with `pnpm dlx heroui-cli@3.0.5 agents-md --react --output CLAUDE.md`. Then run `pnpm exec vp check --fix`.
 
 <!-- HEROUI-REACT-AGENTS-MD-START -->
 
