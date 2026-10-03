@@ -204,12 +204,15 @@ pub(crate) fn union(cfg: &Config, a: Cube, b: Cube, kind: Kind, f: impl Fn(Optio
     Cube { pack: a.pack, kind, cells: merge_sorted(&x[..], &y[..], true, f) }
 }
 
+/// If the left side of an INNER JOIN has this number of cells or fewer, evaluate the right side only for the members of the left side.
+const SEMI_MAX: usize = 4096;
+
 /// c に現れるメンバーだけに各軸を絞った範囲。c が大きければ None（絞っても得をしない）。
 ///
 /// INNER JOIN の結果は c に値があるセルにしか残らないので、もう片側をこの範囲で評価しても
 /// 結果は変わらない。もう片側が持たない軸の絞り込みは、その軸を外す演算が捨てるので害がない。
 pub(crate) fn semi(r: &Restrict, c: &Cube, cat: &Catalog) -> Option<Restrict> {
-    if c.dims().is_empty() || c.cells.len() > cat.cfg.semi_max {
+    if c.dims().is_empty() || c.cells.len() > SEMI_MAX {
         return None;
     }
     let mut out = r.clone();

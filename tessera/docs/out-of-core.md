@@ -1,6 +1,6 @@
 # Design note: store data on NVMe (SSD)
 
-This document is a design study. We implemented only the first step of item 2 of the plan: the base is now an immutable column with no unused capacity. For all other parts, there is only an example for measurement (`native/engine/examples/out_of_core.rs`).
+This document is a design study. We implemented only the first step of item 2 of the plan: the base is now an immutable column with no unused capacity. For all other parts, we only measured with a separate program (`native/engine/examples/out_of_core.rs`). We removed this program. It is in the git history.
 
 ## Conclusion
 
@@ -27,16 +27,13 @@ This document is a design study. We implemented only the first step of item 2 of
    - For memory accounting, the engine counts the size of the base (`base` in `Model.memory()`) for all locations. `max_bytes` is a budget for intermediate results only, and it does not change with the location of the base. If we add a file mapping or shared memory as a location, the engine will count the part on the Rust heap in a different field.
    - The speed did not change after the change to columns (see "Before and after the change to immutable columns for the base" below).
    - As the next step, we tried a change that puts the journal snapshot in the same flat format as the base. The snapshot also holds the values of the formula Metrics, so the recalculation at open is only incremental. We measured this change and did not keep it (see "Proposal: put formula Metric values in the snapshot" below).
-3. Write to NVMe only when the intermediate results are more than `max_bytes`. Use an external sort for the rekey, and do the merge in parallel for each key range (`rekey_external` in the example).
+3. Write to NVMe only when the intermediate results are more than `max_bytes`. Use an external sort for the rekey, and do the merge in parallel for each key range (`rekey_external` in the measurement program).
 
 We will decide on items 2 and 3 after item 1. Before the decision, we will measure again where the memory peak stays.
 
 ## Measurement method
 
-```bash
-cargo run --release -p nanashi-engine --example out_of_core --manifest-path native/Cargo.toml -- [セル数] [置き場所] [pread|mmap|heap ...]
-```
-
+We removed the measurement program. It is in the git history.
 The measurement does not use the engine itself. It makes files in the same layout as the base of the Store (two columns: u64 keys in ascending order and f64 values) and measures them.
 
 - A has 67.11 million cells, and B has 80.45 million cells. They have the same 4 dimensions. B has 80% of the keys of A, plus the adjacent keys. Together, the files are 2,252 MB.
@@ -224,7 +221,7 @@ We measured the version of `Column` with a raw pointer. `Box<[T]>` also reads th
 | Monthly sum of sales (`summarize`) | 4.95, 4.47 ms | 4.48, 4.36 ms |
 | Save the snapshot | 84, 78 ms | 91, 99 ms |
 
-Example (heap in `out_of_core.rs`, A has 8.39 million cells, 2 runs).
+Measurement program (heap, A has 8.39 million cells, 2 runs).
 
 | Operation | Threads | Before (`Vec`) ms | Immutable columns ms |
 |---|---|---|---|

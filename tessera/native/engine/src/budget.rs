@@ -21,10 +21,6 @@ impl Budget {
         Budget { limit, used: Cell::new(0) }
     }
 
-    pub fn limit(&self) -> usize {
-        self.limit
-    }
-
     /// 今持っている途中結果のバイト数。
     pub fn used(&self) -> usize {
         self.used.get()
@@ -37,10 +33,6 @@ impl Budget {
             return Err(self.over(bytes, what));
         }
         Ok(())
-    }
-
-    pub(crate) fn mark(&self) -> usize {
-        self.used.get()
     }
 
     /// ノードの評価が終わった。mark 以降に数えた子の結果を捨て、ノードの結果 out を数える。

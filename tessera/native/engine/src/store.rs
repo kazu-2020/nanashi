@@ -245,11 +245,7 @@ impl Store {
     }
 
     /// 同じ軸と分割軸の空の Store。
-    pub fn emptied(&self) -> Store {
-        self.empty_like()
-    }
-
-    pub(crate) fn empty_like(&self) -> Store {
+    pub fn empty_like(&self) -> Store {
         Store {
             metric_dims: self.metric_dims.clone(),
             pack: self.pack.clone(),

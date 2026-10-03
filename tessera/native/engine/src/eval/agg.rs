@@ -105,7 +105,7 @@ impl Rows {
 
     pub(crate) fn into_cube(self) -> Cube {
         match self {
-            Rows::Store(s) => s.read(&Restrict::all(0)),
+            Rows::Store(s) => s.as_cube(),
             Rows::Shared(c) => (*c).clone(),
             Rows::Owned(c) => c,
         }

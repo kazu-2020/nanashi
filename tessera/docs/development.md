@@ -97,9 +97,7 @@ If you do not give `--size`, the example runs all sizes up to large (20,000 empl
 The other benchmarks are the `bench*.py` files in the repository root.
 With large models, they use some GB of memory.
 Thus, run them one at a time.
-`native/engine/examples/key_layout.rs` measures the speed and memory for different key layouts ("Measurement of key formats" in the [design note](member-numbering.md)).
-`native/engine/examples/out_of_core.rs` measures the speed and memory when the stored data is on NVMe ("Measurement method" in the [design note](out-of-core.md)).
-This example makes files of some GB, and the RSS includes the pages that it reads through mmap.
+We removed the measurement programs for key layouts ([member-numbering.md](member-numbering.md)) and for stored data on NVMe ([out-of-core.md](out-of-core.md)). They are in the git history.
 
 ## Test policy
 

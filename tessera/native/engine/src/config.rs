@@ -13,8 +13,6 @@ pub struct Config {
     pub postings_min_rows: usize,
     /// 集計先が少なくなくても、読みながら集計する経路を使う（テスト用）。
     pub stream_always: bool,
-    /// INNER JOIN の左がこの件数以下なら、右を左のメンバーに絞って評価する。
-    pub semi_max: usize,
     /// これより行の多い Metric では、値が変わった範囲がセル全体の大半を占めれば全体に広げる。
     pub widen_min_rows: usize,
     /// 1 つの式の評価が同時に持つ途中結果のバイト数の上限。並列に評価するときは、この予算を分ける。
@@ -37,7 +35,6 @@ impl Default for Config {
             par_min: 16_384,
             postings_min_rows: 1024,
             stream_always: false,
-            semi_max: 4096,
             widen_min_rows: 4096,
             max_bytes: usize::MAX,
             fuse: true,

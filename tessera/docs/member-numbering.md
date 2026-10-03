@@ -309,12 +309,9 @@ It does not apply to the largest ID that was issued.
 ## Measurement of key formats
 
 We measured the speed and memory of different key formats with `native/engine/examples/key_layout.rs`.
+We removed this program. It is in the git history.
 
-```bash
-cargo run --release -p nanashi-engine --example key_layout --manifest-path native/Cargo.toml -- [セル数]
-```
-
-The example does not use the engine itself.
+The program does not use the engine itself.
 It keeps the same set of coordinates in 4 formats.
 It measures 3 operations that are the main operations of the engine, on 1 thread.
 

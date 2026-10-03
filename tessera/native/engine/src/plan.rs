@@ -25,32 +25,6 @@ fn sorted(mut ms: Vec<u32>) -> Vec<u32> {
     ms
 }
 
-/// 昇順の 2 つの集合の和。
-fn merged(a: &[u32], b: &[u32]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(a.len() + b.len());
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => {
-                out.push(a[i]);
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                out.push(b[j]);
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                out.push(a[i]);
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    out.extend_from_slice(&a[i..]);
-    out.extend_from_slice(&b[j..]);
-    out
-}
-
 impl Reg {
     pub fn new(sels: Vec<(DimId, Vec<u32>)>) -> Reg {
         let mut sels: Vec<(DimId, Vec<u32>)> = sels.into_iter().map(|(d, ms)| (d, sorted(ms))).collect();
@@ -105,7 +79,7 @@ fn union(a: Option<Reg>, b: Option<Reg>) -> Option<Reg> {
     match (a, b) {
         (None, x) | (x, None) => x,
         (Some(a), Some(b)) => Some(Reg {
-            sels: a.sels.iter().filter_map(|(d, ms)| b.get(*d).map(|ns| (*d, merged(ms, ns)))).collect(),
+            sels: a.sels.iter().filter_map(|(d, ms)| b.get(*d).map(|ns| (*d, sorted([&ms[..], ns].concat())))).collect(),
         }),
     }
 }
@@ -854,7 +828,7 @@ impl<'a> Run<'a> {
             }
             if r.is_all() {
                 // 全時点を書き直すので、空から書き込む（既存のセルを時点ごとに消して書き直すより速い）
-                self.stores[*n] = Arc::new(self.stores[*n].emptied());
+                self.stores[*n] = Arc::new(self.stores[*n].empty_like());
             }
         }
         // 格納データにその場で 1 時点ずつ書き込む。次の時点の前月参照は、書き込んだばかりの時点を読む
