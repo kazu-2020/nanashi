@@ -19,6 +19,15 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 - If a task changes more than one file or needs a design decision, invoke `pstack:poteto-mode` before you start the work.
 - If the scope of a task becomes larger during the work, invoke `pstack:poteto-mode` at that time.
 
+## Code style
+
+- Keep actions, calculations, and data apart (from "Grokking Simplicity").
+  - An action has side effects. Its result changes with the time or the number of runs. Examples: database I/O, network I/O, the clock.
+  - A calculation is a pure function. The same input always gives the same output.
+  - Data is a fact about an event. Example: a row that you read from the database.
+- Put the logic in calculations. Keep actions small, and put them at the edges of the code.
+- Use immutable data when the language lets you.
+
 ## Language and writing rules
 
 - Write these items in English that follows ASD-STE100 (Simplified Technical English):
