@@ -195,6 +195,9 @@ class Api:
         region = self.c.get("/")[1]["dimensions"]["Region"]
         self.assertEqual(region["members"], ["N", "S", "W"])
         self.assertEqual((region["properties"], region["property_values"]), ({"Big": "Region"}, {"Big": {"N": "S"}}))
+        again = [{"op": "add_dimension", "args": ["Region", []]}]
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "d2", "ops": again})[0], 400)
+        self.assertEqual(self.c.get("/")[1]["dimensions"]["Region"]["members"], ["N", "S", "W"])
 
     def test_member_order_through_the_api(self):
         ops = [{"op": "add_member", "args": ["Product", "p_new"], "kwargs": {"at": 1}},

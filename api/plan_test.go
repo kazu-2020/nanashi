@@ -80,6 +80,23 @@ func TestAccessLimits(t *testing.T) {
 	}
 }
 
+func TestLimitsThroughProperties(t *testing.T) {
+	em := engineModel{Dims: []engineDim{
+		{Name: "Product", Members: []string{"A", "B"}},
+		{Name: "Sales", Members: []string{"1", "2", "3"},
+			Props: []engineProp{{Name: "Product", Target: "Product", Values: map[string]string{"1": "A", "2": "B"}}}},
+		{Name: "Line", Members: []string{"x", "y"},
+			Props: []engineProp{{Name: "Sale", Target: "Sales", Values: map[string]string{"x": "1", "y": "2"}}}},
+	}}
+	l := accessLimits(contributor, []*nanashiv1.AccessRule{{Role: contributor, List: "Product", Members: []string{"A"}, Write: true}}).through(em)
+	if !l.visible("Sales", "1") || l.visible("Sales", "2") || l.visible("Sales", "3") {
+		t.Errorf("rows of other or blank products must be hidden: %+v", l["Sales"])
+	}
+	if !l.visible("Line", "x") || l.visible("Line", "y") || !l["Line"].write["x"] {
+		t.Errorf("the limit must follow a chain of properties: %+v", l["Line"])
+	}
+}
+
 func TestWriteOps(t *testing.T) {
 	em := model(t)
 	num := func(v float64) *nanashiv1.Value { return &nanashiv1.Value{Value: &nanashiv1.Value_Number{Number: v}} }
@@ -125,6 +142,11 @@ func TestQueryReads(t *testing.T) {
 	// A filter outside the rule leaves no member, so the Metric is left out.
 	req.Filters["Region"] = &nanashiv1.Members{Names: []string{"West"}}
 	if reads, _ := queryReads(req, em, eastOnly()); len(reads) != 2 || reads[0].Metric != "Revenue" {
+		t.Errorf("got %+v", reads)
+	}
+	// A removed member in a filter is dropped, not sent to the engine.
+	req.Filters = map[string]*nanashiv1.Members{"Product": {Names: []string{"A", "Gone"}}}
+	if reads, _ := queryReads(req, em, nil); reads[0].Query["Product"][0] != "A" {
 		t.Errorf("got %+v", reads)
 	}
 }

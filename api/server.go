@@ -316,7 +316,7 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 		}
 	}
 	out := &nanashiv1.ModelDef{Seq: em.Seq, Role: c.role}
-	out.Lists, out.Metrics = modelDef(em, meta, propCells, c.limits)
+	out.Lists, out.Metrics = modelDef(em, meta, propCells, c.limits.through(em))
 	items, err := s.items(ctx, app)
 	if err != nil {
 		return nil, err
@@ -449,6 +449,23 @@ func (s *PlanServer) editMembers(ctx context.Context, app, list string, edits []
 			return nil, dbError(err)
 		}
 	}
+	// Access rules and view filters refer to members by name, so give them the new name too.
+	for _, e := range edits {
+		r := e.GetRename()
+		if r == nil {
+			continue
+		}
+		if _, err := s.Pool.Exec(ctx, `update app_access_rule set members = (select jsonb_agg(case when m = to_jsonb($3::text) then to_jsonb($4::text) else m end)
+			from jsonb_array_elements(members) m) where app_id = $1 and list = $2 and members ? $3`,
+			app, list, r.Name, r.NewName); err != nil {
+			return nil, dbError(err)
+		}
+		if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, array['filters', $2, 'names'],
+			(select jsonb_agg(case when n = to_jsonb($3::text) then to_jsonb($4::text) else n end) from jsonb_array_elements(def->'filters'->$2->'names') n))
+			where app_id = $1 and def->'filters'->$2->'names' ? $3`, app, list, r.Name, r.NewName); err != nil {
+			return nil, dbError(err)
+		}
+	}
 	return ok()
 }
 
@@ -568,7 +585,7 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 	if err != nil {
 		return nil, err
 	}
-	reads, err := queryReads(req.Msg, em, callerOf(ctx).limits)
+	reads, err := queryReads(req.Msg, em, callerOf(ctx).limits.through(em))
 	if err != nil {
 		return nil, invalid(err)
 	}
@@ -590,7 +607,7 @@ func (s *PlanServer) WriteCells(ctx context.Context, req *connect.Request[nanash
 		return nil, err
 	}
 	c := callerOf(ctx)
-	ops, err := writeOps(req.Msg.Writes, em, c.limits)
+	ops, err := writeOps(req.Msg.Writes, em, c.limits.through(em))
 	if err != nil {
 		return nil, connect.NewError(connect.CodePermissionDenied, err)
 	}
@@ -609,7 +626,7 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 	var rows int
 	switch t := req.Msg.Target.(type) {
 	case *nanashiv1.ImportRequest_List:
-		if _, ruled := c.limits[t.List.List]; ruled {
+		if _, ruled := c.limits.through(em)[t.List.List]; ruled {
 			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s には権限の制限があるので読み込めない", t.List.List))
 		}
 		meta, err := s.meta(ctx, app)
@@ -625,7 +642,7 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 		}
 		rows = n
 	case *nanashiv1.ImportRequest_Metric:
-		ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limits)
+		ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limits.through(em))
 		if err != nil {
 			return nil, invalid(err)
 		}
@@ -682,6 +699,15 @@ func (s *PlanServer) DeleteItem(ctx context.Context, req *connect.Request[nanash
 	if _, err := s.Pool.Exec(ctx, "delete from app_item where app_id = $1 and id = $2 and type = $3",
 		req.Msg.AppId, req.Msg.Id, req.Msg.Type); err != nil {
 		return nil, dbError(err)
+	}
+	if req.Msg.Type == nanashiv1.ItemType_ITEM_TYPE_VIEW {
+		// A board must not keep a widget of a deleted view.
+		if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, '{widgets}', coalesce(
+			(select jsonb_agg(w) from jsonb_array_elements(def->'widgets') w where w->>'viewId' is distinct from $2), '[]'))
+			where app_id = $1 and type = $3 and def->'widgets' @> jsonb_build_array(jsonb_build_object('viewId', $2::text))`,
+			req.Msg.AppId, req.Msg.Id, nanashiv1.ItemType_ITEM_TYPE_BOARD); err != nil {
+			return nil, dbError(err)
+		}
 	}
 	return ok()
 }
@@ -822,15 +848,32 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 	if strings.TrimSpace(m.User) == "" {
 		return nil, invalid(errors.New("利用者が空"))
 	}
-	// ponytail: an ADMIN can remove the last ADMIN. Add a check when it becomes a problem.
-	var err error
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx) // A rollback after the commit does nothing.
+	// Lock the members of the application, so that two ADMINs cannot remove each other at the same time.
+	if _, err = tx.Exec(ctx, "select 1 from app_member where app_id = $1 for update", m.AppId); err != nil {
+		return nil, dbError(err)
+	}
 	if m.Role == nanashiv1.Role_ROLE_UNSPECIFIED {
-		_, err = s.Pool.Exec(ctx, "delete from app_member where app_id = $1 and user_name = $2", m.AppId, m.User)
+		_, err = tx.Exec(ctx, "delete from app_member where app_id = $1 and user_name = $2", m.AppId, m.User)
 	} else {
-		_, err = s.Pool.Exec(ctx, `insert into app_member (app_id, user_name, role) values ($1, $2, $3)
+		_, err = tx.Exec(ctx, `insert into app_member (app_id, user_name, role) values ($1, $2, $3)
 			on conflict (app_id, user_name) do update set role = excluded.role`, m.AppId, m.User, m.Role)
 	}
+	var admins int
+	if err == nil {
+		err = tx.QueryRow(ctx, "select count(*) from app_member where app_id = $1 and role = $2", m.AppId, admin).Scan(&admins)
+	}
 	if err != nil {
+		return nil, dbError(err)
+	}
+	if admins == 0 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("最後の ADMIN は外せない"))
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, dbError(err)
 	}
 	return ok()
@@ -844,8 +887,21 @@ func (s *PlanServer) SaveAccessRule(ctx context.Context, req *connect.Request[na
 		}
 		return connect.NewResponse(r), nil
 	}
-	if r.List == "" {
-		return nil, invalid(errors.New("ルールのリストを指定する"))
+	if r.Role != viewer && r.Role != contributor {
+		return nil, invalid(errors.New("ルールは VIEWER か CONTRIBUTOR に付ける（MODELER と ADMIN はルールを無視する）"))
+	}
+	em, _, err := s.Engines.model(ctx, r.AppId)
+	if err != nil {
+		return nil, err
+	}
+	d, found := em.dim(r.List)
+	if !found {
+		return nil, invalid(fmt.Errorf("リスト %s がない", r.List))
+	}
+	for _, x := range r.Members {
+		if !slices.Contains(d.Members, x) {
+			return nil, invalid(fmt.Errorf("%s に %q がない", r.List, x))
+		}
 	}
 	if r.Id == "" {
 		r.Id = newID()

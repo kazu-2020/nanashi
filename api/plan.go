@@ -226,6 +226,43 @@ func accessLimits(role nanashiv1.Role, rules []*nanashiv1.AccessRule) limits {
 	return out
 }
 
+// through also limits each list with a DIMENSION property on a limited list, for example the rows of a
+// transaction list with a Product property when Product has a rule. A member with a blank value is hidden.
+func (l limits) through(em engineModel) limits {
+	if len(l) == 0 {
+		return l
+	}
+	out := maps.Clone(l)
+	for range em.Dims { // Each pass follows one more property step, so len(Dims) passes reach all chains.
+		for _, d := range em.Dims {
+			lim, limited := l[d.Name]
+			for _, p := range d.Props {
+				target, ok := out[p.Target]
+				if !ok || p.Target == d.Name {
+					continue
+				}
+				derived := limit{read: map[string]bool{}, write: map[string]bool{}}
+				for _, m := range d.Members {
+					if target.read[p.Values[m]] {
+						derived.read[m] = true
+					}
+					if target.write[p.Values[m]] {
+						derived.write[m] = true
+					}
+				}
+				if limited {
+					derived = limit{read: intersect(lim.read, derived.read), write: intersect(lim.write, derived.write)}
+				}
+				lim, limited = derived, true
+			}
+			if limited {
+				out[d.Name] = lim
+			}
+		}
+	}
+	return out
+}
+
 func intersect(a, b map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	for k := range a {
@@ -349,12 +386,18 @@ next:
 		q := map[string][]string{}
 		for _, d := range m.Dims {
 			members := req.Filters[d].GetNames()
-			if lim, ok := l[d]; ok {
-				if len(members) == 0 {
-					members = slices.Sorted(maps.Keys(lim.read))
-				} else {
-					members = slices.DeleteFunc(slices.Clone(members), func(x string) bool { return !lim.read[x] })
+			lim, limited := l[d]
+			if limited && len(members) == 0 {
+				members = slices.Sorted(maps.Keys(lim.read))
+			}
+			if limited || len(members) > 0 {
+				// A saved filter or a rule can name a member that was removed later. The engine refuses such a name.
+				dim, _ := em.dim(d)
+				exists := map[string]bool{}
+				for _, x := range dim.Members {
+					exists[x] = true
 				}
+				members = slices.DeleteFunc(slices.Clone(members), func(x string) bool { return !exists[x] || limited && !lim.read[x] })
 				if len(members) == 0 {
 					continue next
 				}

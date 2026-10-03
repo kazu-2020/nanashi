@@ -218,7 +218,7 @@ function Body(props: {
   grid: Grid;
   display: Display;
   editable: (metric: string) => boolean;
-  onWrite: (r: string[], c: string[], text: string) => void;
+  onWrite: (r: string[], c: string[], text: string) => Promise<boolean>;
   onSelect: (r: string[], c: string[]) => void;
 }) {
   const g = props.grid;
@@ -285,9 +285,14 @@ function Body(props: {
                         aria-label={`${keyLabel(r)} ${keyLabel(c) || "値"}`}
                         className="w-24 text-right"
                         defaultValue={text}
-                        onBlur={(e) =>
-                          e.target.value !== text && props.onWrite(r, c, e.target.value)
-                        }
+                        onBlur={(e) => {
+                          const input = e.target;
+                          if (input.value === text) return;
+                          // A refused write must not leave the typed value in the grid.
+                          void props.onWrite(r, c, input.value).then((ok) => {
+                            if (!ok) input.value = text;
+                          });
+                        }}
                         onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
                       />
                     ) : (
