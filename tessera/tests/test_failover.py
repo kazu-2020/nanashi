@@ -55,10 +55,11 @@ class Failover(unittest.TestCase):
     def test_one_leader(self):
         import psycopg
 
-        from .failover import Write, get, post, seeded_model, serving, try_post
+        from .failover import Write, post, seeded_model, serving, try_post
+        from .test_server import Client
         with (seeded_model() as (model_id, tmp), serving(model_id, tmp, "a", role="leader") as a,
               serving(model_id, tmp, "b", role="standby") as b):
-            self.assertEqual([get(s.url + "/ready")[1]["role"] for s in (a, b)], ["leader", "standby"])
+            self.assertEqual([Client(s.url, None).get("/ready")[1]["role"] for s in (a, b)], ["leader", "standby"])
             status, body = try_post(b.url, Write("w-1", "i001", 7))  # 待機系は書き手の番地を返して拒む
             self.assertEqual((status, body["error"], body["leader"]), (421, "not_leader", a.url))
             with psycopg.connect(DSN) as conn:
@@ -68,8 +69,9 @@ class Failover(unittest.TestCase):
             self.assertEqual(post(a.url, Write("w-1", "i001", 7)), 1)
 
     def test_restarted_process_rejoins_as_standby(self):
-        from .failover import Write, get, post, seeded_model, serving, try_post, wait_ready
+        from .failover import Write, post, seeded_model, serving, try_post, wait_ready
         from .test_replica import wait_for
+        from .test_server import Client
         with (seeded_model() as (model_id, tmp), serving(model_id, tmp, "a", role="leader") as a,
               serving(model_id, tmp, "b", role="standby") as b):
             post(a.url, Write("w-1", "i001", 7))
@@ -78,7 +80,7 @@ class Failover(unittest.TestCase):
             wait_ready(b, role="leader")
             with serving(model_id, tmp, "a2", role="standby") as a2:  # 起動し直したプロセスは待機系になる
                 seq = post(b.url, Write("w-2", "i002", 8))
-                wait_for(lambda: get(a2.url + "/health")[1]["seq"] == seq)  # 書き手の確定に追従する
-                self.assertEqual(get(a2.url + "/metrics/Double/cell?Item=i002")[1]["value"], 16.0)
+                wait_for(lambda: Client(a2.url, None).get("/health")[1]["seq"] == seq)  # 書き手の確定に追従する
+                self.assertEqual(Client(a2.url, None).get("/metrics/Double/cell?Item=i002")[1]["value"], 16.0)
                 status, body = try_post(a2.url, Write("w-3", "i003", 9))
                 self.assertEqual((status, body["leader"]), (421, b.url))

@@ -1,4 +1,4 @@
-"""必要な分だけ読む API（get、slice、rows、summarize）と、公開中の版のビュー（Version）。"""
+"""The read API that reads only as necessary (get, slice, rows, summarize), and the published version."""
 import unittest
 
 from sparse_engine import Model
@@ -116,7 +116,7 @@ class RustReads(Reads, unittest.TestCase):
 
 
 class VersionView(unittest.TestCase):
-    def test_version_exposes_reads_only(self):
+    def test_version_reads_and_rejects_writes(self):
         ws = Workspace(build())
         try:
             v = ws.version
@@ -126,8 +126,8 @@ class VersionView(unittest.TestCase):
             self.assertEqual(v.summarize("Price").cells[()], 35)
             self.assertEqual(set(v.metrics) , set(build().metrics))
             self.assertEqual(v.seq, 0)
-            for name in ("set_cell", "add_formula", "transaction", "refresh", "spread"):
-                self.assertFalse(hasattr(v, name), name)
+            with self.assertRaisesRegex(ValueError, "公開済み"):
+                v.set_cell("Price", 99, Product="A")
             what_if = v.fork()  # 手元の複製は書き換えられる
             what_if.set_cell("Price", 99, Product="A")
             self.assertEqual(what_if.get("Price", Product="A"), 99)

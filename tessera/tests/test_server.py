@@ -29,8 +29,8 @@ TOKENS = {"t-alice": "alice", "t-bob": "bob"}
 
 
 class Client:
-    def __init__(self, url: str, token: str | None = "t-alice", headers: dict | None = None):
-        self.url = url
+    def __init__(self, url: str, token: str | None = "t-alice", headers: dict | None = None, timeout: float = 10):
+        self.url, self.timeout = url, timeout
         self.headers = dict(headers or {})
         if token is not None:
             self.headers["Authorization"] = f"Bearer {token}"
@@ -43,10 +43,9 @@ class Client:
                                      headers={"Content-Type": "application/json", **self.headers})
         return self._call(req)
 
-    @staticmethod
-    def _call(req) -> tuple[int, dict]:
+    def _call(self, req) -> tuple[int, dict]:
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.status, json.loads(r.read())
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
@@ -152,7 +151,7 @@ class Api:
         status, err = self.c.post("/writes", {**body, "user": "bob"})  # 本文の自己申告は受け付けない
         self.assertEqual((status, err["error"]), (400, "bad_request"))
         self.assertEqual(Client(self.server.url, "t-bob").post("/writes", body)[0], 200)
-        self.assertEqual(self.ws.version.model.last_record["user"], "bob")
+        self.assertEqual(self.ws.version.last_record["user"], "bob")
 
     def test_size_limits(self):
         status, err = self.c.get("/metrics/Stock/slice")  # 80 セルは上限 50 を超える
@@ -178,7 +177,7 @@ class Api:
                 status, err = self.c.post("/writes", {"client_op_id": f"bad-{op}", "ops": [op]})
                 self.assertEqual((status, err["error"]), (400, "bad_request"), err)
         self.assertEqual(self.c.get("/metrics/Stock/cell?Product=p0")[0], 400)
-        with mock.patch("sparse_engine.workspace.Version.get", side_effect=KeyError("secret")):
+        with mock.patch("sparse_engine.model.Model.get", side_effect=KeyError("secret")):
             status, err = self.c.get("/metrics/Stock/cell?Product=p1&Month=Jan")
         self.assertEqual((status, err["error"], err["message"]), (500, "internal", "内部エラー"))
         self.assertNotIn("secret", json.dumps(err))
@@ -234,7 +233,7 @@ class Limits(unittest.TestCase):
             self.assertEqual(Client(server.url, token=None).get("/")[0], 401)
             c = Client(server.url, token=None, headers={"X-Forwarded-User": "carol"})
             self.assertEqual(c.post("/writes", {"client_op_id": "p", "ops": [write("Stock", 1, Product="p0", Month="Jan")]})[0], 200)
-            self.assertEqual(self.ws.version.model.last_record["user"], "carol")
+            self.assertEqual(self.ws.version.last_record["user"], "carol")
         finally:
             server.stop()
 
@@ -320,7 +319,7 @@ class ProxyHeader(JournalCase, unittest.TestCase):
 
     def history(self) -> list[str]:
         """The users in the journal records of the cell that the tests write."""
-        h = self.journals.journal().cell_history(self.ws.version.model, "Stock", Product="p0", Month="Jan")
+        h = self.journals.journal().cell_history(self.ws.version, "Stock", Product="p0", Month="Jan")
         return [r["user"] for r in h]
 
     def test_user_from_a_trusted_proxy_reaches_the_journal(self):

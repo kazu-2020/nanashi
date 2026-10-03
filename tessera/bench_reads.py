@@ -14,18 +14,10 @@ import tempfile
 import threading
 import time
 
+from bench import median_ms
 from examples.fpa import SIZES, build
 from sparse_engine.rust_engine import RustEngine
 from sparse_engine.workspace import Workspace
-
-
-def timed(fn, repeats: int = 5) -> float:
-    xs = []
-    for _ in range(repeats):
-        t = time.perf_counter()
-        fn()
-        xs.append(time.perf_counter() - t)
-    return 1e3 * statistics.median(xs)
 
 
 def main() -> None:
@@ -47,9 +39,9 @@ def main() -> None:
     n = {name: m.engine.size(m.raw(name)) for name in ("PayrollByEmployee", "Revenue", "Payroll")}
     print(f"{args.size}: PayrollByEmployee {n['PayrollByEmployee']:,} セル、Revenue {n['Revenue']:,} セル")
     for label, fn in cases:
-        print(f"  {label}: {timed(fn):.2f} ms")
+        print(f"  {label}: {median_ms(fn, 5):.2f} ms")
     with tempfile.TemporaryDirectory() as tmp:
-        print(f"  save（スナップショット）: {timed(lambda: m.save(tmp), 3):.0f} ms")
+        print(f"  save（スナップショット）: {median_ms(lambda: m.save(tmp), 3):.0f} ms")
 
     # 読み手がいる間の書き込み: 8 人が読み続ける中で、給与の変更を確定する。読み手が value で Metric を
     # 丸ごと読むと（以前の get の経路）、その間 GIL を握るので書き込みが待たされる。get なら待たされないが、

@@ -208,7 +208,7 @@ class Incremental(unittest.TestCase):
 
         m.set_cell("Salary", 150, Employee="e1")
         self.assertEqual(m.get("Total"), 150)
-        self.assertEqual(m.eval_log, ["DeptSalary", "Total"])
+        self.assertEqual(list(m.eval_log), ["DeptSalary", "Total"])
 
 
 if __name__ == "__main__":

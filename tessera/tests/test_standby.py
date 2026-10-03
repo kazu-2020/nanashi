@@ -56,7 +56,7 @@ class Standby(JournalCase):
         self.assertEqual(self.b.seq, 2)  # a の書き込みを含む版で書き手になる
         self.assertEqual(self.b.version.get("Stock", Product="p1", Month="Feb"), 103.0)
         self.assertEqual(self.b.write(move("p2", "p3", "Jan", 1)), 3)
-        check_same_state(self, self.b.version.model, self.journal().open(ReferenceEngine()))
+        check_same_state(self, self.b.version, self.journal().open(ReferenceEngine()))
 
     def test_failed_promotion_releases_the_lease(self):
         failing, real_publish = threading.Event(), self.b._publish
@@ -98,7 +98,7 @@ class Standby(JournalCase):
         self.assertTrue(committed.is_set())
         self.assertEqual(self.b.version.get("Stock", Product="p3", Month="Jan"), 107.0)
         self.assertEqual(self.b.write(move("p4", "p5", "Jan", 1)), self.b.journal.head)
-        check_same_state(self, self.b.version.model, self.journal().open(ReferenceEngine()))
+        check_same_state(self, self.b.version, self.journal().open(ReferenceEngine()))
 
 
 class FileStandby(Standby, unittest.TestCase):

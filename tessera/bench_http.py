@@ -2,7 +2,8 @@
 
     python bench_http.py
 """
-import json, statistics, sys, threading, time, urllib.parse, urllib.request
+import json, sys, threading, time, urllib.parse, urllib.request
+from bench import median_ms
 from examples.fpa import SIZES, build
 from sparse_engine.rust_engine import RustEngine
 from sparse_engine.server import Server
@@ -24,17 +25,11 @@ def post(body):
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
-def timed(fn, n=20):
-    xs = []
-    for _ in range(n):
-        t = time.perf_counter(); fn(); xs.append(time.perf_counter() - t)
-    return 1e3 * statistics.median(xs)
-
 cell = f"/metrics/PayrollByEmployee/cell?Employee={emp}&Version={urllib.parse.quote("予算")}&Month=m01"
-print(f"GET cell（単独）: {timed(lambda: get(cell)):.2f} ms")
+print(f"GET cell（単独）: {median_ms(lambda: get(cell), 20):.2f} ms")
 summary = "/metrics/Revenue/summary?keep=Month&Version=" + urllib.parse.quote("予算")
-print(f"GET summary 月別合計: {timed(lambda: get(summary)):.2f} ms")
-print(f"POST write（単独）: {timed(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [{'op': 'set_cell', 'args': ['Salary', 500.0], 'kwargs': {'Employee': emp, 'Version': '予算'}}]})):.2f} ms")
+print(f"GET summary 月別合計: {median_ms(lambda: get(summary), 20):.2f} ms")
+print(f"POST write（単独）: {median_ms(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [{'op': 'set_cell', 'args': ['Salary', 500.0], 'kwargs': {'Employee': emp, 'Version': '予算'}}]}), 20):.2f} ms")
 
 stop = threading.Event(); reads = [0]
 def reader():
@@ -43,7 +38,7 @@ def reader():
 threads = [threading.Thread(target=reader, daemon=True) for _ in range(8)]
 t0 = time.perf_counter()
 for t in threads: t.start()
-w = timed(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [{'op': 'set_cell', 'args': ['Salary', 501.0], 'kwargs': {'Employee': emp, 'Version': '予算'}}]}))
+w = median_ms(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [{'op': 'set_cell', 'args': ['Salary', 501.0], 'kwargs': {'Employee': emp, 'Version': '予算'}}]}), 20)
 stop.set()
 for t in threads: t.join()
 dt = time.perf_counter() - t0

@@ -57,7 +57,7 @@ type Router struct {
 	UserHeader string                                       // header set toward engines, default "X-Forwarded-User"
 	Deadline   time.Duration                                // overall per request, default 90s
 
-	leaders leaderCache
+	leaders sync.Map // model -> leader URL, kept between requests
 }
 
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -132,12 +132,12 @@ func (rt *Router) forward(ctx context.Context, model string, out outgoing) write
 			case deliver:
 				return last
 			case redirect:
-				rt.leaders.set(model, d.leader)
+				rt.leaders.Store(model, d.leader)
 				target = d.leader
 				pause = redirected // two engines pointing at each other must not spin
 			case retrySame:
 			case reresolve:
-				rt.leaders.forget(model, target)
+				rt.leaders.CompareAndDelete(model, target) // keep a newer leader that another request learned
 				target = ""
 			}
 			redirected = d.action == redirect
@@ -161,12 +161,12 @@ func (rt *Router) forward(ctx context.Context, model string, out outgoing) write
 }
 
 func (rt *Router) leader(ctx context.Context, model string) (string, error) {
-	if url := rt.leaders.get(model); url != "" {
-		return url, nil
+	if url, ok := rt.leaders.Load(model); ok {
+		return url.(string), nil
 	}
 	url, err := rt.Resolve.Leader(ctx, model)
 	if url != "" && err == nil {
-		rt.leaders.set(model, url)
+		rt.leaders.Store(model, url)
 	}
 	return url, err
 }
@@ -330,36 +330,6 @@ func sleep(ctx context.Context, d time.Duration) bool {
 		return true
 	case <-ctx.Done():
 		return false
-	}
-}
-
-// leaderCache remembers each model's leader URL between requests.
-type leaderCache struct {
-	mu sync.Mutex
-	m  map[string]string
-}
-
-func (c *leaderCache) get(model string) string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.m[model]
-}
-
-func (c *leaderCache) set(model, url string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.m == nil {
-		c.m = map[string]string{}
-	}
-	c.m[model] = url
-}
-
-// forget drops model's entry only if it still names url, so a newer leader learned concurrently survives.
-func (c *leaderCache) forget(model, url string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.m[model] == url {
-		delete(c.m, model)
 	}
 }
 

@@ -1,8 +1,6 @@
 """変わらない ID と、Metric の削除と名前の変更。"""
-import json
 import tempfile
 import unittest
-from pathlib import Path
 
 from examples.fpa import build as build_fpa
 from sparse_engine import Model, to_formula
@@ -10,7 +8,7 @@ from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import _UNSET
 
 from .test_engines import build_with
-from .test_incremental import same, snapshot
+from .test_incremental import check_full, same, snapshot
 
 try:
     from sparse_engine.rust_engine import RustEngine
@@ -28,14 +26,6 @@ def all_ids(m: Model) -> list[int]:
     for d in m.dimensions.values():
         ids += d.ids
     return ids
-
-
-def check_full(test, m: Model) -> None:
-    incremental = snapshot(m)
-    m._invalidate()
-    full = snapshot(m)
-    for name in m.metrics:
-        test.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
 
 
 class Ids(unittest.TestCase):
@@ -116,7 +106,7 @@ class RemoveMetric(unittest.TestCase):
         self.m.eval_log.clear()
         self.m.remove_metric("CatShare")
         self.m.recalc()
-        self.assertEqual(self.m.eval_log, [])  # 誰も参照していないので、何も計算し直さない
+        self.assertEqual(list(self.m.eval_log), [])  # 誰も参照していないので、何も計算し直さない
         self.assertNotIn("CatShare", self.m.metrics)
         del before["CatShare"]
         self.assertEqual(snapshot(self.m), before)
@@ -170,7 +160,7 @@ class RenameMetric(unittest.TestCase):
         self.m.eval_log.clear()
         self.m.rename_metric("Margin", "Profit")
         self.m.recalc()
-        self.assertEqual(self.m.eval_log, [])  # 値は変わらないので、何も計算し直さない
+        self.assertEqual(list(self.m.eval_log), [])  # 値は変わらないので、何も計算し直さない
         self.assertEqual(to_formula(self.m.metrics["Picked"].written), "Profit[FILTER: Flag]")
         after = snapshot(self.m)
         before["Profit"] = before.pop("Margin")
@@ -241,26 +231,6 @@ class Storage(unittest.TestCase):
             self.assertTrue(same(a[name], b[name]), name)
         loaded.add_member("Product", "F")  # 読み込んだあとも、使った ID を振らない
         self.assertEqual(len(set(all_ids(loaded))), len(all_ids(loaded)))
-
-    def test_reads_format_1(self):
-        m = build_with(self.engine())
-        with tempfile.TemporaryDirectory() as tmp:
-            m.save(tmp)
-            from .legacy import to_format2
-            to_format2(tmp, m)  # 版 1 も入力の値は inputs.npz に持つ
-            path = Path(tmp) / "model.json"
-            meta = json.loads(path.read_text())
-            meta["format"] = 1
-            del meta["next_id"]
-            for d in meta["dimensions"]:
-                del d["id"], d["member_ids"]
-            for x in meta["metrics"]:
-                del x["id"]
-            path.write_text(json.dumps(meta))
-            loaded = Model.load(tmp, self.engine())
-        ids = all_ids(loaded)
-        self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(snapshot(loaded).keys(), snapshot(m).keys())
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")

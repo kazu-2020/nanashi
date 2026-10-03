@@ -97,9 +97,7 @@ If you do not give `--size`, the example runs all sizes up to large (20,000 empl
 The other benchmarks are the `bench*.py` files in the repository root.
 With large models, they use some GB of memory.
 Thus, run them one at a time.
-`native/engine/examples/key_layout.rs` measures the speed and memory for different key layouts ("Measurement of key formats" in the [design note](member-numbering.md)).
-`native/engine/examples/out_of_core.rs` measures the speed and memory when the stored data is on NVMe ("Measurement method" in the [design note](out-of-core.md)).
-This example makes files of some GB, and the RSS includes the pages that it reads through mmap.
+We removed the measurement programs for key layouts ([member-numbering.md](member-numbering.md)) and for stored data on NVMe ([out-of-core.md](out-of-core.md)). They are in the git history.
 
 ## Test policy
 
@@ -159,7 +157,7 @@ The role changes of the standby (promotion, demotion, writes that entered the qu
 | `sparse_engine/parser.py` | Parse of formula text, and conversion from the syntax tree to text |
 | `sparse_engine/delta.py` | The decision about which formulas can use incremental aggregation |
 | `sparse_engine/engine.py`, `rust_engine.py` | The interface for storage and evaluation (`Store`), the reference implementation, the bridge to Rust (`RustEngine` and `RustPlanner`) |
-| `sparse_engine/storage.py`, `npz.py` | Save and load (Parquet), and load of the format of earlier versions (npz) |
+| `sparse_engine/storage.py` | Save and load (Parquet) |
 | `sparse_engine/journal.py` | The transaction journal, the file journal, recovery from a snapshot and journal replay |
 | `sparse_engine/workspace.py` | Publication of versions and the single writer (concurrent reads and writes, group commit, optimistic locking) |
 | `sparse_engine/pg_journal.py` | The PostgreSQL journal (lease and fencing, deferred application of large changes) |

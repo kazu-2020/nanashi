@@ -21,8 +21,7 @@ except Conflict as e:
 ```
 
 A version does not change after the engine makes it.
-`version` is a read-only view (`Version`) and has no write operations.
-You can get the `Model` below it with `version.model`, but an operation on it causes a ValueError.
+`version` is a frozen `Model`. An operation on it causes a ValueError.
 A read always sees all of the published version.
 Thus, a read does not see values from a write that is not complete (for example, new details with an old total).
 A read also does not see changes that were cancelled.

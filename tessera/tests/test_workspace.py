@@ -57,7 +57,7 @@ def reopen(test, ws: Workspace, engine) -> None:
         return
     reopened = Workspace.open(journals.journal(**getattr(test, "journal_options", {})), engine)
     try:
-        check_same_state(test, ws.version.model, reopened.version.model)
+        check_same_state(test, ws.version, reopened.version)
         test.assertEqual(reopened.seq, ws.seq)
         seq = reopened.write(lambda m: m.add_dimension("Reopened", ["x"]))
         test.assertEqual(seq, ws.seq + 1)
@@ -108,8 +108,7 @@ class Basics(unittest.TestCase):
         self.assertEqual(v0.get("Stock", Product="p1", Month="Jan"), 100)  # 古い版は変わらない
 
     def test_published_versions_cannot_be_changed(self):
-        self.assertFalse(hasattr(self.ws.version, "set_cell"))  # 版は読み出し専用のビュー
-        model = self.ws.version.model  # 裏の Model も、公開済みなので操作を受け付けない
+        model = self.ws.version  # A published version is frozen. It rejects all operations
         with self.assertRaisesRegex(ValueError, "公開済み"):
             model.set_cell("Stock", 1, Product="p0", Month="Jan")
         with self.assertRaisesRegex(ValueError, "公開済み"):

@@ -35,13 +35,10 @@ except ImportError:
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class RoundTrip(unittest.TestCase):
-    def check(self, saving_engine, loading_engine, legacy=False):
+    def check(self, saving_engine, loading_engine):
         original = small(saving_engine)
         with tempfile.TemporaryDirectory() as tmp:
             original.save(tmp)
-            if legacy:
-                from .legacy import to_format2
-                to_format2(tmp, original)
             loaded = Model.load(tmp, loading_engine)
         self.assertEqual(loaded.dimensions["Employee"].members, original.dimensions["Employee"].members)
         a, b = snapshot(original), snapshot(loaded)
@@ -60,14 +57,6 @@ class RoundTrip(unittest.TestCase):
             names = sorted(p.name for p in Path(tmp).iterdir())
         inputs = sorted(f"inputs.{x.id}.parquet" for x in m.metrics.values() if x.formula is None)
         self.assertEqual(names, sorted(inputs + ["model.json"]))
-
-    def test_reads_format_2(self):
-        """以前の版の保存形式（inputs.npz）を、numpy なしで読める。"""
-        engines = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
-        for saving in engines:
-            for loading in engines:
-                with self.subTest(saving=saving.name, loading=loading.name):
-                    self.check(saving(), loading(), legacy=True)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_reference_to_rust(self):

@@ -5,7 +5,7 @@
 //! - Bin、If、IsBlank、IfBlank の grow: 軸にメンバーを追加したとき、新しいメンバーへ値が広がる軸
 //! - By: 式が持つ軸から、集約（ByAgg）か引き下ろし（ByLookup）かを決める
 
-use crate::{bits_for, Agg, Arg, Catalog, DimId, Diag, Node, Op};
+use crate::{bits_for, merge, same_set, Agg, Arg, Catalog, DimId, Diag, Node, Op};
 
 type Result<T> = std::result::Result<T, Diag>;
 
@@ -50,16 +50,6 @@ fn list(dims: &[DimId], cat: &Catalog) -> Arg {
 /// 軸の名前の tuple（Python の参照実装が型の軸 Type.dims を埋めるところ）。
 fn tuple(dims: &[DimId], cat: &Catalog) -> Arg {
     Arg::Tuple(dims.iter().map(|&d| name(d, cat)).collect())
-}
-
-fn merge(a: &[DimId], b: &[DimId]) -> Vec<DimId> {
-    let mut out = a.to_vec();
-    out.extend(b.iter().copied().filter(|d| !a.contains(d)));
-    out
-}
-
-fn same_set(a: &[DimId], b: &[DimId]) -> bool {
-    a.len() == b.len() && a.iter().all(|d| b.contains(d))
 }
 
 fn replace(dims: &[DimId], old: DimId, new: DimId) -> Vec<DimId> {

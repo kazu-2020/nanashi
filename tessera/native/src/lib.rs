@@ -413,7 +413,6 @@ impl Core {
                 "fuse" => cfg.fuse = v.extract()?,
                 "dense_always" => cfg.dense_always = v.extract()?,
                 "chunk" => cfg.chunk = v.extract()?,
-                "semi_max" => cfg.semi_max = v.extract()?,
                 "widen_min_rows" => cfg.widen_min_rows = v.extract()?,
                 "max_bytes" => cfg.max_bytes = v.extract::<Option<usize>>()?.unwrap_or(usize::MAX),
                 "fail_at" => cfg.fail_at = v.extract()?,
@@ -1160,7 +1159,7 @@ impl Diff {
     /// メンバー型の値の軸の表（ほかの型なら None）、value は値の種類（number、boolean、member）。
     #[pyo3(signature = (dim_ids, value_ids, value))]
     fn to_block(&self, py: Python<'_>, dim_ids: Vec<Vec<i64>>, value_ids: Option<Vec<i64>>, value: &str) -> PyResult<CellBlock> {
-        let kind = pq::Change::parse(value).map_err(err)?;
+        let kind = pq::Value::parse(value).map_err(err)?;
         if dim_ids.len() != self.cols.len() {
             return Err(err("軸の表の数が軸の数と合わない".into()));
         }
@@ -1210,9 +1209,9 @@ impl CellBlock {
     fn value<'py>(&self, py: Python<'py>, v: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
         Ok(match (v, self.c.kind) {
             (None, _) => py.None().into_bound(py),
-            (Some(x), pq::Change::Num) => x.into_pyobject(py)?.into_any(),
-            (Some(x), pq::Change::Bool) => PyBool::new(py, x != 0.0).to_owned().into_any(),
-            (Some(x), pq::Change::Int) => (x as i64).into_pyobject(py)?.into_any(),
+            (Some(x), pq::Value::Num) => x.into_pyobject(py)?.into_any(),
+            (Some(x), pq::Value::Bool) => PyBool::new(py, x != 0.0).to_owned().into_any(),
+            (Some(x), pq::Value::Member) => (x as i64).into_pyobject(py)?.into_any(),
         })
     }
 }
@@ -1344,13 +1343,13 @@ impl CellBlock {
             new.push(value(row.get_item(2)?)?);
         }
         let kind = if floats || (bools && ints) {
-            pq::Change::Num
+            pq::Value::Num
         } else if bools {
-            pq::Change::Bool
+            pq::Value::Bool
         } else if ints {
-            pq::Change::Int
+            pq::Value::Member
         } else {
-            pq::Change::Num
+            pq::Value::Num
         };
         Ok(CellBlock::new(pq::Changes { ids, old, new, kind }))
     }

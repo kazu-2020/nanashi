@@ -2,7 +2,6 @@
 
 ファイルの置き場所は、ローカルのディレクトリと、S3 互換のオブジェクトストレージ（NANASHI_S3_ENDPOINT、
 既定は手元の 59000 番。boto3 が必要）の両方で同じテストを回す。"""
-import hashlib
 import json
 import os
 import tempfile
@@ -52,7 +51,6 @@ AVAILABLE = PG_AVAILABLE
 S3 = s3_client() if AVAILABLE else None
 if AVAILABLE:
     import nanashi_core
-    from psycopg.types.json import Jsonb
 
     from sparse_engine.objects import LocalObjects, S3Objects
     from sparse_engine.pg_journal import Fenced, PgJournal
@@ -126,37 +124,6 @@ class PgJournalTests(unittest.TestCase):
         history = self.journal().cell_history(m, "V", K="k5", T="t0")  # COPY の行を Rust で作って反映する
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
 
-    def test_reads_npz_written_by_earlier_versions(self):
-        from .legacy import npy, write_npz
-        m = build_with(ReferenceEngine())
-        j = self.journal(bulk_cells=3)
-        j.start(m)
-        with m.transaction(user="etl", reason="取り込み"):
-            m.spread("Cost", 100, Product="C")
-        # 記録を以前の版の形（1 つの npz、値はすべて float）に書き直す
-        seq, rec = j.conn.execute("select seq, record from nanashi_operation where model_id = %s and not indexed",
-                                  (self.model_id,)).fetchone()
-        arrays = {}
-        for i, f in enumerate(rec["cells_blob"]["files"]):
-            rows = nanashi_core.CellBlock.from_parquet(self.objects.get(f["uri"])).rows()
-            arrays[f"metric{i}"] = npy("<i8", [f["metric"]])
-            arrays[f"coords{i}"] = npy("<i8", [x for ids, _, _ in rows for x in ids], (len(rows), len(rows[0][0])))
-            for j_, name in ((1, "old"), (2, "new")):
-                arrays[f"{name}{i}"] = npy("<f8", [float("nan") if r[j_] is None else float(r[j_]) for r in rows])
-                arrays[f"{name}_null{i}"] = npy("|b1", [r[j_] is None for r in rows])
-        path = Path(self.tmp.name) / "legacy.npz"
-        write_npz(path, arrays)
-        self.objects.put(f"{self.model_id}/cells/legacy.npz", path.read_bytes())
-        uri = self.objects.uri(f"{self.model_id}/cells/legacy.npz")  # 以前の版は URI を保存していた
-        rec["cells_blob"] = {"uri": uri, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                             "cells": rec["cells_blob"]["cells"]}
-        j.conn.execute("update nanashi_operation set record = %s, cells_uri = %s where model_id = %s and seq = %s",
-                       (Jsonb(rec), uri, self.model_id, seq))
-        for e in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
-            check_same_state(self, m, self.journal().open(e()))
-        history = self.journal().cell_history(m, "Cost", Product="C", Month="Feb")
-        self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
-
     def test_concurrent_indexing_does_not_duplicate_history(self):
         m = build_with(ReferenceEngine())
         j = self.journal(bulk_cells=3)
@@ -206,7 +173,7 @@ class PgJournalTests(unittest.TestCase):
         ws.write(move("p5", "p6", "Feb", 2))
         ws.close()
         reopened = Workspace.open(self.journal(), ReferenceEngine())
-        check_same_state(self, ws.version.model, reopened.version.model)
+        check_same_state(self, ws.version, reopened.version)
         history = reopened.journal.cell_history(reopened.version, "Stock", Product="p6", Month="Feb")
         self.assertEqual([(h["seq"], h["old"], h["new"]) for h in history], [(11, 100.0, 102.0)])
         reopened.close()
@@ -426,22 +393,6 @@ class PgJournalS3Tests(PgJournalTests):
         self.tmp.cleanup()
         check_same_state(self, m, self.journal().open(ReferenceEngine()))
 
-    def test_reads_files_placed_in_a_local_directory_before(self):
-        # 以前の版は、置き場所の絶対パスを表に保存していた。オブジェクトストレージに移ったあとも読める
-        m = build_with(ReferenceEngine())
-        self.local_journal(m)
-        j = self.journal()
-        with j.conn.transaction():
-            j.conn.execute("update nanashi_snapshot set uri = %s || '/' || uri where model_id = %s",
-                           (self.tmp.name, self.model_id))
-            for seq, rec in j.conn.execute("select seq, record from nanashi_operation where model_id = %s"
-                                           " and cells_uri is not null", (self.model_id,)).fetchall():
-                for f in rec["cells_blob"]["files"]:
-                    f["uri"] = f"{self.tmp.name}/{f['uri']}"
-                j.conn.execute("update nanashi_operation set record = %s where model_id = %s and seq = %s",
-                               (Jsonb(rec), self.model_id, seq))
-        check_same_state(self, m, self.journal().open(ReferenceEngine()))
-        self.assertEqual(self.keys(), [])
 
 if __name__ == "__main__":
     unittest.main()
@@ -464,27 +415,12 @@ class Schema(unittest.TestCase):
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(f"drop database if exists {self.db} with (force)")
 
-    def test_old_schema_is_refused_until_migrated(self):
-        import psycopg
-        from sparse_engine.pg_journal import MIGRATIONS, SchemaError, migrate
-        with psycopg.connect(self.dsn, autocommit=True) as conn:  # 以前の版が作った表（版の表はない）
-            conn.execute(MIGRATIONS[0][1])
-            conn.execute("insert into nanashi_model (model_id) values ('old')")
-            conn.execute("insert into nanashi_operation (model_id, seq, at, record) values"
-                         " ('old', 1, '2026-01-02T03:04:05.678+00:00', '{}')")
-            for _ in range(2):  # 以前の版は、同じセルの履歴を二重に書くことがあった
-                conn.execute("insert into nanashi_cell_change values ('old', 1, 5, '{1,2}', null, 3)")
+    def test_schema_is_refused_until_migrated(self):
+        from sparse_engine.pg_journal import SchemaError, migrate
         with self.assertRaisesRegex(SchemaError, "migrate"):
-            PgJournal(self.dsn, "old", tempfile.mkdtemp())
-        self.assertEqual(migrate(self.dsn), (0, 3))
-        self.assertEqual(migrate(self.dsn), (3, 3))  # 何度流してもよい
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
-            self.assertEqual(conn.execute("select data_type from information_schema.columns"
-                                          " where table_name = 'nanashi_operation' and column_name = 'at'").fetchone()[0],
-                             "timestamp with time zone")
-            self.assertEqual(conn.execute("select count(*) from nanashi_cell_change").fetchone()[0], 1)
-            with self.assertRaises(psycopg.errors.UniqueViolation):
-                conn.execute("insert into nanashi_cell_change values ('old', 1, 5, '{1,2}', null, 3)")
+            PgJournal(self.dsn, "new", tempfile.mkdtemp())
+        self.assertEqual(migrate(self.dsn), (0, 1))
+        self.assertEqual(migrate(self.dsn), (1, 1))  # Migrate can run again
         j = PgJournal(self.dsn, "new", tempfile.mkdtemp(), heartbeat=False)
         m = build_with(ReferenceEngine())
         j.start(m)

@@ -48,8 +48,12 @@ def model() -> Model:
     return m
 
 
+def cells(m: Model, name: str) -> dict:
+    return dict(m.value(name).cells)
+
+
 def snapshot(m: Model) -> dict:
-    return {n: dict(m.value(n).cells) for n in m.metrics}
+    return {n: cells(m, n) for n in m.metrics}
 
 
 def same(a, b) -> bool:
@@ -57,6 +61,15 @@ def same(a, b) -> bool:
         return False
     return all(a[k] == b[k] if isinstance(a[k], (bool, str)) else math.isclose(a[k], b[k], abs_tol=1e-6)
                for k in a)
+
+
+def check_full(test, m: Model) -> None:
+    """Make sure that the result of the incremental recalculation is the same as a full recalculation."""
+    incremental = snapshot(m)
+    m._invalidate()
+    full = snapshot(m)
+    for name in m.metrics:
+        test.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
 
 
 class MatchesFullRecalc(unittest.TestCase):
