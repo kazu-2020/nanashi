@@ -159,6 +159,7 @@ class PgStandby(Standby, unittest.TestCase):
         started.wait()
         queued = self.a.submit(move("p2", "p3", "Jan", 1))  # 次のまとまり
         self.take_by_force(seconds=0.0)  # 奪われてすぐ切れたリース（待たずに取り直せる）
+        self.a.journal._extend()  # The heartbeat finds the loss before the commit (it does not take the lease again)
         gate.set()
         with self.assertRaises(NotLeader):  # 止めていたまとまりの確定は締め出され、待機系に戻る
             first.result(timeout=5)

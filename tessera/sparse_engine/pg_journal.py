@@ -171,6 +171,9 @@ class PgJournal(Journal):
         self.acquire_wait = lease_ttl if acquire_wait is None else acquire_wait
         self.holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.epoch: int | None = None  # 取ったリースの世代番号（まだ取っていなければ None）
+        # True if the heartbeat found that another process took the lease. The next append_many raises
+        # Fenced one time and does not take the lease again.
+        self.lost = False
         self.lease_until: float | None = None  # リースの期限（time.monotonic の値。延長できた時点から数える）
         self.lease_error: BaseException | None = None  # 最後に延長できなかった理由（延長できたら None）
         self.conn = psycopg.connect(dsn, autocommit=True)  # 複数の文は transaction() で囲む
@@ -265,7 +268,7 @@ class PgJournal(Journal):
         self.lease_until = time.monotonic() + self.lease_ttl
         if head != self.head:
             raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
-        self.epoch = epoch
+        self.epoch, self.lost = epoch, False
         return epoch
 
     def _take_row(self):
@@ -287,6 +290,7 @@ class PgJournal(Journal):
             if row is None:
                 return False
             self.epoch, self.lease_until, self.lease_error = row[0], time.monotonic() + self.lease_ttl, None
+            self.lost = False
             return True
 
     def leader(self) -> str | None:
@@ -297,29 +301,33 @@ class PgJournal(Journal):
         return None if row is None else row[0]
 
     def _beat(self) -> None:
-        """リースを持っている間、期限の 1/3 ごとに延長する。延長できなければ（締め出された）リースを手放す。"""
+        """While this process has the lease, extend it every 1/3 of the lease time."""
         while not self._stop.wait(self.lease_ttl / 3):
-            if self.epoch is None:
-                continue
-            try:
-                with self._lock:
-                    if self.epoch is None:
-                        continue
-                    started = time.monotonic()
-                    cur = self.conn.execute(
-                        "update nanashi_model set lease_expires = now() + make_interval(secs => %s)"
-                        " where model_id = %s and writer_epoch = %s and lease_holder = %s",
-                        (self.lease_ttl, self.model_id, self.epoch, self.holder))
-                    if cur.rowcount != 1:
-                        self.epoch, self.lease_until = None, None
-                        log.warning("%s: リースを失った（別のプロセスが書き込みを始めた）", self.model_id)
-                    else:
-                        self.lease_until = started + self.lease_ttl
-                    self.lease_error = None
-            except Exception as e:  # 接続の一時的な失敗。期限までに延長できなければ、次の確定で締め出される
-                # 先にログを出す。lease() で理由が見えた時点で、ログも出ているようにする
-                log.warning("%s: リースを延長できなかった", self.model_id, exc_info=True)
-                self.lease_error = e
+            self._extend()
+
+    def _extend(self) -> None:
+        """Extend the lease one time. If another process took the lease, record the loss."""
+        if self.epoch is None:
+            return
+        try:
+            with self._lock:
+                if self.epoch is None:
+                    return
+                started = time.monotonic()
+                cur = self.conn.execute(
+                    "update nanashi_model set lease_expires = now() + make_interval(secs => %s)"
+                    " where model_id = %s and writer_epoch = %s and lease_holder = %s",
+                    (self.lease_ttl, self.model_id, self.epoch, self.holder))
+                if cur.rowcount != 1:
+                    self.epoch, self.lease_until, self.lost = None, None, True
+                    log.warning("%s: リースを失った（別のプロセスが書き込みを始めた）", self.model_id)
+                else:
+                    self.lease_until = started + self.lease_ttl
+                self.lease_error = None
+        except Exception as e:  # A temporary connection failure. If the lease expires, the next commit is fenced
+            # Log first, so that the log is available when lease() shows the cause
+            log.warning("%s: リースを延長できなかった", self.model_id, exc_info=True)
+            self.lease_error = e
 
     def lease(self) -> dict:
         """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
@@ -333,6 +341,11 @@ class PgJournal(Journal):
         if not records:
             return []
         with self._lock:
+            if self.lost:
+                # A batch can start before the loss and commit after it. Do not take the expired lease
+                # again for it: the caller must know of the loss (a standby Workspace demotes)
+                self.lost = False
+                raise Fenced(f"{self.model_id}: リースを失った（別のプロセスが取った）")
             if self.epoch is None:
                 self.acquire()
             seqs = list(range(self.head + 1, self.head + 1 + len(records)))
