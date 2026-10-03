@@ -193,6 +193,23 @@ class Api:
         self.assertEqual(self.c.get("/metrics/Ratio/cell?Region=S")[1]["value"], 0.75)
         self.assertEqual(self.c.get("/")[1]["dimensions"]["Region"]["members"], ["N", "S", "W"])
 
+    def test_definition_has_member_ids_and_property_values(self):
+        ops = [{"op": "add_dimension", "args": ["Region", ["N", "S"]]},
+               {"op": "add_member", "args": ["Region", "W"], "kwargs": {"at": 0}},
+               {"op": "add_property", "args": ["Region", "Lead", "Product", {"N": "p1", "W": "p2"}]}]
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "i", "ops": ops})[0], 200)
+        region = self.c.get("/")[1]["dimensions"]["Region"]
+        ids = dict(zip(region["members"], region["ids"]))
+        self.assertEqual(region["members"], ["W", "N", "S"])
+        self.assertEqual(ids["N"], self.ws.version.dimensions["Region"].id_of("N"))
+        self.assertEqual(ids["W"], self.ws.version.dimensions["Region"].id_of("W"))
+        self.assertEqual(region["mappings"], {"Lead": {"N": "p1", "W": "p2"}})
+        ops = [{"op": "rename_member", "args": ["Region", "N", "North"]}]
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "i2", "ops": ops})[0], 200)
+        region = self.c.get("/")[1]["dimensions"]["Region"]
+        self.assertEqual(dict(zip(region["members"], region["ids"])), {"W": ids["W"], "North": ids["N"], "S": ids["S"]})
+        self.assertEqual(region["mappings"], {"Lead": {"North": "p1", "W": "p2"}})
+
     def test_member_order_through_the_api(self):
         ops = [{"op": "add_member", "args": ["Product", "p_new"], "kwargs": {"at": 1}},
                {"op": "move_member", "args": ["Product", "p2", 0]}]

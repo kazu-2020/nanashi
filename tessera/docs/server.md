@@ -10,7 +10,7 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 
 | Request | Content |
 |---|---|
-| `GET /` | The definitions of dimensions and Metrics, and the sequence number of the current published version |
+| `GET /` | The definitions of dimensions and Metrics, and the sequence number of the current published version. Each dimension has `id`, `members` (display order), `ids` (member IDs in the same order), `ordered`, `properties`, and `mappings` (`{property: {member: target member}}`). |
 | `GET /metrics/<name>/cell?<dimension>=<member>` | 1 cell |
 | `GET /metrics/<name>/slice?<dimension>=a,b` | The cells of a range |
 | `GET /metrics/<name>/rows?<dimension>=a&offset=0&limit=50` | A list of rows and the total number of rows |

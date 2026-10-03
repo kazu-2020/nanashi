@@ -227,8 +227,9 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["stats"]:
             return 200, _Text(stats_text(self.server.workspace))
         if not parts:
-            dims = {d.name: {"id": d.id, "members": d.in_order(), "ordered": d.ordered,
-                             "properties": {p: t for p, (t, _) in d.properties.items()}}
+            dims = {d.name: {"id": d.id, "members": d.in_order(), "ids": [d.id_of(x) for x in d.in_order()],
+                             "ordered": d.ordered, "properties": {p: t for p, (t, _) in d.properties.items()},
+                             "mappings": {p: dict(mp) for p, (_, mp) in d.properties.items()}}
                     for d in v.dimensions.values()}
             metrics = {m.name: {"id": m.id, "dims": list(m.dims), "kind": m.kind, "overridable": m.overridable,
                                 "formula": None if m.written is None else _formula(m.written)}
