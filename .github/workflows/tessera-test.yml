@@ -10,6 +10,9 @@ on:
   pull_request:
     paths: *paths
 
+permissions:
+  contents: read
+
 concurrency:  # 同じ PR に続けて push したら、古いほうの実行は止める
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
