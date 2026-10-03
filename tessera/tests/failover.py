@@ -143,7 +143,7 @@ def routing(tmp: Path) -> Iterator[Server]:
     if go is None:
         raise RuntimeError("ルーターのビルドに Go が要る")
     binary = tmp / "nanashi-router"
-    subprocess.run([go, "build", "-o", str(binary), "./cmd/nanashi-router"], cwd=ROOT / "router", check=True)
+    subprocess.run([go, "build", "-o", str(binary), "./cmd/nanashi-router"], cwd=ROOT.parent / "router", check=True)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]

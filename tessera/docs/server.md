@@ -61,7 +61,7 @@ With `--pass-user-headers` (the default in reverse proxy mode), oauth2-proxy sen
 | `X-Forwarded-Preferred-Username` | The `preferred_username` claim | Do not use. Some identity providers let users change it, and some do not send it |
 
 Use 1 header for all servers of a model. If you change the header, the same person has 2 different users in the journal.
-If the router is between the proxy and the engine, see [router.md](router.md). Then `--trusted-proxy` of the engine contains the address of the router.
+If the router is between the proxy and the engine, see [router.md](../../router/README.md). Then `--trusted-proxy` of the engine contains the address of the router.
 
 These are the limits:
 
@@ -87,7 +87,7 @@ An internal error returns 500 with a fixed message. The server logs the cause wi
 
 If many servers open the same model, the server with the write right (the lease) becomes the writer. The other servers become standbys and follow it (`Workspace(standby=True)`, [Concurrent reads and writes](concurrency.md)).
 A standby receives reads. It refuses writes with 421 and `{"error": "not_leader", "leader": <address of the writer>}`. Thus the sender must resend to `leader`.
-The router ([router.md](router.md)) uses `nanashi_model.lease_endpoint` to find the writer.
+The router ([router.md](../../router/README.md)) uses `nanashi_model.lease_endpoint` to find the writer.
 `--advertise` sets the address that the server gives to other processes when it is the writer.
 The default is `http://<host>:<port>`. If the server listens on `0.0.0.0`, `--advertise` is necessary.
 `--lease-ttl` sets the lease time (30 seconds by default).
