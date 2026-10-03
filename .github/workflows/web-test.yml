@@ -1,6 +1,6 @@
 name: web-test
 
-# Start only when web/, proto/ or this file changes.
+# Start only when web/, proto/, the generated code or this file changes.
 # This workflow also makes sure that the generated code in api/gen/ and web/src/gen/ agrees with proto/.
 on:
   push:
@@ -9,6 +9,8 @@ on:
       - web/**
       - proto/**
       - api/gen/**
+      - api/go.mod  # The versions of the Go plugins
+      - api/go.sum
       - buf.yaml
       - buf.gen.yaml
       - .github/workflows/web-test.yml
@@ -47,7 +49,7 @@ jobs:
       - name: Make sure that the generated code is up to date
         run: |
           pnpm generate
-          git diff --exit-code
-          test -z "$(git status --porcelain)"
+          test -z "$(git status --porcelain)" || { git status; git diff; exit 1; }
+      - run: pnpm exec buf lint ..
       - run: pnpm exec vp check
       - run: pnpm build

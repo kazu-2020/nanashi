@@ -1,11 +1,12 @@
 name: api-test
 
-# Start only when api/ or this file changes.
+# Start only when api/, the engine schema or this file changes.
 on:
   push:
     branches: [main]
     paths: &paths
       - api/**
+      - tessera/sparse_engine/pg_journal.py  # It makes the nanashi_model table
       - .github/workflows/api-test.yml
   pull_request:
     paths: *paths

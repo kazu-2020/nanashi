@@ -8,19 +8,19 @@ const client = createClient(ModelService, createConnectTransport({ baseUrl: "/" 
 
 export default function App() {
   const [models, setModels] = useState<Model[]>();
-  const [error, setError] = useState<string>();
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     client.listModels({}).then(
       (r) => setModels(r.models),
-      (e: Error) => setError(e.message),
+      () => setFailed(true),
     );
   }, []);
 
   return (
     <main className="mx-auto max-w-2xl p-8">
       <h1 className="mb-4 text-2xl font-bold">モデル</h1>
-      {error ? (
-        <p className="text-danger">モデルの一覧を読めません: {error}</p>
+      {failed ? (
+        <p className="text-danger">モデルの一覧を読めません。</p>
       ) : !models ? (
         <Spinner />
       ) : models.length === 0 ? (

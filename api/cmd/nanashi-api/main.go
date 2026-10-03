@@ -6,6 +6,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -28,5 +29,6 @@ func main() {
 	mux.Handle(nanashiv1connect.NewModelServiceHandler(&api.ModelServer{Pool: pool}))
 	// The Vite dev server sends /nanashi.v1.* to this server, so the API does not need CORS.
 	log.Printf("nanashi-api: listening on %s", *listen)
-	log.Fatal(http.ListenAndServe(*listen, mux))
+	srv := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 30 * time.Second}
+	log.Fatal(srv.ListenAndServe())
 }

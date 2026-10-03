@@ -30,7 +30,7 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 
 ## CI
 
-Each directory has its own workflow in `.github/workflows/`. A workflow starts only when its directory or the workflow file changes.
+Each directory has its own workflow in `.github/workflows/`. A workflow starts only when its directory, the files it uses, or the workflow file changes.
 
 - `tessera-test.yml`: the Python and Rust tests and the static checks of `tessera/`.
 - `router-test.yml`: `go vet` and `go test` of `router/`.

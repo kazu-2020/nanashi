@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vp dev",
-    "build": "tsc -b && vp build",
+    "build": "vp build",
     "generate": "cd .. && buf generate"
   },
   "dependencies": {
