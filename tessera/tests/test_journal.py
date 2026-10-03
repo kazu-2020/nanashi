@@ -14,7 +14,7 @@ from sparse_engine.journal import AlreadyCommitted, Fenced, FileJournal
 
 from .journals import FileStore, JournalCase, PgStore
 from .test_engines import build_with
-from .test_incremental import same, snapshot
+from .test_incremental import check_full, same, snapshot
 from .test_member_edit import structural
 from .test_members import random_round as edit_or_add_member
 from .test_redefine import redefine
@@ -45,14 +45,6 @@ def check_same_state(test, a: Model, b: Model) -> None:
     sa, sb = snapshot(a), snapshot(b)
     for name in sa:
         test.assertTrue(same(sa[name], sb[name]), f"{name}\n{sa[name]}\n{sb[name]}")
-
-
-def check_full(test, m: Model) -> None:
-    incremental = snapshot(m)
-    m._invalidate()
-    full = snapshot(m)
-    for name in m.metrics:
-        test.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
 
 
 class Abort(Exception):

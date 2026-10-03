@@ -313,9 +313,14 @@ def aggregate_cube(cube: Cube, keep: Iterable[str], agg: str) -> Cube:
     return Cube(keep, {k: fn(vs) for k, vs in groups.items()})
 
 
-def default_engine() -> Store:
-    """環境変数 SPARSE_ENGINE（reference / rust）で既定のエンジンを選ぶ。テストを両方で回すため。"""
-    if os.environ.get("SPARSE_ENGINE") == "rust":
+def engine_for(name: str | None) -> Store:
+    """Make the engine with the name "rust". Any other name makes the reference implementation."""
+    if name == "rust":
         from .rust_engine import RustEngine
         return RustEngine()
     return ReferenceEngine()
+
+
+def default_engine() -> Store:
+    """Select the engine with the environment variable SPARSE_ENGINE (reference / rust), to run the tests on both."""
+    return engine_for(os.environ.get("SPARSE_ENGINE"))

@@ -17,6 +17,7 @@ import statistics
 import time
 
 from sparse_engine import Model
+from sparse_engine.engine import engine_for
 
 VERSIONS = ["予算", "実績", "見込み"]
 DEPARTMENTS = ["営業", "開発", "管理"]
@@ -145,15 +146,8 @@ def _hire(m: Model, r: random.Random) -> None:
 
 
 def bench(size: str, engine_name: str, repeats: int) -> dict:
-    engine = None
-    if engine_name == "rust":
-        from sparse_engine.rust_engine import RustEngine
-        engine = RustEngine()
-    else:
-        from sparse_engine.engine import ReferenceEngine
-        engine = ReferenceEngine()
     t0 = time.perf_counter()
-    m = build(engine, *SIZES[size])
+    m = build(engine_for(engine_name), *SIZES[size])
     load = time.perf_counter() - t0
     t0 = time.perf_counter()
     m.recalc()

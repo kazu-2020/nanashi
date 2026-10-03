@@ -8,7 +8,7 @@ from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import _UNSET
 
 from .test_engines import build_with
-from .test_incremental import same, snapshot
+from .test_incremental import check_full, same, snapshot
 
 try:
     from sparse_engine.rust_engine import RustEngine
@@ -26,14 +26,6 @@ def all_ids(m: Model) -> list[int]:
     for d in m.dimensions.values():
         ids += d.ids
     return ids
-
-
-def check_full(test, m: Model) -> None:
-    incremental = snapshot(m)
-    m._invalidate()
-    full = snapshot(m)
-    for name in m.metrics:
-        test.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
 
 
 class Ids(unittest.TestCase):
@@ -114,7 +106,7 @@ class RemoveMetric(unittest.TestCase):
         self.m.eval_log.clear()
         self.m.remove_metric("CatShare")
         self.m.recalc()
-        self.assertEqual(self.m.eval_log, [])  # 誰も参照していないので、何も計算し直さない
+        self.assertEqual(list(self.m.eval_log), [])  # 誰も参照していないので、何も計算し直さない
         self.assertNotIn("CatShare", self.m.metrics)
         del before["CatShare"]
         self.assertEqual(snapshot(self.m), before)
@@ -168,7 +160,7 @@ class RenameMetric(unittest.TestCase):
         self.m.eval_log.clear()
         self.m.rename_metric("Margin", "Profit")
         self.m.recalc()
-        self.assertEqual(self.m.eval_log, [])  # 値は変わらないので、何も計算し直さない
+        self.assertEqual(list(self.m.eval_log), [])  # 値は変わらないので、何も計算し直さない
         self.assertEqual(to_formula(self.m.metrics["Picked"].written), "Profit[FILTER: Flag]")
         after = snapshot(self.m)
         before["Profit"] = before.pop("Margin")

@@ -69,7 +69,7 @@ class Semantics(unittest.TestCase):
         m.recalc()
         m.set_cell("Salary", 1, Employee="e1")
         m.recalc()
-        self.assertEqual(m.delta_log, [])
+        self.assertEqual(list(m.delta_log), [])
 
 
 class MatchesFullRecalc(unittest.TestCase):

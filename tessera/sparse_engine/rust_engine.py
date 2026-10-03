@@ -9,7 +9,6 @@ Metric の格納データと評価の途中結果は Rust 側に置き、Python 
 """
 from __future__ import annotations
 
-from collections.abc import MutableMapping
 from typing import Any
 
 import nanashi_core
@@ -27,35 +26,6 @@ from .messages import from_rust, render
 def _formula_error(e: nanashi_core.Diagnostic) -> FormulaError:
     code, params = from_rust(*e.args)
     return FormulaError(code, **params)
-
-
-class LazyEdges(MutableMapping):
-    """Rust が返した依存グラフ。Metric 名 -> Edge の列に直すのは、初めて使うときだけ
-    （計画を作るたびに全部の辺を Python のオブジェクトにすると、計画そのものより時間がかかる）。"""
-
-    def __init__(self, build):
-        self._build = build
-        self._data: dict | None = None
-
-    def _fill(self) -> dict:
-        if self._data is None:
-            self._data = self._build()
-        return self._data
-
-    def __getitem__(self, key):
-        return self._fill()[key]
-
-    def __setitem__(self, key, value):
-        self._fill()[key] = value
-
-    def __delitem__(self, key):
-        del self._fill()[key]
-
-    def __iter__(self):
-        return iter(self._fill())
-
-    def __len__(self):
-        return len(self._fill())
 
 
 EXPRS_MAX = 20_000  # 式の変換結果を覚えておく数の上限
@@ -517,7 +487,7 @@ class RustPlanner:
             [stores[n] for n in names],
             [counts.get(n) for n in names],
             [(index[n], region(r)) for n, r in changed.items()],
-            [(self.e._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in added.items()],
+            self._added(cat, added),
             [(index[n], h) for n, h in olds.items()],
             [(index[n], region(r)) for n, r in forced.items()], full)
 
@@ -528,8 +498,8 @@ class RustPlanner:
     # ------------------------------------------------ 計算計画
 
     def plan(self, formulas: dict, dims: dict, cat: Catalog) -> tuple[list, Any, list]:
-        """依存グラフから計算計画を作る。循環の誤りは FormulaError（コードと値は Python の参照実装と同じ）。
-        依存グラフ（Metric 名 -> Edge の列）は、初めて使うときに Python のオブジェクトにする。"""
+        """Make the calculation plan and the dependency graph (Metric name -> list of Edge).
+        A cycle causes a FormulaError (the code and the values are the same as in the reference implementation)."""
         names = list(formulas)
         index = {n: i for i, n in enumerate(names)}
         items = []
@@ -545,40 +515,20 @@ class RustPlanner:
         except nanashi_core.Diagnostic as e:
             raise _formula_error(e) from None
 
-        def graph():
-            return {n: [Edge(names[t], tuple(sorted((self.e._names[d], k) for d, k in lags)),
-                             frozenset(self.e._names[d] for d in broken)) for t, lags, broken in es]
-                    for n, es in zip(names, edges)}
+        graph = {n: [Edge(names[t], tuple(sorted((self.e._names[d], k) for d, k in lags)),
+                          frozenset(self.e._names[d] for d in broken)) for t, lags, broken in es]
+                 for n, es in zip(names, edges)}
         plan = [Step(tuple(names[i] for i in ms), None if d is None else self.e._names[d]) for ms, d in steps]
-        return plan, LazyEdges(graph), [[plan[i] for i in level] for level in levels]
+        return plan, graph, [[plan[i] for i in level] for level in levels]
 
     # ------------------------------------------------ 影響範囲
-
-    def _prop_plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
-        """影響範囲の伝搬に使う、式だけの Rust の計算計画（差分集計の計画は要らない。分割軸を選ぶ時点では
-        まだできていない）。計画を作り直すまで使い回す。"""
-        if self._prop_plan is not None and self._prop_plan[0] is plan.steps:
-            return self._prop_plan[1], self._prop_plan[2]
-        names = list(cat.metrics)
-        index = {n: i for i, n in enumerate(names)}
-
-        def bound(expr):
-            compiled, reads = self.e._compile(expr, cat)
-            return compiled, [index[n] for n in reads]
-
-        metrics = [(None if m.formula is None else bound(m.formula), False, False) for m in cat.metrics.values()]
-        levels = [[(None if s.scan_dim is None else self.e._dim(cat, s.scan_dim), [index[n] for n in s.names])
-                   for s in level] for level in plan.levels]
-        rplan = self.e.core.make_plan(metrics, levels)
-        self._prop_plan = (plan.steps, rplan, names)
-        return rplan, names
 
     def _added(self, cat: Catalog, added) -> list:
         return [(self.e._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in (added or {}).items()]
 
     def propagate(self, plan, cat: Catalog, changed: dict, added=None) -> dict:
         """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲（changed を含む）。"""
-        rplan, names = self._prop_plan_for(plan, cat)
+        rplan, names = self._plan_for(plan, cat, prop=True)
         index = {n: i for i, n in enumerate(names)}
         out = self.e.core.propagate(rplan, [(index[n], self.e._region(cat, r)) for n, r in changed.items()],
                                   self._added(cat, added))
@@ -586,7 +536,7 @@ class RustPlanner:
 
     def removal_regions(self, plan, stores: dict, cat: Catalog, dim: str, member: str) -> dict:
         """軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。"""
-        rplan, names = self._prop_plan_for(plan, cat)
+        rplan, names = self._plan_for(plan, cat, prop=True)
         out = self.e.core.removal_regions(rplan, [stores[n] for n in names], self.e._dim(cat, dim),
                                         cat.dimension(dim)._index[member])
         return {names[i]: self.e._to_names(cat, r) for i, r in out}
@@ -602,11 +552,15 @@ class RustPlanner:
         r = self.e.core.affected(compiled, regs, self._added(cat, added), gone)
         return None if r is None else self.e._to_names(cat, r)
 
-    def _plan_for(self, plan, cat: Catalog) -> tuple[Any, list[str]]:
-        """Model の計算計画（CompiledPlan）を Rust の計算計画にする。計画を作り直すまで使い回す。
-        差分集計する Metric の件数の式と差分の式は Rust が作る。"""
-        if self._plan is not None and self._plan[0] is plan.steps:
-            return self._plan[1], self._plan[2]
+    def _plan_for(self, plan, cat: Catalog, *, prop: bool = False) -> tuple[Any, list[str]]:
+        """Make the Rust calculation plan from the Model plan (CompiledPlan). Use it again until the plan changes.
+        If prop is true, make the plan for the propagation of the affected range. It has only the formulas,
+        because the incremental aggregation plan is not ready when the engine selects the partition dimension.
+        Otherwise, Rust makes the count and delta formulas of the Metrics with incremental aggregation."""
+        slot = "_prop_plan" if prop else "_plan"
+        cached = getattr(self, slot)
+        if cached is not None and cached[0] is plan.steps:
+            return cached[1], cached[2]
         names = list(cat.metrics)
         index = {n: i for i, n in enumerate(names)}
 
@@ -614,12 +568,12 @@ class RustPlanner:
             compiled, reads = self.e._compile(expr, cat)
             return compiled, [index[n] for n in reads]
 
-        metrics = [(None if m.formula is None else bound(m.formula), n in plan.delta, n in plan.sources)
-                   for n, m in cat.metrics.items()]
+        metrics = [(None if m.formula is None else bound(m.formula), not prop and n in plan.delta,
+                    not prop and n in plan.sources) for n, m in cat.metrics.items()]
         levels = [[(None if s.scan_dim is None else self.e._dim(cat, s.scan_dim), [index[n] for n in s.names])
                    for s in level] for level in plan.levels]
         rplan = self.e.core.make_plan(metrics, levels)
-        self._plan = (plan.steps, rplan, names)
+        setattr(self, slot, (plan.steps, rplan, names))
         return rplan, names
 
     def delta_plan(self, expr: Expr, cat: Catalog):

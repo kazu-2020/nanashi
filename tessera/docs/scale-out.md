@@ -179,7 +179,7 @@ If a worker stops during a task, the writer retries the task. The writer loses n
 ### Isolation
 
 A **scenario** is a what-if analysis ([Model operations](modeling.md), `fork`) that runs on a reader.
-Today, `Version.fork()` runs in the process that holds the version, that is, usually the writer.
+Today, `version.fork()` runs in the process that holds the version, that is, usually the writer.
 In this design, the HTTP API gets a `/scenarios` endpoint. The reader forks the published version, applies the changes of the user, and recalculates on the reader.
 A scenario never takes the lease and never writes to the journal.
 

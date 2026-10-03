@@ -2,7 +2,8 @@
 
 Workspace はモデルを 1 つ預かり、確定した状態を「版」として公開する。版は作ったら変えない。
 読み出しはいつでも公開中の版（version）を見るので、書き込みの途中の値や、取り消された変更は見えない。
-版は読み出し専用のビュー（Version）で、1 セル、範囲、ページ、集計を必要な分だけ読める。
+A version is a frozen Model. Read one cell, a range, a page, or a summary only as necessary.
+An operation on a version causes a ValueError. To try changes, make a copy with fork.
 
 書き込みは 1 本のスレッド（ライター）が列から順に取り出して処理する。列に溜まっている書き込みを
 1 つのまとまりにして、公開中の版の複製に 1 件ずつトランザクションとして適用し、記録は 1 回の
@@ -43,6 +44,7 @@ from concurrent.futures import Future
 from typing import Any, Callable
 
 from .journal import FileJournal, Journal, Stale
+from .model import Model
 
 log = logging.getLogger(__name__)
 
@@ -151,83 +153,12 @@ class Stats:
             self.commit_seconds_max = max(self.commit_seconds_max, seconds)
 
 
-def written_cells(record: dict) -> Written:
-    """記録で書き換えた入力セル（Metric の ID と、座標のメンバーの ID）。"""
-    return Written(record)
-
-
 def _follow(req: _Request, first: _Request) -> None:
     """同じまとまりで同じ client_op_id を送った書き込みに、最初の書き込みと同じ結果を返す。"""
     if first.future.exception() is not None:
         req.future.set_exception(first.future.exception())
     else:
         req.future.set_result(first.future.result())
-
-
-class Version:
-    """公開中の版の読み出し専用のビュー。
-
-    読み出しは Model と同じ名前（get、slice、rows、summarize、value）で、必要な分だけ読む。
-    手元で試したいときは fork で複製を取る（複製は普通の Model なので書き換えられる）。
-    """
-
-    __slots__ = ("_model",)
-
-    def __init__(self, model):
-        self._model = model
-
-    @property
-    def seq(self) -> int:
-        """この版の通し番号。"""
-        return self._model.seq
-
-    @property
-    def model(self):
-        """裏の Model。読み出しにだけ使う（操作を呼ぶと ValueError）。記録先のスナップショットなどに渡す。"""
-        return self._model
-
-    @property
-    def dimensions(self):
-        return self._model.dimensions
-
-    @property
-    def metrics(self):
-        return self._model.metrics
-
-    @property
-    def warnings(self):
-        return self._model.warnings
-
-    def dimension(self, name: str):
-        return self._model.dimension(name)
-
-    def metric_type(self, name: str):
-        return self._model.metric_type(name)
-
-    def get(self, name: str, **coords):
-        return self._model.get(name, **coords)
-
-    def value(self, name: str):
-        return self._model.value(name)
-
-    def slice(self, name: str, **coords):
-        return self._model.slice(name, **coords)
-
-    def rows(self, name: str, **kwargs):
-        return self._model.rows(name, **kwargs)
-
-    def summarize(self, name: str, keep=(), agg: str = "sum", **coords):
-        return self._model.summarize(name, keep, agg, **coords)
-
-    def raw(self, name: str):
-        return self._model.raw(name)
-
-    def fork(self):
-        """この版の複製（書き換えられる Model）。ホワットイフ分析に使う。"""
-        return self._model.fork()
-
-    def __repr__(self) -> str:
-        return f"Version(seq={self.seq})"
 
 
 class Workspace:
@@ -295,15 +226,14 @@ class Workspace:
         if self.journal is not None:
             model.seq = self.journal.head
         model._frozen = True
-        self._version_model = model
-        self._version = Version(model)
+        self._version = model
         self._known_since = model.seq
 
     # ------------------------------------------------ 読み出し
 
     @property
-    def version(self) -> Version:
-        """公開中の版（読み出し専用）。"""
+    def version(self) -> Model:
+        """The published version. It is frozen: an operation on it causes a ValueError."""
         return self._version
 
     @property
@@ -354,7 +284,7 @@ class Workspace:
         """公開中の版のスナップショットを記録先に置く（版は変わらないので、どのスレッドからでもよい）。"""
         if self.journal is None:
             raise ValueError("記録先（journal）がない")
-        model = self._version_model
+        model = self._version
         self._checkpoint_seq, self._checkpoint_at = model.seq, time.monotonic()
         self.journal.save_snapshot(model)
         self.stats.add(snapshots=1)
@@ -440,7 +370,7 @@ class Workspace:
                 if req.future.set_running_or_notify_cancel():
                     req.future.set_exception(err)
             return
-        working = self._version_model.fork()  # 公開中の版は変えない
+        working = self._version.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
         aliases: list[tuple[_Request, _Request]] = []  # 同じまとまりで同じ client_op_id を送ったもの
         firsts: dict[str, _Request] = {}
@@ -456,7 +386,7 @@ class Workspace:
                     aliases.append((req, firsts[req.client_op_id]))
                     continue
                 firsts[req.client_op_id] = req
-            pending = [written_cells(r) for _, r in applied]
+            pending = [Written(r) for _, r in applied]
             try:
                 with working.transaction(user=req.user, reason=req.reason, client_op_id=req.client_op_id,
                                          validate=lambda rec, req=req, pending=pending:
@@ -497,7 +427,7 @@ class Workspace:
         self.stats.commit(len(committed), time.monotonic() - started)
         for (req, rec), seq in zip(committed, seqs):
             rec["seq"] = seq
-            self._recent.append((seq, req.user, written_cells(rec)))
+            self._recent.append((seq, req.user, Written(rec)))
             if req.client_op_id is not None:
                 self._ops[req.client_op_id] = seq
                 if len(self._ops) > self._recent.maxlen:
@@ -505,7 +435,7 @@ class Workspace:
         if seqs:
             working.seq = seqs[-1]
         working._frozen = True
-        self._version_model, self._version = working, Version(working)  # 公開する
+        self._version = working  # 公開する
 
         for req, rec in applied:
             req.future.set_result(rec.get("seq", working.seq))
@@ -525,13 +455,13 @@ class Workspace:
         """記録先の最新の版に追いつく（手元の版が古いと言われたとき）。公開中の版の複製に、ほかのプロセスが
         確定した記録を書き込み、影響範囲だけを計算し直す。追いつけなければ、記録先から開き直す。"""
         try:
-            model = self._version_model.fork()
+            model = self._version.fork()
             if not self.journal.catch_up(model):
                 return
         except Exception:
             log.warning("記録先の記録に追いつけなかったので、開き直す", exc_info=True)
             try:
-                model = self.journal.open(self._version_model.engine)
+                model = self.journal.open(self._version.engine)
             except Exception as e:
                 log.exception("記録先からの開き直しに失敗した")
                 self.stats.add(reopen_failures=1)
@@ -547,7 +477,7 @@ class Workspace:
         """読んだ版（req.expect）より後に、同じセルを変えた書き込みがあれば Conflict。"""
         if req.expect is None:
             return
-        mine = written_cells(record)
+        mine = Written(record)
         if not mine:
             return
         if req.expect < self._known_since or (self._recent and len(self._recent) == self._recent.maxlen
@@ -576,7 +506,7 @@ class Workspace:
         try:
             self._reload()
             if self._degraded is None:
-                self._publish(self._version_model)  # 版が同じでも、expect を確かめる基準は今の版にする
+                self._publish(self._version)  # 版が同じでも、expect を確かめる基準は今の版にする
         except BaseException:
             self.journal.release()
             raise
@@ -631,7 +561,7 @@ class Workspace:
             or (self.checkpoint_interval is not None and time.monotonic() - self._checkpoint_at >= self.checkpoint_interval)
         if not due:
             return
-        model = self._version_model
+        model = self._version
         self._checkpoint_seq, self._checkpoint_at = model.seq, time.monotonic()
 
         def run():
@@ -673,10 +603,10 @@ class Replica:
         model.journal = None
         model.recalc()
         model._frozen = True
-        self._version = Version(model)
+        self._version = model
 
     @property
-    def version(self) -> Version:
+    def version(self) -> Model:
         return self._version
 
     @property
@@ -686,7 +616,7 @@ class Replica:
     def refresh(self) -> int:
         """今すぐ記録先に追いつく。公開中の版の通し番号を返す。"""
         with self._lock:
-            model = self._version.model.fork()
+            model = self._version.fork()
             if self.journal.catch_up(model):
                 self._publish(model)
                 self.stats.add(catch_ups=1)

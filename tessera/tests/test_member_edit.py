@@ -7,7 +7,7 @@ from examples.fpa import build
 from sparse_engine import Model, ref, to_formula
 from sparse_engine.engine import ReferenceEngine
 
-from .test_incremental import same, snapshot
+from .test_incremental import cells, check_full, same, snapshot
 from .test_input_features import model as planning_model
 from .test_member_values import model as version_model
 
@@ -48,10 +48,6 @@ def model(engine=None) -> Model:
     return m
 
 
-def cells(m: Model, name: str) -> dict:
-    return dict(m.value(name).cells)
-
-
 class Rename(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
@@ -71,7 +67,7 @@ class Rename(unittest.TestCase):
         self.m.eval_log.clear()
         self.m.rename_member("Product", "A", "Alpha")
         self.m.recalc()
-        self.assertEqual(self.m.eval_log, [])
+        self.assertEqual(list(self.m.eval_log), [])
 
     def test_formulas_use_the_new_name(self):
         self.m.rename_member("Month", "Jan", "January")
@@ -120,12 +116,7 @@ class Remove(unittest.TestCase):
         self.m = model(self.engine())
 
     def check_full(self):
-        """差分で直した結果が、全体の計算し直しと一致する。"""
-        incremental = snapshot(self.m)
-        self.m._invalidate()
-        full = snapshot(self.m)
-        for name in self.m.metrics:
-            self.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
+        check_full(self, self.m)
 
     def test_middle_month(self):
         self.m.remove_member("Month", "Feb")

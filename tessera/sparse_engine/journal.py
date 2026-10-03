@@ -42,7 +42,7 @@ from .expr import Expr
 from .objects import LocalObjects
 from .parser import parse, to_formula
 
-LOG_VERSION = 1
+LOG_VERSION = 1  # The format version of a record ("v")
 
 log = logging.getLogger(__name__)
 
@@ -404,22 +404,24 @@ def _define(model, spec: dict) -> None:
 # ---------------------------------------------------------------- ファイルへの記録
 
 class Journal:
-    """記録先の共通部分。記録の追記と読み出し、スナップショットの保存と一覧は、記録先ごとに実装する。
+    """The common part of the journals. Each journal (FileJournal, PgJournal) implements these items:
 
-        head                       最後の記録の通し番号
-        append_many(records)       記録を追記して確定し、通し番号の列を返す（まとめて 1 回で確定する）
-        seq_of(client_op_id)       その ID の記録の通し番号（なければ None）
-        records(after)             通し番号が after より後の記録（古い順）
-        save_snapshot(model)       model（通し番号 model.seq の時点）のスナップショットを置く
-        snapshots()                スナップショットの (通し番号, 置き場所) を新しい順に
-        load_snapshot(place)       置き場所のスナップショットを読む。壊れていれば BrokenSnapshot
-                                   （open は 1 つ前のスナップショットから記録を多く再生する）
-        acquire()                  書き込みの権利（FileJournal のロック、PgJournal のリース）を取る
-        take()                     書き込みの権利を、待たずに取れるなら取る（待機系が使う）
-        leader()                   書き込みの権利を持っているプロセスが公開している番地
-        release()                  書き込みの権利を手放す。次の書き手が待たずに済む
-        refresh()                  記録先の最新の通し番号を読み直す
-        wait(timeout)              記録が増えたかもしれないときまで待つ
+        head                       The seq of the last record
+        objects                    The object storage for the snapshots and the large cell changes
+        append_many(records)       Append the records, commit them in one write, and return their seqs
+        seq_of(client_op_id)       The seq of the record with this ID (None if there is no record)
+        seq_of_many(client_op_ids) The committed client_op_id -> seq, in one lookup
+        records(after)             The records with a seq after "after" (oldest first)
+        save_snapshot(model)       Put a snapshot of model (at seq model.seq)
+        snapshots()                The (seq, place) of the snapshots, newest first
+        acquire()                  Get the write right (the FileJournal lock, the PgJournal lease)
+        lease()                    The state of the write right (held, seconds left, last renewal error)
+        release()                  Release the write right. The next writer does not wait
+        refresh()                  Read the latest seq of the journal again
+        wait(timeout)              Wait until the journal can have new records
+
+    take() and leader() have defaults here. load_snapshot(place) reads a snapshot.
+    If the snapshot is broken, it raises BrokenSnapshot. Then open replays more records from the snapshot before it.
     """
 
     head: int = 0
@@ -439,10 +441,6 @@ class Journal:
     def leader(self) -> str | None:
         """書き込みの権利を持っているプロセスが公開している番地（分からない記録先は None）。"""
         return None
-
-    def lease(self) -> dict:
-        """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
-        return {"held": False, "expires_in": None, "error": None}
 
     def refresh(self) -> int:
         """記録先の最新の通し番号を読み直して head にする（ほかのプロセスの書き込みに追いつくとき）。"""
@@ -470,13 +468,8 @@ class Journal:
         """記録を追記して、ディスクへの書き込みを確かめてから通し番号を返す。"""
         return self.append_many([record])[0]
 
-    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
-        """確定済みの client_op_id -> 通し番号（まとめて 1 回で引ける記録先はそうする）。"""
-        out = {}
-        for i in client_op_ids:
-            if (seq := self.seq_of(i)) is not None:
-                out[i] = seq
-        return out
+    def load_snapshot(self, place: Snapshot, engine):
+        return read_snapshot(self.objects, place, engine)
 
     def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
         """セルの変更の履歴（古い順）。メンバー型の値は今の名前に直す（消したメンバーは ID のまま）。"""
@@ -764,7 +757,7 @@ class FileJournal(Journal):
             line = {**r, "seq": q}
             if cell_count(r) > self.bulk_cells:  # 大量のセルは、先にファイルへ書き出す
                 line["changes"] = {k: v for k, v in r["changes"].items() if k != "cells"}
-                line["cells_blob"] = self._write_cells(r)
+                line["cells_blob"] = write_cell_files(self.objects, f"cells/{uuid.uuid4().hex}", r)
             lines.append(json.dumps(line, ensure_ascii=False, separators=(",", ":"), default=_json_rows) + "\n")
         data = "".join(lines).encode("utf-8")
         path = self.log_path
@@ -800,15 +793,6 @@ class FileJournal(Journal):
 
     def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
         return {i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op}
-
-    def _write_cells(self, record: dict) -> dict:
-        """記録のセルの変更を cells/ の Parquet に置き、記録の行に入れる参照（キーは path からの相対）を返す。"""
-        prefix = f"cells/{uuid.uuid4().hex}"
-
-        def put(name: str, data: bytes) -> str:
-            self.objects.put(f"{prefix}-{name}", data)
-            return f"{prefix}-{name}"
-        return {"files": write_cell_files(record, put), "cells": cell_count(record)}
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
@@ -875,9 +859,6 @@ class FileJournal(Journal):
                 out.append((meta["seq"], Snapshot(prefix, meta["files"])))
         return sorted(out, key=lambda x: (x[0], x[1].uri), reverse=True)
 
-    def load_snapshot(self, place: Snapshot, engine):
-        return read_snapshot(self.objects, place, engine)
-
 
 def cell_count(record: dict) -> int:
     """記録の中の、書き換えた入力セルの数。"""
@@ -889,19 +870,22 @@ def as_block(core, rows):
     return core.CellBlock.from_rows(rows) if isinstance(rows, list) else rows
 
 
-def write_cell_files(record: dict, put: Callable[[str, bytes], str]) -> list[dict]:
-    """記録のセルの変更を Metric ごとの Parquet にし、put(<Metric の ID>.parquet, 中身) で置いて、
-    [{"metric", "uri"（put が返した置き場所）, "sha256", "cells"}] を返す。"""
+def write_cell_files(objects, prefix: str, record: dict) -> dict:
+    """Write the cell changes of the record to objects, one Parquet file for each Metric.
+    The key of a file is "<prefix>-<Metric ID>.parquet". Return {"files", "cells"}.
+    Each item of "files" is {"metric", "uri", "sha256", "cells"}."""
     core = native()
     files = []
     for c in record["changes"].get("cells", []):
         block = as_block(core, c["rows"])
-        # 列の名前は軸の ID（記録に軸がなければ c0、c1、…）
+        # The column names are the dimension IDs (c0, c1, ... if the record has no dimensions)
         names = [f"d{i}" for i in c["dims"]] if "dims" in c else [f"c{j}" for j in range(block.width)]
         data = block.to_parquet(names, [("nanashi", json.dumps({"metric": c["metric"]}))])
-        files.append({"metric": c["metric"], "uri": put(f"{c['metric']}.parquet", data),
-                      "sha256": hashlib.sha256(data).hexdigest(), "cells": len(block)})
-    return files
+        uri = f"{prefix}-{c['metric']}.parquet"
+        objects.put(uri, data)
+        files.append({"metric": c["metric"], "uri": uri, "sha256": hashlib.sha256(data).hexdigest(),
+                      "cells": len(block)})
+    return {"files": files, "cells": cell_count(record)}
 
 
 def read_cell_files(files: list[dict], get: Callable[[str], bytes]) -> list[dict]:
@@ -921,14 +905,6 @@ def _json_rows(x: Any) -> list:
     if hasattr(x, "rows"):
         return x.rows()
     raise TypeError(f"JSON にできない値: {type(x).__name__}")
-
-
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _write_all(fd: int, data: bytes) -> None:

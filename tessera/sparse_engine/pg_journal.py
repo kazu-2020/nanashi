@@ -47,7 +47,7 @@ from psycopg.types.json import Jsonb
 
 from .engine import native
 from .journal import (Fenced, Journal, Snapshot, _shown, as_block, cell_count, put_snapshot, read_cell_files,
-                      read_snapshot, write_cell_files)
+                      write_cell_files)
 from .objects import open_objects
 
 log = logging.getLogger(__name__)
@@ -357,14 +357,9 @@ class PgJournal(Journal):
     # ------------------------------------------------ 大量のセル
 
     def _write_blob(self, record: dict) -> dict:
-        """記録のセルの変更を Metric ごとの Parquet にして置き、置き場所、ハッシュ、件数を返す。"""
+        """Write the cell changes of the record as Parquet files. Return the prefix, the files, and the cell count."""
         prefix = f"{self.model_id}/cells/{uuid.uuid4().hex}"
-
-        def put(name: str, data: bytes) -> str:
-            self.objects.put(f"{prefix}-{name}", data)
-            return f"{prefix}-{name}"
-        files = write_cell_files(record, put)
-        return {"prefix": prefix, "files": files, "cells": cell_count(record)}
+        return {"prefix": prefix, **write_cell_files(self.objects, prefix, record)}
 
     def _read_blob(self, blob: dict) -> list[dict]:
         """_write_blob で置いたセルの変更を読む（Metric ごとの変更の塊）。"""
@@ -478,9 +473,6 @@ class PgJournal(Journal):
             rows = self.conn.execute("select seq, uri, meta from nanashi_snapshot where model_id = %s and seq <= %s"
                                      " order by seq desc", (self.model_id, self.head)).fetchall()
         return [(seq, Snapshot(uri, meta["files"])) for seq, uri, meta in rows]
-
-    def load_snapshot(self, place: Snapshot, engine):
-        return read_snapshot(self.objects, place, engine)
 
     def prune(self, keep: int = 2, op_window: int = 100_000) -> dict:
         """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットを消す。残す一番古い

@@ -13,12 +13,12 @@ import argparse
 import json
 import random
 import resource
-import statistics
-import subprocess
-import sys
 import time
 
 import numpy as np
+
+from bench import run_plan, time_edits
+from sparse_engine.engine import engine_for
 
 N_PRODUCT, N_CATEGORY, N_REGION = 2_000, 20, 10
 MONTHS = [f"m{i:02d}" for i in range(1, 37)]
@@ -73,13 +73,8 @@ def generate(n: int, seed: int = 0) -> list[tuple[str, tuple[str, ...], str]]:
 
 def build(engine_name: str, n: int):
     from sparse_engine import Model
-    from sparse_engine.engine import ReferenceEngine
 
-    if engine_name == "rust":
-        from sparse_engine.rust_engine import RustEngine
-        engine = RustEngine()
-    else:
-        engine = ReferenceEngine()
+    engine = engine_for(engine_name)
     m = Model(engine=engine)
     products = [f"p{i:04d}" for i in range(N_PRODUCT)]
     m.add_dimension("Product", products)
@@ -130,27 +125,9 @@ def run(engine_name: str, n: int, repeats: int) -> dict:
     m.recalc()
     full = time.perf_counter() - t0
 
-    rng = np.random.default_rng(1)
-    # 全体の再計算の直後の最初の変更（後回しにした分割のコストを含む）
-    label, name, coords = EDITS[0]
-    m.set_cell(name, float(rng.integers(1, 100)), **coords)
-    t0 = time.perf_counter()
-    m.recalc()
-    first_edit = time.perf_counter() - t0
-
-    edits = {}
-    for label, name, coords in EDITS:
-        times, touched = [], []
-        for _ in range(repeats):
-            m.set_cell(name, float(rng.integers(1, 100)), **coords)
-            m.slice_log.clear()
-            t0 = time.perf_counter()
-            m.recalc()
-            times.append(time.perf_counter() - t0)
-            touched.append(len(m.slice_log))
-        t = statistics.median(times)
-        k = statistics.median(touched)
-        edits[label] = {"ms": t * 1000, "metrics": k, "ms_per_metric": t * 1000 / k if k else None}
+    first_edit, timings = time_edits(m, EDITS, repeats)
+    edits = {label: {"ms": t * 1000, "metrics": k, "ms_per_metric": t * 1000 / k if k else None}
+             for label, (t, k) in timings.items()}
 
     formulas = [x.formula for x in m.metrics.values() if x.formula is not None]
     scans = sum(len(s.names) for s in m._plan if s.scan_dim is not None)
@@ -163,22 +140,9 @@ def run(engine_name: str, n: int, repeats: int) -> dict:
 
 
 def driver(sizes: list[int], reference_up_to: int) -> None:
-    results = []
-    for n in sizes:
-        for engine in (["reference"] if n <= reference_up_to else []) + ["rust"]:
-            print(f"running {engine} {n} ...", file=sys.stderr, flush=True)
-            try:
-                out = subprocess.run([sys.executable, __file__, "--engine", engine, "--metrics", str(n)],
-                                     capture_output=True, text=True, timeout=3600, check=True)
-                results.append(json.loads(out.stdout))
-            except subprocess.TimeoutExpired:
-                results.append({"engine": engine, "metrics": n, "timeout": True})
-            except subprocess.CalledProcessError as e:
-                print(e.stderr, file=sys.stderr)
-                results.append({"engine": engine, "metrics": n, "error": e.stderr[-800:]})
-    with open("bench_metrics_results.json", "w") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-    report(results)
+    plan = [(engine, "metrics", n) for n in sizes
+            for engine in (["reference"] if n <= reference_up_to else []) + ["rust"]]
+    report(run_plan(__file__, plan, 3600, 800, "bench_metrics_results.json"))
 
 
 def report(results: list[dict]) -> None:

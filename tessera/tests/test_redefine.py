@@ -7,7 +7,7 @@ from sparse_engine import FormulaError, Model
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
-from .test_incremental import model as build, same, snapshot
+from .test_incremental import check_full, model as build, same, snapshot
 from .test_members import random_round as edit_or_add_member
 
 try:
@@ -25,15 +25,6 @@ def computed(engine=None) -> Model:
     return m
 
 
-def check_full(test, m: Model) -> None:
-    """差分で直した結果が、全体の計算し直しと一致する。"""
-    incremental = snapshot(m)
-    m._invalidate()
-    full = snapshot(m)
-    for name in m.metrics:
-        test.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
-
-
 class Redefine(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
 
@@ -43,7 +34,7 @@ class Redefine(unittest.TestCase):
     def test_new_formula_computes_only_itself(self):
         self.m.add_formula("Double", ["Product", "Month"], "Margin * 2")
         self.m.recalc()
-        self.assertEqual(self.m.eval_log, ["Double"])
+        self.assertEqual(list(self.m.eval_log), ["Double"])
         self.assertEqual(self.m.get("Double", Product="A", Month="Jan"), 2 * (30 - 7))
         check_full(self, self.m)
 
@@ -60,7 +51,7 @@ class Redefine(unittest.TestCase):
     def test_same_values_stop_propagation(self):
         self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 1")
         self.m.recalc()
-        self.assertEqual(self.m.eval_log, ["Margin"])
+        self.assertEqual(list(self.m.eval_log), ["Margin"])
 
     def test_delta_aggregate_keeps_working(self):
         self.m.add_formula("DeptSalary", ["Department"], "Salary[BY SUM: Employee.Department] * 1")

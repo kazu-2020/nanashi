@@ -173,7 +173,7 @@ class PgJournalTests(unittest.TestCase):
         ws.write(move("p5", "p6", "Feb", 2))
         ws.close()
         reopened = Workspace.open(self.journal(), ReferenceEngine())
-        check_same_state(self, ws.version.model, reopened.version.model)
+        check_same_state(self, ws.version, reopened.version)
         history = reopened.journal.cell_history(reopened.version, "Stock", Product="p6", Month="Feb")
         self.assertEqual([(h["seq"], h["old"], h["new"]) for h in history], [(11, 100.0, 102.0)])
         reopened.close()

@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import functools
 import itertools
+from collections import deque
 import math
 from dataclasses import dataclass, field
 from statistics import mean
@@ -35,7 +36,7 @@ from .engine import Store, default_engine
 from .evaluate import Edge, FormulaError, Kind, Restrict, Type, combos, member_kind, union_region
 from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_member, references_metric,
                    rename_member, rename_metrics, uses_property)
-from .journal import AlreadyCommitted, Transaction, changes, jsonable, now
+from .journal import LOG_VERSION, AlreadyCommitted, Transaction, changes, jsonable, now
 from .messages import msg
 from .parser import parse
 from .planner import CompiledPlan, Step
@@ -86,18 +87,9 @@ class Pending:
 LOG_MAX = 10_000  # 観察用の記録の上限（古いものから捨てる）
 
 
-class Log(list):
-    """観察用の記録。上限を超えたら古いものから捨てる（長く動かしても伸び続けない）。"""
-
-    def append(self, item) -> None:
-        super().append(item)
-        if len(self) > LOG_MAX:
-            del self[:len(self) - LOG_MAX]
-
-    def extend(self, items) -> None:
-        super().extend(items)
-        if len(self) > LOG_MAX:
-            del self[:len(self) - LOG_MAX]
+def _log() -> deque:
+    """An observation log. If it has more than LOG_MAX items, it discards the oldest items."""
+    return deque(maxlen=LOG_MAX)
 
 
 class SliceLog:
@@ -281,9 +273,9 @@ class Model:
     max_cells: int | None = 1_000_000_000  # 計算 Metric 1 つのセル数の見積もりの上限。None なら検査しない
     dimensions: dict[str, Dimension] = field(default_factory=dict)
     metrics: dict[str, Metric] = field(default_factory=dict)
-    eval_log: Log = field(default_factory=Log)  # 再計算した Metric 名（観察用）
+    eval_log: deque = field(default_factory=_log)  # 再計算した Metric 名（観察用）
     slice_log: SliceLog = field(default_factory=lambda: SliceLog())  # 再計算した範囲（観察用）
-    delta_log: Log = field(default_factory=Log)  # 差分集計で更新した Metric（観察用）
+    delta_log: deque = field(default_factory=_log)  # 差分集計で更新した Metric（観察用）
     _state: dict[str, MetricState] = field(default_factory=dict)  # Metric ごとの、定義以外の状態
     _plan: list[Step] | None = None
     _levels: list[list[Step]] = field(default_factory=list)  # 依存関係の段ごとの計画（全体の再計算用）
@@ -413,7 +405,7 @@ class Model:
         try:
             yield txn
             self.recalc()
-            record = {"v": 1, "at": now(), "user": user, "reason": reason, "client_op_id": client_op_id,
+            record = {"v": LOG_VERSION, "at": now(), "user": user, "reason": reason, "client_op_id": client_op_id,
                       "ops": txn.ops, "changes": changes(saved, self)}
             if validate is not None:
                 validate(record)

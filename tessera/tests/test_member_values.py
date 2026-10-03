@@ -5,7 +5,7 @@ import unittest
 from sparse_engine import FormulaError, Model, dim, member, parse, to_formula
 from sparse_engine.engine import ReferenceEngine
 
-from .test_incremental import same, snapshot
+from .test_incremental import cells, same, snapshot
 
 try:
     from sparse_engine.rust_engine import RustEngine
@@ -37,10 +37,6 @@ def model(engine=None) -> Model:
     m.recalc()
     m.slice_log.clear()
     return m
-
-
-def cells(m: Model, name: str) -> dict:
-    return dict(m.value(name).cells)
 
 
 class Syntax(unittest.TestCase):

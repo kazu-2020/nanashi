@@ -16,7 +16,7 @@ import time
 import uuid
 
 from examples.fpa import SIZES, build
-from sparse_engine.journal import FileJournal, now
+from sparse_engine.journal import LOG_VERSION, FileJournal, now
 from sparse_engine.rust_engine import RustEngine
 from sparse_engine.workspace import Workspace
 
@@ -111,7 +111,7 @@ def bench_bulk(kind: str) -> None:
         t = Target(kind)
         j = t.make()
         rows = [[[i // 1000, i % 1000, 7], float(i), float(i + 1)] for i in range(n)]
-        rec = {"v": 1, "at": now(), "user": "etl", "reason": None, "client_op_id": None, "ops": [],
+        rec = {"v": LOG_VERSION, "at": now(), "user": "etl", "reason": None, "client_op_id": None, "ops": [],
                "changes": {"next_id": 1, "cells": [{"metric": 1, "rows": rows}]}}
         s = time.perf_counter()
         j.append(rec)

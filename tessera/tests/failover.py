@@ -8,7 +8,7 @@
 --via-router なら、送り手はルーター（router/）の /models/<モデルの ID>/writes にだけ送り、送り先を変えない。
 書き手を探して送り直すのはルーターの役目なので、ルーターが 200 以外を返せば失敗として数える。
 両方のサーバーを止めたあと、記録先の記録と開き直したモデルの値を、送り手が受け取った確定と突き合わせる。
-リースの期限は短くして（--lease-ttl、既定 3 秒）、SIGKILL の引き継ぎもすぐ測れるようにする。
+リースの期限は短くして（LEASE_TTL、3 秒）、SIGKILL の引き継ぎもすぐ測れるようにする。
 PostgreSQL（NANASHI_PG_DSN）を使う。
 """
 from __future__ import annotations
@@ -17,7 +17,6 @@ import argparse
 import collections
 import http.client
 import itertools
-import json
 import math
 import shutil
 import signal
@@ -28,7 +27,6 @@ import tempfile
 import threading
 import time
 import urllib.error
-import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
@@ -43,6 +41,7 @@ from sparse_engine.pg_journal import PgJournal
 from sparse_engine.rust_engine import RustEngine
 
 from .journals import DSN
+from .test_server import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 ITEMS = [f"i{n:03d}" for n in range(200)]
@@ -112,19 +111,23 @@ def seeded_model() -> Iterator[tuple[str, Path]]:
             journal.close()
 
 
-@contextmanager
-def serving(model_id: str, tmp: Path, name: str, *, lease_ttl: float = LEASE_TTL,
-            role: str | None = None) -> Iterator[Server]:
-    """サーバーのプロセスを起こし、/ready が 200 を返す（role を渡せば、その役割になる）まで待つ。
-    抜けるときに残っていれば殺す。"""
+def free_port() -> int:
+    """Return a TCP port on 127.0.0.1 that is free now."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+        return s.getsockname()[1]
+
+
+@contextmanager
+def serving(model_id: str, tmp: Path, name: str, *, role: str | None = None) -> Iterator[Server]:
+    """サーバーのプロセスを起こし、/ready が 200 を返す（role を渡せば、その役割になる）まで待つ。
+    抜けるときに残っていれば殺す。"""
+    port = free_port()
     log = tmp / f"{name}.log"
     with open(log, "wb") as out:
         proc = subprocess.Popen(
             [sys.executable, "-m", "sparse_engine.server", str(tmp / "objects"), "--pg", DSN,
-             "--model-id", model_id, "--port", str(port), "--engine", "rust", "--lease-ttl", str(lease_ttl)],
+             "--model-id", model_id, "--port", str(port), "--engine", "rust", "--lease-ttl", str(LEASE_TTL)],
             cwd=ROOT, stdout=out, stderr=out)
     server = Server(proc, f"http://127.0.0.1:{port}", log)
     try:
@@ -144,16 +147,14 @@ def routing(tmp: Path) -> Iterator[Server]:
         raise RuntimeError("ルーターのビルドに Go が要る")
     binary = tmp / "nanashi-router"
     subprocess.run([go, "build", "-o", str(binary), "./cmd/nanashi-router"], cwd=ROOT.parent / "router", check=True)
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    port = free_port()
     log = tmp / "router.log"
     with open(log, "wb") as out:
         proc = subprocess.Popen([str(binary), "--pg", DSN, "--listen", f"127.0.0.1:{port}"], stdout=out, stderr=out)
     router = Server(proc, f"http://127.0.0.1:{port}", log)
     try:
         deadline = time.monotonic() + 30
-        while not healthy(router.url + "/healthz"):
+        while not healthy(router.url, "/healthz"):
             if proc.poll() is not None:
                 raise RuntimeError(f"ルーターが終了した（{proc.returncode}）:\n{log.read_text()}")
             if time.monotonic() > deadline:
@@ -172,7 +173,7 @@ def wait_ready(server: Server, timeout: float = 60.0, role: str | None = None) -
         if server.proc.poll() is not None:
             raise RuntimeError(f"サーバーが終了した（{server.proc.returncode}）:\n{server.log.read_text()}")
         try:
-            status, body = get(server.url + "/ready")
+            status, body = Client(server.url, None, timeout=2).get("/ready")
             if status == 200 and role in (None, body["role"]):
                 return
         except OSError:
@@ -181,33 +182,18 @@ def wait_ready(server: Server, timeout: float = 60.0, role: str | None = None) -
     raise TimeoutError(f"{server.url} が {timeout} 秒で要求を受けられる{role or ''}にならなかった")
 
 
-def healthy(url: str) -> bool:
+def healthy(url: str, path: str) -> bool:
     try:
-        return get(url)[0] == 200
+        return Client(url, None, timeout=2).get(path)[0] == 200
     except OSError:
         return False
 
 
-def get(url: str) -> tuple[int, dict]:
-    """GET して (状態, JSON の本文) を返す（4xx、5xx でも本文を返す）。"""
-    try:
-        with urllib.request.urlopen(url, timeout=2) as r:
-            return r.status, json.load(r)
-    except urllib.error.HTTPError as e:
-        return e.code, json.load(e)
-
-
 def try_post(url: str, write: Write) -> tuple[int, dict]:
     """write を送り、(状態, JSON の本文) を返す（4xx、5xx でも本文を返す）。"""
-    body = {"client_op_id": write.op_id,
-            "ops": [{"op": "set_cell", "args": ["Value", write.value], "kwargs": {"Item": write.item}}]}
-    req = urllib.request.Request(url + "/writes", data=json.dumps(body).encode(), method="POST",
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=CLIENT_TIMEOUT) as r:
-            return r.status, json.load(r)
-    except urllib.error.HTTPError as e:
-        return e.code, json.load(e)
+    return Client(url, None, timeout=CLIENT_TIMEOUT).post("/writes", {
+        "client_op_id": write.op_id,
+        "ops": [{"op": "set_cell", "args": ["Value", write.value], "kwargs": {"Item": write.item}}]})
 
 
 def post(url: str, write: Write) -> int:
@@ -268,7 +254,7 @@ def wait_until(cond, clients: list[Future], timeout: float = GIVE_UP + 30) -> No
         time.sleep(0.05)
 
 
-def run(sig: signal.Signals, lease_ttl: float = LEASE_TTL, via_router: bool = False) -> Report:
+def run(sig: signal.Signals, via_router: bool = False) -> Report:
     """A に書き込み続ける中で A に sig を送り、B に引き継がせる。via_router なら送り手はルーターにだけ送る。"""
     report, lock, stop = Report(), threading.Lock(), threading.Event()
 
@@ -280,8 +266,8 @@ def run(sig: signal.Signals, lease_ttl: float = LEASE_TTL, via_router: bool = Fa
         after = acked(report.killed_at)
         return len(after) >= AFTER and time.monotonic() >= min(after) + SETTLE
 
-    with (seeded_model() as (model_id, tmp), serving(model_id, tmp, "a", lease_ttl=lease_ttl, role="leader") as a,
-          serving(model_id, tmp, "b", lease_ttl=lease_ttl, role="standby") as b, ExitStack() as stack):
+    with (seeded_model() as (model_id, tmp), serving(model_id, tmp, "a", role="leader") as a,
+          serving(model_id, tmp, "b", role="standby") as b, ExitStack() as stack):
         urls = [a.url, b.url]
         if via_router:
             urls = [f"{stack.enter_context(routing(tmp)).url}/models/{model_id}"]
@@ -346,14 +332,13 @@ def violations(report: Report) -> list[str]:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="書き手のサーバーを止めて、もう一方のサーバーに引き継がせる")
     ap.add_argument("--signal", choices=["TERM", "KILL"], default="TERM", help="A に送るシグナル")
-    ap.add_argument("--lease-ttl", type=float, default=LEASE_TTL, help="サーバーに渡すリースの期限（秒）")
     ap.add_argument("--via-router", action="store_true", help="送り手はルーターにだけ送る（Go が要る）")
     args = ap.parse_args(argv)
-    report = run(signal.Signals[f"SIG{args.signal}"], args.lease_ttl, args.via_router)
+    report = run(signal.Signals[f"SIG{args.signal}"], args.via_router)
     problems = violations(report)
     print(f"送った書き込み {len(report.issued)}、確定 {len(report.acks)}、"
           f"再送した書き込み {sum(a.attempts > 1 for a in report.acks)}")
-    print(f"A を止めてから確定が途切れた最も長い間: {report.gap:.2f} 秒（リースの期限 {args.lease_ttl} 秒）")
+    print(f"A を止めてから確定が途切れた最も長い間: {report.gap:.2f} 秒（リースの期限 {LEASE_TTL} 秒）")
     print(f"失敗した送信: {dict(report.failures.most_common())}")
     print("\n".join(problems) or "確定を返した書き込みはすべて 1 回だけ記録され、値も合っている")
     sys.exit(1 if problems else 0)

@@ -46,9 +46,9 @@ class Follow(JournalCase):
         self.assertEqual(v.get("Stock", Product="p1", Month="Jan"), 105.0)
         self.assertEqual(v.get("Total"), 8000.0)
         # 入力の変更として書き込むので、変わった範囲だけを計算し直す（全体を計算し直さない）
-        double = [r for n, r in v.model.slice_log if n == "Double"]
+        double = [r for n, r in v.slice_log if n == "Double"]
         self.assertTrue(double and all(r for r in double), double)
-        check_same_state(self, self.ws.version.model, v.model)
+        check_same_state(self, self.ws.version, v)
 
     def test_structural_changes_are_followed(self):
         self.ws.write(lambda m: m.add_member("Product", "p99"))
@@ -56,21 +56,21 @@ class Follow(JournalCase):
         self.ws.write(lambda m: m.add_formula("Triple", ["Product", "Month"], "Stock * 3"))
         self.replica.refresh()
         self.assertEqual(self.replica.version.get("Triple", Product="p99", Month="Feb"), 21.0)
-        check_same_state(self, self.ws.version.model, self.replica.version.model)
+        check_same_state(self, self.ws.version, self.replica.version)
 
     def test_member_order_is_followed_without_recalculating(self):
         self.ws.write(lambda m: m.move_member("Product", "p3", 0))
         self.replica.refresh()
         v = self.replica.version
-        self.assertEqual(v.model.dimensions["Product"].in_order()[0], "p3")
-        self.assertEqual(list(v.model.slice_log), [])  # 並び順だけなら何も計算し直さない
-        check_same_state(self, self.ws.version.model, v.model)
+        self.assertEqual(v.dimensions["Product"].in_order()[0], "p3")
+        self.assertEqual(list(v.slice_log), [])  # 並び順だけなら何も計算し直さない
+        check_same_state(self, self.ws.version, v)
 
     def test_replica_follows_in_the_background(self):
         for i in range(5):
             self.ws.write(move("p0", f"p{i + 1}", "Mar", 1))
         wait_for(lambda: self.replica.seq == self.ws.seq)
-        check_same_state(self, self.ws.version.model, self.replica.version.model)
+        check_same_state(self, self.ws.version, self.replica.version)
         self.assertIsNone(self.replica.error)
 
     def test_readers_see_whole_versions_while_following(self):
@@ -135,7 +135,7 @@ class WriterCatchesUp(JournalCase, unittest.TestCase):
         self.assertEqual(b.version.get("Stock", Product="p1", Month="Jan"), 105.0)  # 追いついた
         self.assertEqual(b.write(move("p2", "p3", "Jan", 1)), 2)
         b.close()
-        check_same_state(self, b.version.model, self.journals.journal().open(ReferenceEngine()))
+        check_same_state(self, b.version, self.journals.journal().open(ReferenceEngine()))
 
 
 if __name__ == "__main__":
