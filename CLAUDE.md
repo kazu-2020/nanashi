@@ -6,7 +6,18 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 
 - `tessera/`: the sparse multidimensional calculation engine. `tessera/CLAUDE.md` gives the guidance for it.
 - `router/`: a Go router. It goes in front of the engine servers. `router/README.md` is its specification.
+- `api/`: the Go application server. `api/CLAUDE.md` gives the guidance for it.
+- `web/`: the frontend (SPA). `web/CLAUDE.md` gives the guidance for it.
+- `proto/`: the Connect contract between `api/` and `web/`. `buf.gen.yaml` makes `api/gen/` and `web/src/gen/` from it.
 - `compose.yaml`: PostgreSQL (port 55432) and RustFS (port 59000) for development and tests. Start them with `docker compose up -d`.
+
+## Skills for the work
+
+- Use the `ponytail` skill and the `pstack:poteto-mode` skill together. One skill does not replace the other skill.
+  - `ponytail` sets the size of the solution. Make the smallest change that works.
+  - `pstack:poteto-mode` sets the process. Plan the work, delegate it to subagents, and verify it.
+- If a task changes more than one file or needs a design decision, invoke `pstack:poteto-mode` before you start the work.
+- If the scope of a task becomes larger during the work, invoke `pstack:poteto-mode` at that time.
 
 ## Language and writing rules
 
@@ -27,10 +38,12 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 
 ## CI
 
-Each directory has its own workflow in `.github/workflows/`. A workflow starts only when its directory or the workflow file changes.
+Each directory has its own workflow in `.github/workflows/`. A workflow starts only when its directory, the files it uses, or the workflow file changes.
 
 - `tessera-test.yml`: the Python and Rust tests and the static checks of `tessera/`.
 - `router-test.yml`: `go vet` and `go test` of `router/`.
+- `api-test.yml`: `go vet` and `go test` of `api/`.
+- `web-test.yml`: `vp check` and the build of `web/`. It also makes sure that the generated code agrees with `proto/`.
 
 ## Router
 
