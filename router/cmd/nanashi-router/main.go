@@ -27,10 +27,18 @@ func main() {
 	tokensFile := flag.String("tokens", "", "{トークン: 利用者} の JSON。Bearer トークンで認証する")
 	userHeader := flag.String("user-header", "",
 		"認証を済ませたプロキシが付ける、利用者の見出し（例: X-Forwarded-User）。同じ見出しでエンジンに渡す。--trusted-proxy が要る")
-	var trusted prefixes
-	flag.Var(&trusted, "trusted-proxy",
+	var trusted []netip.Prefix
+	flag.Func("trusted-proxy",
 		"--user-header の見出しを信頼する送信元（例: 10.0.1.0/24、10.0.1.5）。複数なら繰り返す。"+
-			"ほかの送信元には 401 を返す（127.0.0.1 も自動では信頼しない）")
+			"ほかの送信元には 401 を返す（127.0.0.1 も自動では信頼しない）",
+		func(v string) error {
+			x, err := router.ParsePrefix(v)
+			if err != nil {
+				return err
+			}
+			trusted = append(trusted, x)
+			return nil
+		})
 	deadline := flag.Duration("deadline", 90*time.Second, "1 つの要求を送り直し続ける長さ")
 	insecure := flag.Bool("insecure", false, "認証なしで 127.0.0.1 以外でも待ち受ける")
 	flag.Parse()
@@ -99,26 +107,6 @@ func main() {
 	if err := <-done; !errors.Is(err, http.ErrServerClosed) {
 		log.Print(err)
 	}
-}
-
-// prefixes is the value of a repeated --trusted-proxy flag.
-type prefixes []netip.Prefix
-
-func (p *prefixes) String() string {
-	s := make([]string, len(*p))
-	for i, x := range *p {
-		s[i] = x.String()
-	}
-	return strings.Join(s, ",")
-}
-
-func (p *prefixes) Set(v string) error {
-	x, err := router.ParsePrefix(v)
-	if err != nil {
-		return err
-	}
-	*p = append(*p, x)
-	return nil
 }
 
 func readTokens(path string) (map[string]string, error) {
