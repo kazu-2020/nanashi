@@ -73,6 +73,7 @@ When you read a value, the engine calculates again only the range that changed.
 | [docs/limitations.md](docs/limitations.md) | Limitations and future work |
 | [docs/member-numbering.md](docs/member-numbering.md) | Design note: member names, IDs, numbers, ranks, tombstones for deleted members, wider keys, reorganization of Views (the first stage of the separation of numbers and ranks is implemented) |
 | [docs/out-of-core.md](docs/out-of-core.md) | Design note: a plan to keep stored data on NVMe (SSD), and measurements of pread, mmap and heap (not implemented) |
+| [docs/scale-out.md](docs/scale-out.md) | Design note: separate storage from calculation, workers for heavy recalculations, readers for simulations (not implemented) |
 
 ## License
 
