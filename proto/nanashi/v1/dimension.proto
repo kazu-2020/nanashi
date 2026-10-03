@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package nanashi.v1;
+
+option go_package = "github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1";
+
+// DimensionService gives the dimensions of a model to the frontend, and writes them to the engine.
+service DimensionService {
+  // ListDimensions returns the dimensions of a model, with the members and the properties.
+  rpc ListDimensions(ListDimensionsRequest) returns (ListDimensionsResponse) {}
+  // WriteDimensions applies the operations in one commit of the engine.
+  rpc WriteDimensions(WriteDimensionsRequest) returns (WriteDimensionsResponse) {}
+}
+
+message ListDimensionsRequest {
+  string model_id = 1;
+}
+
+message ListDimensionsResponse {
+  // The sequence number of the version that the response shows.
+  int64 seq = 1;
+  repeated Dimension dimensions = 2;
+}
+
+message Dimension {
+  int64 id = 1;
+  string name = 2;
+  // True for a time series. Its members are in the order of time, and you can add a member only at the end.
+  bool ordered = 3;
+  // In the display order.
+  repeated Member members = 4;
+  repeated Property properties = 5;
+}
+
+message Member {
+  int64 id = 1;
+  string name = 2;
+}
+
+// Property maps each member of a dimension to a member of the target dimension.
+message Property {
+  string name = 1;
+  string target_dimension = 2;
+  // Member name -> member name of the target dimension. A member without a value is not in the map.
+  map<string, string> values = 3;
+}
+
+message WriteDimensionsRequest {
+  string model_id = 1;
+  // An ID that the frontend makes for each commit. A resent request is not committed two times.
+  string client_op_id = 2;
+  // The seq of the version that the user saw. The engine rejects the write if a later version changed the same cells.
+  optional int64 expect = 3;
+  string reason = 4;
+  repeated DimensionOp ops = 5;
+}
+
+message DimensionOp {
+  oneof op {
+    AddDimension add_dimension = 1;
+    AddMember add_member = 2;
+    MoveMember move_member = 3;
+    RenameMember rename_member = 4;
+    RemoveMember remove_member = 5;
+    AddProperty add_property = 6;
+  }
+}
+
+message AddDimension {
+  string name = 1;
+  repeated string members = 2;
+  bool ordered = 3;
+}
+
+message AddMember {
+  string dimension = 1;
+  string name = 2;
+  // The position in the display order (from 0). If absent, the member goes to the end.
+  optional int32 at = 3;
+  // Property name -> member name of the target dimension.
+  map<string, string> properties = 4;
+}
+
+message MoveMember {
+  string dimension = 1;
+  string name = 2;
+  int32 at = 3;
+}
+
+message RenameMember {
+  string dimension = 1;
+  string old_name = 2;
+  string new_name = 3;
+}
+
+message RemoveMember {
+  string dimension = 1;
+  string name = 2;
+}
+
+// AddProperty adds a property, or replaces the values of a property with the same name.
+message AddProperty {
+  string dimension = 1;
+  string name = 2;
+  string target_dimension = 3;
+  map<string, string> values = 4;
+}
+
+message WriteDimensionsResponse {
+  int64 seq = 1;
+  // True if the engine already committed a write with the same client_op_id.
+  bool resent = 2;
+}
