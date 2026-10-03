@@ -235,6 +235,24 @@ class PgJournalTests(unittest.TestCase):
         with self.assertRaises(Fenced):  # 通し番号は合っていても、世代番号が古いので締め出される
             m.set_cell("Price", 13, Product="A")
 
+    def test_lease_lost_before_a_commit_fences_that_commit(self):
+        # The heartbeat finds the loss before the commit. The lease is already expired and nobody wrote,
+        # so acquire() would succeed. The commit must not take the lease again without notice
+        m = build_with(ReferenceEngine())
+        j = self.journal(heartbeat=False)
+        j.start(m)
+        m.set_cell("Price", 12, Product="A")  # m takes the lease
+        # Another process takes the lease, and the lease expires at once
+        self.journal().conn.execute("update nanashi_model set writer_epoch = writer_epoch + 1,"
+                                    " lease_holder = 'intruder', lease_expires = now() where model_id = %s",
+                                    (self.model_id,))
+        j._extend()  # one heartbeat
+        self.assertFalse(j.lease()["held"])
+        with self.assertRaises(Fenced):
+            m.set_cell("Price", 13, Product="A")
+        m.set_cell("Price", 14, Product="A")  # after the caller knows of the loss, a new commit takes the lease
+        self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 14)
+
     def test_prune_removes_old_snapshots_and_bulk_files(self):
         m = build_with(ReferenceEngine())
         j = self.journal(bulk_cells=3)

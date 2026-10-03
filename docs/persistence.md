@@ -153,6 +153,7 @@ If the lease expires and a different process gets the lease, the engine refuses 
 If a different process wrote after the load, the local model is old. Thus the engine refuses to give the lease.
 
 While there are no writes, a different thread extends the lease at each 1/3 of the lease time (`heartbeat=False` stops this).
+If this thread finds that a different process took the lease, the next commit fails with `Fenced`. This is also true when that lease expired and nobody wrote. Thus a writer that lost the lease does not get it again without notice. The commit after that gets the lease again.
 `close` releases the lease. Thus the next process that writes does not wait for the lease to expire.
 `Workspace.close` also releases the lease of the journal.
 Thus, if you stop the HTTP server and start it again immediately, the first write does not wait.
