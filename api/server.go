@@ -492,27 +492,12 @@ func (s *PlanServer) editMembers(ctx context.Context, app, list string, editsOf 
 	if err != nil {
 		return nil, invalid(err)
 	}
-	ops, text, err := editOps(list, em, meta, edits)
+	ops, stmts, err := editOps(app, list, em, meta, edits)
 	if err != nil {
 		return nil, invalid(err)
 	}
 	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
 		return nil, err
-	}
-	var stmts []stmt
-	for prop, values := range text {
-		stmts = append(stmts, stmt{"update app_property set text_values = $4 where app_id = $1 and list = $2 and name = $3",
-			[]any{app, list, prop, textJSON(values)}})
-	}
-	// Access rules and view filters refer to members by name. Give them the new name, or remove the name of a
-	// removed member: if a later edit adds the name again, an old rule must not give access to it.
-	for _, e := range edits {
-		if r := e.GetRename(); r != nil {
-			n := strings.TrimSpace(r.NewName) // editOps gives the engine the same name.
-			stmts = append(stmts, memberRenames(app, list, r.Name, &n)...)
-		} else if r := e.GetRemove(); r != nil {
-			stmts = append(stmts, memberRenames(app, list, r.Name, nil)...)
-		}
 	}
 	if err := s.run(ctx, stmts); err != nil {
 		return nil, err

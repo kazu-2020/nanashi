@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -192,38 +193,48 @@ func TestImportTransactionList(t *testing.T) {
 	if err != nil || rows != 2 {
 		t.Fatal(rows, err)
 	}
-	ops, text, err := editOps("Sales", em, meta, edits)
+	ops, stmts, err := editOps("app", "Sales", em, meta, edits)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// New rows continue after the largest number (9). add_property sends the whole mapping.
+	// New rows continue after the largest number (9). Each row sets only its own property value.
 	want := `[{"op":"add_member","args":["Sales","10"]},{"op":"set_cell","args":["Sales.Amount",1200],"kwargs":{"Sales":"10"}},` +
+		`{"op":"set_property_values","args":["Sales","Product",{"10":"A"}]},` +
 		`{"op":"add_member","args":["Sales","11"]},{"op":"set_cell","args":["Sales.Amount",5],"kwargs":{"Sales":"11"}},` +
-		`{"op":"add_property","args":["Sales","Product","Product",{"1":"A","10":"A","11":"B","2":"B"}]}]`
+		`{"op":"set_property_values","args":["Sales","Product",{"11":"B"}]}]`
 	if got := opsJSON(t, ops); got != want {
 		t.Errorf("got %s", got)
 	}
-	if n := text["Note"]; n["1"] != "old" || n["10"] != "first" || len(n) != 2 {
-		t.Errorf("text: %v", n)
+	// Row 10 sets its Note, and the blank Note of row 11 removes the value. The other values stay in the table.
+	if len(stmts) != 2 || !strings.Contains(stmts[0].sql, "jsonb_set") || fmt.Sprint(stmts[0].args) != "[app Sales Note 10 first]" ||
+		!strings.Contains(stmts[1].sql, "text_values - $4") || fmt.Sprint(stmts[1].args) != "[app Sales Note 11]" {
+		t.Errorf("text statements: %v", stmts)
 	}
 }
 
 func TestEditMembersRenameRemove(t *testing.T) {
 	em := model(t)
-	ops, _, err := editOps("Sales", em, appMeta{}, []*nanashiv1.MemberEdit{
-		{Edit: &nanashiv1.MemberEdit_Rename{Rename: &nanashiv1.RenameMember{Name: "1", NewName: "one"}}},
+	ops, stmts, err := editOps("app", "Sales", em, appMeta{}, []*nanashiv1.MemberEdit{
+		{Edit: &nanashiv1.MemberEdit_Rename{Rename: &nanashiv1.RenameMember{Name: "1", NewName: " one "}}},
 		{Edit: &nanashiv1.MemberEdit_Remove{Remove: &nanashiv1.RemoveMember{Name: "2"}}},
 		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Name: "9", Properties: map[string]string{"Product": "B"}}}},
+		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Name: "one", Properties: map[string]string{"Product": " "}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The engine follows the rename and the removal in the property values. A blank value removes the value.
 	want := `[{"op":"rename_member","args":["Sales","1","one"]},{"op":"remove_member","args":["Sales","2"]},` +
-		`{"op":"add_property","args":["Sales","Product","Product",{"9":"B","one":"A"}]}]`
+		`{"op":"set_property_values","args":["Sales","Product",{"9":"B"}]},{"op":"set_property_values","args":["Sales","Product",{"one":null}]}]`
 	if got := opsJSON(t, ops); got != want {
 		t.Errorf("got %s", got)
 	}
-	if _, _, err := editOps("Sales", em, appMeta{}, []*nanashiv1.MemberEdit{
+	// The api tables get the trimmed new name once for each reference site, and nil for the removed member.
+	if len(stmts) != 2*len(memberRefs) || fmt.Sprint(stmts[0].args[:3]) != "[app Sales 1]" || *stmts[0].args[3].(*string) != "one" ||
+		fmt.Sprint(stmts[len(memberRefs)].args) != "[app Sales 2 <nil>]" {
+		t.Errorf("reference statements: %v", stmts)
+	}
+	if _, _, err := editOps("app", "Sales", em, appMeta{}, []*nanashiv1.MemberEdit{
 		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Name: "1", Properties: map[string]string{"Color": "x"}}}},
 	}); err == nil {
 		t.Error("an unknown property must be an error")

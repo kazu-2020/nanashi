@@ -140,6 +140,12 @@ check "rename gives the view filter the trimmed name" '.views[] | select(.name =
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 ok alice SetMemberRole "{\"appId\": \"$APP2\", \"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}" >/dev/null
 ok alice SaveAccessRule "{\"appId\": \"$APP2\", \"role\": \"ROLE_VIEWER\", \"list\": \"Product\", \"members\": [\"A\", \"D\"]}" >/dev/null
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"A\", \"newName\": \"A1\"}}]}" >/dev/null
+check "member rename reaches the access rule" '.rules[0].members == ["A1", "D"]' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
+check "member rename keeps the TEXT value and the DIMENSION value" \
+  '.lists[] | select(.name == "Product") | .members[] | select(.name == "A1") | .properties == {"Category": "Hard", "Note": "first"}' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"A1\", \"newName\": \"A\"}}]}" >/dev/null
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"remove\": {\"name\": \"D\"}}]}" >/dev/null
 check "remove takes the member out of access rules" '.rules[0].members == ["A"]' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
 check "remove keeps the comments of the member" '.comments[0].cell.Product == "D"' \
