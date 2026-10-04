@@ -175,8 +175,10 @@ func (s *PlanServer) ListSnapshots(ctx context.Context, req *connect.Request[nan
 
 func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[nanashiv1.CreateSnapshotRequest]) (*connect.Response[nanashiv1.Snapshot], error) {
 	app := req.Msg.AppId
+	// The lock makes the engine reads and the api rows (meta, items) read one version of the application.
+	defer s.lock(app)()
 	var data snapshotData
-	// A write between two reads gives cubes of different versions. Then read all again.
+	// A write of a different api process between two reads gives cubes of different versions. Then read all again.
 	for try := 0; ; try++ {
 		em, raw, err := s.Engines.model(ctx, app)
 		if err != nil {
