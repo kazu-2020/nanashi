@@ -3,11 +3,9 @@ package api
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +16,8 @@ import (
 	"github.com/kazu-2020/nanashi/api/gen/nanashi/v1/nanashiv1connect"
 )
 
-func TestListModels(t *testing.T) {
+// TestAccessByRole needs PostgreSQL, but no engine: the interceptor refuses the calls before the engine.
+func TestAccessByRole(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// If NANASHI_PG_DSN is set (as in CI), a missing database is a failure, not a skip.
@@ -35,54 +34,73 @@ func TestListModels(t *testing.T) {
 		skip("PostgreSQL (%s) is not reachable: %v", dsn, err)
 	}
 	t.Cleanup(pool.Close)
-	var migrated bool
-	if err := pool.QueryRow(ctx, "select to_regclass('nanashi_model') is not null").Scan(&migrated); err != nil || !migrated {
-		skip("nanashi_model is missing (python -m sparse_engine.pg_journal migrate): %v", err)
-	}
-	prefix := fmt.Sprintf("api-test-%d-", time.Now().UnixNano())
-	if _, err := pool.Exec(ctx, `insert into nanashi_model (model_id, lease_expires) values
-		($1, now() + interval '30 seconds'), ($2, now() - interval '1 second'), ($3, null)`,
-		prefix+"a-live", prefix+"b-expired", prefix+"c-released"); err != nil {
+	if err := Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), "delete from nanashi_model where model_id like $1", prefix+"%")
-	})
-
-	res, err := listModels(t, pool)
-	if err != nil {
+	app := "api-test-" + newID()
+	if _, err := pool.Exec(ctx, "insert into app_application (id, name) values ($1, 'test')", app); err != nil {
 		t.Fatal(err)
 	}
-	var got []string
-	for _, m := range res.Msg.Models {
-		if id, ok := strings.CutPrefix(m.Id, prefix); ok {
-			got = append(got, fmt.Sprintf("%s=%v", id, m.Open))
-		}
-	}
-	if want := "a-live=true b-expired=false c-released=false"; strings.Join(got, " ") != want {
-		t.Errorf("got %q, want %q", strings.Join(got, " "), want)
-	}
-}
-
-// TestListModelsHidesDatabaseError needs no database. The pool points to a closed port.
-func TestListModelsHidesDatabaseError(t *testing.T) {
-	pool, err := pgxpool.New(context.Background(), "postgresql://nobody@127.0.0.1:1/secret_db?connect_timeout=1")
-	if err != nil {
+	if _, err := pool.Exec(ctx, "insert into app_member (app_id, user_name, role) values ($1, 'alice', 4), ($1, 'bob', 1)", app); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	_, err = listModels(t, pool)
-	if connect.CodeOf(err) != connect.CodeUnavailable || strings.Contains(err.Error(), "secret_db") {
-		t.Errorf("got %v, want unavailable without database details", err)
-	}
-}
+	t.Cleanup(func() { pool.Exec(context.Background(), "delete from app_application where id = $1", app) })
 
-// listModels sends the request through Connect, as the frontend does.
-func listModels(t *testing.T, pool *pgxpool.Pool) (*connect.Response[nanashiv1.ListModelsResponse], error) {
+	server := &PlanServer{Pool: pool, Engines: &Engines{}}
 	mux := http.NewServeMux()
-	mux.Handle(nanashiv1connect.NewModelServiceHandler(&ModelServer{Pool: pool}))
+	mux.Handle(nanashiv1connect.NewPlanServiceHandler(server, connect.WithInterceptors(server.Interceptor())))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return nanashiv1connect.NewModelServiceClient(srv.Client(), srv.URL).
-		ListModels(context.Background(), connect.NewRequest(&nanashiv1.ListModelsRequest{}))
+	client := nanashiv1connect.NewPlanServiceClient(srv.Client(), srv.URL)
+	list := func(user string) (map[string]nanashiv1.Role, error) {
+		req := connect.NewRequest(&nanashiv1.ListApplicationsRequest{})
+		if user != "" {
+			req.Header().Set("X-Nanashi-User", user)
+		}
+		res, err := client.ListApplications(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]nanashiv1.Role{}
+		for _, a := range res.Msg.Applications {
+			out[a.Id] = a.Role
+		}
+		return out, nil
+	}
+	if _, err := list(""); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("no user: got %v, want unauthenticated", err)
+	}
+	for user, want := range map[string]nanashiv1.Role{"alice": admin, "bob": viewer, "carol": 0} {
+		got, err := list(user)
+		if err != nil || got[app] != want {
+			t.Errorf("%s: got role %v (%v), want %v", user, got[app], err, want)
+		}
+	}
+	write := connect.NewRequest(&nanashiv1.WriteCellsRequest{AppId: app})
+	write.Header().Set("X-Nanashi-User", "bob")
+	if _, err := client.WriteCells(ctx, write); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("viewer writes: got %v, want permission denied", err)
+	}
+	// The audit detail has the cell values of the requests, so the access rules of a VIEWER do not apply to it.
+	audit := connect.NewRequest(&nanashiv1.ListAuditRequest{AppId: app})
+	audit.Header().Set("X-Nanashi-User", "bob")
+	if _, err := client.ListAudit(ctx, audit); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("viewer reads the audit trail: got %v, want permission denied", err)
+	}
+	read := connect.NewRequest(&nanashiv1.GetModelRequest{AppId: app})
+	read.Header().Set("X-Nanashi-User", "carol")
+	if _, err := client.GetModel(ctx, read); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("non-member reads: got %v, want permission denied", err)
+	}
+}
+
+// TestRPCRulesCoverAllMethods makes sure that the interceptor does not refuse an RPC of PlanService.
+func TestRPCRulesCoverAllMethods(t *testing.T) {
+	methods := nanashiv1.File_nanashi_v1_plan_proto.Services().ByName("PlanService").Methods()
+	for i := range methods.Len() {
+		name := string(methods.Get(i).Name())
+		if _, ok := rpcRules[name]; !ok {
+			t.Errorf("rpcRules has no entry for %s", name)
+		}
+	}
 }

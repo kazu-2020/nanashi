@@ -188,9 +188,15 @@ class Api:
                {"op": "add_input", "args": ["Weight", ["Region"], [[["N"], 1.0], [["S"], 3.0]]]},
                {"op": "add_formula", "args": ["Share", ["Region"], "Weight / Weight[REMOVE SUM: Region]"]},
                {"op": "add_member", "args": ["Region", "W"]},
+               {"op": "add_property", "args": ["Region", "Big", "Region", {"N": "S"}]},
                {"op": "rename_metric", "args": ["Share", "Ratio"]}]
         self.assertEqual(self.c.post("/writes", {"client_op_id": "d", "ops": ops})[0], 200)
         self.assertEqual(self.c.get("/metrics/Ratio/cell?Region=S")[1]["value"], 0.75)
+        region = self.c.get("/")[1]["dimensions"]["Region"]
+        self.assertEqual(region["members"], ["N", "S", "W"])
+        self.assertEqual((region["properties"], region["property_values"]), ({"Big": "Region"}, {"Big": {"N": "S"}}))
+        again = [{"op": "add_dimension", "args": ["Region", []]}]
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "d2", "ops": again})[0], 400)
         self.assertEqual(self.c.get("/")[1]["dimensions"]["Region"]["members"], ["N", "S", "W"])
 
     def test_member_order_through_the_api(self):

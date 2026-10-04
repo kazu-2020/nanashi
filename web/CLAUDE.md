@@ -8,6 +8,7 @@ It calls the application server (`api/`) with Connect.
 ```bash
 (cd web && pnpm install)
 (cd web && pnpm exec vp check)  # format, lint and type check
+(cd web && pnpm exec vp test run)  # unit tests of the pure logic (src/logic.ts)
 (cd web && pnpm build)
 (cd web && pnpm dev)            # Start nanashi-api on 127.0.0.1:8080 first
 (cd web && pnpm generate)       # Make api/gen/ and web/src/gen/ from proto/
