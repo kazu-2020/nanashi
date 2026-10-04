@@ -93,7 +93,8 @@ export function BoardsPage() {
                 ? model.views.find((x) => x.id === w.content.value)
                 : undefined;
             return (
-              <div key={i} className="rounded border p-2">
+              // A key from the content stops a widget from showing the grid of a deleted widget while it reads.
+              <div key={`${i}:${JSON.stringify(w.content)}`} className="rounded border p-2">
                 <div className="flex items-center justify-between">
                   <b>{v?.name ?? ""}</b>
                   {modeler && (
