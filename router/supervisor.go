@@ -87,7 +87,11 @@ func afterExit(st state, err error, now time.Time) state {
 		st.fails++
 	}
 	st.lastErr = err.Error()
-	st.retryAt = now.Add(min(firstRetry<<(st.fails-1), maxRetry))
+	retry := maxRetry // the shift overflows a Duration after about 35 crashes, so stop at the cap before it
+	if st.fails <= 6 {
+		retry = min(firstRetry<<(st.fails-1), maxRetry)
+	}
+	st.retryAt = now.Add(retry)
 	return st
 }
 

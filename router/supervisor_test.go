@@ -64,6 +64,7 @@ func TestAfterExit(t *testing.T) {
 		{"second crash", 1, time.Second, false, crash, 2, 2 * time.Second},
 		{"third crash", 2, time.Second, false, crash, 3, 4 * time.Second},
 		{"backoff stops at maxRetry", 9, time.Second, false, crash, 10, maxRetry},
+		{"backoff stays at maxRetry after many crashes", 39, time.Second, false, crash, 40, maxRetry},
 		{"crash after a healthy run", 7, healthyRun, false, crash, 1, time.Second},
 		{"killed after a long run", 2, 2 * healthyRun, true, errors.New("signal: killed"), 3, 4 * time.Second},
 	}

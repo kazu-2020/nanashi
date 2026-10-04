@@ -149,7 +149,7 @@ def _cell_map(cells) -> dict:
     return {tuple(k): v for k, v in cells}
 
 
-PROBES = {"health", "ready", "stats"}  # monitors call these; they are not use (--idle-exit)
+PROBES = {"health", "ready", "stats"}  # monitors call these; they do not count as use (--idle-exit)
 
 
 def is_probe(path: str) -> bool:
