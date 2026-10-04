@@ -82,7 +82,11 @@ type callerKey struct{}
 func callerOf(ctx context.Context) caller { return ctx.Value(callerKey{}).(caller) }
 
 // dbError hides the database error from the client. It can contain table names and addresses.
+// A *connect.Error passes through.
 func dbError(err error) error {
+	if cerr := new(connect.Error); errors.As(err, &cerr) {
+		return err
+	}
 	log.Printf("database: %v", err)
 	return connect.NewError(connect.CodeUnavailable, errors.New("データベースを読み書きできない"))
 }
@@ -257,9 +261,6 @@ func (s *PlanServer) change(ctx context.Context, app string, planOf func(engineM
 		}
 		return s.Engines.write(ctx, app, callerOf(ctx).user, p.ops)
 	})
-	if cerr := new(connect.Error); errors.As(err, &cerr) {
-		return nil, err
-	}
 	if err != nil {
 		return nil, dbError(err)
 	}

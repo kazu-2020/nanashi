@@ -226,9 +226,6 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 		}
 		return nil
 	})
-	if cerr := new(connect.Error); errors.As(err, &cerr) {
-		return nil, err
-	}
 	if err != nil {
 		return nil, dbError(err)
 	}

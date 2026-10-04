@@ -151,9 +151,6 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 		}
 		return s.Engines.write(ctx, app, c.user, replayOps(em, snap.Inputs, snap.Overrides))
 	})
-	if cerr := new(connect.Error); errors.As(err, &cerr) {
-		return nil, err
-	}
 	if err != nil {
 		return nil, dbError(err)
 	}
