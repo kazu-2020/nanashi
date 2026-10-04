@@ -18,7 +18,7 @@ import {
   ValueKind,
 } from "./gen/nanashi/v1/plan_pb";
 import { defaultSpec, parseCsv, ROLES, roleName, toFilters } from "./logic";
-import { Pivot } from "./Pivot";
+import { PivotEditor, PivotWidget } from "./Pivot";
 import { cls, memberNames, time, useApp, useRun } from "./state";
 import { Check, Checks, Section, Sel } from "./ui";
 
@@ -549,7 +549,7 @@ export function MetricsPage() {
           <MetricEditor key={JSON.stringify(def ?? sel)} def={def} onSaved={setSel} />
         )}
         {def && (
-          <Pivot
+          <PivotEditor
             key={`${def.name}:${def.dimensions.join()}`}
             initial={defaultSpec([def.name], def.dimensions)}
           />
@@ -623,7 +623,7 @@ export function TablesPage() {
         </div>
       )}
       {t && t.metrics.length > 0 && (
-        <Pivot key={t.id + t.metrics.join()} initial={defaultSpec(t.metrics, dims)} />
+        <PivotEditor key={t.id + t.metrics.join()} initial={defaultSpec(t.metrics, dims)} />
       )}
     </div>
   );
@@ -658,7 +658,7 @@ export function ViewsPage() {
         ビューはメトリックやテーブルの画面で「ビューとして保存」すると作れます。
       </p>
       {v && (
-        <Pivot
+        <PivotEditor
           key={v.id}
           view={{ id: v.id, name: v.name }}
           initial={{ ...v, filters: toFilters(v.filters) }}
@@ -753,11 +753,7 @@ export function BoardsPage() {
                 ? model.views.find((x) => x.id === w.content.value)
                 : undefined;
             return (
-              // Pivot keeps its first spec in state, so a widget with another view or definition needs a new key.
-              <div
-                key={`${i}:${JSON.stringify(w.content)}:${JSON.stringify(v ?? null)}`}
-                className="rounded border p-2"
-              >
+              <div key={i} className="rounded border p-2">
                 <div className="flex items-center justify-between">
                   <b>{v?.name ?? ""}</b>
                   {modeler && (
@@ -774,11 +770,7 @@ export function BoardsPage() {
                   <p className="whitespace-pre-wrap">{w.content.value}</p>
                 )}
                 {v && (
-                  <Pivot
-                    compact
-                    initial={{ ...v, filters: toFilters(v.filters) }}
-                    page={boardPage}
-                  />
+                  <PivotWidget spec={{ ...v, filters: toFilters(v.filters) }} page={boardPage} />
                 )}
               </div>
             );

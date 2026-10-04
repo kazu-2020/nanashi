@@ -3,6 +3,7 @@ import {
   Aggregation,
   Display,
   type Members,
+  type MetricDef,
   type QueryResponse,
   Role,
   type Value,
@@ -157,17 +158,19 @@ export function writeCoords(
   return out;
 }
 
-// spreadable tells if an edit of a cell writes the typed value. A spread goes over all members of an open
-// dimension, so a filter with more members must not leave the dimension open. Only SUM is the sum of the spread.
-export function spreadable(
-  metricDims: string[],
+// editable tells if an edit of a cell of a Metric writes the typed value. A formula Metric takes input only
+// if it is overridable. A spread goes over all members of an open dimension, so a filter with more members
+// must not leave the dimension open. Only SUM is the sum of the spread.
+export function editable(
+  def: Pick<MetricDef, "dimensions" | "formula" | "overridable"> | undefined,
   grid: Grid,
   filters: Filters,
   aggregation: Aggregation,
 ): boolean {
+  if (!def || (def.formula && !def.overridable)) return false;
   if (aggregation !== Aggregation.UNSPECIFIED && aggregation !== Aggregation.SUM) return false;
   const onAxis = (d: string) => grid.rowDims.includes(d) || grid.colDims.includes(d);
-  return metricDims.every((d) => onAxis(d) || (filters[d]?.length ?? 0) <= 1);
+  return def.dimensions.every((d) => onAxis(d) || (filters[d]?.length ?? 0) <= 1);
 }
 
 export const keyLabel = (k: string[]) => k.map((m) => m || "(なし)").join(" / ");
