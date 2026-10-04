@@ -281,6 +281,9 @@ func TestUserHeaderComesFromAuth(t *testing.T) {
 	if v := h.Values("X-Forwarded-User"); len(v) != 1 || v[0] != "alice" {
 		t.Errorf("engine saw X-Forwarded-User %q, want [alice]", v)
 	}
+	if v := h.Get("X-Nanashi-Model"); v != "plan" {
+		t.Errorf("engine saw X-Nanashi-Model %q, want plan", v)
+	}
 	if h.Get("Authorization") != "" {
 		t.Errorf("engine saw the client's Authorization %q", h.Get("Authorization"))
 	}
@@ -464,13 +467,13 @@ func TestPutCreatesModel(t *testing.T) {
 		created = append(created, model)
 		return nil
 	}}
-	for _, target := range []string{"/models/plan", "/models/plan/"} {
+	for _, target := range []string{"/models/plan", "/models/plan/", "/models/plan?x=1"} {
 		if got := do(t, rt, "PUT", target, nil, nil); got.status != 200 || got.body != "{\"ok\":true}\n" {
 			t.Errorf("%s: got %d %s", target, got.status, got.body)
 		}
 	}
-	if len(created) != 2 || created[0] != "plan" {
-		t.Errorf("Create got %v, want [plan plan]", created)
+	if len(created) != 3 || created[0] != "plan" {
+		t.Errorf("Create got %v, want [plan plan plan]", created)
 	}
 	rt.Create = nil
 	if got := do(t, rt, "PUT", "/models/plan", nil, nil); got.status != 405 {

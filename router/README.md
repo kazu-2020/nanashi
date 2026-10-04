@@ -31,12 +31,15 @@ Thus, the router returns it as it is.
 | 500, 504 or 503 (`busy`, `stale`, `closed`) for a write, no connection, broken connection | Waits, finds the writer again, then resends |
 
 The wait starts at 50 ms and doubles up to 1 second (with jitter).
+The router sends the model ID to the engine in the `X-Nanashi-Model` header. If the engine serves a different model, it answers 421 and the router finds the writer again.
 The router waits up to 70 seconds for each send (the engine waits up to about 60 seconds for a write commit).
 If the router does not find a writer before `--deadline` (default 90 seconds), it returns 503 `{"error": "no_leader"}`.
 For a model that is not in the journal, it returns 404 `{"error": "no_model"}`.
 If the engine of the model crashed 3 times in a row, the router returns 503 `{"error": "engine_failing"}` immediately (only with `--tessera`).
 The message contains the text of the last crash.
 At the deadline, the router returns the last response that it received (504 if the deadline came before a response).
+
+At start, the router makes sure that the table `nanashi_model` exists. If it does not, the router stops with a message. Make the schema with `python -m sparse_engine.pg_journal migrate <DSN>` in `tessera/`.
 
 `PUT /models/<model ID>` adds the model to `nanashi_model` and returns 200 `{"ok": true}`.
 It starts no engine. If the model is already there, it does nothing, so you can send it again.
@@ -51,7 +54,7 @@ If a request comes for a model that has no live writer, the router starts `<tess
 The router waits for the lease of the new engine, as it waits for any writer, until `--deadline`.
 An engine that stops with code 0 (idle stop or SIGTERM) starts again on the next request, without a wait.
 After a crash, the router waits 1 second before the next start, and doubles the wait up to 60 seconds.
-If an engine runs for 60 seconds without a lease, the router kills it.
+If an engine runs for 60 seconds without a lease, the router kills it. The count starts when the router first sees the engine without a lease. The kill counts as a crash.
 On SIGTERM and SIGINT, the router sends SIGTERM to its engines after it stops, and kills them after 15 seconds.
 
 Without `--tessera`, the router only finds engines that something else started.

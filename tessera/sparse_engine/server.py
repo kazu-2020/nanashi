@@ -149,7 +149,17 @@ def _cell_map(cells) -> dict:
     return {tuple(k): v for k, v in cells}
 
 
-PROBES = (["health"], ["ready"], ["stats"])  # monitors call these; they are not use (--idle-exit)
+PROBES = {"health", "ready", "stats"}  # monitors call these; they are not use (--idle-exit)
+
+
+def is_probe(path: str) -> bool:
+    """Return True if the request path is a probe. It must not raise: do_GET calls it in a finally."""
+    return path.split("?", 1)[0].strip("/") in PROBES
+
+
+def misdirected(header: str | None, model_id: str | None) -> bool:
+    """Return True if the router sent the request for a different model (X-Nanashi-Model)."""
+    return header is not None and model_id is not None and header != model_id
 
 
 def idle_for(active: int, last: float, now: float) -> float:
@@ -201,11 +211,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 読み出し
 
+    def _misdirected(self) -> bool:
+        """Answer 421 without a leader and return True if the request names a different model.
+        The router then forgets this address and finds the writer of that model again."""
+        header = self.headers.get("X-Nanashi-Model")
+        if not misdirected(header, self.server.model_id):
+            return False
+        self._fail(ApiError(421, "not_leader", f"このエンジンはモデル {self.server.model_id} のもの（{header} ではない）"))
+        return True
+
     def do_GET(self) -> None:
+        if self._misdirected():
+            return
         try:
             self._run(self._get)
         finally:
-            if [p for p in urllib.parse.urlsplit(self.path).path.split("/") if p] not in PROBES:
+            if not is_probe(self.path):
                 self.server.touch()
 
     def _user(self) -> str | None:
@@ -295,6 +316,8 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------ 書き込み
 
     def do_POST(self) -> None:
+        if self._misdirected():
+            return
         try:
             self._run(self._post)
         finally:
@@ -411,7 +434,8 @@ class Server(ThreadingHTTPServer):
     def __init__(self, workspace: Workspace | Replica | None, host: str = "127.0.0.1", port: int = 8080, *,
                  write_timeout: float | None = 30.0, tokens: dict[str, str] | None = None,
                  user_header: str | None = None, trusted_proxies: Iterable[str] = (), max_body: int = 16 << 20,
-                 max_cells: int = 100_000, max_threads: int = 64, request_timeout: float | None = 30.0):
+                 max_cells: int = 100_000, max_threads: int = 64, request_timeout: float | None = 30.0,
+                 model_id: str | None = None):
         if tokens is not None and user_header is not None:
             raise ValueError("tokens と user_header はどちらか一方")
         trusted = parse_networks(trusted_proxies)
@@ -424,6 +448,7 @@ class Server(ThreadingHTTPServer):
         self.write_timeout = write_timeout
         self.tokens, self.user_header, self.trusted_proxies = tokens, user_header, trusted
         self.max_body, self.max_cells, self.request_timeout = max_body, max_cells, request_timeout
+        self.model_id = model_id  # with a PgJournal: refuse requests that X-Nanashi-Model sends for another model
         self._slots = threading.BoundedSemaphore(max_threads)
         self._thread: threading.Thread | None = None
         # Connections in progress (probes too) and the monotonic time of the last use (probes not).
@@ -569,7 +594,7 @@ def main(argv=None) -> None:
     # 先に待ち受けて番地を決める（--port 0 でも、知らせる番地に実際の番号が入る）。要求は serve_forever まで受けない
     server = Server(None, args.host, args.port, tokens=tokens, user_header=args.user_header,
                     trusted_proxies=args.trusted_proxy, max_body=args.max_body, max_cells=args.max_cells,
-                    max_threads=args.max_threads)
+                    max_threads=args.max_threads, model_id=args.model_id if args.pg else None)
     if args.pg:
         from .pg_journal import PgJournal, migrate
         if args.migrate:
@@ -630,13 +655,19 @@ def _stop_on_signal(server: Server) -> None:
 
 
 def _stop_when_idle(server: Server, limit: float) -> None:
-    """Call server.shutdown() after limit seconds without use. This is the same path as SIGTERM."""
+    """Call server.shutdown() after limit seconds without use, or when the parent process (the router) is gone.
+    This is the same path as SIGTERM."""
     server.touch()  # count from the start of serving; opening the workspace can take a long time
+    parent = os.getppid()
 
     def watch() -> None:
         while server.idle() < limit:
+            if os.getppid() != parent:
+                log.info("親のプロセス（ルーター）が止まったので止める")
+                break
             time.sleep(min(1.0, limit / 4))
-        log.info("%g 秒のあいだ要求がなかったので止める", limit)
+        else:
+            log.info("%g 秒のあいだ要求がなかったので止める", limit)
         server.shutdown()
 
     threading.Thread(target=watch, name="nanashi-idle", daemon=True).start()

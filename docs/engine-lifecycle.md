@@ -23,7 +23,7 @@ The api must not know the engine processes, the path to `tessera/`, or the DSN o
 | Who stops an idle engine | The engine itself, with a new option `--idle-exit`. | Only the engine knows the requests in progress. The router caches the leader address, so it does not see each request. |
 | A stopped engine | Stays stopped until the next request. The router never starts an engine on its own. | No request, no process. This also holds after an idle stop, after a crash, and after a second router started a duplicate. |
 | Crash loop | Exponential backoff, 1 s to 60 s. After 3 crashes in a row, the router returns 503 `engine_failing` at once. | The api holds its lock while it waits. It must not wait 90 seconds for an engine that cannot start. |
-| A process that holds no lease for too long | The router kills it. The next request starts a new one. | This is the one state that otherwise blocks a model for ever. |
+| A process that holds no lease for too long | The router kills it after 60 s without a lease. The kill counts as a failure. The next request starts a new one. | This is the one state that otherwise blocks a model for ever. |
 | Model creation | Explicit: `PUT /models/<id>` inserts the `nanashi_model` row and starts no engine. An unknown id still gets 404. | A wrong id must not make a process, a row, and a directory. |
 | Spawn backend | `exec` of the Python server on the router host. No `Backend` interface. | One implementation. An ECS backend is a different `Resolver` that wraps `PgResolver`. |
 | The api lock | Stays as it is. | See "Why the lock stays". |
@@ -96,8 +96,9 @@ func (s *Supervisor) Leader(ctx context.Context, model string) (string, error)
 func (s *Supervisor) Close()
 
 // plan is the decision for a model that has no live leader.
-//   running, now - started < bootBudget -> none
-//   running, now - started >= bootBudget -> kill
+//   running, first observation without a lease -> none (noLeaseSince = now)
+//   running, now - noLeaseSince < bootBudget -> none
+//   running, now - noLeaseSince >= bootBudget -> kill (killed = true; the exit counts as a failure)
 //   not running, fails >= quietFails, now < retryAt -> failing
 //   not running, now < retryAt -> none
 //   not running -> spawn
@@ -112,7 +113,7 @@ func afterExit(st state, err error, now time.Time) state // ranFor is now - st.s
 ```
 
 Constants: `quietFails = 3`, `firstRetry = 1s`, `maxRetry = 60s`, `healthyRun = 1m`.
-`bootBudget = 60s` is the time that a process may run without a lease: 2 times the lease time of the engine. The cold start of the large plan is about 1 second (`tessera/docs/performance.md`), so a slow start does not become a crash loop.
+`bootBudget = 60s` is the time that a process may run without a lease, counted from the first observation without a lease: 2 times the lease time of the engine. `Leader` clears the count when the lease names the process again. The cold start of the large plan is about 1 second (`tessera/docs/performance.md`), so a slow start does not become a crash loop.
 
 The argv of an engine is `.venv/bin/python -m sparse_engine.server <engine-dir>/<model> --pg <DSN> --model-id <model> --port 0 --idle-exit <seconds>`.
 The engine listens on 127.0.0.1 and advertises the port that it got in the lease. The Supervisor never learns the port.
@@ -122,6 +123,7 @@ The engine listens on 127.0.0.1 and advertises the port that it got in the lease
 
 - `Router` gets a field `Create func(ctx context.Context, model string) error`. `PUT /models/<id>` calls it and returns 200 `{"ok": true}`. If `Create` is nil, the router returns 405. The `Resolver` interface does not change, so the fakes in the tests do not change.
 - `PgResolver.Create` runs `insert into nanashi_model (model_id) values ($1) on conflict do nothing`. It is the same statement that `PgJournal.__init__` runs. The PostgreSQL role of the router needs the insert permission.
+- The router sends `X-Nanashi-Model: <id>` with each request. An engine that serves a different model answers 421 without `leader`, and the router finds the writer again. This protects against a port that a new engine of another model got after a restart.
 - In `forward`, next to the `ErrUnknownModel` case: `ErrEngineFailing` returns 503 `engine_failing` with the last crash text at once.
 - `cmd/nanashi-router/main.go` gets `--tessera`, `--engine-dir` (default `../.nanashi-data`, as in the api today), and `--engine-idle` (default 15m). With `--tessera`, the Resolver is a `Supervisor` that wraps the `PgResolver`.
 

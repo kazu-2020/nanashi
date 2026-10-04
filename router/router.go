@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -80,7 +81,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		user = u
 	}
-	if r.Method == http.MethodPut && rest == "/" {
+	if path, _, _ := strings.Cut(rest, "?"); r.Method == http.MethodPut && path == "/" {
 		rt.create(r.Context(), w, model)
 		return
 	}
@@ -99,7 +100,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), deadline)
 	defer cancel()
-	out := outgoing{method: r.Method, rest: rest, body: body, header: rt.upstreamHeader(r.Header, user)}
+	out := outgoing{method: r.Method, rest: rest, body: body, header: rt.upstreamHeader(r.Header, user, model)}
 	rt.forward(ctx, model, out).write(w)
 }
 
@@ -109,7 +110,8 @@ func (rt *Router) create(ctx context.Context, w http.ResponseWriter, model strin
 		return
 	}
 	if err := rt.Create(ctx, model); err != nil {
-		apiError{http.StatusInternalServerError, "internal", "モデル " + model + " を作れなかった（" + err.Error() + "）"}.write(w)
+		log.Printf("create %s: %v", model, err)
+		apiError{http.StatusInternalServerError, "internal", "モデル " + model + " を作れなかった"}.write(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -191,9 +193,12 @@ func (rt *Router) leader(ctx context.Context, model string) (string, error) {
 	return url, err
 }
 
-func (rt *Router) upstreamHeader(in http.Header, user string) http.Header {
+// upstreamHeader is the header toward the engine. X-Nanashi-Model lets the engine refuse a request for
+// a different model with 421, after which forward resolves the leader again.
+func (rt *Router) upstreamHeader(in http.Header, user, model string) http.Header {
 	h := in.Clone()
 	removeHopByHop(h)
+	h.Set("X-Nanashi-Model", model)
 	name := rt.UserHeader
 	if name == "" {
 		name = "X-Forwarded-User"

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -86,6 +87,9 @@ func main() {
 		log.Fatalf("PostgreSQL につながらない: %v", err)
 	}
 	defer resolver.Close()
+	if err := resolver.Ready(ctx); err != nil {
+		fail(fmt.Sprintf("nanashi_model を読めない（%v）。tessera/ で python -m sparse_engine.pg_journal migrate <DSN> を実行してスキーマを作る", err))
+	}
 	var resolve router.Resolver = resolver
 	var supervisor *router.Supervisor
 	if *tessera != "" {
@@ -136,7 +140,7 @@ func newSupervisor(lease router.Resolver, tessera, engineDir, dsn string, idle t
 	if err != nil {
 		return nil, err
 	}
-	idleExit := fmt.Sprint(int(idle.Seconds()))
+	idleExit := strconv.FormatFloat(idle.Seconds(), 'g', -1, 64)
 	return &router.Supervisor{Lease: lease, Command: func(model string) *exec.Cmd {
 		cmd := exec.Command(filepath.Join(tessera, ".venv/bin/python"), "-m", "sparse_engine.server",
 			filepath.Join(engineDir, model), "--pg", dsn, "--model-id", model, "--port", "0", "--idle-exit", idleExit)

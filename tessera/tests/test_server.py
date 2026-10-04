@@ -524,7 +524,20 @@ class IdleExit(unittest.TestCase):
             with contextlib.suppress(OSError):
                 c.get("/health")
             time.sleep(0.5)
-        self.assertEqual(proc.wait(timeout=1), 0)
+        self.assertIsNotNone(proc.poll(), "the probes kept the server alive")
+        self.assertEqual(proc.returncode, 0)
+
+
+class ModelHeader(unittest.TestCase):
+    def test_other_model_gets_421_without_leader(self):
+        ws = workspace(self, model(ReferenceEngine()))
+        server = Server(ws, "127.0.0.1", 0, tokens=TOKENS, model_id="m1").start()
+        self.addCleanup(server.stop)
+        status, body = Client(server.url, headers={"X-Nanashi-Model": "other"}).get("/")
+        self.assertEqual((status, body["error"]), (421, "not_leader"))
+        self.assertNotIn("leader", body)
+        self.assertEqual(Client(server.url, headers={"X-Nanashi-Model": "m1"}).get("/")[0], 200)
+        self.assertEqual(Client(server.url).get("/")[0], 200)
 
 
 class WithJournal(JournalCase, unittest.TestCase):

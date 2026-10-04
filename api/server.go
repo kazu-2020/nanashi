@@ -210,7 +210,7 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 	app := "app-" + newID()
 	if err := s.Engines.Create(ctx, app); err != nil {
 		log.Printf("CreateApplication: %v", err)
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンを起動できない"))
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("モデルを作れない"))
 	}
 	if snap.Engine != nil {
 		em, err := parseEngineModel(snap.Engine)

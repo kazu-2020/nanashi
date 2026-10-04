@@ -21,6 +21,8 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 | `GET /ready` | Whether the server can receive requests. It returns 503 and the reason in these conditions: the writer stopped, the server could not open the journal again, the server cannot extend the lease, the standby monitor failed, or `Replica` cannot catch up. It also returns the role `role` (`leader`, `standby`, or `follower` with `--follow`). No authentication is necessary. |
 | `GET /stats` | Numbers for monitoring (Prometheus text format). For example: the number and time of commits, cancelled writes, the queue length, whether the server is the writer (`nanashi_leader`), the lease state, the time since the last snapshot, and the delay of `Replica`. |
 
+With `--pg`, if a request has the header `X-Nanashi-Model` and its value is not the `--model-id` of the server, the server answers 421 `not_leader` without a `leader` field.
+
 Authentication, not the request body, sets the user that the audit records.
 With `--tokens`, the server requires `Authorization: Bearer <token>`.
 With `--user-header X-Forwarded-User`, the server uses the value of the header that an authenticating proxy added.
