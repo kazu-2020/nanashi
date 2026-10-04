@@ -5,7 +5,6 @@ package api
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -380,14 +379,21 @@ type engineRead struct {
 	Query  map[string][]string
 }
 
+// engineAggs gives the engine aggregation of each Aggregation.
+var engineAggs = map[nanashiv1.Aggregation]string{
+	nanashiv1.Aggregation_AGGREGATION_UNSPECIFIED: "sum",
+	nanashiv1.Aggregation_AGGREGATION_SUM:         "sum",
+	nanashiv1.Aggregation_AGGREGATION_AVG:         "avg",
+	nanashiv1.Aggregation_AGGREGATION_MIN:         "min",
+	nanashiv1.Aggregation_AGGREGATION_MAX:         "max",
+	nanashiv1.Aggregation_AGGREGATION_COUNT:       "count",
+}
+
 // queryReads makes the engine reads for a QueryRequest. It leaves out a Metric that the filters make empty.
 func queryReads(req *nanashiv1.QueryRequest, em engineModel, l limits) ([]engineRead, error) {
-	agg := strings.ToLower(req.Aggregation)
-	if agg == "" {
-		agg = "sum"
-	}
-	if !slices.Contains([]string{"sum", "avg", "min", "max", "count"}, agg) {
-		return nil, fmt.Errorf("集計は SUM、AVG、MIN、MAX、COUNT のいずれか（%q）", req.Aggregation)
+	agg, ok := engineAggs[req.Aggregation]
+	if !ok {
+		return nil, fmt.Errorf("集計 %d がない", req.Aggregation)
 	}
 	shown := slices.Concat(req.Rows, req.Columns)
 	var out []engineRead
@@ -952,16 +958,44 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 	var metrics []*nanashiv1.MetricDef
 	for _, m := range em.Metrics {
 		if !hidden[m.Name] && !l.hides(m) {
-			metrics = append(metrics, &nanashiv1.MetricDef{Name: m.Name, Dimensions: m.Dims, Kind: m.Kind, Formula: m.Formula, Overridable: m.Overridable})
+			kind, list := valueKind(m.Kind)
+			metrics = append(metrics, &nanashiv1.MetricDef{Name: m.Name, Dimensions: m.Dims, Kind: kind, MemberList: list, Formula: m.Formula, Overridable: m.Overridable})
 		}
 	}
 	return lists, metrics
 }
 
-// metricOp gives the operations that save m. It gives no operation for an input Metric that does not change.
+// engineKind gives the engine kind of m: "number", "boolean" or "member:<list>".
+func engineKind(em engineModel, m *nanashiv1.MetricDef) (string, error) {
+	if m.Kind == nanashiv1.ValueKind_VALUE_KIND_MEMBER {
+		if _, ok := em.dim(m.MemberList); !ok {
+			return "", fmt.Errorf("リスト %q がない", m.MemberList)
+		}
+		return "member:" + m.MemberList, nil
+	}
+	if m.MemberList != "" {
+		return "", errors.New("リストはメンバーのメトリックにだけ付ける")
+	}
+	if m.Kind == nanashiv1.ValueKind_VALUE_KIND_BOOLEAN {
+		return "boolean", nil
+	}
+	return "number", nil
+}
+
+// valueKind is the reverse of engineKind.
+func valueKind(kind string) (nanashiv1.ValueKind, string) {
+	if list, ok := strings.CutPrefix(kind, "member:"); ok {
+		return nanashiv1.ValueKind_VALUE_KIND_MEMBER, list
+	}
+	if kind == "boolean" {
+		return nanashiv1.ValueKind_VALUE_KIND_BOOLEAN, ""
+	}
+	return nanashiv1.ValueKind_VALUE_KIND_NUMBER, ""
+}
+
+// metricOp gives the operations that save m with the engine kind. It gives no operation for an input Metric that does not change.
 // add_input and add_formula delete the cells of an input Metric, so a change to one needs replace.
-func metricOp(em engineModel, m *nanashiv1.MetricDef, replace bool) ([]op, error) {
-	kind := cmp.Or(m.Kind, "number")
+func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, replace bool) ([]op, error) {
 	dims := m.Dimensions
 	if dims == nil {
 		dims = []string{}

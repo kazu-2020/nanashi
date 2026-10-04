@@ -191,6 +191,118 @@ func (PropertyType) EnumDescriptor() ([]byte, []int) {
 	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{2}
 }
 
+// ValueKind is the type of the values of a Metric.
+type ValueKind int32
+
+const (
+	ValueKind_VALUE_KIND_UNSPECIFIED ValueKind = 0 // NUMBER.
+	ValueKind_VALUE_KIND_NUMBER      ValueKind = 1
+	ValueKind_VALUE_KIND_BOOLEAN     ValueKind = 2
+	ValueKind_VALUE_KIND_MEMBER      ValueKind = 3 // A member of MetricDef.member_list.
+)
+
+// Enum value maps for ValueKind.
+var (
+	ValueKind_name = map[int32]string{
+		0: "VALUE_KIND_UNSPECIFIED",
+		1: "VALUE_KIND_NUMBER",
+		2: "VALUE_KIND_BOOLEAN",
+		3: "VALUE_KIND_MEMBER",
+	}
+	ValueKind_value = map[string]int32{
+		"VALUE_KIND_UNSPECIFIED": 0,
+		"VALUE_KIND_NUMBER":      1,
+		"VALUE_KIND_BOOLEAN":     2,
+		"VALUE_KIND_MEMBER":      3,
+	}
+)
+
+func (x ValueKind) Enum() *ValueKind {
+	p := new(ValueKind)
+	*p = x
+	return p
+}
+
+func (x ValueKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ValueKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_nanashi_v1_plan_proto_enumTypes[3].Descriptor()
+}
+
+func (ValueKind) Type() protoreflect.EnumType {
+	return &file_nanashi_v1_plan_proto_enumTypes[3]
+}
+
+func (x ValueKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ValueKind.Descriptor instead.
+func (ValueKind) EnumDescriptor() ([]byte, []int) {
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{3}
+}
+
+// Aggregation is how a Query combines the cells of a number Metric.
+type Aggregation int32
+
+const (
+	Aggregation_AGGREGATION_UNSPECIFIED Aggregation = 0 // SUM.
+	Aggregation_AGGREGATION_SUM         Aggregation = 1
+	Aggregation_AGGREGATION_AVG         Aggregation = 2
+	Aggregation_AGGREGATION_MIN         Aggregation = 3
+	Aggregation_AGGREGATION_MAX         Aggregation = 4
+	Aggregation_AGGREGATION_COUNT       Aggregation = 5
+)
+
+// Enum value maps for Aggregation.
+var (
+	Aggregation_name = map[int32]string{
+		0: "AGGREGATION_UNSPECIFIED",
+		1: "AGGREGATION_SUM",
+		2: "AGGREGATION_AVG",
+		3: "AGGREGATION_MIN",
+		4: "AGGREGATION_MAX",
+		5: "AGGREGATION_COUNT",
+	}
+	Aggregation_value = map[string]int32{
+		"AGGREGATION_UNSPECIFIED": 0,
+		"AGGREGATION_SUM":         1,
+		"AGGREGATION_AVG":         2,
+		"AGGREGATION_MIN":         3,
+		"AGGREGATION_MAX":         4,
+		"AGGREGATION_COUNT":       5,
+	}
+)
+
+func (x Aggregation) Enum() *Aggregation {
+	p := new(Aggregation)
+	*p = x
+	return p
+}
+
+func (x Aggregation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Aggregation) Descriptor() protoreflect.EnumDescriptor {
+	return file_nanashi_v1_plan_proto_enumTypes[4].Descriptor()
+}
+
+func (Aggregation) Type() protoreflect.EnumType {
+	return &file_nanashi_v1_plan_proto_enumTypes[4]
+}
+
+func (x Aggregation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Aggregation.Descriptor instead.
+func (Aggregation) EnumDescriptor() ([]byte, []int) {
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{4}
+}
+
 type Display int32
 
 const (
@@ -230,11 +342,11 @@ func (x Display) String() string {
 }
 
 func (Display) Descriptor() protoreflect.EnumDescriptor {
-	return file_nanashi_v1_plan_proto_enumTypes[3].Descriptor()
+	return file_nanashi_v1_plan_proto_enumTypes[5].Descriptor()
 }
 
 func (Display) Type() protoreflect.EnumType {
-	return &file_nanashi_v1_plan_proto_enumTypes[3]
+	return &file_nanashi_v1_plan_proto_enumTypes[5]
 }
 
 func (x Display) Number() protoreflect.EnumNumber {
@@ -243,7 +355,7 @@ func (x Display) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Display.Descriptor instead.
 func (Display) EnumDescriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{3}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{5}
 }
 
 type ItemType int32
@@ -282,11 +394,11 @@ func (x ItemType) String() string {
 }
 
 func (ItemType) Descriptor() protoreflect.EnumDescriptor {
-	return file_nanashi_v1_plan_proto_enumTypes[4].Descriptor()
+	return file_nanashi_v1_plan_proto_enumTypes[6].Descriptor()
 }
 
 func (ItemType) Type() protoreflect.EnumType {
-	return &file_nanashi_v1_plan_proto_enumTypes[4]
+	return &file_nanashi_v1_plan_proto_enumTypes[6]
 }
 
 func (x ItemType) Number() protoreflect.EnumNumber {
@@ -295,7 +407,7 @@ func (x ItemType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ItemType.Descriptor instead.
 func (ItemType) EnumDescriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{4}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{6}
 }
 
 type Ack struct {
@@ -758,8 +870,9 @@ type MetricDef struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Name       string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Dimensions []string               `protobuf:"bytes,2,rep,name=dimensions,proto3" json:"dimensions,omitempty"`
-	// "number", "boolean" or "member:<list>".
-	Kind string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Kind       ValueKind              `protobuf:"varint,3,opt,name=kind,proto3,enum=nanashi.v1.ValueKind" json:"kind,omitempty"`
+	// The list of a MEMBER Metric. Empty for the other kinds.
+	MemberList string `protobuf:"bytes,6,opt,name=member_list,json=memberList,proto3" json:"member_list,omitempty"`
 	// Empty for an input Metric.
 	Formula string `protobuf:"bytes,4,opt,name=formula,proto3" json:"formula,omitempty"`
 	// True if a user can type over the formula result.
@@ -812,9 +925,16 @@ func (x *MetricDef) GetDimensions() []string {
 	return nil
 }
 
-func (x *MetricDef) GetKind() string {
+func (x *MetricDef) GetKind() ValueKind {
 	if x != nil {
 		return x.Kind
+	}
+	return ValueKind_VALUE_KIND_UNSPECIFIED
+}
+
+func (x *MetricDef) GetMemberList() string {
+	if x != nil {
+		return x.MemberList
 	}
 	return ""
 }
@@ -1944,8 +2064,8 @@ type QueryRequest struct {
 	Columns []string               `protobuf:"bytes,4,rep,name=columns,proto3" json:"columns,omitempty"`
 	// Only these members. A missing dimension gives all members.
 	Filters map[string]*Members `protobuf:"bytes,5,rep,name=filters,proto3" json:"filters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// SUM (default), AVG, MIN, MAX or COUNT. It is used only for number Metrics.
-	Aggregation   string `protobuf:"bytes,6,opt,name=aggregation,proto3" json:"aggregation,omitempty"`
+	// It is used only for number Metrics.
+	Aggregation   Aggregation `protobuf:"varint,6,opt,name=aggregation,proto3,enum=nanashi.v1.Aggregation" json:"aggregation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2015,11 +2135,11 @@ func (x *QueryRequest) GetFilters() map[string]*Members {
 	return nil
 }
 
-func (x *QueryRequest) GetAggregation() string {
+func (x *QueryRequest) GetAggregation() Aggregation {
 	if x != nil {
 		return x.Aggregation
 	}
-	return ""
+	return Aggregation_AGGREGATION_UNSPECIFIED
 }
 
 type QueryCell struct {
@@ -2605,7 +2725,7 @@ type ViewDef struct {
 	Columns       []string            `protobuf:"bytes,6,rep,name=columns,proto3" json:"columns,omitempty"`
 	Filters       map[string]*Members `protobuf:"bytes,7,rep,name=filters,proto3" json:"filters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Display       Display             `protobuf:"varint,8,opt,name=display,proto3,enum=nanashi.v1.Display" json:"display,omitempty"`
-	Aggregation   string              `protobuf:"bytes,9,opt,name=aggregation,proto3" json:"aggregation,omitempty"`
+	Aggregation   Aggregation         `protobuf:"varint,9,opt,name=aggregation,proto3,enum=nanashi.v1.Aggregation" json:"aggregation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2696,11 +2816,11 @@ func (x *ViewDef) GetDisplay() Display {
 	return Display_DISPLAY_UNSPECIFIED
 }
 
-func (x *ViewDef) GetAggregation() string {
+func (x *ViewDef) GetAggregation() Aggregation {
 	if x != nil {
 		return x.Aggregation
 	}
-	return ""
+	return Aggregation_AGGREGATION_UNSPECIFIED
 }
 
 type Widget struct {
@@ -2927,9 +3047,9 @@ type Comment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	Id    string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
-	// What the comment is about, for example "metric:Revenue" or "board:<id>".
-	Target string `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
-	// The cell, as dimension name to member. Empty for the whole target.
+	// The Metric of the comment.
+	Metric string `protobuf:"bytes,3,opt,name=metric,proto3" json:"metric,omitempty"`
+	// The cell, as dimension name to member. Empty for the whole Metric.
 	Cell map[string]string `protobuf:"bytes,4,rep,name=cell,proto3" json:"cell,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	User string            `protobuf:"bytes,5,opt,name=user,proto3" json:"user,omitempty"`
 	Body string            `protobuf:"bytes,6,opt,name=body,proto3" json:"body,omitempty"`
@@ -2983,9 +3103,9 @@ func (x *Comment) GetId() string {
 	return ""
 }
 
-func (x *Comment) GetTarget() string {
+func (x *Comment) GetMetric() string {
 	if x != nil {
-		return x.Target
+		return x.Metric
 	}
 	return ""
 }
@@ -3022,7 +3142,7 @@ type ListCommentsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	// Empty gives all comments of the application.
-	Target        string `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	Metric        string `protobuf:"bytes,2,opt,name=metric,proto3" json:"metric,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3064,9 +3184,9 @@ func (x *ListCommentsRequest) GetAppId() string {
 	return ""
 }
 
-func (x *ListCommentsRequest) GetTarget() string {
+func (x *ListCommentsRequest) GetMetric() string {
 	if x != nil {
-		return x.Target
+		return x.Metric
 	}
 	return ""
 }
@@ -3613,9 +3733,7 @@ type AccessRule struct {
 	List    string   `protobuf:"bytes,4,opt,name=list,proto3" json:"list,omitempty"`
 	Members []string `protobuf:"bytes,5,rep,name=members,proto3" json:"members,omitempty"`
 	// If false, the users can read the members but cannot write.
-	Write bool `protobuf:"varint,6,opt,name=write,proto3" json:"write,omitempty"`
-	// If true, delete the rule with this id.
-	Delete        bool `protobuf:"varint,7,opt,name=delete,proto3" json:"delete,omitempty"`
+	Write         bool `protobuf:"varint,6,opt,name=write,proto3" json:"write,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3692,11 +3810,56 @@ func (x *AccessRule) GetWrite() bool {
 	return false
 }
 
-func (x *AccessRule) GetDelete() bool {
+type DeleteAccessRuleRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteAccessRuleRequest) Reset() {
+	*x = DeleteAccessRuleRequest{}
+	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteAccessRuleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteAccessRuleRequest) ProtoMessage() {}
+
+func (x *DeleteAccessRuleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
 	if x != nil {
-		return x.Delete
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
 	}
-	return false
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteAccessRuleRequest.ProtoReflect.Descriptor instead.
+func (*DeleteAccessRuleRequest) Descriptor() ([]byte, []int) {
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *DeleteAccessRuleRequest) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *DeleteAccessRuleRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
 }
 
 type Access struct {
@@ -3709,7 +3872,7 @@ type Access struct {
 
 func (x *Access) Reset() {
 	*x = Access{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3721,7 +3884,7 @@ func (x *Access) String() string {
 func (*Access) ProtoMessage() {}
 
 func (x *Access) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3734,7 +3897,7 @@ func (x *Access) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Access.ProtoReflect.Descriptor instead.
 func (*Access) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{54}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *Access) GetMembers() []*AppMember {
@@ -3789,13 +3952,15 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\amembers\x18\x04 \x03(\v2\x12.nanashi.v1.MemberR\amembers\x127\n" +
 	"\n" +
 	"properties\x18\x05 \x03(\v2\x17.nanashi.v1.PropertyDefR\n" +
-	"propertiesJ\x04\b\x03\x10\x04\"\x8f\x01\n" +
+	"propertiesJ\x04\b\x03\x10\x04\"\xc7\x01\n" +
 	"\tMetricDef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
 	"\n" +
 	"dimensions\x18\x02 \x03(\tR\n" +
-	"dimensions\x12\x12\n" +
-	"\x04kind\x18\x03 \x01(\tR\x04kind\x12\x18\n" +
+	"dimensions\x12)\n" +
+	"\x04kind\x18\x03 \x01(\x0e2\x15.nanashi.v1.ValueKindR\x04kind\x12\x1f\n" +
+	"\vmember_list\x18\x06 \x01(\tR\n" +
+	"memberList\x12\x18\n" +
 	"\aformula\x18\x04 \x01(\tR\aformula\x12 \n" +
 	"\voverridable\x18\x05 \x01(\bR\voverridable\"\xa5\x02\n" +
 	"\bModelDef\x12\x10\n" +
@@ -3878,14 +4043,14 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x06number\x18\x01 \x01(\x01H\x00R\x06number\x12\x1a\n" +
 	"\aboolean\x18\x02 \x01(\bH\x00R\aboolean\x12\x18\n" +
 	"\x06member\x18\x03 \x01(\tH\x00R\x06memberB\a\n" +
-	"\x05value\"\xa1\x02\n" +
+	"\x05value\"\xba\x02\n" +
 	"\fQueryRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x18\n" +
 	"\ametrics\x18\x02 \x03(\tR\ametrics\x12\x12\n" +
 	"\x04rows\x18\x03 \x03(\tR\x04rows\x12\x18\n" +
 	"\acolumns\x18\x04 \x03(\tR\acolumns\x12?\n" +
-	"\afilters\x18\x05 \x03(\v2%.nanashi.v1.QueryRequest.FiltersEntryR\afilters\x12 \n" +
-	"\vaggregation\x18\x06 \x01(\tR\vaggregation\x1aO\n" +
+	"\afilters\x18\x05 \x03(\v2%.nanashi.v1.QueryRequest.FiltersEntryR\afilters\x129\n" +
+	"\vaggregation\x18\x06 \x01(\x0e2\x17.nanashi.v1.AggregationR\vaggregation\x1aO\n" +
 	"\fFiltersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
 	"\x05value\x18\x02 \x01(\v2\x13.nanashi.v1.MembersR\x05value:\x028\x01\"d\n" +
@@ -3937,7 +4102,7 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x18\n" +
-	"\ametrics\x18\x04 \x03(\tR\ametrics\"\xea\x02\n" +
+	"\ametrics\x18\x04 \x03(\tR\ametrics\"\x83\x03\n" +
 	"\aViewDef\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
@@ -3946,8 +4111,8 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x04rows\x18\x05 \x03(\tR\x04rows\x12\x18\n" +
 	"\acolumns\x18\x06 \x03(\tR\acolumns\x12:\n" +
 	"\afilters\x18\a \x03(\v2 .nanashi.v1.ViewDef.FiltersEntryR\afilters\x12-\n" +
-	"\adisplay\x18\b \x01(\x0e2\x13.nanashi.v1.DisplayR\adisplay\x12 \n" +
-	"\vaggregation\x18\t \x01(\tR\vaggregation\x1aO\n" +
+	"\adisplay\x18\b \x01(\x0e2\x13.nanashi.v1.DisplayR\adisplay\x129\n" +
+	"\vaggregation\x18\t \x01(\x0e2\x17.nanashi.v1.AggregationR\vaggregation\x1aO\n" +
 	"\fFiltersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
 	"\x05value\x18\x02 \x01(\v2\x13.nanashi.v1.MembersR\x05value:\x028\x01\"D\n" +
@@ -3968,7 +4133,7 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\aComment\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x16\n" +
-	"\x06target\x18\x03 \x01(\tR\x06target\x121\n" +
+	"\x06metric\x18\x03 \x01(\tR\x06metric\x121\n" +
 	"\x04cell\x18\x04 \x03(\v2\x1d.nanashi.v1.Comment.CellEntryR\x04cell\x12\x12\n" +
 	"\x04user\x18\x05 \x01(\tR\x04user\x12\x12\n" +
 	"\x04body\x18\x06 \x01(\tR\x04body\x12\x1d\n" +
@@ -3979,7 +4144,7 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"D\n" +
 	"\x13ListCommentsRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x16\n" +
-	"\x06target\x18\x02 \x01(\tR\x06target\"G\n" +
+	"\x06metric\x18\x02 \x01(\tR\x06metric\"G\n" +
 	"\x14ListCommentsResponse\x12/\n" +
 	"\bcomments\x18\x01 \x03(\v2\x13.nanashi.v1.CommentR\bcomments\"\x7f\n" +
 	"\n" +
@@ -4013,7 +4178,7 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\tAppMember\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12$\n" +
-	"\x04role\x18\x03 \x01(\x0e2\x10.nanashi.v1.RoleR\x04role\"\xb5\x01\n" +
+	"\x04role\x18\x03 \x01(\x0e2\x10.nanashi.v1.RoleR\x04role\"\x9d\x01\n" +
 	"\n" +
 	"AccessRule\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x0e\n" +
@@ -4021,8 +4186,10 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x04role\x18\x03 \x01(\x0e2\x10.nanashi.v1.RoleR\x04role\x12\x12\n" +
 	"\x04list\x18\x04 \x01(\tR\x04list\x12\x18\n" +
 	"\amembers\x18\x05 \x03(\tR\amembers\x12\x14\n" +
-	"\x05write\x18\x06 \x01(\bR\x05write\x12\x16\n" +
-	"\x06delete\x18\a \x01(\bR\x06delete\"g\n" +
+	"\x05write\x18\x06 \x01(\bR\x05write\"@\n" +
+	"\x17DeleteAccessRuleRequest\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x0e\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\"g\n" +
 	"\x06Access\x12/\n" +
 	"\amembers\x18\x01 \x03(\v2\x15.nanashi.v1.AppMemberR\amembers\x12,\n" +
 	"\x05rules\x18\x02 \x03(\v2\x16.nanashi.v1.AccessRuleR\x05rules*e\n" +
@@ -4044,7 +4211,19 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x17PROPERTY_TYPE_DIMENSION\x10\x01\x12\x18\n" +
 	"\x14PROPERTY_TYPE_NUMBER\x10\x02\x12\x19\n" +
 	"\x15PROPERTY_TYPE_BOOLEAN\x10\x03\x12\x16\n" +
-	"\x12PROPERTY_TYPE_TEXT\x10\x04*h\n" +
+	"\x12PROPERTY_TYPE_TEXT\x10\x04*m\n" +
+	"\tValueKind\x12\x1a\n" +
+	"\x16VALUE_KIND_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11VALUE_KIND_NUMBER\x10\x01\x12\x16\n" +
+	"\x12VALUE_KIND_BOOLEAN\x10\x02\x12\x15\n" +
+	"\x11VALUE_KIND_MEMBER\x10\x03*\x95\x01\n" +
+	"\vAggregation\x12\x1b\n" +
+	"\x17AGGREGATION_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fAGGREGATION_SUM\x10\x01\x12\x13\n" +
+	"\x0fAGGREGATION_AVG\x10\x02\x12\x13\n" +
+	"\x0fAGGREGATION_MIN\x10\x03\x12\x13\n" +
+	"\x0fAGGREGATION_MAX\x10\x04\x12\x15\n" +
+	"\x11AGGREGATION_COUNT\x10\x05*h\n" +
 	"\aDisplay\x12\x17\n" +
 	"\x13DISPLAY_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fDISPLAY_GRID\x10\x01\x12\x10\n" +
@@ -4055,7 +4234,7 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x15ITEM_TYPE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fITEM_TYPE_TABLE\x10\x01\x12\x12\n" +
 	"\x0eITEM_TYPE_VIEW\x10\x02\x12\x13\n" +
-	"\x0fITEM_TYPE_BOARD\x10\x032\x92\x0e\n" +
+	"\x0fITEM_TYPE_BOARD\x10\x032\xde\x0e\n" +
 	"\vPlanService\x12_\n" +
 	"\x10ListApplications\x12#.nanashi.v1.ListApplicationsRequest\x1a$.nanashi.v1.ListApplicationsResponse\"\x00\x12T\n" +
 	"\x11CreateApplication\x12$.nanashi.v1.CreateApplicationRequest\x1a\x17.nanashi.v1.Application\"\x00\x12?\n" +
@@ -4087,7 +4266,8 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x0eCreateSnapshot\x12!.nanashi.v1.CreateSnapshotRequest\x1a\x14.nanashi.v1.Snapshot\"\x00\x12?\n" +
 	"\tGetAccess\x12\x1c.nanashi.v1.GetAccessRequest\x1a\x12.nanashi.v1.Access\"\x00\x129\n" +
 	"\rSetMemberRole\x12\x15.nanashi.v1.AppMember\x1a\x0f.nanashi.v1.Ack\"\x00\x12B\n" +
-	"\x0eSaveAccessRule\x12\x16.nanashi.v1.AccessRule\x1a\x16.nanashi.v1.AccessRule\"\x00B;Z9github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1b\x06proto3"
+	"\x0eSaveAccessRule\x12\x16.nanashi.v1.AccessRule\x1a\x16.nanashi.v1.AccessRule\"\x00\x12J\n" +
+	"\x10DeleteAccessRule\x12#.nanashi.v1.DeleteAccessRuleRequest\x1a\x0f.nanashi.v1.Ack\"\x00B;Z9github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1b\x06proto3"
 
 var (
 	file_nanashi_v1_plan_proto_rawDescOnce sync.Once
@@ -4101,185 +4281,193 @@ func file_nanashi_v1_plan_proto_rawDescGZIP() []byte {
 	return file_nanashi_v1_plan_proto_rawDescData
 }
 
-var file_nanashi_v1_plan_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_nanashi_v1_plan_proto_msgTypes = make([]protoimpl.MessageInfo, 64)
+var file_nanashi_v1_plan_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_nanashi_v1_plan_proto_msgTypes = make([]protoimpl.MessageInfo, 65)
 var file_nanashi_v1_plan_proto_goTypes = []any{
 	(Role)(0),                        // 0: nanashi.v1.Role
 	(ListKind)(0),                    // 1: nanashi.v1.ListKind
 	(PropertyType)(0),                // 2: nanashi.v1.PropertyType
-	(Display)(0),                     // 3: nanashi.v1.Display
-	(ItemType)(0),                    // 4: nanashi.v1.ItemType
-	(*Ack)(nil),                      // 5: nanashi.v1.Ack
-	(*Application)(nil),              // 6: nanashi.v1.Application
-	(*ListApplicationsRequest)(nil),  // 7: nanashi.v1.ListApplicationsRequest
-	(*ListApplicationsResponse)(nil), // 8: nanashi.v1.ListApplicationsResponse
-	(*CreateApplicationRequest)(nil), // 9: nanashi.v1.CreateApplicationRequest
-	(*GetModelRequest)(nil),          // 10: nanashi.v1.GetModelRequest
-	(*PropertyDef)(nil),              // 11: nanashi.v1.PropertyDef
-	(*Member)(nil),                   // 12: nanashi.v1.Member
-	(*ListDef)(nil),                  // 13: nanashi.v1.ListDef
-	(*MetricDef)(nil),                // 14: nanashi.v1.MetricDef
-	(*ModelDef)(nil),                 // 15: nanashi.v1.ModelDef
-	(*CreateListRequest)(nil),        // 16: nanashi.v1.CreateListRequest
-	(*AddPropertyRequest)(nil),       // 17: nanashi.v1.AddPropertyRequest
-	(*EditMembersRequest)(nil),       // 18: nanashi.v1.EditMembersRequest
-	(*MemberEdit)(nil),               // 19: nanashi.v1.MemberEdit
-	(*AddMember)(nil),                // 20: nanashi.v1.AddMember
-	(*RenameMember)(nil),             // 21: nanashi.v1.RenameMember
-	(*RemoveMember)(nil),             // 22: nanashi.v1.RemoveMember
-	(*MoveMember)(nil),               // 23: nanashi.v1.MoveMember
-	(*SetProperties)(nil),            // 24: nanashi.v1.SetProperties
-	(*CreateCalendarRequest)(nil),    // 25: nanashi.v1.CreateCalendarRequest
-	(*CreateScenarioRequest)(nil),    // 26: nanashi.v1.CreateScenarioRequest
-	(*SaveMetricRequest)(nil),        // 27: nanashi.v1.SaveMetricRequest
-	(*RenameMetricRequest)(nil),      // 28: nanashi.v1.RenameMetricRequest
-	(*DeleteMetricRequest)(nil),      // 29: nanashi.v1.DeleteMetricRequest
-	(*Members)(nil),                  // 30: nanashi.v1.Members
-	(*Value)(nil),                    // 31: nanashi.v1.Value
-	(*QueryRequest)(nil),             // 32: nanashi.v1.QueryRequest
-	(*QueryCell)(nil),                // 33: nanashi.v1.QueryCell
-	(*QueryResponse)(nil),            // 34: nanashi.v1.QueryResponse
-	(*CellWrite)(nil),                // 35: nanashi.v1.CellWrite
-	(*WriteCellsRequest)(nil),        // 36: nanashi.v1.WriteCellsRequest
-	(*ImportRequest)(nil),            // 37: nanashi.v1.ImportRequest
-	(*ListImport)(nil),               // 38: nanashi.v1.ListImport
-	(*MetricImport)(nil),             // 39: nanashi.v1.MetricImport
-	(*ImportResponse)(nil),           // 40: nanashi.v1.ImportResponse
-	(*TableDef)(nil),                 // 41: nanashi.v1.TableDef
-	(*ViewDef)(nil),                  // 42: nanashi.v1.ViewDef
-	(*Widget)(nil),                   // 43: nanashi.v1.Widget
-	(*BoardDef)(nil),                 // 44: nanashi.v1.BoardDef
-	(*DeleteItemRequest)(nil),        // 45: nanashi.v1.DeleteItemRequest
-	(*Comment)(nil),                  // 46: nanashi.v1.Comment
-	(*ListCommentsRequest)(nil),      // 47: nanashi.v1.ListCommentsRequest
-	(*ListCommentsResponse)(nil),     // 48: nanashi.v1.ListCommentsResponse
-	(*AuditEntry)(nil),               // 49: nanashi.v1.AuditEntry
-	(*ListAuditRequest)(nil),         // 50: nanashi.v1.ListAuditRequest
-	(*ListAuditResponse)(nil),        // 51: nanashi.v1.ListAuditResponse
-	(*Snapshot)(nil),                 // 52: nanashi.v1.Snapshot
-	(*ListSnapshotsRequest)(nil),     // 53: nanashi.v1.ListSnapshotsRequest
-	(*ListSnapshotsResponse)(nil),    // 54: nanashi.v1.ListSnapshotsResponse
-	(*CreateSnapshotRequest)(nil),    // 55: nanashi.v1.CreateSnapshotRequest
-	(*GetAccessRequest)(nil),         // 56: nanashi.v1.GetAccessRequest
-	(*AppMember)(nil),                // 57: nanashi.v1.AppMember
-	(*AccessRule)(nil),               // 58: nanashi.v1.AccessRule
-	(*Access)(nil),                   // 59: nanashi.v1.Access
-	nil,                              // 60: nanashi.v1.Member.PropertiesEntry
-	nil,                              // 61: nanashi.v1.AddMember.PropertiesEntry
-	nil,                              // 62: nanashi.v1.SetProperties.PropertiesEntry
-	nil,                              // 63: nanashi.v1.QueryRequest.FiltersEntry
-	nil,                              // 64: nanashi.v1.CellWrite.CoordsEntry
-	nil,                              // 65: nanashi.v1.ListImport.PropertyColumnsEntry
-	nil,                              // 66: nanashi.v1.MetricImport.DimensionColumnsEntry
-	nil,                              // 67: nanashi.v1.ViewDef.FiltersEntry
-	nil,                              // 68: nanashi.v1.Comment.CellEntry
+	(ValueKind)(0),                   // 3: nanashi.v1.ValueKind
+	(Aggregation)(0),                 // 4: nanashi.v1.Aggregation
+	(Display)(0),                     // 5: nanashi.v1.Display
+	(ItemType)(0),                    // 6: nanashi.v1.ItemType
+	(*Ack)(nil),                      // 7: nanashi.v1.Ack
+	(*Application)(nil),              // 8: nanashi.v1.Application
+	(*ListApplicationsRequest)(nil),  // 9: nanashi.v1.ListApplicationsRequest
+	(*ListApplicationsResponse)(nil), // 10: nanashi.v1.ListApplicationsResponse
+	(*CreateApplicationRequest)(nil), // 11: nanashi.v1.CreateApplicationRequest
+	(*GetModelRequest)(nil),          // 12: nanashi.v1.GetModelRequest
+	(*PropertyDef)(nil),              // 13: nanashi.v1.PropertyDef
+	(*Member)(nil),                   // 14: nanashi.v1.Member
+	(*ListDef)(nil),                  // 15: nanashi.v1.ListDef
+	(*MetricDef)(nil),                // 16: nanashi.v1.MetricDef
+	(*ModelDef)(nil),                 // 17: nanashi.v1.ModelDef
+	(*CreateListRequest)(nil),        // 18: nanashi.v1.CreateListRequest
+	(*AddPropertyRequest)(nil),       // 19: nanashi.v1.AddPropertyRequest
+	(*EditMembersRequest)(nil),       // 20: nanashi.v1.EditMembersRequest
+	(*MemberEdit)(nil),               // 21: nanashi.v1.MemberEdit
+	(*AddMember)(nil),                // 22: nanashi.v1.AddMember
+	(*RenameMember)(nil),             // 23: nanashi.v1.RenameMember
+	(*RemoveMember)(nil),             // 24: nanashi.v1.RemoveMember
+	(*MoveMember)(nil),               // 25: nanashi.v1.MoveMember
+	(*SetProperties)(nil),            // 26: nanashi.v1.SetProperties
+	(*CreateCalendarRequest)(nil),    // 27: nanashi.v1.CreateCalendarRequest
+	(*CreateScenarioRequest)(nil),    // 28: nanashi.v1.CreateScenarioRequest
+	(*SaveMetricRequest)(nil),        // 29: nanashi.v1.SaveMetricRequest
+	(*RenameMetricRequest)(nil),      // 30: nanashi.v1.RenameMetricRequest
+	(*DeleteMetricRequest)(nil),      // 31: nanashi.v1.DeleteMetricRequest
+	(*Members)(nil),                  // 32: nanashi.v1.Members
+	(*Value)(nil),                    // 33: nanashi.v1.Value
+	(*QueryRequest)(nil),             // 34: nanashi.v1.QueryRequest
+	(*QueryCell)(nil),                // 35: nanashi.v1.QueryCell
+	(*QueryResponse)(nil),            // 36: nanashi.v1.QueryResponse
+	(*CellWrite)(nil),                // 37: nanashi.v1.CellWrite
+	(*WriteCellsRequest)(nil),        // 38: nanashi.v1.WriteCellsRequest
+	(*ImportRequest)(nil),            // 39: nanashi.v1.ImportRequest
+	(*ListImport)(nil),               // 40: nanashi.v1.ListImport
+	(*MetricImport)(nil),             // 41: nanashi.v1.MetricImport
+	(*ImportResponse)(nil),           // 42: nanashi.v1.ImportResponse
+	(*TableDef)(nil),                 // 43: nanashi.v1.TableDef
+	(*ViewDef)(nil),                  // 44: nanashi.v1.ViewDef
+	(*Widget)(nil),                   // 45: nanashi.v1.Widget
+	(*BoardDef)(nil),                 // 46: nanashi.v1.BoardDef
+	(*DeleteItemRequest)(nil),        // 47: nanashi.v1.DeleteItemRequest
+	(*Comment)(nil),                  // 48: nanashi.v1.Comment
+	(*ListCommentsRequest)(nil),      // 49: nanashi.v1.ListCommentsRequest
+	(*ListCommentsResponse)(nil),     // 50: nanashi.v1.ListCommentsResponse
+	(*AuditEntry)(nil),               // 51: nanashi.v1.AuditEntry
+	(*ListAuditRequest)(nil),         // 52: nanashi.v1.ListAuditRequest
+	(*ListAuditResponse)(nil),        // 53: nanashi.v1.ListAuditResponse
+	(*Snapshot)(nil),                 // 54: nanashi.v1.Snapshot
+	(*ListSnapshotsRequest)(nil),     // 55: nanashi.v1.ListSnapshotsRequest
+	(*ListSnapshotsResponse)(nil),    // 56: nanashi.v1.ListSnapshotsResponse
+	(*CreateSnapshotRequest)(nil),    // 57: nanashi.v1.CreateSnapshotRequest
+	(*GetAccessRequest)(nil),         // 58: nanashi.v1.GetAccessRequest
+	(*AppMember)(nil),                // 59: nanashi.v1.AppMember
+	(*AccessRule)(nil),               // 60: nanashi.v1.AccessRule
+	(*DeleteAccessRuleRequest)(nil),  // 61: nanashi.v1.DeleteAccessRuleRequest
+	(*Access)(nil),                   // 62: nanashi.v1.Access
+	nil,                              // 63: nanashi.v1.Member.PropertiesEntry
+	nil,                              // 64: nanashi.v1.AddMember.PropertiesEntry
+	nil,                              // 65: nanashi.v1.SetProperties.PropertiesEntry
+	nil,                              // 66: nanashi.v1.QueryRequest.FiltersEntry
+	nil,                              // 67: nanashi.v1.CellWrite.CoordsEntry
+	nil,                              // 68: nanashi.v1.ListImport.PropertyColumnsEntry
+	nil,                              // 69: nanashi.v1.MetricImport.DimensionColumnsEntry
+	nil,                              // 70: nanashi.v1.ViewDef.FiltersEntry
+	nil,                              // 71: nanashi.v1.Comment.CellEntry
 }
 var file_nanashi_v1_plan_proto_depIdxs = []int32{
 	0,  // 0: nanashi.v1.Application.role:type_name -> nanashi.v1.Role
-	6,  // 1: nanashi.v1.ListApplicationsResponse.applications:type_name -> nanashi.v1.Application
+	8,  // 1: nanashi.v1.ListApplicationsResponse.applications:type_name -> nanashi.v1.Application
 	2,  // 2: nanashi.v1.PropertyDef.type:type_name -> nanashi.v1.PropertyType
-	60, // 3: nanashi.v1.Member.properties:type_name -> nanashi.v1.Member.PropertiesEntry
+	63, // 3: nanashi.v1.Member.properties:type_name -> nanashi.v1.Member.PropertiesEntry
 	1,  // 4: nanashi.v1.ListDef.kind:type_name -> nanashi.v1.ListKind
-	12, // 5: nanashi.v1.ListDef.members:type_name -> nanashi.v1.Member
-	11, // 6: nanashi.v1.ListDef.properties:type_name -> nanashi.v1.PropertyDef
-	0,  // 7: nanashi.v1.ModelDef.role:type_name -> nanashi.v1.Role
-	13, // 8: nanashi.v1.ModelDef.lists:type_name -> nanashi.v1.ListDef
-	14, // 9: nanashi.v1.ModelDef.metrics:type_name -> nanashi.v1.MetricDef
-	41, // 10: nanashi.v1.ModelDef.tables:type_name -> nanashi.v1.TableDef
-	42, // 11: nanashi.v1.ModelDef.views:type_name -> nanashi.v1.ViewDef
-	44, // 12: nanashi.v1.ModelDef.boards:type_name -> nanashi.v1.BoardDef
-	1,  // 13: nanashi.v1.CreateListRequest.kind:type_name -> nanashi.v1.ListKind
-	11, // 14: nanashi.v1.AddPropertyRequest.property:type_name -> nanashi.v1.PropertyDef
-	19, // 15: nanashi.v1.EditMembersRequest.edits:type_name -> nanashi.v1.MemberEdit
-	20, // 16: nanashi.v1.MemberEdit.add:type_name -> nanashi.v1.AddMember
-	21, // 17: nanashi.v1.MemberEdit.rename:type_name -> nanashi.v1.RenameMember
-	22, // 18: nanashi.v1.MemberEdit.remove:type_name -> nanashi.v1.RemoveMember
-	23, // 19: nanashi.v1.MemberEdit.move:type_name -> nanashi.v1.MoveMember
-	24, // 20: nanashi.v1.MemberEdit.set:type_name -> nanashi.v1.SetProperties
-	61, // 21: nanashi.v1.AddMember.properties:type_name -> nanashi.v1.AddMember.PropertiesEntry
-	62, // 22: nanashi.v1.SetProperties.properties:type_name -> nanashi.v1.SetProperties.PropertiesEntry
-	14, // 23: nanashi.v1.SaveMetricRequest.metric:type_name -> nanashi.v1.MetricDef
-	63, // 24: nanashi.v1.QueryRequest.filters:type_name -> nanashi.v1.QueryRequest.FiltersEntry
-	31, // 25: nanashi.v1.QueryCell.value:type_name -> nanashi.v1.Value
-	33, // 26: nanashi.v1.QueryResponse.cells:type_name -> nanashi.v1.QueryCell
-	64, // 27: nanashi.v1.CellWrite.coords:type_name -> nanashi.v1.CellWrite.CoordsEntry
-	31, // 28: nanashi.v1.CellWrite.value:type_name -> nanashi.v1.Value
-	35, // 29: nanashi.v1.WriteCellsRequest.writes:type_name -> nanashi.v1.CellWrite
-	38, // 30: nanashi.v1.ImportRequest.list:type_name -> nanashi.v1.ListImport
-	39, // 31: nanashi.v1.ImportRequest.metric:type_name -> nanashi.v1.MetricImport
-	65, // 32: nanashi.v1.ListImport.property_columns:type_name -> nanashi.v1.ListImport.PropertyColumnsEntry
-	66, // 33: nanashi.v1.MetricImport.dimension_columns:type_name -> nanashi.v1.MetricImport.DimensionColumnsEntry
-	67, // 34: nanashi.v1.ViewDef.filters:type_name -> nanashi.v1.ViewDef.FiltersEntry
-	3,  // 35: nanashi.v1.ViewDef.display:type_name -> nanashi.v1.Display
-	43, // 36: nanashi.v1.BoardDef.widgets:type_name -> nanashi.v1.Widget
-	4,  // 37: nanashi.v1.DeleteItemRequest.type:type_name -> nanashi.v1.ItemType
-	68, // 38: nanashi.v1.Comment.cell:type_name -> nanashi.v1.Comment.CellEntry
-	46, // 39: nanashi.v1.ListCommentsResponse.comments:type_name -> nanashi.v1.Comment
-	49, // 40: nanashi.v1.ListAuditResponse.entries:type_name -> nanashi.v1.AuditEntry
-	52, // 41: nanashi.v1.ListSnapshotsResponse.snapshots:type_name -> nanashi.v1.Snapshot
-	0,  // 42: nanashi.v1.AppMember.role:type_name -> nanashi.v1.Role
-	0,  // 43: nanashi.v1.AccessRule.role:type_name -> nanashi.v1.Role
-	57, // 44: nanashi.v1.Access.members:type_name -> nanashi.v1.AppMember
-	58, // 45: nanashi.v1.Access.rules:type_name -> nanashi.v1.AccessRule
-	30, // 46: nanashi.v1.QueryRequest.FiltersEntry.value:type_name -> nanashi.v1.Members
-	30, // 47: nanashi.v1.ViewDef.FiltersEntry.value:type_name -> nanashi.v1.Members
-	7,  // 48: nanashi.v1.PlanService.ListApplications:input_type -> nanashi.v1.ListApplicationsRequest
-	9,  // 49: nanashi.v1.PlanService.CreateApplication:input_type -> nanashi.v1.CreateApplicationRequest
-	10, // 50: nanashi.v1.PlanService.GetModel:input_type -> nanashi.v1.GetModelRequest
-	16, // 51: nanashi.v1.PlanService.CreateList:input_type -> nanashi.v1.CreateListRequest
-	17, // 52: nanashi.v1.PlanService.AddProperty:input_type -> nanashi.v1.AddPropertyRequest
-	18, // 53: nanashi.v1.PlanService.EditMembers:input_type -> nanashi.v1.EditMembersRequest
-	25, // 54: nanashi.v1.PlanService.CreateCalendar:input_type -> nanashi.v1.CreateCalendarRequest
-	26, // 55: nanashi.v1.PlanService.CreateScenario:input_type -> nanashi.v1.CreateScenarioRequest
-	27, // 56: nanashi.v1.PlanService.SaveMetric:input_type -> nanashi.v1.SaveMetricRequest
-	28, // 57: nanashi.v1.PlanService.RenameMetric:input_type -> nanashi.v1.RenameMetricRequest
-	29, // 58: nanashi.v1.PlanService.DeleteMetric:input_type -> nanashi.v1.DeleteMetricRequest
-	32, // 59: nanashi.v1.PlanService.Query:input_type -> nanashi.v1.QueryRequest
-	36, // 60: nanashi.v1.PlanService.WriteCells:input_type -> nanashi.v1.WriteCellsRequest
-	37, // 61: nanashi.v1.PlanService.Import:input_type -> nanashi.v1.ImportRequest
-	41, // 62: nanashi.v1.PlanService.SaveTable:input_type -> nanashi.v1.TableDef
-	42, // 63: nanashi.v1.PlanService.SaveView:input_type -> nanashi.v1.ViewDef
-	44, // 64: nanashi.v1.PlanService.SaveBoard:input_type -> nanashi.v1.BoardDef
-	45, // 65: nanashi.v1.PlanService.DeleteItem:input_type -> nanashi.v1.DeleteItemRequest
-	47, // 66: nanashi.v1.PlanService.ListComments:input_type -> nanashi.v1.ListCommentsRequest
-	46, // 67: nanashi.v1.PlanService.AddComment:input_type -> nanashi.v1.Comment
-	50, // 68: nanashi.v1.PlanService.ListAudit:input_type -> nanashi.v1.ListAuditRequest
-	53, // 69: nanashi.v1.PlanService.ListSnapshots:input_type -> nanashi.v1.ListSnapshotsRequest
-	55, // 70: nanashi.v1.PlanService.CreateSnapshot:input_type -> nanashi.v1.CreateSnapshotRequest
-	56, // 71: nanashi.v1.PlanService.GetAccess:input_type -> nanashi.v1.GetAccessRequest
-	57, // 72: nanashi.v1.PlanService.SetMemberRole:input_type -> nanashi.v1.AppMember
-	58, // 73: nanashi.v1.PlanService.SaveAccessRule:input_type -> nanashi.v1.AccessRule
-	8,  // 74: nanashi.v1.PlanService.ListApplications:output_type -> nanashi.v1.ListApplicationsResponse
-	6,  // 75: nanashi.v1.PlanService.CreateApplication:output_type -> nanashi.v1.Application
-	15, // 76: nanashi.v1.PlanService.GetModel:output_type -> nanashi.v1.ModelDef
-	5,  // 77: nanashi.v1.PlanService.CreateList:output_type -> nanashi.v1.Ack
-	5,  // 78: nanashi.v1.PlanService.AddProperty:output_type -> nanashi.v1.Ack
-	5,  // 79: nanashi.v1.PlanService.EditMembers:output_type -> nanashi.v1.Ack
-	5,  // 80: nanashi.v1.PlanService.CreateCalendar:output_type -> nanashi.v1.Ack
-	5,  // 81: nanashi.v1.PlanService.CreateScenario:output_type -> nanashi.v1.Ack
-	5,  // 82: nanashi.v1.PlanService.SaveMetric:output_type -> nanashi.v1.Ack
-	5,  // 83: nanashi.v1.PlanService.RenameMetric:output_type -> nanashi.v1.Ack
-	5,  // 84: nanashi.v1.PlanService.DeleteMetric:output_type -> nanashi.v1.Ack
-	34, // 85: nanashi.v1.PlanService.Query:output_type -> nanashi.v1.QueryResponse
-	5,  // 86: nanashi.v1.PlanService.WriteCells:output_type -> nanashi.v1.Ack
-	40, // 87: nanashi.v1.PlanService.Import:output_type -> nanashi.v1.ImportResponse
-	41, // 88: nanashi.v1.PlanService.SaveTable:output_type -> nanashi.v1.TableDef
-	42, // 89: nanashi.v1.PlanService.SaveView:output_type -> nanashi.v1.ViewDef
-	44, // 90: nanashi.v1.PlanService.SaveBoard:output_type -> nanashi.v1.BoardDef
-	5,  // 91: nanashi.v1.PlanService.DeleteItem:output_type -> nanashi.v1.Ack
-	48, // 92: nanashi.v1.PlanService.ListComments:output_type -> nanashi.v1.ListCommentsResponse
-	46, // 93: nanashi.v1.PlanService.AddComment:output_type -> nanashi.v1.Comment
-	51, // 94: nanashi.v1.PlanService.ListAudit:output_type -> nanashi.v1.ListAuditResponse
-	54, // 95: nanashi.v1.PlanService.ListSnapshots:output_type -> nanashi.v1.ListSnapshotsResponse
-	52, // 96: nanashi.v1.PlanService.CreateSnapshot:output_type -> nanashi.v1.Snapshot
-	59, // 97: nanashi.v1.PlanService.GetAccess:output_type -> nanashi.v1.Access
-	5,  // 98: nanashi.v1.PlanService.SetMemberRole:output_type -> nanashi.v1.Ack
-	58, // 99: nanashi.v1.PlanService.SaveAccessRule:output_type -> nanashi.v1.AccessRule
-	74, // [74:100] is the sub-list for method output_type
-	48, // [48:74] is the sub-list for method input_type
-	48, // [48:48] is the sub-list for extension type_name
-	48, // [48:48] is the sub-list for extension extendee
-	0,  // [0:48] is the sub-list for field type_name
+	14, // 5: nanashi.v1.ListDef.members:type_name -> nanashi.v1.Member
+	13, // 6: nanashi.v1.ListDef.properties:type_name -> nanashi.v1.PropertyDef
+	3,  // 7: nanashi.v1.MetricDef.kind:type_name -> nanashi.v1.ValueKind
+	0,  // 8: nanashi.v1.ModelDef.role:type_name -> nanashi.v1.Role
+	15, // 9: nanashi.v1.ModelDef.lists:type_name -> nanashi.v1.ListDef
+	16, // 10: nanashi.v1.ModelDef.metrics:type_name -> nanashi.v1.MetricDef
+	43, // 11: nanashi.v1.ModelDef.tables:type_name -> nanashi.v1.TableDef
+	44, // 12: nanashi.v1.ModelDef.views:type_name -> nanashi.v1.ViewDef
+	46, // 13: nanashi.v1.ModelDef.boards:type_name -> nanashi.v1.BoardDef
+	1,  // 14: nanashi.v1.CreateListRequest.kind:type_name -> nanashi.v1.ListKind
+	13, // 15: nanashi.v1.AddPropertyRequest.property:type_name -> nanashi.v1.PropertyDef
+	21, // 16: nanashi.v1.EditMembersRequest.edits:type_name -> nanashi.v1.MemberEdit
+	22, // 17: nanashi.v1.MemberEdit.add:type_name -> nanashi.v1.AddMember
+	23, // 18: nanashi.v1.MemberEdit.rename:type_name -> nanashi.v1.RenameMember
+	24, // 19: nanashi.v1.MemberEdit.remove:type_name -> nanashi.v1.RemoveMember
+	25, // 20: nanashi.v1.MemberEdit.move:type_name -> nanashi.v1.MoveMember
+	26, // 21: nanashi.v1.MemberEdit.set:type_name -> nanashi.v1.SetProperties
+	64, // 22: nanashi.v1.AddMember.properties:type_name -> nanashi.v1.AddMember.PropertiesEntry
+	65, // 23: nanashi.v1.SetProperties.properties:type_name -> nanashi.v1.SetProperties.PropertiesEntry
+	16, // 24: nanashi.v1.SaveMetricRequest.metric:type_name -> nanashi.v1.MetricDef
+	66, // 25: nanashi.v1.QueryRequest.filters:type_name -> nanashi.v1.QueryRequest.FiltersEntry
+	4,  // 26: nanashi.v1.QueryRequest.aggregation:type_name -> nanashi.v1.Aggregation
+	33, // 27: nanashi.v1.QueryCell.value:type_name -> nanashi.v1.Value
+	35, // 28: nanashi.v1.QueryResponse.cells:type_name -> nanashi.v1.QueryCell
+	67, // 29: nanashi.v1.CellWrite.coords:type_name -> nanashi.v1.CellWrite.CoordsEntry
+	33, // 30: nanashi.v1.CellWrite.value:type_name -> nanashi.v1.Value
+	37, // 31: nanashi.v1.WriteCellsRequest.writes:type_name -> nanashi.v1.CellWrite
+	40, // 32: nanashi.v1.ImportRequest.list:type_name -> nanashi.v1.ListImport
+	41, // 33: nanashi.v1.ImportRequest.metric:type_name -> nanashi.v1.MetricImport
+	68, // 34: nanashi.v1.ListImport.property_columns:type_name -> nanashi.v1.ListImport.PropertyColumnsEntry
+	69, // 35: nanashi.v1.MetricImport.dimension_columns:type_name -> nanashi.v1.MetricImport.DimensionColumnsEntry
+	70, // 36: nanashi.v1.ViewDef.filters:type_name -> nanashi.v1.ViewDef.FiltersEntry
+	5,  // 37: nanashi.v1.ViewDef.display:type_name -> nanashi.v1.Display
+	4,  // 38: nanashi.v1.ViewDef.aggregation:type_name -> nanashi.v1.Aggregation
+	45, // 39: nanashi.v1.BoardDef.widgets:type_name -> nanashi.v1.Widget
+	6,  // 40: nanashi.v1.DeleteItemRequest.type:type_name -> nanashi.v1.ItemType
+	71, // 41: nanashi.v1.Comment.cell:type_name -> nanashi.v1.Comment.CellEntry
+	48, // 42: nanashi.v1.ListCommentsResponse.comments:type_name -> nanashi.v1.Comment
+	51, // 43: nanashi.v1.ListAuditResponse.entries:type_name -> nanashi.v1.AuditEntry
+	54, // 44: nanashi.v1.ListSnapshotsResponse.snapshots:type_name -> nanashi.v1.Snapshot
+	0,  // 45: nanashi.v1.AppMember.role:type_name -> nanashi.v1.Role
+	0,  // 46: nanashi.v1.AccessRule.role:type_name -> nanashi.v1.Role
+	59, // 47: nanashi.v1.Access.members:type_name -> nanashi.v1.AppMember
+	60, // 48: nanashi.v1.Access.rules:type_name -> nanashi.v1.AccessRule
+	32, // 49: nanashi.v1.QueryRequest.FiltersEntry.value:type_name -> nanashi.v1.Members
+	32, // 50: nanashi.v1.ViewDef.FiltersEntry.value:type_name -> nanashi.v1.Members
+	9,  // 51: nanashi.v1.PlanService.ListApplications:input_type -> nanashi.v1.ListApplicationsRequest
+	11, // 52: nanashi.v1.PlanService.CreateApplication:input_type -> nanashi.v1.CreateApplicationRequest
+	12, // 53: nanashi.v1.PlanService.GetModel:input_type -> nanashi.v1.GetModelRequest
+	18, // 54: nanashi.v1.PlanService.CreateList:input_type -> nanashi.v1.CreateListRequest
+	19, // 55: nanashi.v1.PlanService.AddProperty:input_type -> nanashi.v1.AddPropertyRequest
+	20, // 56: nanashi.v1.PlanService.EditMembers:input_type -> nanashi.v1.EditMembersRequest
+	27, // 57: nanashi.v1.PlanService.CreateCalendar:input_type -> nanashi.v1.CreateCalendarRequest
+	28, // 58: nanashi.v1.PlanService.CreateScenario:input_type -> nanashi.v1.CreateScenarioRequest
+	29, // 59: nanashi.v1.PlanService.SaveMetric:input_type -> nanashi.v1.SaveMetricRequest
+	30, // 60: nanashi.v1.PlanService.RenameMetric:input_type -> nanashi.v1.RenameMetricRequest
+	31, // 61: nanashi.v1.PlanService.DeleteMetric:input_type -> nanashi.v1.DeleteMetricRequest
+	34, // 62: nanashi.v1.PlanService.Query:input_type -> nanashi.v1.QueryRequest
+	38, // 63: nanashi.v1.PlanService.WriteCells:input_type -> nanashi.v1.WriteCellsRequest
+	39, // 64: nanashi.v1.PlanService.Import:input_type -> nanashi.v1.ImportRequest
+	43, // 65: nanashi.v1.PlanService.SaveTable:input_type -> nanashi.v1.TableDef
+	44, // 66: nanashi.v1.PlanService.SaveView:input_type -> nanashi.v1.ViewDef
+	46, // 67: nanashi.v1.PlanService.SaveBoard:input_type -> nanashi.v1.BoardDef
+	47, // 68: nanashi.v1.PlanService.DeleteItem:input_type -> nanashi.v1.DeleteItemRequest
+	49, // 69: nanashi.v1.PlanService.ListComments:input_type -> nanashi.v1.ListCommentsRequest
+	48, // 70: nanashi.v1.PlanService.AddComment:input_type -> nanashi.v1.Comment
+	52, // 71: nanashi.v1.PlanService.ListAudit:input_type -> nanashi.v1.ListAuditRequest
+	55, // 72: nanashi.v1.PlanService.ListSnapshots:input_type -> nanashi.v1.ListSnapshotsRequest
+	57, // 73: nanashi.v1.PlanService.CreateSnapshot:input_type -> nanashi.v1.CreateSnapshotRequest
+	58, // 74: nanashi.v1.PlanService.GetAccess:input_type -> nanashi.v1.GetAccessRequest
+	59, // 75: nanashi.v1.PlanService.SetMemberRole:input_type -> nanashi.v1.AppMember
+	60, // 76: nanashi.v1.PlanService.SaveAccessRule:input_type -> nanashi.v1.AccessRule
+	61, // 77: nanashi.v1.PlanService.DeleteAccessRule:input_type -> nanashi.v1.DeleteAccessRuleRequest
+	10, // 78: nanashi.v1.PlanService.ListApplications:output_type -> nanashi.v1.ListApplicationsResponse
+	8,  // 79: nanashi.v1.PlanService.CreateApplication:output_type -> nanashi.v1.Application
+	17, // 80: nanashi.v1.PlanService.GetModel:output_type -> nanashi.v1.ModelDef
+	7,  // 81: nanashi.v1.PlanService.CreateList:output_type -> nanashi.v1.Ack
+	7,  // 82: nanashi.v1.PlanService.AddProperty:output_type -> nanashi.v1.Ack
+	7,  // 83: nanashi.v1.PlanService.EditMembers:output_type -> nanashi.v1.Ack
+	7,  // 84: nanashi.v1.PlanService.CreateCalendar:output_type -> nanashi.v1.Ack
+	7,  // 85: nanashi.v1.PlanService.CreateScenario:output_type -> nanashi.v1.Ack
+	7,  // 86: nanashi.v1.PlanService.SaveMetric:output_type -> nanashi.v1.Ack
+	7,  // 87: nanashi.v1.PlanService.RenameMetric:output_type -> nanashi.v1.Ack
+	7,  // 88: nanashi.v1.PlanService.DeleteMetric:output_type -> nanashi.v1.Ack
+	36, // 89: nanashi.v1.PlanService.Query:output_type -> nanashi.v1.QueryResponse
+	7,  // 90: nanashi.v1.PlanService.WriteCells:output_type -> nanashi.v1.Ack
+	42, // 91: nanashi.v1.PlanService.Import:output_type -> nanashi.v1.ImportResponse
+	43, // 92: nanashi.v1.PlanService.SaveTable:output_type -> nanashi.v1.TableDef
+	44, // 93: nanashi.v1.PlanService.SaveView:output_type -> nanashi.v1.ViewDef
+	46, // 94: nanashi.v1.PlanService.SaveBoard:output_type -> nanashi.v1.BoardDef
+	7,  // 95: nanashi.v1.PlanService.DeleteItem:output_type -> nanashi.v1.Ack
+	50, // 96: nanashi.v1.PlanService.ListComments:output_type -> nanashi.v1.ListCommentsResponse
+	48, // 97: nanashi.v1.PlanService.AddComment:output_type -> nanashi.v1.Comment
+	53, // 98: nanashi.v1.PlanService.ListAudit:output_type -> nanashi.v1.ListAuditResponse
+	56, // 99: nanashi.v1.PlanService.ListSnapshots:output_type -> nanashi.v1.ListSnapshotsResponse
+	54, // 100: nanashi.v1.PlanService.CreateSnapshot:output_type -> nanashi.v1.Snapshot
+	62, // 101: nanashi.v1.PlanService.GetAccess:output_type -> nanashi.v1.Access
+	7,  // 102: nanashi.v1.PlanService.SetMemberRole:output_type -> nanashi.v1.Ack
+	60, // 103: nanashi.v1.PlanService.SaveAccessRule:output_type -> nanashi.v1.AccessRule
+	7,  // 104: nanashi.v1.PlanService.DeleteAccessRule:output_type -> nanashi.v1.Ack
+	78, // [78:105] is the sub-list for method output_type
+	51, // [51:78] is the sub-list for method input_type
+	51, // [51:51] is the sub-list for extension type_name
+	51, // [51:51] is the sub-list for extension extendee
+	0,  // [0:51] is the sub-list for field type_name
 }
 
 func init() { file_nanashi_v1_plan_proto_init() }
@@ -4312,8 +4500,8 @@ func file_nanashi_v1_plan_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nanashi_v1_plan_proto_rawDesc), len(file_nanashi_v1_plan_proto_rawDesc)),
-			NumEnums:      5,
-			NumMessages:   64,
+			NumEnums:      7,
+			NumMessages:   65,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

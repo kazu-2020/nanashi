@@ -50,6 +50,7 @@ service PlanService {
   rpc GetAccess(GetAccessRequest) returns (Access) {}
   rpc SetMemberRole(AppMember) returns (Ack) {}
   rpc SaveAccessRule(AccessRule) returns (AccessRule) {}
+  rpc DeleteAccessRule(DeleteAccessRuleRequest) returns (Ack) {}
 }
 
 message Ack {}
@@ -127,11 +128,20 @@ message ListDef {
   repeated PropertyDef properties = 5;
 }
 
+// ValueKind is the type of the values of a Metric.
+enum ValueKind {
+  VALUE_KIND_UNSPECIFIED = 0; // NUMBER.
+  VALUE_KIND_NUMBER = 1;
+  VALUE_KIND_BOOLEAN = 2;
+  VALUE_KIND_MEMBER = 3; // A member of MetricDef.member_list.
+}
+
 message MetricDef {
   string name = 1;
   repeated string dimensions = 2;
-  // "number", "boolean" or "member:<list>".
-  string kind = 3;
+  ValueKind kind = 3;
+  // The list of a MEMBER Metric. Empty for the other kinds.
+  string member_list = 6;
   // Empty for an input Metric.
   string formula = 4;
   // True if a user can type over the formula result.
@@ -247,6 +257,16 @@ message Value {
   }
 }
 
+// Aggregation is how a Query combines the cells of a number Metric.
+enum Aggregation {
+  AGGREGATION_UNSPECIFIED = 0; // SUM.
+  AGGREGATION_SUM = 1;
+  AGGREGATION_AVG = 2;
+  AGGREGATION_MIN = 3;
+  AGGREGATION_MAX = 4;
+  AGGREGATION_COUNT = 5;
+}
+
 // QueryRequest reads the cells of Metrics, aggregated to the dimensions in rows and columns.
 // The response ignores a dimension that a Metric does not have.
 message QueryRequest {
@@ -256,8 +276,8 @@ message QueryRequest {
   repeated string columns = 4;
   // Only these members. A missing dimension gives all members.
   map<string, Members> filters = 5;
-  // SUM (default), AVG, MIN, MAX or COUNT. It is used only for number Metrics.
-  string aggregation = 6;
+  // It is used only for number Metrics.
+  Aggregation aggregation = 6;
 }
 
 message QueryCell {
@@ -344,7 +364,7 @@ message ViewDef {
   repeated string columns = 6;
   map<string, Members> filters = 7;
   Display display = 8;
-  string aggregation = 9;
+  Aggregation aggregation = 9;
 }
 
 message Widget {
@@ -380,9 +400,9 @@ message DeleteItemRequest {
 message Comment {
   string app_id = 1;
   string id = 2;
-  // What the comment is about, for example "metric:Revenue" or "board:<id>".
-  string target = 3;
-  // The cell, as dimension name to member. Empty for the whole target.
+  // The Metric of the comment.
+  string metric = 3;
+  // The cell, as dimension name to member. Empty for the whole Metric.
   map<string, string> cell = 4;
   string user = 5;
   string body = 6;
@@ -393,7 +413,7 @@ message Comment {
 message ListCommentsRequest {
   string app_id = 1;
   // Empty gives all comments of the application.
-  string target = 2;
+  string metric = 2;
 }
 
 message ListCommentsResponse {
@@ -461,8 +481,11 @@ message AccessRule {
   repeated string members = 5;
   // If false, the users can read the members but cannot write.
   bool write = 6;
-  // If true, delete the rule with this id.
-  bool delete = 7;
+}
+
+message DeleteAccessRuleRequest {
+  string app_id = 1;
+  string id = 2;
 }
 
 message Access {

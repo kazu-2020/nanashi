@@ -15,6 +15,7 @@ import {
   type WidgetSchema,
   PropertyType,
   Role,
+  ValueKind,
 } from "./gen/nanashi/v1/plan_pb";
 import { defaultSpec, parseCsv, ROLES, roleName, toFilters } from "./logic";
 import { Pivot } from "./Pivot";
@@ -389,11 +390,21 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
   const [f, setF] = useState({
     name: d?.name ?? "",
     dimensions: d?.dimensions ?? [],
-    kind: d?.kind || "number",
+    kind: d?.kind ?? ValueKind.NUMBER,
+    memberList: d?.memberList ?? "",
     formula: d?.formula ?? "",
     overridable: d?.overridable ?? false,
   });
   const [newName, setNewName] = useState("");
+  const kinds = [
+    { kind: ValueKind.NUMBER, memberList: "", label: "数値" },
+    { kind: ValueKind.BOOLEAN, memberList: "", label: "真偽値" },
+    ...model.lists.map((l) => ({
+      kind: ValueKind.MEMBER,
+      memberList: l.name,
+      label: `メンバー: ${l.name}`,
+    })),
+  ];
   return (
     <div className="flex flex-col gap-2 rounded border p-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -406,16 +417,12 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
         />
         <Sel
           label="値の種類"
-          value={f.kind}
-          onChange={(kind) => setF({ ...f, kind })}
-          options={[
-            ["number", "数値"],
-            ["boolean", "真偽値"],
-            ...model.lists.map((l): [string, string] => [
-              `member:${l.name}`,
-              `メンバー: ${l.name}`,
-            ]),
-          ]}
+          value={String(kinds.findIndex((k) => k.kind === f.kind && k.memberList === f.memberList))}
+          onChange={(i) => {
+            const { kind, memberList } = kinds[Number(i)];
+            setF({ ...f, kind, memberList });
+          }}
+          options={kinds.map((k, i): [string, string] => [String(i), k.label])}
         />
         <Check isSelected={f.overridable} onChange={(overridable) => setF({ ...f, overridable })}>
           上書き入力を許可
@@ -941,7 +948,7 @@ export function CommentsPage() {
             <tr key={c.id}>
               <td>{time(c.createdAt)}</td>
               <td>{c.user}</td>
-              <td>{c.target}</td>
+              <td>{c.metric}</td>
               <td>
                 {Object.entries(c.cell)
                   .map(([k, v]) => `${k}=${v}`)
@@ -1098,7 +1105,7 @@ export function AccessPage() {
                   <Button
                     size="sm"
                     variant="danger-soft"
-                    onPress={() => act(() => api.saveAccessRule({ appId, id: x.id, delete: true }))}
+                    onPress={() => act(() => api.deleteAccessRule({ appId, id: x.id }))}
                   >
                     削除
                   </Button>

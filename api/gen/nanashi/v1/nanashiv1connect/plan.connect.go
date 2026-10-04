@@ -96,6 +96,9 @@ const (
 	// PlanServiceSaveAccessRuleProcedure is the fully-qualified name of the PlanService's
 	// SaveAccessRule RPC.
 	PlanServiceSaveAccessRuleProcedure = "/nanashi.v1.PlanService/SaveAccessRule"
+	// PlanServiceDeleteAccessRuleProcedure is the fully-qualified name of the PlanService's
+	// DeleteAccessRule RPC.
+	PlanServiceDeleteAccessRuleProcedure = "/nanashi.v1.PlanService/DeleteAccessRule"
 )
 
 // PlanServiceClient is a client for the nanashi.v1.PlanService service.
@@ -136,6 +139,7 @@ type PlanServiceClient interface {
 	GetAccess(context.Context, *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error)
 	SetMemberRole(context.Context, *connect.Request[v1.AppMember]) (*connect.Response[v1.Ack], error)
 	SaveAccessRule(context.Context, *connect.Request[v1.AccessRule]) (*connect.Response[v1.AccessRule], error)
+	DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 }
 
 // NewPlanServiceClient constructs a client for the nanashi.v1.PlanService service. By default, it
@@ -305,6 +309,12 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("SaveAccessRule")),
 			connect.WithClientOptions(opts...),
 		),
+		deleteAccessRule: connect.NewClient[v1.DeleteAccessRuleRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceDeleteAccessRuleProcedure,
+			connect.WithSchema(planServiceMethods.ByName("DeleteAccessRule")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -336,6 +346,7 @@ type planServiceClient struct {
 	getAccess         *connect.Client[v1.GetAccessRequest, v1.Access]
 	setMemberRole     *connect.Client[v1.AppMember, v1.Ack]
 	saveAccessRule    *connect.Client[v1.AccessRule, v1.AccessRule]
+	deleteAccessRule  *connect.Client[v1.DeleteAccessRuleRequest, v1.Ack]
 }
 
 // ListApplications calls nanashi.v1.PlanService.ListApplications.
@@ -468,6 +479,11 @@ func (c *planServiceClient) SaveAccessRule(ctx context.Context, req *connect.Req
 	return c.saveAccessRule.CallUnary(ctx, req)
 }
 
+// DeleteAccessRule calls nanashi.v1.PlanService.DeleteAccessRule.
+func (c *planServiceClient) DeleteAccessRule(ctx context.Context, req *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
+	return c.deleteAccessRule.CallUnary(ctx, req)
+}
+
 // PlanServiceHandler is an implementation of the nanashi.v1.PlanService service.
 type PlanServiceHandler interface {
 	// Applications.
@@ -506,6 +522,7 @@ type PlanServiceHandler interface {
 	GetAccess(context.Context, *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error)
 	SetMemberRole(context.Context, *connect.Request[v1.AppMember]) (*connect.Response[v1.Ack], error)
 	SaveAccessRule(context.Context, *connect.Request[v1.AccessRule]) (*connect.Response[v1.AccessRule], error)
+	DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 }
 
 // NewPlanServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -671,6 +688,12 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(planServiceMethods.ByName("SaveAccessRule")),
 		connect.WithHandlerOptions(opts...),
 	)
+	planServiceDeleteAccessRuleHandler := connect.NewUnaryHandler(
+		PlanServiceDeleteAccessRuleProcedure,
+		svc.DeleteAccessRule,
+		connect.WithSchema(planServiceMethods.ByName("DeleteAccessRule")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/nanashi.v1.PlanService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case PlanServiceListApplicationsProcedure:
@@ -725,6 +748,8 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceSetMemberRoleHandler.ServeHTTP(w, r)
 		case PlanServiceSaveAccessRuleProcedure:
 			planServiceSaveAccessRuleHandler.ServeHTTP(w, r)
+		case PlanServiceDeleteAccessRuleProcedure:
+			planServiceDeleteAccessRuleHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -836,4 +861,8 @@ func (UnimplementedPlanServiceHandler) SetMemberRole(context.Context, *connect.R
 
 func (UnimplementedPlanServiceHandler) SaveAccessRule(context.Context, *connect.Request[v1.AccessRule]) (*connect.Response[v1.AccessRule], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SaveAccessRule is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.DeleteAccessRule is not implemented"))
 }

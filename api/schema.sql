@@ -35,12 +35,17 @@ create table if not exists app_item (
 create table if not exists app_comment (
   id bigserial primary key,
   app_id text not null,
-  target text not null,
+  metric text not null,
   cell jsonb not null,
   user_name text not null,
   body text not null,
   created_at timestamptz not null default now()
 );
+-- ponytail: a database from before the column rename has "target". Delete this block when no such database is left.
+do $$ begin
+  alter table app_comment rename column target to metric;
+exception when undefined_column then null;
+end $$;
 create table if not exists app_audit (
   id bigserial primary key,
   app_id text not null,

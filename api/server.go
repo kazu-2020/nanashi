@@ -80,6 +80,7 @@ var rpcRules = map[string]rpcRule{
 	"RenameMetric": {modeler, true}, "DeleteMetric": {modeler, true}, "SaveTable": {modeler, true},
 	"SaveView": {modeler, true}, "SaveBoard": {modeler, true}, "DeleteItem": {modeler, true},
 	"GetAccess": {min: admin}, "SetMemberRole": {admin, true}, "SaveAccessRule": {admin, true},
+	"DeleteAccessRule": {admin, true},
 }
 
 // caller is the user of a request and the rights of the user in the application of the request.
@@ -570,7 +571,11 @@ func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanash
 	if err != nil {
 		return nil, err
 	}
-	ops, err := metricOp(em, m, req.Msg.Replace)
+	kind, err := engineKind(em, m)
+	if err != nil {
+		return nil, invalid(err)
+	}
+	ops, err := metricOp(em, m, kind, req.Msg.Replace)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
@@ -610,7 +615,7 @@ func (s *PlanServer) RenameMetric(ctx context.Context, req *connect.Request[nana
 		where app_id = $1 and def->'metrics' ? $2`, req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
 		return nil, dbError(err)
 	}
-	if _, err := s.Pool.Exec(ctx, "update app_comment set target = 'metric:' || $3 where app_id = $1 and target = 'metric:' || $2",
+	if _, err := s.Pool.Exec(ctx, "update app_comment set metric = $3 where app_id = $1 and metric = $2",
 		req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
 		return nil, dbError(err)
 	}
@@ -762,12 +767,12 @@ func (s *PlanServer) DeleteItem(ctx context.Context, req *connect.Request[nanash
 }
 
 func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nanashiv1.ListCommentsRequest]) (*connect.Response[nanashiv1.ListCommentsResponse], error) {
-	rows, _ := s.Pool.Query(ctx, `select id, target, cell, user_name, body, (extract(epoch from created_at) * 1000)::bigint from app_comment
-		where app_id = $1 and ($2 = '' or target = $2) order by id`, req.Msg.AppId, req.Msg.Target)
+	rows, _ := s.Pool.Query(ctx, `select id, metric, cell, user_name, body, (extract(epoch from created_at) * 1000)::bigint from app_comment
+		where app_id = $1 and ($2 = '' or metric = $2) order by id`, req.Msg.AppId, req.Msg.Metric)
 	comments, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*nanashiv1.Comment, error) {
 		c := &nanashiv1.Comment{AppId: req.Msg.AppId}
 		var id int64
-		err := row.Scan(&id, &c.Target, &c.Cell, &c.User, &c.Body, &c.CreatedAt)
+		err := row.Scan(&id, &c.Metric, &c.Cell, &c.User, &c.Body, &c.CreatedAt)
 		c.Id = strconv.FormatInt(id, 10)
 		return c, err
 	})
@@ -786,13 +791,13 @@ func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nana
 
 func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanashiv1.Comment]) (*connect.Response[nanashiv1.Comment], error) {
 	c := req.Msg
-	if strings.TrimSpace(c.Body) == "" || c.Target == "" {
-		return nil, invalid(errors.New("コメントの対象と本文が要る"))
+	if strings.TrimSpace(c.Body) == "" || c.Metric == "" {
+		return nil, invalid(errors.New("コメントのメトリックと本文が要る"))
 	}
 	c.User = callerOf(ctx).user
 	var id int64
-	if err := s.Pool.QueryRow(ctx, `insert into app_comment (app_id, target, cell, user_name, body) values ($1, $2, $3, $4, $5)
-		returning id, (extract(epoch from created_at) * 1000)::bigint`, c.AppId, c.Target, textJSON(c.Cell), c.User, c.Body).Scan(&id, &c.CreatedAt); err != nil {
+	if err := s.Pool.QueryRow(ctx, `insert into app_comment (app_id, metric, cell, user_name, body) values ($1, $2, $3, $4, $5)
+		returning id, (extract(epoch from created_at) * 1000)::bigint`, c.AppId, c.Metric, textJSON(c.Cell), c.User, c.Body).Scan(&id, &c.CreatedAt); err != nil {
 		return nil, dbError(err)
 	}
 	c.Id = strconv.FormatInt(id, 10)
@@ -939,12 +944,6 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 
 func (s *PlanServer) SaveAccessRule(ctx context.Context, req *connect.Request[nanashiv1.AccessRule]) (*connect.Response[nanashiv1.AccessRule], error) {
 	r := req.Msg
-	if r.Delete {
-		if _, err := s.Pool.Exec(ctx, "delete from app_access_rule where app_id = $1 and id = $2", r.AppId, r.Id); err != nil {
-			return nil, dbError(err)
-		}
-		return connect.NewResponse(r), nil
-	}
 	if r.Role != viewer && r.Role != contributor {
 		return nil, invalid(errors.New("ルールは VIEWER か CONTRIBUTOR に付ける（MODELER と ADMIN はルールを無視する）"))
 	}
@@ -974,4 +973,11 @@ func (s *PlanServer) SaveAccessRule(ctx context.Context, req *connect.Request[na
 		return nil, dbError(err)
 	}
 	return connect.NewResponse(r), nil
+}
+
+func (s *PlanServer) DeleteAccessRule(ctx context.Context, req *connect.Request[nanashiv1.DeleteAccessRuleRequest]) (*ack, error) {
+	if _, err := s.Pool.Exec(ctx, "delete from app_access_rule where app_id = $1 and id = $2", req.Msg.AppId, req.Msg.Id); err != nil {
+		return nil, dbError(err)
+	}
+	return ok()
 }

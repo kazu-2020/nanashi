@@ -1,10 +1,12 @@
 // Pure calculations for the pivot grid, CSV and filters. No I/O here.
 import {
+  Aggregation,
   Display,
   type Members,
   type QueryResponse,
   Role,
   type Value,
+  ValueKind,
 } from "./gen/nanashi/v1/plan_pb";
 
 // METRIC is the pseudo-dimension that puts the Metrics on an axis.
@@ -123,14 +125,14 @@ export function formatValue(v: Value | undefined): string {
 }
 
 // parseValue reads typed text for a Metric kind. Blank text gives undefined (a blank cell).
-export function parseValue(kind: string, text: string): Value["value"] | undefined {
+export function parseValue(kind: ValueKind, text: string): Value["value"] | undefined {
   const t = text.trim();
   if (t === "") return undefined;
-  if (kind === "boolean") {
+  if (kind === ValueKind.BOOLEAN) {
     if (!/^(true|false|1|0)$/i.test(t)) throw new Error(`TRUE か FALSE ではありません: ${t}`);
     return { case: "boolean", value: /^(true|1)$/i.test(t) };
   }
-  if (kind.startsWith("member:")) return { case: "member", value: t };
+  if (kind === ValueKind.MEMBER) return { case: "member", value: t };
   const n = Number(t);
   if (Number.isNaN(n)) throw new Error(`数値ではありません: ${t}`);
   return { case: "number", value: n };
@@ -161,9 +163,9 @@ export function spreadable(
   metricDims: string[],
   grid: Grid,
   filters: Filters,
-  aggregation: string,
+  aggregation: Aggregation,
 ): boolean {
-  if (aggregation !== "" && aggregation !== "SUM") return false;
+  if (aggregation !== Aggregation.UNSPECIFIED && aggregation !== Aggregation.SUM) return false;
   const onAxis = (d: string) => grid.rowDims.includes(d) || grid.colDims.includes(d);
   return metricDims.every((d) => onAxis(d) || (filters[d]?.length ?? 0) <= 1);
 }
@@ -253,7 +255,7 @@ export type Spec = {
   rows: string[];
   columns: string[];
   filters: Filters;
-  aggregation: string;
+  aggregation: Aggregation;
   display: Display;
 };
 
@@ -274,7 +276,7 @@ export function defaultSpec(metrics: string[], dims: string[]): Spec {
     rows: many ? [METRIC] : dims.slice(0, 1),
     columns: many ? dims.slice(0, 1) : dims.slice(1, 2),
     filters: {},
-    aggregation: "SUM",
+    aggregation: Aggregation.SUM,
     display: Display.GRID,
   };
 }

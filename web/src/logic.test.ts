@@ -1,6 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { expect, test } from "vite-plus/test";
-import { QueryResponseSchema } from "./gen/nanashi/v1/plan_pb";
+import { Aggregation, QueryResponseSchema, ValueKind } from "./gen/nanashi/v1/plan_pb";
 import {
   buildGrid,
   formatValue,
@@ -56,10 +56,10 @@ test("an edit is refused if its spread goes outside the filter or the aggregatio
   const resp = create(QueryResponseSchema, { dimensions: ["Product"], cells: [] });
   const g = buildGrid(resp, ["Sales"], ["Product"], [], {}, {});
   const dims = ["Product", "Region"];
-  expect(spreadable(dims, g, { Region: ["East"] }, "SUM")).toBe(true);
-  expect(spreadable(dims, g, {}, "")).toBe(true);
-  expect(spreadable(dims, g, { Region: ["East", "West"] }, "SUM")).toBe(false);
-  for (const agg of ["AVG", "MIN", "MAX", "COUNT"])
+  expect(spreadable(dims, g, { Region: ["East"] }, Aggregation.SUM)).toBe(true);
+  expect(spreadable(dims, g, {}, Aggregation.UNSPECIFIED)).toBe(true);
+  expect(spreadable(dims, g, { Region: ["East", "West"] }, Aggregation.SUM)).toBe(false);
+  for (const agg of [Aggregation.AVG, Aggregation.MIN, Aggregation.MAX, Aggregation.COUNT])
     expect(spreadable(dims, g, {}, agg)).toBe(false);
 });
 
@@ -71,7 +71,14 @@ test("a boolean cell takes TRUE, FALSE, 1 or 0 and refuses other text", () => {
     [" False ", false],
     ["0", false],
   ] as const)
-    expect(parseValue("boolean", text)).toEqual({ case: "boolean", value });
-  expect(parseValue("boolean", " ")).toBeUndefined();
-  for (const text of ["tru", "yes", "2"]) expect(() => parseValue("boolean", text)).toThrow(text);
+    expect(parseValue(ValueKind.BOOLEAN, text)).toEqual({ case: "boolean", value });
+  expect(parseValue(ValueKind.BOOLEAN, " ")).toBeUndefined();
+  for (const text of ["tru", "yes", "2"])
+    expect(() => parseValue(ValueKind.BOOLEAN, text)).toThrow(text);
+});
+
+test("a cell text gives the value of the Metric kind", () => {
+  expect(parseValue(ValueKind.MEMBER, " 12 ")).toEqual({ case: "member", value: "12" });
+  expect(parseValue(ValueKind.NUMBER, "12")).toEqual({ case: "number", value: 12 });
+  expect(() => parseValue(ValueKind.NUMBER, "x")).toThrow("x");
 });

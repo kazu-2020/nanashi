@@ -15,7 +15,7 @@ import {
   YAxis,
 } from "recharts";
 import { api, getUser } from "./api";
-import { Display, Role } from "./gen/nanashi/v1/plan_pb";
+import { Aggregation, Display, Role } from "./gen/nanashi/v1/plan_pb";
 import {
   buildGrid,
   chartRows,
@@ -42,7 +42,13 @@ const DISPLAYS: [string, string][] = [
   [String(Display.BAR), "棒"],
   [String(Display.KPI), "KPI"],
 ];
-const AGGS = ["SUM", "AVG", "MIN", "MAX", "COUNT"];
+const AGGS = [
+  Aggregation.SUM,
+  Aggregation.AVG,
+  Aggregation.MIN,
+  Aggregation.MAX,
+  Aggregation.COUNT,
+].map((a): [string, string] => [String(a), Aggregation[a]]);
 
 export function Pivot(props: {
   initial: Spec;
@@ -152,8 +158,8 @@ export function Pivot(props: {
             ))}
             <Sel
               label="集計"
-              value={spec.aggregation}
-              onChange={(aggregation) => setSpec({ ...spec, aggregation })}
+              value={String(spec.aggregation || Aggregation.SUM)}
+              onChange={(v) => setSpec({ ...spec, aggregation: Number(v) })}
               options={AGGS}
             />
             <Sel
@@ -335,11 +341,10 @@ const sameCell = (a: Record<string, string>, b: Record<string, string>) =>
 function CellComments(props: { metric: string; coords: Record<string, string> }) {
   const { appId } = useApp();
   const run = useRun();
-  const target = `metric:${props.metric}`;
   const [body, setBody] = useState("");
   const { data: resp, refetch: again } = useQuery({
-    queryKey: ["comments", appId, target],
-    queryFn: () => api.listComments({ appId, target }),
+    queryKey: ["comments", appId, props.metric],
+    queryFn: () => api.listComments({ appId, metric: props.metric }),
   });
   const list = resp?.comments.filter((c) => sameCell(c.cell, props.coords)) ?? [];
   return (
@@ -363,7 +368,7 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
           size="sm"
           onPress={() =>
             run(async () => {
-              await api.addComment({ appId, target, cell: props.coords, body });
+              await api.addComment({ appId, metric: props.metric, cell: props.coords, body });
               setBody("");
               await again();
             })
