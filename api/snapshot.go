@@ -117,8 +117,8 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 		}
 	}
 	app := "app-" + newID()
-	// The rows go first: an engine step error rolls them back, so no engine is left without an application.
-	// A commit error after the engine steps can still leave an engine model (the router has no delete).
+	// The rows go first, so an error before Engines.Create makes no engine model. A replay error or a commit error
+	// after Engines.Create leaves an engine model without an application in the router (the router has no delete).
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "insert into app_application (id, name) values ($1, $2)", app, name); err != nil {
 			return err

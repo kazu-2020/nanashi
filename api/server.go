@@ -237,8 +237,9 @@ func (s *PlanServer) ListApplications(ctx context.Context, _ *connect.Request[na
 }
 
 // change applies the plan that planOf makes from the current model and api data of the application. The lock
-// makes the plan and the write see the same model. The statements and the engine write are one transaction: an
-// engine error rolls the rows back.
+// makes the plan and the write see the same model. An engine error rolls the statements back. Only in the normal
+// case do the statements and the engine write commit together. If the commit fails after the engine write, the
+// engine and the api tables disagree. The transaction holds one pool connection during the engine write.
 func (s *PlanServer) change(ctx context.Context, app string, planOf func(engineModel, appMeta) (plan, error)) (*ack, error) {
 	defer s.lock(app)()
 	em, _, err := s.Engines.model(ctx, app)
