@@ -30,18 +30,20 @@ export function useRun() {
   );
 }
 
-// useMutate runs a write, then reads again every query whose key starts with ["app", appId].
-// It also removes the queries that no screen shows. Otherwise a screen that opens later shows their old
-// cells as editable while it reads them again.
-export function useMutate() {
+// useMutate runs a write, then reads again every query whose key starts with ["app", appId, part].
+// Without part, it reads all the data of the application again. Give part only for a write that does not
+// change the model, because the model is large. It also removes the queries that no screen shows.
+// Otherwise a screen that opens later shows their old cells as editable while it reads them again.
+export function useMutate(part?: "query" | "comments" | "snapshots") {
   const run = useRun();
   const { appId } = useApp();
   const queryClient = useQueryClient();
+  const queryKey = part ? ["app", appId, part] : ["app", appId];
   return (f: () => Promise<unknown>) =>
     run(async () => {
       await f();
-      await queryClient.invalidateQueries({ queryKey: ["app", appId] });
-      queryClient.removeQueries({ queryKey: ["app", appId], type: "inactive" });
+      await queryClient.invalidateQueries({ queryKey });
+      queryClient.removeQueries({ queryKey, type: "inactive" });
     });
 }
 

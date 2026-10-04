@@ -90,6 +90,7 @@ export function PivotWidget(props: { spec: Spec; page: Record<string, string> })
 export function PivotEditor(props: { initial: Spec; view?: { id: string; name: string } }) {
   const { appId, can } = useApp();
   const mutate = useMutate();
+  const writeCells = useMutate("query");
   const [spec, setSpec] = useState(props.initial);
   const [cell, setCell] = useState<{ metric: string; coords: Record<string, string> }>();
   const view = props.view;
@@ -111,7 +112,7 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
     const metric = g.metric(r, c);
     const def = defs.get(metric)!;
     const coords = writeCoords(def.dimensions, g, r, c, filters);
-    return mutate(async () => {
+    return writeCells(async () => {
       const v = parseValue(def.kind, text);
       await api.writeCells({
         appId,
@@ -333,7 +334,7 @@ const sameCell = (a: Record<string, string>, b: Record<string, string>) =>
 
 function CellComments(props: { metric: string; coords: Record<string, string> }) {
   const { appId } = useApp();
-  const mutate = useMutate();
+  const mutate = useMutate("comments");
   const [body, setBody] = useState("");
   const { data: resp } = useQuery({
     queryKey: ["app", appId, "comments", props.metric],

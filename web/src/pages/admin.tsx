@@ -79,7 +79,7 @@ export function AuditPage() {
 
 export function SnapshotsPage() {
   const { appId, can } = useApp();
-  const mutate = useMutate();
+  const mutate = useMutate("snapshots");
   const [name, setName] = useState("");
   const { data: r } = useQuery({
     queryKey: ["app", appId, "snapshots"],
