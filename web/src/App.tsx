@@ -140,7 +140,7 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
   const [from, setFrom] = useState("");
   const [snapshot, setSnapshot] = useState("");
   const { data: snaps } = useQuery({
-    queryKey: ["snapshots", from],
+    queryKey: ["app", from, "snapshots"],
     queryFn: () => api.listSnapshots({ appId: from }),
     enabled: !!from,
   });
@@ -197,20 +197,17 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
 }
 
 function Shell(props: { appId: string }) {
-  const { data: model, refetch } = useQuery({
-    queryKey: ["model", props.appId],
+  const { data: model } = useQuery({
+    queryKey: ["app", props.appId, "model"],
     queryFn: () => api.getModel({ appId: props.appId }),
   });
   const [page, setPage] = useState("lists");
   if (!model) return <p>読み込み中…</p>;
-  const reload = async () => {
-    await refetch();
-  };
   const can = (r: Role) => model.role >= r;
   const pages = PAGES.filter((p) => !p.role || can(p.role));
   const Page = (pages.find((p) => p.id === page) ?? pages[0]).page;
   return (
-    <AppCtx.Provider value={{ appId: props.appId, model, reload, can }}>
+    <AppCtx.Provider value={{ appId: props.appId, model, can }}>
       <div className="flex gap-4">
         <nav className="flex w-40 shrink-0 flex-col gap-1">
           {pages.map((p) => (

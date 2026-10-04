@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext } from "react";
 import { errorText } from "./api";
 import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
@@ -7,7 +8,6 @@ export const Report = createContext<(e: unknown) => void>(() => {});
 export type AppState = {
   appId: string;
   model: ModelDef;
-  reload: () => Promise<void>;
   can: (r: Role) => boolean;
 };
 export const AppCtx = createContext<AppState | null>(null);
@@ -28,6 +28,18 @@ export function useRun() {
     },
     [report],
   );
+}
+
+// useMutate runs a write, then reads all the data of the application again.
+export function useMutate() {
+  const run = useRun();
+  const { appId } = useApp();
+  const queryClient = useQueryClient();
+  return (f: () => Promise<unknown>) =>
+    run(async () => {
+      await f();
+      await queryClient.invalidateQueries({ queryKey: ["app", appId] });
+    });
 }
 
 export const memberNames = (model: ModelDef, list: string) =>

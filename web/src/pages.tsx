@@ -19,7 +19,7 @@ import {
 } from "./gen/nanashi/v1/plan_pb";
 import { defaultSpec, parseCsv, ROLES, roleName, toFilters } from "./logic";
 import { PivotEditor, PivotWidget } from "./Pivot";
-import { cls, memberNames, time, useApp, useRun } from "./state";
+import { cls, memberNames, time, useApp, useMutate } from "./state";
 import { Check, Checks, Section, Sel } from "./ui";
 
 const KINDS: [string, string][] = [
@@ -37,17 +37,6 @@ const lines = (s: string) =>
     .split(/\r?\n/)
     .map((x) => x.trim())
     .filter(Boolean);
-
-// useMutate runs an action, then reads the model again.
-function useMutate() {
-  const run = useRun();
-  const { reload } = useApp();
-  return (f: () => Promise<unknown>) =>
-    run(async () => {
-      await f();
-      await reload();
-    });
-}
 
 export function ListsPage() {
   const { appId, model, can } = useApp();
@@ -920,7 +909,7 @@ export function ImportPage() {
 export function CommentsPage() {
   const { appId } = useApp();
   const { data: r } = useQuery({
-    queryKey: ["comments", appId],
+    queryKey: ["app", appId, "comments"],
     queryFn: () => api.listComments({ appId }),
   });
   return (
@@ -956,9 +945,9 @@ export function CommentsPage() {
 }
 
 export function AuditPage() {
-  const { appId, model } = useApp();
+  const { appId } = useApp();
   const { data: r } = useQuery({
-    queryKey: ["audit", appId, String(model.seq)],
+    queryKey: ["app", appId, "audit"],
     queryFn: () => api.listAudit({ appId, limit: 200 }),
   });
   return (
@@ -989,10 +978,10 @@ export function AuditPage() {
 
 export function SnapshotsPage() {
   const { appId, can } = useApp();
-  const run = useRun();
+  const mutate = useMutate();
   const [name, setName] = useState("");
-  const { data: r, refetch: again } = useQuery({
-    queryKey: ["snapshots", appId],
+  const { data: r } = useQuery({
+    queryKey: ["app", appId, "snapshots"],
     queryFn: () => api.listSnapshots({ appId }),
   });
   return (
@@ -1007,10 +996,9 @@ export function SnapshotsPage() {
           />
           <Button
             onPress={() =>
-              run(async () => {
+              mutate(async () => {
                 await api.createSnapshot({ appId, name });
                 setName("");
-                await again();
               })
             }
           >
@@ -1034,9 +1022,9 @@ export function SnapshotsPage() {
 
 export function AccessPage() {
   const { appId, model } = useApp();
-  const run = useRun();
-  const { data: r, refetch: again } = useQuery({
-    queryKey: ["access", appId],
+  const act = useMutate();
+  const { data: r } = useQuery({
+    queryKey: ["app", appId, "access"],
     queryFn: () => api.getAccess({ appId }),
   });
   const [user, setUser] = useState("");
@@ -1047,7 +1035,6 @@ export function AccessPage() {
     members: [] as string[],
     write: false,
   });
-  const act = (f: () => Promise<unknown>) => run(async () => (await f(), await again()));
   return (
     <div>
       <Section title="メンバー">

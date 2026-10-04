@@ -33,7 +33,7 @@ import {
   type Spec,
   toProtoFilters,
 } from "./logic";
-import { cls, time, useApp, useRun } from "./state";
+import { cls, time, useApp, useMutate } from "./state";
 import { Checks, Sel } from "./ui";
 
 const DISPLAYS: [string, string][] = [
@@ -62,12 +62,8 @@ function usePivot(spec: Spec, page?: Record<string, string>) {
   const filters = mergeFilters(spec.filters, page ?? {});
   const strip = (ds: string[]) => ds.filter((d) => d !== METRIC);
 
-  const {
-    data: resp,
-    refetch: requery,
-    isPlaceholderData,
-  } = useQuery({
-    queryKey: ["query", appId, String(model.seq), spec, page],
+  const { data: resp, isPlaceholderData } = useQuery({
+    queryKey: ["app", appId, "query", spec, page],
     queryFn: () =>
       api.query({
         appId,
@@ -82,7 +78,7 @@ function usePivot(spec: Spec, page?: Record<string, string>) {
     placeholderData: keepPreviousData,
   });
   const grid = resp && buildGrid(resp, spec.metrics, spec.rows, spec.columns, order, filters);
-  return { grid, filters, defs, dims, order, isPlaceholderData, requery };
+  return { grid, filters, defs, dims, order, isPlaceholderData };
 }
 
 // PivotWidget shows a view on a board, read-only and without controls.
@@ -93,13 +89,13 @@ export function PivotWidget(props: { spec: Spec; page: Record<string, string> })
 }
 
 export function PivotEditor(props: { initial: Spec; view?: { id: string; name: string } }) {
-  const { appId, can, reload } = useApp();
-  const run = useRun();
+  const { appId, can } = useApp();
+  const mutate = useMutate();
   const [spec, setSpec] = useState(props.initial);
   const [cell, setCell] = useState<{ metric: string; coords: Record<string, string> }>();
   const view = props.view;
   const [viewName, setViewName] = useState(view?.name ?? "");
-  const { grid, filters, defs, dims, order, isPlaceholderData, requery } = usePivot(spec);
+  const { grid, filters, defs, dims, order, isPlaceholderData } = usePivot(spec);
   const axisDims = spec.metrics.length > 1 ? [METRIC, ...dims] : dims;
 
   const axisOf = (d: string) =>
@@ -116,27 +112,25 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
     const metric = g.metric(r, c);
     const def = defs.get(metric)!;
     const coords = writeCoords(def.dimensions, g, r, c, filters);
-    return run(async () => {
+    return mutate(async () => {
       const v = parseValue(def.kind, text);
       await api.writeCells({
         appId,
         writes: [{ metric, coords, value: v ? { value: v } : undefined }],
       });
-      await requery();
     });
   };
 
   const saveView = (id: string) =>
-    run(async () => {
-      await api.saveView({
+    mutate(() =>
+      api.saveView({
         appId,
         id,
         name: viewName,
         ...spec,
         filters: toProtoFilters(spec.filters),
-      });
-      await reload();
-    });
+      }),
+    );
 
   const exportCsv = (g: Grid) => {
     const a = document.createElement("a");
@@ -340,10 +334,10 @@ const sameCell = (a: Record<string, string>, b: Record<string, string>) =>
 
 function CellComments(props: { metric: string; coords: Record<string, string> }) {
   const { appId } = useApp();
-  const run = useRun();
+  const mutate = useMutate();
   const [body, setBody] = useState("");
-  const { data: resp, refetch: again } = useQuery({
-    queryKey: ["comments", appId, props.metric],
+  const { data: resp } = useQuery({
+    queryKey: ["app", appId, "comments", props.metric],
     queryFn: () => api.listComments({ appId, metric: props.metric }),
   });
   const list = resp?.comments.filter((c) => sameCell(c.cell, props.coords)) ?? [];
@@ -367,10 +361,9 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
         <Button
           size="sm"
           onPress={() =>
-            run(async () => {
+            mutate(async () => {
               await api.addComment({ appId, metric: props.metric, cell: props.coords, body });
               setBody("");
-              await again();
             })
           }
         >

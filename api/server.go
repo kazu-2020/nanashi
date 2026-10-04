@@ -314,7 +314,7 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 			}
 		}
 	}
-	out := &nanashiv1.ModelDef{Seq: em.Seq, Role: c.role}
+	out := &nanashiv1.ModelDef{Role: c.role}
 	out.Lists, out.Metrics = modelDef(em, meta, propCells, c.limits.through(em))
 	items, err := s.items(ctx, app)
 	if err != nil {
