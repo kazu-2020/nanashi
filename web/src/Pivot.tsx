@@ -50,7 +50,7 @@ const AGGS = [
   Aggregation.COUNT,
 ].map((a): [string, string] => [String(a), Aggregation[a]]);
 
-// usePivot reads the cells of a spec and places them on a grid. page holds the page selector members of a board.
+// page holds the page selector members of a board.
 function usePivot(spec: Spec, page?: Record<string, string>) {
   const { appId, model } = useApp();
   const order = useMemo(
@@ -81,7 +81,6 @@ function usePivot(spec: Spec, page?: Record<string, string>) {
   return { grid, filters, defs, dims, order, isPlaceholderData };
 }
 
-// PivotWidget shows a view on a board, read-only and without controls.
 export function PivotWidget(props: { spec: Spec; page: Record<string, string> }) {
   const { grid } = usePivot(props.spec, props.page);
   if (!grid) return <p className="text-sm">読み込み中…</p>;

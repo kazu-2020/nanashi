@@ -1,4 +1,3 @@
-// The screens that show Metrics in a pivot: Metrics, tables and views.
 import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
 import { Code, ConnectError } from "@connectrpc/connect";

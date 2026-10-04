@@ -1,4 +1,3 @@
-// The screens of the administration: comments, audit log, snapshots and access.
 import { Button, Input } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -124,7 +123,7 @@ export function SnapshotsPage() {
 
 export function AccessPage() {
   const { appId, model } = useApp();
-  const act = useMutate();
+  const mutate = useMutate();
   const { data: r } = useQuery({
     queryKey: ["app", appId, "access"],
     queryFn: () => api.getAccess({ appId }),
@@ -150,7 +149,7 @@ export function AccessPage() {
                     ariaLabel={`${m.user} のロール`}
                     value={String(m.role)}
                     onChange={(v) =>
-                      act(() => api.setMemberRole({ appId, user: m.user, role: Number(v) }))
+                      mutate(() => api.setMemberRole({ appId, user: m.user, role: Number(v) }))
                     }
                     empty="（外す）"
                     options={ROLES}
@@ -168,7 +167,9 @@ export function AccessPage() {
             onChange={(e) => setUser(e.target.value)}
           />
           <Sel ariaLabel="追加するロール" value={role} onChange={setRole} options={ROLES} />
-          <Button onPress={() => act(() => api.setMemberRole({ appId, user, role: Number(role) }))}>
+          <Button
+            onPress={() => mutate(() => api.setMemberRole({ appId, user, role: Number(role) }))}
+          >
             追加
           </Button>
         </div>
@@ -186,7 +187,7 @@ export function AccessPage() {
                   <Button
                     size="sm"
                     variant="danger-soft"
-                    onPress={() => act(() => api.deleteAccessRule({ appId, id: x.id }))}
+                    onPress={() => mutate(() => api.deleteAccessRule({ appId, id: x.id }))}
                   >
                     削除
                   </Button>
@@ -220,7 +221,7 @@ export function AccessPage() {
           </Check>
           <Button
             onPress={() =>
-              act(() => api.saveAccessRule({ appId, ...rule, role: Number(rule.role) }))
+              mutate(() => api.saveAccessRule({ appId, ...rule, role: Number(rule.role) }))
             }
           >
             ルールを追加

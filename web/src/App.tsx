@@ -245,7 +245,8 @@ function Shell(props: { appId: string }) {
 }
 
 // PageBoundary catches an error of a screen, for example a chunk that did not download after a deploy.
-// The key of the screen resets it when the user opens another screen.
+// The key of the screen clears the message when the user opens another screen. React.lazy keeps a failed
+// import, so the same screen fails again until the user reloads the page.
 class PageBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() {

@@ -158,9 +158,8 @@ export function writeCoords(
   return out;
 }
 
-// editable tells if an edit of a cell of a Metric writes the typed value. A formula Metric takes input only
-// if it is overridable. A spread goes over all members of an open dimension, so a filter with more members
-// must not leave the dimension open. Only SUM is the sum of the spread.
+// editable tells if an edit of a cell writes the typed value. A spread goes over all members of an open
+// dimension, so a filter with more members must not leave the dimension open. Only SUM is the sum of the spread.
 export function editable(
   def: Pick<MetricDef, "dimensions" | "formula" | "overridable"> | undefined,
   grid: Grid,

@@ -1,4 +1,3 @@
-// The screens of the model: lists, calendar, scenarios and import.
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
