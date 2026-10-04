@@ -34,6 +34,8 @@ func (s *PlanServer) items(ctx context.Context, app string) ([]itemRow, error) {
 
 // saveItem keeps the definition as protojson. If *id is empty, it sets a new id (id points into msg).
 func (s *PlanServer) saveItem(ctx context.Context, app string, typ nanashiv1.ItemType, id *string, msg proto.Message) error {
+	// The lock keeps an item write out of a snapshot and out of a rename of the names that the item keeps.
+	defer s.lock(app)()
 	if *id == "" {
 		*id = newID()
 	}
@@ -70,6 +72,7 @@ func (s *PlanServer) SaveBoard(ctx context.Context, req *connect.Request[nanashi
 }
 
 func (s *PlanServer) DeleteItem(ctx context.Context, req *connect.Request[nanashiv1.DeleteItemRequest]) (*ack, error) {
+	defer s.lock(req.Msg.AppId)()
 	if _, err := s.Pool.Exec(ctx, "delete from app_item where app_id = $1 and id = $2 and type = $3",
 		req.Msg.AppId, req.Msg.Id, req.Msg.Type); err != nil {
 		return nil, dbError(err)

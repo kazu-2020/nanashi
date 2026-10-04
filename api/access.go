@@ -235,6 +235,8 @@ func (s *PlanServer) SaveAccessRule(ctx context.Context, req *connect.Request[na
 	if r.Role != viewer && r.Role != contributor {
 		return nil, invalid(errors.New("ルールは VIEWER か CONTRIBUTOR に付ける（MODELER と ADMIN はルールを無視する）"))
 	}
+	// A rename between the member check and the upsert would leave the old name in the rule.
+	defer s.lock(r.AppId)()
 	em, _, err := s.Engines.model(ctx, r.AppId)
 	if err != nil {
 		return nil, err
