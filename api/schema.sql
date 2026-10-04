@@ -72,3 +72,10 @@ create table if not exists app_access_rule (
   write boolean not null,
   primary key (app_id, id)
 );
+-- app_rename gives names (a JSON array of strings) with old replaced by new, in the same order.
+-- If new is null, it removes old. An empty result is '[]'.
+create or replace function app_rename(names jsonb, old text, new text) returns jsonb language sql immutable as $$
+  select coalesce(jsonb_agg(case when n = to_jsonb(old) then to_jsonb(new) else n end order by i), '[]')
+  from jsonb_array_elements(names) with ordinality as e(n, i)
+  where n <> to_jsonb(old) or new is not null
+$$;

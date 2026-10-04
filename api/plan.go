@@ -171,6 +171,47 @@ func objectEntries(raw json.RawMessage) ([]jsonEntry, error) {
 	return out, nil
 }
 
+// stmt is one SQL statement with its arguments.
+type stmt struct {
+	sql  string
+	args []any
+}
+
+// memberRefs are the places in the api tables that name a member of a list. The arguments of each statement
+// are (app, list, old name, new name). A null new name removes the old name (app_rename in schema.sql).
+// A cell comment of a removed member stays as it is. The comments list still shows it.
+var memberRefs = []string{
+	`update app_access_rule set members = app_rename(members, $3, $4) where app_id = $1 and list = $2 and members ? $3`,
+	`update app_item set def = jsonb_set(def, array['filters', $2, 'names'], app_rename(def->'filters'->$2->'names', $3, $4))
+		where app_id = $1 and def->'filters'->$2->'names' ? $3`,
+	`update app_comment set cell = jsonb_set(cell, array[$2], to_jsonb($4::text)) where app_id = $1 and cell->>$2 = $3 and $4::text is not null`,
+}
+
+// metricRefs are the places in the api tables that name a Metric. The arguments are (app, old name, new name).
+// DeleteMetric does not touch the comments of the Metric.
+var metricRefs = []string{
+	`update app_item set def = jsonb_set(def, '{metrics}', app_rename(def->'metrics', $2, $3)) where app_id = $1 and def->'metrics' ? $2`,
+	`update app_comment set metric = $3 where app_id = $1 and metric = $2 and $3::text is not null`,
+}
+
+// memberRenames gives the statements that rename a member in the api tables, or remove it when name is nil.
+func memberRenames(app, list, old string, name *string) []stmt {
+	return statements(memberRefs, app, list, old, name)
+}
+
+// metricRenames gives the statements that rename a Metric in the api tables, or remove it when name is nil.
+func metricRenames(app, old string, name *string) []stmt {
+	return statements(metricRefs, app, old, name)
+}
+
+func statements(sqls []string, args ...any) []stmt {
+	out := make([]stmt, len(sqls))
+	for i, sql := range sqls {
+		out[i] = stmt{sql, args}
+	}
+	return out
+}
+
 // propRow is a NUMBER, BOOLEAN or TEXT property, which the api keeps. The engine keeps DIMENSION properties.
 type propRow struct {
 	List string                 `json:"list"`

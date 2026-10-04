@@ -19,10 +19,9 @@ import (
 	"github.com/kazu-2020/nanashi/api/gen/nanashi/v1/nanashiv1connect"
 )
 
-// TestAccessByRole needs PostgreSQL, but no engine: the interceptor refuses the calls before the engine.
-func TestAccessByRole(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+// testPool gives a pool on the test database with the api tables. Without PostgreSQL, it skips the test.
+func testPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
+	t.Helper()
 	// If NANASHI_PG_DSN is set (as in CI), a missing database is a failure, not a skip.
 	skip := t.Skipf
 	if os.Getenv("NANASHI_PG_DSN") != "" {
@@ -40,6 +39,14 @@ func TestAccessByRole(t *testing.T) {
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
+	return pool
+}
+
+// TestAccessByRole needs PostgreSQL, but no engine: the interceptor refuses the calls before the engine.
+func TestAccessByRole(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
 	app := "api-test-" + newID()
 	if _, err := pool.Exec(ctx, "insert into app_application (id, name) values ($1, 'test')", app); err != nil {
 		t.Fatal(err)
@@ -96,6 +103,35 @@ func TestAccessByRole(t *testing.T) {
 		t.Errorf("non-member reads: got %v, want permission denied", err)
 	}
 }
+
+func TestAppRename(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	for _, c := range []struct {
+		old  string
+		name *string
+		want string
+	}{
+		{"b", ptr("B"), `["c", "B", "a"]`},
+		{"b", nil, `["c", "a"]`},
+		{"x", ptr("y"), `["c", "b", "a"]`},
+	} {
+		var got string
+		if err := pool.QueryRow(ctx, `select app_rename('["c", "b", "a"]', $1, $2)::text`, c.old, c.name).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("app_rename(%q, %v): got %s, want %s", c.old, c.name, got, c.want)
+		}
+	}
+	var got string
+	if err := pool.QueryRow(ctx, `select app_rename('["a"]', 'a', null)::text`).Scan(&got); err != nil || got != "[]" {
+		t.Errorf("removing the last name: got %s, %v, want []", got, err)
+	}
+}
+
+func ptr(s string) *string { return &s }
 
 func TestConnectError(t *testing.T) {
 	for _, c := range []struct {

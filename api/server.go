@@ -276,6 +276,22 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 	return connect.NewResponse(&nanashiv1.Application{Id: app, Name: name, Role: admin}), nil
 }
 
+// run executes the statements in one transaction.
+func (s *PlanServer) run(ctx context.Context, stmts []stmt) error {
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		for _, st := range stmts {
+			if _, err := tx.Exec(ctx, st.sql, st.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return dbError(err)
+	}
+	return nil
+}
+
 func textJSON(m map[string]string) string {
 	if m == nil {
 		m = map[string]string{}
@@ -483,41 +499,23 @@ func (s *PlanServer) editMembers(ctx context.Context, app, list string, editsOf 
 	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
 		return nil, err
 	}
+	var stmts []stmt
 	for prop, values := range text {
-		if _, err := s.Pool.Exec(ctx, "update app_property set text_values = $4 where app_id = $1 and list = $2 and name = $3",
-			app, list, prop, textJSON(values)); err != nil {
-			return nil, dbError(err)
-		}
+		stmts = append(stmts, stmt{"update app_property set text_values = $4 where app_id = $1 and list = $2 and name = $3",
+			[]any{app, list, prop, textJSON(values)}})
 	}
 	// Access rules and view filters refer to members by name. Give them the new name, or remove the name of a
 	// removed member: if a later edit adds the name again, an old rule must not give access to it.
 	for _, e := range edits {
-		var old string
-		var name *string // nil removes the name.
 		if r := e.GetRename(); r != nil {
 			n := strings.TrimSpace(r.NewName) // editOps gives the engine the same name.
-			old, name = r.Name, &n
+			stmts = append(stmts, memberRenames(app, list, r.Name, &n)...)
 		} else if r := e.GetRemove(); r != nil {
-			old = r.Name
-		} else {
-			continue
+			stmts = append(stmts, memberRenames(app, list, r.Name, nil)...)
 		}
-		if _, err := s.Pool.Exec(ctx, `update app_access_rule set members = coalesce((select jsonb_agg(case when m = to_jsonb($3::text) then to_jsonb($4::text) else m end)
-			from jsonb_array_elements(members) m where m <> to_jsonb($3::text) or $4::text is not null), '[]')
-			where app_id = $1 and list = $2 and members ? $3`, app, list, old, name); err != nil {
-			return nil, dbError(err)
-		}
-		if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, array['filters', $2, 'names'], coalesce(
-			(select jsonb_agg(case when n = to_jsonb($3::text) then to_jsonb($4::text) else n end) from jsonb_array_elements(def->'filters'->$2->'names') n
-			where n <> to_jsonb($3::text) or $4::text is not null), '[]'))
-			where app_id = $1 and def->'filters'->$2->'names' ? $3`, app, list, old, name); err != nil {
-			return nil, dbError(err)
-		}
-		// Cell comments of a removed member stay as they are. The comments list still shows them.
-		if _, err := s.Pool.Exec(ctx, `update app_comment set cell = jsonb_set(cell, array[$2], to_jsonb($4::text))
-			where app_id = $1 and cell->>$2 = $3 and $4::text is not null`, app, list, old, name); err != nil {
-			return nil, dbError(err)
-		}
+	}
+	if err := s.run(ctx, stmts); err != nil {
+		return nil, err
 	}
 	return ok()
 }
@@ -619,14 +617,8 @@ func (s *PlanServer) RenameMetric(ctx context.Context, req *connect.Request[nana
 		return nil, err
 	}
 	// Tables, views and comments refer to Metrics by name, so give them the new name too.
-	if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, '{metrics}',
-		(select jsonb_agg(case when m = to_jsonb($2::text) then to_jsonb($3::text) else m end) from jsonb_array_elements(def->'metrics') m))
-		where app_id = $1 and def->'metrics' ? $2`, req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
-		return nil, dbError(err)
-	}
-	if _, err := s.Pool.Exec(ctx, "update app_comment set metric = $3 where app_id = $1 and metric = $2",
-		req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
-		return nil, dbError(err)
+	if err := s.run(ctx, metricRenames(req.Msg.AppId, req.Msg.Name, &req.Msg.NewName)); err != nil {
+		return nil, err
 	}
 	return ok()
 }
@@ -639,10 +631,8 @@ func (s *PlanServer) DeleteMetric(ctx context.Context, req *connect.Request[nana
 		return nil, err
 	}
 	// A table or a view with a deleted Metric cannot query, so remove the name from them.
-	if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, '{metrics}',
-		coalesce((select jsonb_agg(m) from jsonb_array_elements(def->'metrics') m where m <> to_jsonb($2::text)), '[]'))
-		where app_id = $1 and def->'metrics' ? $2`, req.Msg.AppId, req.Msg.Name); err != nil {
-		return nil, dbError(err)
+	if err := s.run(ctx, metricRenames(req.Msg.AppId, req.Msg.Name, nil)); err != nil {
+		return nil, err
 	}
 	return ok()
 }
