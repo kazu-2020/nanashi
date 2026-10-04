@@ -1,7 +1,6 @@
 package api
 
-// This file holds the actions on the engine servers: the HTTP client. All requests go through the router,
-// and the router starts the engine of a model when a request comes for it.
+// All engine requests go through the router. The router starts the engine of a model when a request comes for it.
 
 import (
 	"bytes"
@@ -10,10 +9,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 
 	"connectrpc.com/connect"
 )
@@ -23,6 +24,174 @@ type Engines struct {
 	Router string // Base URL of the router, for example http://127.0.0.1:8090.
 	HTTP   *http.Client
 }
+
+// op is one Model operation in a write to the engine (POST /writes).
+type op struct {
+	Op     string         `json:"op"`
+	Args   []any          `json:"args"`
+	Kwargs map[string]any `json:"kwargs,omitempty"`
+}
+
+func newOp(name string, args ...any) op { return op{Op: name, Args: args} }
+
+func (o op) with(kwargs map[string]any) op {
+	o.Kwargs = kwargs
+	return o
+}
+
+// engineModel is the engine definition (GET /) with the order of dimensions, properties and Metrics kept.
+// Seq is the version of the model that the engine sent.
+type engineModel struct {
+	Seq     int64
+	Dims    []engineDim
+	Metrics []engineMetric
+}
+
+type engineDim struct {
+	Name    string
+	Members []string
+	Ordered bool
+	Props   []engineProp
+}
+
+// engineProp is a DIMENSION property: a member of the list maps to a member of Target.
+type engineProp struct {
+	Name   string
+	Target string
+	Values map[string]string
+}
+
+type engineMetric struct {
+	Name        string
+	Dims        []string
+	Kind        string
+	Formula     string // Empty for an input Metric.
+	Overridable bool
+}
+
+// engineCube is the body of slice and summary: each cell is the coordinates in dims order and then the value.
+// Seq is the version of the model that the engine read. A snapshot stores it too. Replay ignores it.
+type engineCube struct {
+	Seq   int64    `json:"seq"`
+	Dims  []string `json:"dims"`
+	Cells [][]any  `json:"cells"`
+}
+
+func (m engineModel) dim(name string) (engineDim, bool) {
+	i := slices.IndexFunc(m.Dims, func(d engineDim) bool { return d.Name == name })
+	if i < 0 {
+		return engineDim{}, false
+	}
+	return m.Dims[i], true
+}
+
+func (m engineModel) metric(name string) (engineMetric, error) {
+	i := slices.IndexFunc(m.Metrics, func(x engineMetric) bool { return x.Name == name })
+	if i < 0 {
+		return engineMetric{}, fmt.Errorf("Metric %s がない", name)
+	}
+	return m.Metrics[i], nil
+}
+
+func parseEngineModel(body []byte) (engineModel, error) {
+	var raw struct {
+		Seq        int64           `json:"seq"`
+		Dimensions json.RawMessage `json:"dimensions"`
+		Metrics    json.RawMessage `json:"metrics"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return engineModel{}, err
+	}
+	// Go maps lose the key order. The order of dimensions and Metrics is significant (display, replay).
+	out := engineModel{Seq: raw.Seq}
+	dims, err := objectEntries(raw.Dimensions)
+	if err != nil {
+		return engineModel{}, err
+	}
+	for _, e := range dims {
+		var d struct {
+			Members        []string                     `json:"members"`
+			Ordered        bool                         `json:"ordered"`
+			Properties     json.RawMessage              `json:"properties"`
+			PropertyValues map[string]map[string]string `json:"property_values"`
+		}
+		if err := json.Unmarshal(e.value, &d); err != nil {
+			return engineModel{}, err
+		}
+		props, err := objectEntries(d.Properties)
+		if err != nil {
+			return engineModel{}, err
+		}
+		dim := engineDim{Name: e.key, Members: d.Members, Ordered: d.Ordered}
+		for _, p := range props {
+			var target string
+			if err := json.Unmarshal(p.value, &target); err != nil {
+				return engineModel{}, err
+			}
+			values := d.PropertyValues[p.key]
+			if values == nil {
+				values = map[string]string{}
+			}
+			dim.Props = append(dim.Props, engineProp{Name: p.key, Target: target, Values: values})
+		}
+		out.Dims = append(out.Dims, dim)
+	}
+	metrics, err := objectEntries(raw.Metrics)
+	if err != nil {
+		return engineModel{}, err
+	}
+	for _, e := range metrics {
+		var m struct {
+			Dims        []string `json:"dims"`
+			Kind        string   `json:"kind"`
+			Formula     string   `json:"formula"`
+			Overridable bool     `json:"overridable"`
+		}
+		if err := json.Unmarshal(e.value, &m); err != nil {
+			return engineModel{}, err
+		}
+		out.Metrics = append(out.Metrics, engineMetric{Name: e.key, Dims: m.Dims, Kind: m.Kind, Formula: m.Formula, Overridable: m.Overridable})
+	}
+	return out, nil
+}
+
+type jsonEntry struct {
+	key   string
+	value json.RawMessage
+}
+
+// objectEntries gives the keys and values of a JSON object in their order.
+func objectEntries(raw json.RawMessage) ([]jsonEntry, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	var out []jsonEntry
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
+		}
+		out = append(out, jsonEntry{t.(string), value})
+	}
+	return out, nil
+}
+
+// engineRead is one read of a Metric from the engine: GET /metrics/<metric>/<path>?<query>.
+type engineRead struct {
+	Metric string
+	Path   string // "summary" for a number Metric, "slice" for other kinds, "overrides" for the overrides of a formula.
+	Query  map[string][]string
+}
+
+// The actions follow.
 
 func newID() string {
 	b := make([]byte, 8)

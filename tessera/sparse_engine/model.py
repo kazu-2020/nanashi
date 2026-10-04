@@ -500,6 +500,26 @@ class Model:
                 self._redefine(m.name)
 
     @_operation
+    def set_property_values(self, dim: str, prop: str, values: Mapping[str, str | None]) -> None:
+        """Set the values of the property prop for some members of dim. A None value removes the value of the member.
+
+        The values of the other members do not change. Then it calculates again like add_property.
+        """
+        d = self.dimension(dim)
+        if prop not in d.properties:
+            raise ValueError(f"{dim} にプロパティ {prop} がない")
+        target, mapping = d.properties[prop]
+        mapping = dict(mapping)
+        for member, value in values.items():
+            if member not in d:
+                raise ValueError(f"{dim}: メンバー {member!r} がない")
+            if value is None:
+                mapping.pop(member, None)
+            else:
+                mapping[member] = value
+        self.add_property(dim, prop, target, mapping)
+
+    @_operation
     def add_input(self, name: str, dims, cells: Mapping[Key, float | bool] | None = None,
                   *, kind: Kind = "number", storage: Any = None, partition: str | None = None) -> None:
         """cells は {キー: 値}。大量のデータはエンジンの格納形式で storage に渡してもよい。

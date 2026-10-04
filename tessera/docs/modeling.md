@@ -28,6 +28,11 @@ m.add_member("Month", "Apr")                             # On an ordered dimensi
 ```
 
 If the dimension has properties, you can set their values when you add the member, for example `m.add_member("Product", "p9", Category="ハード")`.
+To change the values of some members later, use `set_property_values`. A `None` value removes the value. The values of the other members do not change.
+
+```python
+m.set_property_values("Product", "Category", {"p9": "ソフト", "p1": None})
+```
 
 On an unordered dimension (for example, accounts or departments), you can insert a member at a position (`at`). You can change the order with `move_member`.
 The position is the index in the member order (starts at 0). `rows()` and the HTTP list (`GET /`) return members in this order.

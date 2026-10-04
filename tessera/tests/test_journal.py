@@ -161,6 +161,7 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.remove_member("Month", "Feb")
             self.m.remove_member("Product", "B")
             self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"})  # D は対応を外す
+            self.m.set_property_values("Product", "Category", {"A": "X", "C": None, "D": "Y"})
             self.m.remove_metric("CatShare")
         self.m.add_input("Salary", ["Employee"], {("e2",): 250})  # 入力の置き換え
         self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1})  # 計算 Metric を入力に

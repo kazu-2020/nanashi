@@ -181,6 +181,24 @@ class Redefine(unittest.TestCase):
         m.add_property("Product", "Category", "Category", {"A": "Y", "B": "Y"})
         self.assertEqual(dict(m.value("Looked").cells), {("A",): 2, ("B",): 2})
 
+    def test_set_property_values_changes_only_given_members(self):
+        m = Model(engine=self.engine())
+        m.add_dimension("Product", ["A", "B", "C"])
+        m.add_dimension("Category", ["X", "Y"])
+        m.add_property("Product", "Category", "Category", {"A": "X", "B": "Y", "C": "Y"})
+        m.add_input("Rate", ["Category"], {("X",): 1, ("Y",): 2})
+        m.add_formula("Looked", ["Product"], "Rate[BY: Product.Category]")
+        m.recalc()
+        m.set_property_values("Product", "Category", {"A": "Y", "C": None})
+        self.assertEqual(m.dimensions["Product"].properties["Category"][1], {"A": "Y", "B": "Y"})
+        self.assertEqual(dict(m.value("Looked").cells), {("A",): 2, ("B",): 2})
+        with self.assertRaises(ValueError):
+            m.set_property_values("Product", "Category", {"A": "Z"})
+        with self.assertRaises(ValueError):
+            m.set_property_values("Product", "Size", {"A": "X"})
+        with self.assertRaises(ValueError):
+            m.set_property_values("Product", "Category", {"Missing": None})
+
     def test_overrides_survive_redefinition(self):
         self.m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True)
         self.m.set_cell("Plus1", 50, Product="A")
