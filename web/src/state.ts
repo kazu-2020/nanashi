@@ -30,7 +30,9 @@ export function useRun() {
   );
 }
 
-// useMutate runs a write, then reads all the data of the application again.
+// useMutate runs a write, then reads again every query whose key starts with ["app", appId].
+// It also removes the queries that no screen shows. Otherwise a screen that opens later shows their old
+// cells as editable while it reads them again.
 export function useMutate() {
   const run = useRun();
   const { appId } = useApp();
@@ -39,6 +41,7 @@ export function useMutate() {
     run(async () => {
       await f();
       await queryClient.invalidateQueries({ queryKey: ["app", appId] });
+      queryClient.removeQueries({ queryKey: ["app", appId], type: "inactive" });
     });
 }
 
