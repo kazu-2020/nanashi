@@ -231,20 +231,16 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 			return nil, dbError(err)
 		}
 	}
-	app := "app-" + newID()
-	if err := s.Engines.Create(ctx, app); err != nil {
-		log.Printf("CreateApplication: %v", err)
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("モデルを作れない"))
-	}
+	var em engineModel
 	if snap.Engine != nil {
-		em, err := parseEngineModel(snap.Engine)
-		if err != nil {
+		var err error
+		if em, err = parseEngineModel(snap.Engine); err != nil {
 			return nil, dbError(err)
 		}
-		if err := s.Engines.write(ctx, app, c.user, replayOps(em, snap.Inputs, snap.Overrides)); err != nil {
-			return nil, err
-		}
 	}
+	app := "app-" + newID()
+	// The rows go first: an engine step error rolls them back, so no engine is left without an application.
+	// A commit error after the engine steps can still leave an engine model (the router has no delete).
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "insert into app_application (id, name) values ($1, $2)", app, name); err != nil {
 			return err
@@ -268,8 +264,18 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 				return err
 			}
 		}
-		return nil
+		if err := s.Engines.Create(ctx, app); err != nil {
+			log.Printf("CreateApplication: %v", err)
+			return connect.NewError(connect.CodeUnavailable, errors.New("モデルを作れない"))
+		}
+		if snap.Engine == nil {
+			return nil
+		}
+		return s.Engines.write(ctx, app, c.user, replayOps(em, snap.Inputs, snap.Overrides))
 	})
+	if cerr := new(connect.Error); errors.As(err, &cerr) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -752,20 +758,30 @@ func (s *PlanServer) ListSnapshots(ctx context.Context, req *connect.Request[nan
 
 func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[nanashiv1.CreateSnapshotRequest]) (*connect.Response[nanashiv1.Snapshot], error) {
 	app := req.Msg.AppId
-	em, raw, err := s.Engines.model(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	data := snapshotData{Engine: raw, Inputs: map[string]engineCube{}, Overrides: map[string]engineCube{}}
-	for _, m := range em.Metrics {
-		if m.Formula == "" {
-			if data.Inputs[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "slice"}); err != nil {
-				return nil, err
+	var data snapshotData
+	// A write between two reads gives cubes of different versions. Then read all again.
+	for try := 0; ; try++ {
+		em, raw, err := s.Engines.model(ctx, app)
+		if err != nil {
+			return nil, err
+		}
+		data = snapshotData{Engine: raw, Inputs: map[string]engineCube{}, Overrides: map[string]engineCube{}}
+		for _, m := range em.Metrics {
+			if m.Formula == "" {
+				if data.Inputs[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "slice"}); err != nil {
+					return nil, err
+				}
+			} else if m.Overridable {
+				if data.Overrides[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "overrides"}); err != nil {
+					return nil, err
+				}
 			}
-		} else if m.Overridable {
-			if data.Overrides[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "overrides"}); err != nil {
-				return nil, err
-			}
+		}
+		if sameSeq(em, data.Inputs, data.Overrides) {
+			break
+		}
+		if try == 2 {
+			return nil, connect.NewError(connect.CodeAborted, errors.New("モデルが変わり続けているので、スナップショットを作れない"))
 		}
 	}
 	meta, err := s.meta(ctx, app)

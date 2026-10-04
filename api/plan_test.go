@@ -65,6 +65,20 @@ func TestParseEngineModelKeepsOrder(t *testing.T) {
 	}
 }
 
+func TestSameSeq(t *testing.T) {
+	em := model(t) // seq 7
+	if em.Seq != 7 {
+		t.Fatalf("seq: %d", em.Seq)
+	}
+	same := map[string]engineCube{"Budget": {Seq: 7}}
+	if !sameSeq(em, same, map[string]engineCube{}) {
+		t.Error("cubes of the model version must agree")
+	}
+	if sameSeq(em, same, map[string]engineCube{"Revenue": {Seq: 8}}) {
+		t.Error("a cube of a later version must not agree")
+	}
+}
+
 func TestAccessLimits(t *testing.T) {
 	rules := []*nanashiv1.AccessRule{
 		{Role: viewer, List: "Region", Members: []string{"East", "West"}, Write: true},

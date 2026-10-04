@@ -32,7 +32,9 @@ func (o op) with(kwargs map[string]any) op {
 }
 
 // engineModel is the engine definition (GET /) with the order of dimensions, properties and Metrics kept.
+// Seq is the version of the model that the engine sent.
 type engineModel struct {
+	Seq     int64
 	Dims    []engineDim
 	Metrics []engineMetric
 }
@@ -60,9 +62,23 @@ type engineMetric struct {
 }
 
 // engineCube is the body of slice and summary: each cell is the coordinates in dims order and then the value.
+// Seq is the version of the model that the engine read. A snapshot stores it too; replay ignores it.
 type engineCube struct {
+	Seq   int64    `json:"seq"`
 	Dims  []string `json:"dims"`
 	Cells [][]any  `json:"cells"`
+}
+
+// sameSeq tells if every cube comes from the version of em.
+func sameSeq(em engineModel, cubes ...map[string]engineCube) bool {
+	for _, m := range cubes {
+		for _, c := range m {
+			if c.Seq != em.Seq {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (m engineModel) dim(name string) (engineDim, bool) {
@@ -83,6 +99,7 @@ func (m engineModel) metric(name string) (engineMetric, error) {
 
 func parseEngineModel(body []byte) (engineModel, error) {
 	var raw struct {
+		Seq        int64           `json:"seq"`
 		Dimensions json.RawMessage `json:"dimensions"`
 		Metrics    json.RawMessage `json:"metrics"`
 	}
@@ -90,7 +107,7 @@ func parseEngineModel(body []byte) (engineModel, error) {
 		return engineModel{}, err
 	}
 	// Go maps lose the key order. The order of dimensions and Metrics is significant (display, replay).
-	out := engineModel{}
+	out := engineModel{Seq: raw.Seq}
 	dims, err := objectEntries(raw.Dimensions)
 	if err != nil {
 		return engineModel{}, err
