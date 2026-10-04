@@ -13,7 +13,9 @@ var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func TestPlan(t *testing.T) {
 	sec := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Second) }
-	spawned := func(fails int, retryAt time.Time) state { return state{running: true, started: t0, noLeaseSince: t0, fails: fails, retryAt: retryAt} }
+	spawned := func(fails int, retryAt time.Time) state {
+		return state{running: true, started: t0, noLeaseSince: t0, fails: fails, retryAt: retryAt}
+	}
 	leased := state{running: true, started: t0} // Leader saw a lease and cleared noLeaseSince
 	lapsed := state{running: true, started: t0, noLeaseSince: sec(300)}
 	tests := []struct {
