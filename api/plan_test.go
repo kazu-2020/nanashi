@@ -211,17 +211,15 @@ func TestImportTransactionList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// New rows continue after the largest number (9). Each row sets only its own property value.
+	// New rows continue after the largest number (9). One operation and one statement set the values of all rows.
 	want := `[{"op":"add_member","args":["Sales","10"]},{"op":"set_cell","args":["Sales.Amount",1200],"kwargs":{"Sales":"10"}},` +
-		`{"op":"set_property_values","args":["Sales","Product",{"10":"A"}]},` +
 		`{"op":"add_member","args":["Sales","11"]},{"op":"set_cell","args":["Sales.Amount",5],"kwargs":{"Sales":"11"}},` +
-		`{"op":"set_property_values","args":["Sales","Product",{"11":"B"}]}]`
+		`{"op":"set_property_values","args":["Sales","Product",{"10":"A","11":"B"}]}]`
 	if got := opsJSON(t, ops); got != want {
 		t.Errorf("got %s", got)
 	}
 	// Row 10 sets its Note, and the blank Note of row 11 removes the value. The other values stay in the table.
-	if len(stmts) != 2 || !strings.Contains(stmts[0].sql, "jsonb_set") || fmt.Sprint(stmts[0].args) != "[app Sales Note 10 first]" ||
-		!strings.Contains(stmts[1].sql, "text_values - $4") || fmt.Sprint(stmts[1].args) != "[app Sales Note 11]" {
+	if len(stmts) != 1 || fmt.Sprint(stmts[0].args) != `[app Sales Note [11] {"10":"first"}]` {
 		t.Errorf("text statements: %v", stmts)
 	}
 }
@@ -229,6 +227,7 @@ func TestImportTransactionList(t *testing.T) {
 func TestEditMembersRenameRemove(t *testing.T) {
 	em := model(t)
 	ops, stmts, err := editOps("app", "Sales", em, appMeta{}, []*nanashiv1.MemberEdit{
+		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Name: "1", Properties: map[string]string{"Product": "A"}}}},
 		{Edit: &nanashiv1.MemberEdit_Rename{Rename: &nanashiv1.RenameMember{Name: "1", NewName: " one "}}},
 		{Edit: &nanashiv1.MemberEdit_Remove{Remove: &nanashiv1.RemoveMember{Name: "2"}}},
 		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Name: "9", Properties: map[string]string{"Product": "B"}}}},
@@ -237,9 +236,11 @@ func TestEditMembersRenameRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The engine follows the rename and the removal in the property values. A blank value removes the value.
-	want := `[{"op":"rename_member","args":["Sales","1","one"]},{"op":"remove_member","args":["Sales","2"]},` +
-		`{"op":"set_property_values","args":["Sales","Product",{"9":"B"}]},{"op":"set_property_values","args":["Sales","Product",{"one":null}]}]`
+	// The values of a member go to the engine before its rename, and the engine follows the rename and the removal.
+	// A blank value removes the value.
+	want := `[{"op":"set_property_values","args":["Sales","Product",{"1":"A"}]},` +
+		`{"op":"rename_member","args":["Sales","1","one"]},{"op":"remove_member","args":["Sales","2"]},` +
+		`{"op":"set_property_values","args":["Sales","Product",{"9":"B","one":null}]}]`
 	if got := opsJSON(t, ops); got != want {
 		t.Errorf("got %s", got)
 	}

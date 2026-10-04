@@ -619,24 +619,37 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 		}
 		return nil
 	}
+	// values keeps the DIMENSION and TEXT property values until the next rename or removal, so that one
+	// operation or statement sets the values of all members of an import. A nil value removes the value.
+	values := map[string]map[string]*string{}
+	flush := func() {
+		for _, prop := range slices.Sorted(maps.Keys(values)) {
+			if dimProps[prop] {
+				ops = append(ops, newOp("set_property_values", list, prop, values[prop]))
+			} else {
+				stmts = append(stmts, textValues(app, list, prop, values[prop]))
+			}
+		}
+		clear(values)
+	}
 	setProps := func(member string, props map[string]string) error {
 		for _, prop := range slices.Sorted(maps.Keys(props)) {
 			v := strings.TrimSpace(props[prop])
 			switch kind, isMetric := propKind[types[prop]]; {
-			case dimProps[prop]:
-				var value any // A blank value removes the value of the member.
-				if v != "" {
-					value = v
+			case dimProps[prop] || types[prop] == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+				if values[prop] == nil {
+					values[prop] = map[string]*string{}
 				}
-				ops = append(ops, newOp("set_property_values", list, prop, map[string]any{member: value}))
+				values[prop][member] = nil // A blank value removes the value of the member.
+				if v != "" {
+					values[prop][member] = &v
+				}
 			case isMetric:
 				val, err := parseValue(kind, v)
 				if err != nil {
 					return fmt.Errorf("%s.%s: %w", list, prop, err)
 				}
 				ops = append(ops, newOp("set_cell", propMetric(list, prop), val).with(map[string]any{list: member}))
-			case types[prop] == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
-				stmts = append(stmts, textValue(app, list, prop, member, v))
 			default:
 				return fmt.Errorf("%s にプロパティ %s がない", list, prop)
 			}
@@ -673,6 +686,7 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			if name == "" || members[name] {
 				return nil, nil, fmt.Errorf("%s に %q という名前は付けられない", list, name)
 			}
+			flush()
 			ops = append(ops, newOp("rename_member", list, old, name))
 			stmts = append(stmts, memberRenames(app, list, old, &name)...)
 			delete(members, old)
@@ -681,6 +695,7 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			if err := exists(x.Remove.Name); err != nil {
 				return nil, nil, err
 			}
+			flush()
 			ops = append(ops, newOp("remove_member", list, x.Remove.Name))
 			stmts = append(stmts, memberRenames(app, list, x.Remove.Name, nil)...)
 			delete(members, x.Remove.Name)
@@ -693,17 +708,23 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			return nil, nil, errors.New("メンバーの変更が空")
 		}
 	}
+	flush()
 	return ops, stmts, nil
 }
 
-// textValue sets the TEXT property value of one member. A blank value removes the value of the member.
-func textValue(app, list, prop, member, value string) stmt {
-	if value == "" {
-		return stmt{"update app_property set text_values = text_values - $4 where app_id = $1 and list = $2 and name = $3",
-			[]any{app, list, prop, member}}
+// textValues sets the TEXT property values of some members. A nil value removes the value of the member.
+func textValues(app, list, prop string, values map[string]*string) stmt {
+	removed, set := []string{}, map[string]string{}
+	for member, v := range values {
+		if v == nil {
+			removed = append(removed, member)
+		} else {
+			set[member] = *v
+		}
 	}
-	return stmt{"update app_property set text_values = jsonb_set(text_values, array[$4], to_jsonb($5::text)) where app_id = $1 and list = $2 and name = $3",
-		[]any{app, list, prop, member, value}}
+	slices.Sort(removed)
+	return stmt{"update app_property set text_values = (text_values - $4::text[]) || $5::jsonb where app_id = $1 and list = $2 and name = $3",
+		[]any{app, list, prop, removed, textJSON(set)}}
 }
 
 func parseCSV(text string) (map[string]int, [][]string, error) {
