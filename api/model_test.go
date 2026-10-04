@@ -77,3 +77,28 @@ func TestModelDefHidesMembersAndPropertyMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestEditMembersSelfReference(t *testing.T) {
+	em := engineModel{Dims: []engineDim{{Name: "Product", Members: []string{"X"},
+		Props: []engineProp{{Name: "Parent", Target: "Product", Values: map[string]string{}}}}}}
+	add := func(name, parent string) *nanashiv1.MemberEdit {
+		return &nanashiv1.MemberEdit{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Name: name, Properties: map[string]string{"Parent": parent}}}}
+	}
+	ops, _, err := editOps("app", "Product", em, appMeta{}, []*nanashiv1.MemberEdit{
+		add("A", "B"),
+		add("C", "X"),
+		{Edit: &nanashiv1.MemberEdit_Rename{Rename: &nanashiv1.RenameMember{Name: "X", NewName: "Y"}}},
+		add("B", ""),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The value X goes to the engine before the rename of X, so the engine renames it. The value B waits until
+	// B exists.
+	want := `[{"op":"add_member","args":["Product","A"]},{"op":"add_member","args":["Product","C"]},` +
+		`{"op":"set_property_values","args":["Product","Parent",{"C":"X"}]},{"op":"rename_member","args":["Product","X","Y"]},` +
+		`{"op":"add_member","args":["Product","B"]},{"op":"set_property_values","args":["Product","Parent",{"A":"B","B":null}]}]`
+	if got := opsJSON(t, ops); got != want {
+		t.Errorf("got %s", got)
+	}
+}

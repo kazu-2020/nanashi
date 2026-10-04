@@ -88,9 +88,9 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 	for _, m := range dim.Members {
 		members[m] = true
 	}
-	dimProps := map[string]bool{}
+	targets := map[string]string{} // DIMENSION property to its target list.
 	for _, p := range dim.Props {
-		dimProps[p.Name] = true
+		targets[p.Name] = p.Target
 	}
 	types := map[string]nanashiv1.PropertyType{}
 	for _, p := range meta.Props {
@@ -106,24 +106,35 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 		}
 		return nil
 	}
-	// values keeps the DIMENSION and TEXT property values until the next rename or removal, so that one
-	// operation or statement sets the values of all members of an import. A nil value removes the value.
+	// values keeps the DIMENSION and TEXT property values until the end, so that one operation or statement sets
+	// the values of all members of an import. A nil value removes the value.
 	values := map[string]map[string]*string{}
-	flush := func() {
+	// send sends the kept values that touch member (all values if member is nil). A rename or a removal of a member
+	// first sends the values that name it, because the engine and memberRefs then follow the rename or the removal.
+	send := func(member *string) {
 		for _, prop := range slices.Sorted(maps.Keys(values)) {
-			if dimProps[prop] {
-				ops = append(ops, newOp("set_property_values", list, prop, values[prop]))
+			touched := map[string]*string{}
+			for k, v := range values[prop] {
+				if member == nil || k == *member || targets[prop] == list && v != nil && *v == *member {
+					touched[k] = v
+					delete(values[prop], k)
+				}
+			}
+			if len(touched) == 0 {
+				continue
+			}
+			if _, ok := targets[prop]; ok {
+				ops = append(ops, newOp("set_property_values", list, prop, touched))
 			} else {
-				stmts = append(stmts, textValues(app, list, prop, values[prop]))
+				stmts = append(stmts, textValues(app, list, prop, touched))
 			}
 		}
-		clear(values)
 	}
 	setProps := func(member string, props map[string]string) error {
 		for _, prop := range slices.Sorted(maps.Keys(props)) {
 			v := strings.TrimSpace(props[prop])
 			switch kind, isMetric := propKind[types[prop]]; {
-			case dimProps[prop] || types[prop] == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+			case targets[prop] != "" || types[prop] == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
 				if values[prop] == nil {
 					values[prop] = map[string]*string{}
 				}
@@ -173,7 +184,7 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			if name == "" || members[name] {
 				return nil, nil, fmt.Errorf("%s に %q という名前は付けられない", list, name)
 			}
-			flush()
+			send(&old)
 			ops = append(ops, newOp("rename_member", list, old, name))
 			stmts = append(stmts, memberRenames(app, list, old, &name)...)
 			delete(members, old)
@@ -182,7 +193,7 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			if err := exists(x.Remove.Name); err != nil {
 				return nil, nil, err
 			}
-			flush()
+			send(&x.Remove.Name)
 			ops = append(ops, newOp("remove_member", list, x.Remove.Name))
 			stmts = append(stmts, memberRenames(app, list, x.Remove.Name, nil)...)
 			delete(members, x.Remove.Name)
@@ -195,7 +206,7 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			return nil, nil, errors.New("メンバーの変更が空")
 		}
 	}
-	flush()
+	send(nil)
 	return ops, stmts, nil
 }
 
