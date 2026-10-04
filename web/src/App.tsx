@@ -3,20 +3,10 @@ import { QueryCache, QueryClient, QueryClientProvider, useQuery } from "@tanstac
 import { useCallback, useState, type ReactNode } from "react";
 import { api, errorText, getUser, setUser } from "./api";
 import { Role } from "./gen/nanashi/v1/plan_pb";
-import {
-  AccessPage,
-  AuditPage,
-  BoardsPage,
-  CalendarPage,
-  CommentsPage,
-  ImportPage,
-  ListsPage,
-  MetricsPage,
-  ScenariosPage,
-  SnapshotsPage,
-  TablesPage,
-  ViewsPage,
-} from "./pages";
+import { AccessPage, AuditPage, CommentsPage, SnapshotsPage } from "./pages/admin";
+import { BoardsPage } from "./pages/boards";
+import { MetricsPage, TablesPage, ViewsPage } from "./pages/metrics";
+import { CalendarPage, ImportPage, ListsPage, ScenariosPage } from "./pages/model";
 import { roleName } from "./logic";
 import { AppCtx, Report, useRun } from "./state";
 import { Sel } from "./ui";
