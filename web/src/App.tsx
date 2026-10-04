@@ -1,18 +1,31 @@
 import { Alert, Button, CloseButton, Input } from "@heroui/react";
 import { QueryCache, QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { useCallback, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useState, type ComponentType } from "react";
 import { api, errorText, getUser, setUser } from "./api";
 import { Role } from "./gen/nanashi/v1/plan_pb";
-import { AccessPage, AuditPage, CommentsPage, SnapshotsPage } from "./pages/admin";
-import { BoardsPage } from "./pages/boards";
-import { MetricsPage, TablesPage, ViewsPage } from "./pages/metrics";
-import { CalendarPage, ImportPage, ListsPage, ScenariosPage } from "./pages/model";
 import { roleName } from "./logic";
 import { AppCtx, Report, useRun } from "./state";
 import { Sel } from "./ui";
 
+const ListsPage = lazy(() => import("./pages/model").then((m) => ({ default: m.ListsPage })));
+const CalendarPage = lazy(() => import("./pages/model").then((m) => ({ default: m.CalendarPage })));
+const ScenariosPage = lazy(() =>
+  import("./pages/model").then((m) => ({ default: m.ScenariosPage })),
+);
+const ImportPage = lazy(() => import("./pages/model").then((m) => ({ default: m.ImportPage })));
+const MetricsPage = lazy(() => import("./pages/metrics").then((m) => ({ default: m.MetricsPage })));
+const TablesPage = lazy(() => import("./pages/metrics").then((m) => ({ default: m.TablesPage })));
+const ViewsPage = lazy(() => import("./pages/metrics").then((m) => ({ default: m.ViewsPage })));
+const BoardsPage = lazy(() => import("./pages/boards").then((m) => ({ default: m.BoardsPage })));
+const CommentsPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.CommentsPage })));
+const AuditPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.AuditPage })));
+const SnapshotsPage = lazy(() =>
+  import("./pages/admin").then((m) => ({ default: m.SnapshotsPage })),
+);
+const AccessPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.AccessPage })));
+
 // PAGES gives the navigation. A page with a role shows only to users with that role or higher.
-const PAGES: { id: string; label: string; page: () => ReactNode; role?: Role }[] = [
+const PAGES: { id: string; label: string; page: ComponentType; role?: Role }[] = [
   { id: "lists", label: "リスト", page: ListsPage },
   { id: "metrics", label: "メトリック", page: MetricsPage },
   { id: "tables", label: "テーブル", page: TablesPage },
@@ -212,7 +225,9 @@ function Shell(props: { appId: string }) {
           ))}
         </nav>
         <div className="min-w-0 flex-1">
-          <Page />
+          <Suspense fallback={<p>読み込み中…</p>}>
+            <Page />
+          </Suspense>
         </div>
       </div>
     </AppCtx.Provider>
