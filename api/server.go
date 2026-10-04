@@ -55,7 +55,7 @@ type (
 	ack     = connect.Response[nanashiv1.Ack]
 	role    = nanashiv1.Role
 	rpcRule struct {
-		min   role // The minimum role in the application. ROLE_UNSPECIFIED: no application.
+		min   role // The minimum role in the application. ROLE_UNSPECIFIED: the RPC needs no application.
 		audit bool // Record the call in the audit trail.
 	}
 )
@@ -107,7 +107,7 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 			if !ok {
 				return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("%s は使えない", method))
 			}
-			c := caller{user: user, limits: limits{}}
+			c := caller{user: user}
 			appID := ""
 			if a, ok := req.Any().(interface{ GetAppId() string }); ok {
 				appID = a.GetAppId()
@@ -163,8 +163,6 @@ func invalid(err error) error { return connect.NewError(connect.CodeInvalidArgum
 
 func ok() (*ack, error) { return connect.NewResponse(&nanashiv1.Ack{}), nil }
 
-// ---------------------------------------------------------------- applications
-
 func (s *PlanServer) ListApplications(ctx context.Context, _ *connect.Request[nanashiv1.ListApplicationsRequest]) (*connect.Response[nanashiv1.ListApplicationsResponse], error) {
 	rows, _ := s.Pool.Query(ctx, `select a.id, a.name, m.role from app_application a
 		join app_member m on m.app_id = a.id where m.user_name = $1 order by a.created_at, a.id`, callerOf(ctx).user)
@@ -195,7 +193,11 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 			return nil, dbError(err)
 		}
 		// The new application has no access rules, so only a user who reads all data can restore it.
-		if r, _, err := s.rights(ctx, source, c.user); err != nil || r < modeler {
+		r, _, err := s.rights(ctx, source, c.user)
+		if err != nil {
+			return nil, err
+		}
+		if r < modeler {
 			return nil, connect.NewError(connect.CodePermissionDenied, errors.New("このスナップショットを戻す権限がない"))
 		}
 		if err := json.Unmarshal([]byte(content), &snap); err != nil {
@@ -272,8 +274,6 @@ func (s *PlanServer) StartAll(ctx context.Context) error {
 	return nil
 }
 
-// ---------------------------------------------------------------- modeling
-
 func (s *PlanServer) meta(ctx context.Context, app string) (appMeta, error) {
 	meta := appMeta{Kinds: map[string]nanashiv1.ListKind{}}
 	rows, _ := s.Pool.Query(ctx, "select name, kind from app_list where app_id = $1", app)
@@ -336,7 +336,6 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 	}
 	for _, it := range items {
 		// The definition can come from a snapshot of another application, so set app_id and id again.
-		var err error
 		switch it.Type {
 		case nanashiv1.ItemType_ITEM_TYPE_TABLE:
 			t := &nanashiv1.TableDef{}
@@ -373,17 +372,19 @@ func (s *PlanServer) CreateList(ctx context.Context, req *connect.Request[nanash
 	if members == nil {
 		members = []string{}
 	}
-	return s.writeWithList(ctx, m.AppId, m.Name, m.Kind, []op{newOp("add_dimension", m.Name, members)})
+	return s.writeWithList(ctx, m.AppId, m.Kind, []op{newOp("add_dimension", m.Name, members)}, m.Name)
 }
 
-// writeWithList writes the operations and then records the kind of the new list.
-func (s *PlanServer) writeWithList(ctx context.Context, app, list string, kind nanashiv1.ListKind, ops []op) (*ack, error) {
+// writeWithList writes the operations and then records the kind of the new lists.
+func (s *PlanServer) writeWithList(ctx context.Context, app string, kind nanashiv1.ListKind, ops []op, lists ...string) (*ack, error) {
 	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
 		return nil, err
 	}
-	if _, err := s.Pool.Exec(ctx, `insert into app_list (app_id, name, kind) values ($1, $2, $3)
-		on conflict (app_id, name) do update set kind = excluded.kind`, app, list, kind); err != nil {
-		return nil, dbError(err)
+	for _, list := range lists {
+		if _, err := s.Pool.Exec(ctx, `insert into app_list (app_id, name, kind) values ($1, $2, $3)
+			on conflict (app_id, name) do update set kind = excluded.kind`, app, list, kind); err != nil {
+			return nil, dbError(err)
+		}
 	}
 	return ok()
 }
@@ -413,15 +414,12 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 		return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("%s にプロパティ %s はすでにある", list, p.Name))
 	}
 	var ops []op
-	switch p.Type {
-	case nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION:
+	switch kind, isMetric := propKind[p.Type]; {
+	case isMetric:
+		ops = []op{newOp("add_input", propMetric(list, p.Name), []string{list}, []any{}).with(map[string]any{"kind": kind})}
+	case p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION:
 		ops = []op{newOp("add_property", list, p.Name, p.Target, map[string]string{})}
-	case nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER:
-		ops = []op{newOp("add_input", propMetric(list, p.Name), []string{list}, []any{}).with(map[string]any{"kind": "number"})}
-	case nanashiv1.PropertyType_PROPERTY_TYPE_BOOLEAN:
-		ops = []op{newOp("add_input", propMetric(list, p.Name), []string{list}, []any{}).with(map[string]any{"kind": "boolean"})}
-	case nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
-	default:
+	case p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
 		return nil, invalid(errors.New("プロパティの型を指定する"))
 	}
 	if p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION {
@@ -495,17 +493,7 @@ func (s *PlanServer) CreateCalendar(ctx context.Context, req *connect.Request[na
 	if err != nil {
 		return nil, invalid(err)
 	}
-	app := req.Msg.AppId
-	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
-		return nil, err
-	}
-	for _, list := range []string{"Year", "Quarter", "Month"} {
-		if _, err := s.Pool.Exec(ctx, `insert into app_list (app_id, name, kind) values ($1, $2, $3)
-			on conflict (app_id, name) do update set kind = excluded.kind`, app, list, nanashiv1.ListKind_LIST_KIND_CALENDAR); err != nil {
-			return nil, dbError(err)
-		}
-	}
-	return ok()
+	return s.writeWithList(ctx, req.Msg.AppId, nanashiv1.ListKind_LIST_KIND_CALENDAR, ops, "Year", "Quarter", "Month")
 }
 
 const scenarioList = "Scenario"
@@ -523,8 +511,8 @@ func (s *PlanServer) CreateScenario(ctx context.Context, req *connect.Request[na
 		if from != "" {
 			return nil, invalid(fmt.Errorf("シナリオ %s がない", from))
 		}
-		return s.writeWithList(ctx, app, scenarioList, nanashiv1.ListKind_LIST_KIND_SCENARIO,
-			[]op{newOp("add_dimension", scenarioList, []string{name})})
+		return s.writeWithList(ctx, app, nanashiv1.ListKind_LIST_KIND_SCENARIO,
+			[]op{newOp("add_dimension", scenarioList, []string{name})}, scenarioList)
 	}
 	ops := []op{newOp("add_member", scenarioList, name)}
 	if from != "" {
@@ -594,8 +582,6 @@ func (s *PlanServer) DeleteMetric(ctx context.Context, req *connect.Request[nana
 	return ok()
 }
 
-// ---------------------------------------------------------------- data
-
 func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.QueryRequest]) (*connect.Response[nanashiv1.QueryResponse], error) {
 	app := req.Msg.AppId
 	em, _, err := s.Engines.model(ctx, app)
@@ -606,8 +592,8 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 	if err != nil {
 		return nil, invalid(err)
 	}
-	dims := append(append([]string{}, req.Msg.Rows...), req.Msg.Columns...)
-	out := &nanashiv1.QueryResponse{Seq: em.Seq, Dimensions: dims}
+	dims := slices.Concat(req.Msg.Rows, req.Msg.Columns)
+	out := &nanashiv1.QueryResponse{Dimensions: dims}
 	for _, r := range reads {
 		cube, err := s.Engines.read(ctx, app, r)
 		if err != nil {
@@ -673,8 +659,6 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 	return connect.NewResponse(&nanashiv1.ImportResponse{Rows: int32(rows)}), nil
 }
 
-// ---------------------------------------------------------------- tables, views and boards
-
 // saveItem keeps the definition as protojson. If *id is empty, it sets a new id (id points into msg).
 func (s *PlanServer) saveItem(ctx context.Context, app string, typ nanashiv1.ItemType, id *string, msg proto.Message) error {
 	if *id == "" {
@@ -728,8 +712,6 @@ func (s *PlanServer) DeleteItem(ctx context.Context, req *connect.Request[nanash
 	}
 	return ok()
 }
-
-// ---------------------------------------------------------------- collaboration
 
 func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nanashiv1.ListCommentsRequest]) (*connect.Response[nanashiv1.ListCommentsResponse], error) {
 	rows, _ := s.Pool.Query(ctx, `select id, target, cell, user_name, body, (extract(epoch from created_at) * 1000)::bigint from app_comment
@@ -836,8 +818,6 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 	return connect.NewResponse(snap), nil
 }
 
-// ---------------------------------------------------------------- access
-
 func (s *PlanServer) rules(ctx context.Context, app string) ([]*nanashiv1.AccessRule, error) {
 	rows, _ := s.Pool.Query(ctx, "select id, role, list, members, write from app_access_rule where app_id = $1 order by id", app)
 	rules, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*nanashiv1.AccessRule, error) {
@@ -872,32 +852,34 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 	if strings.TrimSpace(m.User) == "" {
 		return nil, invalid(errors.New("利用者が空"))
 	}
-	tx, err := s.Pool.Begin(ctx)
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Lock the members of the application, so that two ADMINs cannot remove each other at the same time.
+		if _, err := tx.Exec(ctx, "select 1 from app_member where app_id = $1 for update", m.AppId); err != nil {
+			return err
+		}
+		var err error
+		if m.Role == nanashiv1.Role_ROLE_UNSPECIFIED {
+			_, err = tx.Exec(ctx, "delete from app_member where app_id = $1 and user_name = $2", m.AppId, m.User)
+		} else {
+			_, err = tx.Exec(ctx, `insert into app_member (app_id, user_name, role) values ($1, $2, $3)
+				on conflict (app_id, user_name) do update set role = excluded.role`, m.AppId, m.User, m.Role)
+		}
+		if err != nil {
+			return err
+		}
+		var admins int
+		if err := tx.QueryRow(ctx, "select count(*) from app_member where app_id = $1 and role = $2", m.AppId, admin).Scan(&admins); err != nil {
+			return err
+		}
+		if admins == 0 {
+			return connect.NewError(connect.CodeFailedPrecondition, errors.New("最後の ADMIN は外せない"))
+		}
+		return nil
+	})
+	if cerr := new(connect.Error); errors.As(err, &cerr) {
+		return nil, err
+	}
 	if err != nil {
-		return nil, dbError(err)
-	}
-	defer tx.Rollback(ctx) // A rollback after the commit does nothing.
-	// Lock the members of the application, so that two ADMINs cannot remove each other at the same time.
-	if _, err = tx.Exec(ctx, "select 1 from app_member where app_id = $1 for update", m.AppId); err != nil {
-		return nil, dbError(err)
-	}
-	if m.Role == nanashiv1.Role_ROLE_UNSPECIFIED {
-		_, err = tx.Exec(ctx, "delete from app_member where app_id = $1 and user_name = $2", m.AppId, m.User)
-	} else {
-		_, err = tx.Exec(ctx, `insert into app_member (app_id, user_name, role) values ($1, $2, $3)
-			on conflict (app_id, user_name) do update set role = excluded.role`, m.AppId, m.User, m.Role)
-	}
-	var admins int
-	if err == nil {
-		err = tx.QueryRow(ctx, "select count(*) from app_member where app_id = $1 and role = $2", m.AppId, admin).Scan(&admins)
-	}
-	if err != nil {
-		return nil, dbError(err)
-	}
-	if admins == 0 {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("最後の ADMIN は外せない"))
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, dbError(err)
 	}
 	return ok()

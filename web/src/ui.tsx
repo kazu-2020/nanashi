@@ -1,4 +1,3 @@
-// Small form controls.
 import type { ReactNode } from "react";
 import { cls } from "./state";
 

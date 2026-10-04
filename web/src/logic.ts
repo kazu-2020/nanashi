@@ -10,6 +10,8 @@ import {
 // METRIC is the pseudo-dimension that puts the Metrics on an axis.
 export const METRIC = "#metric";
 
+export const dimLabel = (d: string) => (d === METRIC ? "メトリック" : d);
+
 export type Filters = Record<string, string[]>;
 // The member order of each list, and the Metric names for METRIC.
 export type Order = Record<string, string[]>;
@@ -170,8 +172,7 @@ function csvField(s: string): string {
 }
 
 export function gridToCsv(g: Grid): string {
-  const label = (d: string) => (d === METRIC ? "メトリック" : d);
-  const header = [...g.rowDims.map(label), ...g.colKeys.map((c) => keyLabel(c) || "値")];
+  const header = [...g.rowDims.map(dimLabel), ...g.colKeys.map((c) => keyLabel(c) || "値")];
   const lines = g.rowKeys.map((r) => [...r, ...g.colKeys.map((c) => formatValue(g.value(r, c)))]);
   return [header, ...lines].map((l) => l.map(csvField).join(",")).join("\n") + "\n";
 }
@@ -241,6 +242,8 @@ export const ROLES: [string, string][] = [
   [String(Role.MODELER), "モデラー"],
   [String(Role.ADMIN), "管理者"],
 ];
+
+export const roleName = (r: Role) => ROLES.find(([v]) => v === String(r))?.[1] ?? "";
 
 export type Spec = {
   metrics: string[];

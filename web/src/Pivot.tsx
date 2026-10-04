@@ -18,6 +18,7 @@ import { Display, Role } from "./gen/nanashi/v1/plan_pb";
 import {
   buildGrid,
   chartRows,
+  dimLabel,
   formatValue,
   gridToCsv,
   keyLabel,
@@ -53,7 +54,8 @@ export function Pivot(props: {
   const run = useRun();
   const [spec, setSpec] = useState(props.initial);
   const [cell, setCell] = useState<{ metric: string; coords: Record<string, string> }>();
-  const [viewName, setViewName] = useState(props.view?.name ?? "");
+  const view = props.view;
+  const [viewName, setViewName] = useState(view?.name ?? "");
   const order = useMemo(
     () => Object.fromEntries(model.lists.map((l) => [l.name, l.members.map((m) => m.name)])),
     [model],
@@ -129,7 +131,7 @@ export function Pivot(props: {
             {axisDims.map((d) => (
               <Sel
                 key={d}
-                label={d === METRIC ? "メトリック" : d}
+                label={dimLabel(d)}
                 value={axisOf(d)}
                 onChange={(a) => setAxis(d, a)}
                 empty="なし"
@@ -182,8 +184,8 @@ export function Pivot(props: {
                 <Button size="sm" variant="secondary" onPress={() => saveView("")}>
                   ビューとして保存
                 </Button>
-                {props.view && (
-                  <Button size="sm" variant="secondary" onPress={() => saveView(props.view!.id)}>
+                {view && (
+                  <Button size="sm" variant="secondary" onPress={() => saveView(view.id)}>
                     このビューを上書き保存
                   </Button>
                 )}
@@ -256,14 +258,13 @@ function Body(props: {
       </div>
     );
   }
-  const label = (d: string) => (d === METRIC ? "メトリック" : d);
   return (
     <div className="overflow-auto">
       <table className={cls.table}>
         <thead>
           <tr>
             {g.rowDims.map((d) => (
-              <th key={d}>{label(d)}</th>
+              <th key={d}>{dimLabel(d)}</th>
             ))}
             {g.colKeys.map((c) => (
               <th key={JSON.stringify(c)}>{keyLabel(c) || "値"}</th>

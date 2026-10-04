@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Code, ConnectError } from "@connectrpc/connect";
 import { api, errorText } from "./api";
 import {
+  type BoardDef,
   ItemType,
   ListKind,
   type MemberEditSchema,
@@ -13,9 +14,9 @@ import {
   PropertyType,
   Role,
 } from "./gen/nanashi/v1/plan_pb";
-import { defaultSpec, parseCsv, ROLES, toFilters } from "./logic";
+import { defaultSpec, parseCsv, ROLES, roleName, toFilters } from "./logic";
 import { Pivot } from "./Pivot";
-import { cls, time, useApp, useLoad, useRun } from "./state";
+import { cls, memberNames, time, useApp, useLoad, useRun } from "./state";
 import { Checks, Section, Sel } from "./ui";
 
 const KINDS: [string, string][] = [
@@ -163,11 +164,7 @@ export function ListsPage() {
                             value={v}
                             onChange={set}
                             empty=""
-                            options={
-                              model.lists
-                                .find((l) => l.name === p.target)
-                                ?.members.map((t) => t.name) ?? []
-                            }
+                            options={memberNames(model, p.target)}
                           />
                         ) : (
                           <input
@@ -183,30 +180,28 @@ export function ListsPage() {
                   })}
                   {modeler && (
                     <td className="whitespace-nowrap">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        isDisabled={i === 0}
-                        onPress={() =>
-                          edit([
-                            { edit: { case: "move", value: { name: m.name, position: i - 1 } } },
-                          ])
-                        }
-                      >
-                        ↑
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        isDisabled={i === list.members.length - 1}
-                        onPress={() =>
-                          edit([
-                            { edit: { case: "move", value: { name: m.name, position: i + 1 } } },
-                          ])
-                        }
-                      >
-                        ↓
-                      </Button>
+                      {(
+                        [
+                          [-1, "↑", i === 0],
+                          [1, "↓", i === list.members.length - 1],
+                        ] as const
+                      ).map(([step, arrow, end]) => (
+                        <Button
+                          key={arrow}
+                          size="sm"
+                          variant="ghost"
+                          isDisabled={end}
+                          onPress={() =>
+                            edit([
+                              {
+                                edit: { case: "move", value: { name: m.name, position: i + step } },
+                              },
+                            ])
+                          }
+                        >
+                          {arrow}
+                        </Button>
+                      ))}
                       <Button
                         size="sm"
                         variant="danger-soft"
@@ -671,23 +666,20 @@ export function BoardsPage() {
   const [text, setText] = useState("");
   const b = model.boards.find((x) => x.id === sel);
   const modeler = can(Role.MODELER);
-  const save = (patch: {
-    widgets?: MessageInitShape<typeof WidgetSchema>[];
-    pageSelectors?: string[];
-  }) =>
-    b &&
+  const save = (
+    board: BoardDef,
+    patch: { widgets?: MessageInitShape<typeof WidgetSchema>[]; pageSelectors?: string[] },
+  ) =>
     mutate(() =>
       api.saveBoard({
         appId,
-        id: b.id,
-        name: b.name,
-        widgets: b.widgets,
-        pageSelectors: b.pageSelectors,
+        id: board.id,
+        name: board.name,
+        widgets: board.widgets,
+        pageSelectors: board.pageSelectors,
         ...patch,
       }),
     );
-  const order = (d: string) =>
-    model.lists.find((l) => l.name === d)?.members.map((m) => m.name) ?? [];
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap gap-2">
@@ -725,14 +717,14 @@ export function BoardsPage() {
                 value={page[d] ?? ""}
                 onChange={(m) => setPage({ ...page, [d]: m })}
                 empty="すべて"
-                options={order(d)}
+                options={memberNames(model, d)}
               />
             ))}
             {modeler && (
               <Sel
                 label="ページセレクターを追加"
                 value=""
-                onChange={(d) => d && save({ pageSelectors: [...b.pageSelectors, d] })}
+                onChange={(d) => d && save(b, { pageSelectors: [...b.pageSelectors, d] })}
                 empty=""
                 options={model.lists.map((l) => l.name).filter((n) => !b.pageSelectors.includes(n))}
               />
@@ -751,7 +743,7 @@ export function BoardsPage() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      onPress={() => save({ widgets: b.widgets.filter((_, j) => j !== i) })}
+                      onPress={() => save(b, { widgets: b.widgets.filter((_, j) => j !== i) })}
                     >
                       ウィジェットを削除
                     </Button>
@@ -773,7 +765,7 @@ export function BoardsPage() {
                 value=""
                 onChange={(id) =>
                   id &&
-                  save({ widgets: [...b.widgets, { content: { case: "viewId", value: id } }] })
+                  save(b, { widgets: [...b.widgets, { content: { case: "viewId", value: id } }] })
                 }
                 empty=""
                 options={model.views.map((x): [string, string] => [x.id, x.name])}
@@ -787,7 +779,7 @@ export function BoardsPage() {
               <Button
                 size="sm"
                 onPress={() =>
-                  save({ widgets: [...b.widgets, { content: { case: "text", value: text } }] })
+                  save(b, { widgets: [...b.widgets, { content: { case: "text", value: text } }] })
                 }
               >
                 テキストを追加
@@ -851,7 +843,11 @@ export function ImportPage() {
         <Sel
           label="読み込み先"
           value={to}
-          onChange={(v) => (setTo(v), setTarget(""), setMap({}))}
+          onChange={(v) => {
+            setTo(v);
+            setTarget("");
+            setMap({});
+          }}
           options={[
             ["metric", "メトリック"],
             ["list", "リスト"],
@@ -1026,7 +1022,6 @@ export function AccessPage() {
     write: false,
   });
   const act = (f: () => Promise<unknown>) => run(async () => (await f(), again()));
-  const roleName = (x: Role) => ROLES.find(([v]) => v === String(x))?.[1] ?? "";
   return (
     <div>
       <Section title="メンバー">
@@ -1099,9 +1094,7 @@ export function AccessPage() {
             options={model.lists.map((l) => l.name)}
           />
           <Checks
-            options={
-              model.lists.find((l) => l.name === rule.list)?.members.map((m) => m.name) ?? []
-            }
+            options={memberNames(model, rule.list)}
             value={rule.members}
             onChange={(members) => setRule({ ...rule, members })}
           />

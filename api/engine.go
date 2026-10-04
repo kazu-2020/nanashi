@@ -31,7 +31,6 @@ type Engines struct {
 	Tessera string // Path to tessera/.
 	Dir     string // Directory for the engine files. Each application uses <Dir>/<app id>.
 	DSN     string
-	Spawn   bool // If false, another process starts the engines.
 	HTTP    *http.Client
 
 	mu    sync.Mutex
@@ -51,36 +50,33 @@ func newID() string {
 
 // Start starts the engine of an application if it does not run, and waits until the router finds it.
 func (e *Engines) Start(ctx context.Context, app string) error {
-	var done chan struct{}
-	if e.Spawn {
-		e.mu.Lock()
-		p, ok := e.procs[app]
-		if !ok {
-			cmd := exec.Command(filepath.Join(e.Tessera, ".venv/bin/python"), "-m", "sparse_engine.server",
-				filepath.Join(e.Dir, app), "--pg", e.DSN, "--model-id", app, "--migrate", "--port", "0")
-			cmd.Dir = e.Tessera
-			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-			if err := cmd.Start(); err != nil {
-				e.mu.Unlock()
-				return err
-			}
-			p = &engineProc{cmd: cmd, done: make(chan struct{})}
-			go func() {
-				err := cmd.Wait()
-				log.Printf("engine %s stopped: %v", app, err)
-				e.mu.Lock()
-				delete(e.procs, app)
-				e.mu.Unlock()
-				close(p.done)
-			}()
-			if e.procs == nil {
-				e.procs = map[string]*engineProc{}
-			}
-			e.procs[app] = p
+	e.mu.Lock()
+	p, ok := e.procs[app]
+	if !ok {
+		cmd := exec.Command(filepath.Join(e.Tessera, ".venv/bin/python"), "-m", "sparse_engine.server",
+			filepath.Join(e.Dir, app), "--pg", e.DSN, "--model-id", app, "--migrate", "--port", "0")
+		cmd.Dir = e.Tessera
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		if err := cmd.Start(); err != nil {
+			e.mu.Unlock()
+			return err
 		}
-		done = p.done
-		e.mu.Unlock()
+		p = &engineProc{cmd: cmd, done: make(chan struct{})}
+		go func() {
+			err := cmd.Wait()
+			log.Printf("engine %s stopped: %v", app, err)
+			e.mu.Lock()
+			delete(e.procs, app)
+			e.mu.Unlock()
+			close(p.done)
+		}()
+		if e.procs == nil {
+			e.procs = map[string]*engineProc{}
+		}
+		e.procs[app] = p
 	}
+	done := p.done
+	e.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	for {
@@ -145,9 +141,10 @@ func (e *Engines) model(ctx context.Context, app string) (engineModel, []byte, e
 func (e *Engines) read(ctx context.Context, app string, r engineRead) (engineCube, error) {
 	var cube engineCube
 	body, err := e.get(ctx, app, "/metrics/"+url.PathEscape(r.Metric)+"/"+r.Path, r.Query)
-	if err == nil {
-		err = json.Unmarshal(body, &cube)
+	if err != nil {
+		return cube, err
 	}
+	err = json.Unmarshal(body, &cube)
 	return cube, err
 }
 

@@ -25,7 +25,6 @@ func main() {
 	router := flag.String("router", "http://127.0.0.1:8090", "URL of nanashi-router")
 	tessera := flag.String("tessera", "../tessera", "path to tessera/")
 	engineDir := flag.String("engine-dir", "../.nanashi-data", "directory for the engine files")
-	spawn := flag.Bool("spawn", true, "start an engine server for each application, and stop them on exit")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -46,14 +45,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	engines := &api.Engines{Router: *router, Tessera: tesseraAbs, Dir: dirAbs, DSN: *dsn, Spawn: *spawn,
+	engines := &api.Engines{Router: *router, Tessera: tesseraAbs, Dir: dirAbs, DSN: *dsn,
 		HTTP: &http.Client{Timeout: 100 * time.Second}}
 	defer engines.StopAll()
 	server := &api.PlanServer{Pool: pool, Engines: engines}
-	if *spawn {
-		if err := server.StartAll(ctx); err != nil {
-			log.Fatal(err)
-		}
+	if err := server.StartAll(ctx); err != nil {
+		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()

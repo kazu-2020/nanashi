@@ -689,8 +689,6 @@ type ListDef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Kind  ListKind               `protobuf:"varint,2,opt,name=kind,proto3,enum=nanashi.v1.ListKind" json:"kind,omitempty"`
-	// True if the members have a fixed time order (calendar lists).
-	Ordered bool `protobuf:"varint,3,opt,name=ordered,proto3" json:"ordered,omitempty"`
 	// The members in their order. Access rules can hide members.
 	Members       []*Member      `protobuf:"bytes,4,rep,name=members,proto3" json:"members,omitempty"`
 	Properties    []*PropertyDef `protobuf:"bytes,5,rep,name=properties,proto3" json:"properties,omitempty"`
@@ -740,13 +738,6 @@ func (x *ListDef) GetKind() ListKind {
 		return x.Kind
 	}
 	return ListKind_LIST_KIND_UNSPECIFIED
-}
-
-func (x *ListDef) GetOrdered() bool {
-	if x != nil {
-		return x.Ordered
-	}
-	return false
 }
 
 func (x *ListDef) GetMembers() []*Member {
@@ -935,12 +926,11 @@ func (x *ModelDef) GetBoards() []*BoardDef {
 }
 
 type CreateListRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
-	Name  string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// DIMENSION or TRANSACTION.
-	Kind          ListKind `protobuf:"varint,3,opt,name=kind,proto3,enum=nanashi.v1.ListKind" json:"kind,omitempty"`
-	Members       []string `protobuf:"bytes,4,rep,name=members,proto3" json:"members,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Kind          ListKind               `protobuf:"varint,3,opt,name=kind,proto3,enum=nanashi.v1.ListKind" json:"kind,omitempty"`
+	Members       []string               `protobuf:"bytes,4,rep,name=members,proto3" json:"members,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2095,8 +2085,7 @@ func (x *QueryCell) GetValue() *Value {
 
 type QueryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Seq   int64                  `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	// rows and then columns.
+	// The dimensions of QueryCell.coords: the rows, then the columns.
 	Dimensions    []string     `protobuf:"bytes,2,rep,name=dimensions,proto3" json:"dimensions,omitempty"`
 	Cells         []*QueryCell `protobuf:"bytes,3,rep,name=cells,proto3" json:"cells,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -2131,13 +2120,6 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
 	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{29}
-}
-
-func (x *QueryResponse) GetSeq() int64 {
-	if x != nil {
-		return x.Seq
-	}
-	return 0
 }
 
 func (x *QueryResponse) GetDimensions() []string {
@@ -3800,15 +3782,14 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"properties\x1a=\n" +
 	"\x0fPropertiesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc8\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x01\n" +
 	"\aListDef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x04kind\x18\x02 \x01(\x0e2\x14.nanashi.v1.ListKindR\x04kind\x12\x18\n" +
-	"\aordered\x18\x03 \x01(\bR\aordered\x12,\n" +
+	"\x04kind\x18\x02 \x01(\x0e2\x14.nanashi.v1.ListKindR\x04kind\x12,\n" +
 	"\amembers\x18\x04 \x03(\v2\x12.nanashi.v1.MemberR\amembers\x127\n" +
 	"\n" +
 	"properties\x18\x05 \x03(\v2\x17.nanashi.v1.PropertyDefR\n" +
-	"properties\"\x8f\x01\n" +
+	"propertiesJ\x04\b\x03\x10\x04\"\x8f\x01\n" +
 	"\tMetricDef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
 	"\n" +
@@ -3911,13 +3892,12 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\tQueryCell\x12\x16\n" +
 	"\x06metric\x18\x01 \x01(\tR\x06metric\x12\x16\n" +
 	"\x06coords\x18\x02 \x03(\tR\x06coords\x12'\n" +
-	"\x05value\x18\x03 \x01(\v2\x11.nanashi.v1.ValueR\x05value\"n\n" +
-	"\rQueryResponse\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12\x1e\n" +
+	"\x05value\x18\x03 \x01(\v2\x11.nanashi.v1.ValueR\x05value\"b\n" +
+	"\rQueryResponse\x12\x1e\n" +
 	"\n" +
 	"dimensions\x18\x02 \x03(\tR\n" +
 	"dimensions\x12+\n" +
-	"\x05cells\x18\x03 \x03(\v2\x15.nanashi.v1.QueryCellR\x05cells\"\xc2\x01\n" +
+	"\x05cells\x18\x03 \x03(\v2\x15.nanashi.v1.QueryCellR\x05cellsJ\x04\b\x01\x10\x02\"\xc2\x01\n" +
 	"\tCellWrite\x12\x16\n" +
 	"\x06metric\x18\x01 \x01(\tR\x06metric\x129\n" +
 	"\x06coords\x18\x02 \x03(\v2!.nanashi.v1.CellWrite.CoordsEntryR\x06coords\x12'\n" +

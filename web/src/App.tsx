@@ -16,7 +16,7 @@ import {
   TablesPage,
   ViewsPage,
 } from "./pages";
-import { ROLES } from "./logic";
+import { roleName } from "./logic";
 import { AppCtx, Report, useLoad, useRun } from "./state";
 import { Sel } from "./ui";
 
@@ -38,7 +38,7 @@ const PAGES: { id: string; label: string; page: () => ReactNode; role?: Role }[]
 
 export default function App() {
   const [error, setError] = useState("");
-  const [user, setU] = useState(getUser());
+  const [user, setCurrentUser] = useState(getUser());
   const [app, setApp] = useState<{ id: string; name: string }>();
   const report = useCallback((e: unknown) => setError(errorText(e)), []);
   return (
@@ -59,7 +59,7 @@ export default function App() {
                 className="underline"
                 onClick={() => {
                   setUser("");
-                  setU("");
+                  setCurrentUser("");
                   setApp(undefined);
                 }}
               >
@@ -81,7 +81,7 @@ export default function App() {
           <Login
             onLogin={(u) => {
               setUser(u);
-              setU(u);
+              setCurrentUser(u);
             }}
           />
         ) : !app ? (
@@ -128,7 +128,6 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
   );
   const create = (snapshotId: string) =>
     run(async () => props.onOpen(await api.createApplication({ name, snapshotId })));
-  const roleName = (r: Role) => ROLES.find(([v]) => v === String(r))?.[1];
   return (
     <div className="flex flex-col gap-4">
       <h2 className="text-lg font-bold">アプリケーション</h2>
@@ -157,7 +156,10 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
         <Sel
           label="アプリケーション"
           value={from}
-          onChange={(v) => (setFrom(v), setSnapshot(""))}
+          onChange={(v) => {
+            setFrom(v);
+            setSnapshot("");
+          }}
           empty=""
           options={apps?.applications.map((a): [string, string] => [a.id, a.name]) ?? []}
         />

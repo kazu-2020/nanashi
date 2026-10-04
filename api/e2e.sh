@@ -101,9 +101,8 @@ APP2=$(ok alice CreateApplication "{\"name\": \"E2E restored\", \"snapshotId\": 
 Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Revenue\", \"Budget\"], \"rows\": [\"Product\"], \"columns\": [\"Scenario\"]}")
 check "restored data" "[$(cell Revenue '["A", ""]').number, $(cell Budget '["A", "Plan"]').number] == [125, 1200]" "$Q"
 ok alice RenameMetric "{\"appId\": \"$APP2\", \"name\": \"Budget\", \"newName\": \"Budget 2027\"}" >/dev/null
-check "rename reaches tables and views" '(.tables[0].metrics == ["Budget 2027", "Revenue"]) and (.views[0].metrics == ["Budget 2027"])' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 MODEL2=$(ok alice GetModel "{\"appId\": \"$APP2\"}")
+check "rename reaches tables and views" '(.tables[0].metrics == ["Budget 2027", "Revenue"]) and (.views[0].metrics == ["Budget 2027"])' "$MODEL2"
 check "restored model" '(.lists[] | select(.name == "Product") | .members[0].properties.Note == "first") and (.views | length == 1) and (.lists[-1].kind == "LIST_KIND_SCENARIO")' "$MODEL2"
 B27='"appId": "'$APP2'", "metric": {"name": "Budget 2027"'
 check "a dimension change of an input Metric is refused" '.code == "failed_precondition"' \
@@ -131,6 +130,9 @@ for i in $(seq 8); do
 done
 wait "${PIDS[@]}"
 check "concurrent edits keep all TEXT values" '[.lists[] | select(.name == "Load") | .members[].properties.Note] | sort == ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"]' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+ok alice DeleteItem "{\"appId\": \"$APP2\", \"id\": \"$VIEW\", \"type\": \"ITEM_TYPE_VIEW\"}" >/dev/null
+check "deleting a view removes its board widget" '(.boards[0].widgets | length == 1) and (.boards[0].widgets[0].text == "Notes")' \
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 
 ok alice SetMemberRole "{\"appId\": \"$APP\", \"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}" >/dev/null

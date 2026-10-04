@@ -1,4 +1,3 @@
-// Shared React context and hooks.
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { errorText } from "./api";
 import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
@@ -49,6 +48,9 @@ export function useLoad<T>(f: () => Promise<T>, deps: unknown[]): [T | undefined
   }, [...deps, tick]);
   return [data, () => setTick((t) => t + 1)];
 }
+
+export const memberNames = (model: ModelDef, list: string) =>
+  model.lists.find((l) => l.name === list)?.members.map((m) => m.name) ?? [];
 
 export const cls = {
   input: "rounded border border-gray-300 px-2 py-1 text-sm",

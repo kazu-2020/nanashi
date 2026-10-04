@@ -93,3 +93,14 @@ func TestAccessByRole(t *testing.T) {
 		t.Errorf("non-member reads: got %v, want permission denied", err)
 	}
 }
+
+// TestRPCRulesCoverAllMethods makes sure that the interceptor does not refuse an RPC of PlanService.
+func TestRPCRulesCoverAllMethods(t *testing.T) {
+	methods := nanashiv1.File_nanashi_v1_plan_proto.Services().ByName("PlanService").Methods()
+	for i := range methods.Len() {
+		name := string(methods.Get(i).Name())
+		if _, ok := rpcRules[name]; !ok {
+			t.Errorf("rpcRules has no entry for %s", name)
+		}
+	}
+}

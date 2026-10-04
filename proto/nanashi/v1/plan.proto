@@ -4,7 +4,7 @@ package nanashi.v1;
 
 option go_package = "github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1";
 
-// PlanService gives the planning features (like Pigment) to the frontend.
+// PlanService gives the planning features to the frontend.
 // The header X-Nanashi-User identifies the user. Each application is one engine model.
 service PlanService {
   // Applications.
@@ -119,8 +119,7 @@ message Member {
 message ListDef {
   string name = 1;
   ListKind kind = 2;
-  // True if the members have a fixed time order (calendar lists).
-  bool ordered = 3;
+  reserved 3;
   // The members in their order. Access rules can hide members.
   repeated Member members = 4;
   repeated PropertyDef properties = 5;
@@ -150,7 +149,6 @@ message ModelDef {
 message CreateListRequest {
   string app_id = 1;
   string name = 2;
-  // DIMENSION or TRANSACTION.
   ListKind kind = 3;
   repeated string members = 4;
 }
@@ -268,8 +266,8 @@ message QueryCell {
 }
 
 message QueryResponse {
-  int64 seq = 1;
-  // rows and then columns.
+  reserved 1;
+  // The dimensions of QueryCell.coords: the rows, then the columns.
   repeated string dimensions = 2;
   repeated QueryCell cells = 3;
 }

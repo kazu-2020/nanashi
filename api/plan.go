@@ -85,76 +85,73 @@ func (m engineModel) metric(name string) (engineMetric, error) {
 
 func parseEngineModel(body []byte) (engineModel, error) {
 	var raw struct {
-		Seq        int64                      `json:"seq"`
-		Dimensions map[string]json.RawMessage `json:"dimensions"`
-		Metrics    map[string]struct {
-			Dims        []string `json:"dims"`
-			Kind        string   `json:"kind"`
-			Formula     *string  `json:"formula"`
-			Overridable bool     `json:"overridable"`
-		} `json:"metrics"`
+		Seq        int64           `json:"seq"`
+		Dimensions json.RawMessage `json:"dimensions"`
+		Metrics    json.RawMessage `json:"metrics"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return engineModel{}, err
 	}
 	// Go maps lose the key order. The order of dimensions and Metrics is significant (display, replay).
-	var top struct {
-		Dimensions json.RawMessage `json:"dimensions"`
-		Metrics    json.RawMessage `json:"metrics"`
-	}
-	if err := json.Unmarshal(body, &top); err != nil {
-		return engineModel{}, err
-	}
 	out := engineModel{Seq: raw.Seq}
-	dimNames, err := objectKeys(top.Dimensions)
+	dims, err := objectEntries(raw.Dimensions)
 	if err != nil {
 		return engineModel{}, err
 	}
-	for _, name := range dimNames {
+	for _, e := range dims {
 		var d struct {
 			Members        []string                     `json:"members"`
 			Ordered        bool                         `json:"ordered"`
 			Properties     json.RawMessage              `json:"properties"`
 			PropertyValues map[string]map[string]string `json:"property_values"`
 		}
-		if err := json.Unmarshal(raw.Dimensions[name], &d); err != nil {
+		if err := json.Unmarshal(e.value, &d); err != nil {
 			return engineModel{}, err
 		}
-		var targets map[string]string
-		if err := json.Unmarshal(d.Properties, &targets); err != nil {
-			return engineModel{}, err
-		}
-		propNames, err := objectKeys(d.Properties)
+		props, err := objectEntries(d.Properties)
 		if err != nil {
 			return engineModel{}, err
 		}
-		dim := engineDim{Name: name, Members: d.Members, Ordered: d.Ordered}
-		for _, p := range propNames {
-			dim.Props = append(dim.Props, engineProp{Name: p, Target: targets[p], Values: d.PropertyValues[p]})
+		dim := engineDim{Name: e.key, Members: d.Members, Ordered: d.Ordered}
+		for _, p := range props {
+			var target string
+			if err := json.Unmarshal(p.value, &target); err != nil {
+				return engineModel{}, err
+			}
+			values := d.PropertyValues[p.key]
+			if values == nil {
+				values = map[string]string{}
+			}
+			dim.Props = append(dim.Props, engineProp{Name: p.key, Target: target, Values: values})
 		}
 		out.Dims = append(out.Dims, dim)
 	}
-	metricNames, err := objectKeys(top.Metrics)
+	metrics, err := objectEntries(raw.Metrics)
 	if err != nil {
 		return engineModel{}, err
 	}
-	for _, name := range metricNames {
-		m := raw.Metrics[name]
-		out.Metrics = append(out.Metrics, engineMetric{Name: name, Dims: m.Dims, Kind: m.Kind,
-			Formula: deref(m.Formula), Overridable: m.Overridable})
+	for _, e := range metrics {
+		var m struct {
+			Dims        []string `json:"dims"`
+			Kind        string   `json:"kind"`
+			Formula     string   `json:"formula"`
+			Overridable bool     `json:"overridable"`
+		}
+		if err := json.Unmarshal(e.value, &m); err != nil {
+			return engineModel{}, err
+		}
+		out.Metrics = append(out.Metrics, engineMetric{Name: e.key, Dims: m.Dims, Kind: m.Kind, Formula: m.Formula, Overridable: m.Overridable})
 	}
 	return out, nil
 }
 
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
+type jsonEntry struct {
+	key   string
+	value json.RawMessage
 }
 
-// objectKeys gives the keys of a JSON object in their order.
-func objectKeys(raw json.RawMessage) ([]string, error) {
+// objectEntries gives the keys and values of a JSON object in their order.
+func objectEntries(raw json.RawMessage) ([]jsonEntry, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
@@ -162,19 +159,19 @@ func objectKeys(raw json.RawMessage) ([]string, error) {
 	if _, err := dec.Token(); err != nil {
 		return nil, err
 	}
-	var keys []string
+	var out []jsonEntry
 	for dec.More() {
 		t, err := dec.Token()
 		if err != nil {
 			return nil, err
 		}
-		keys = append(keys, t.(string))
-		var skip json.RawMessage
-		if err := dec.Decode(&skip); err != nil {
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
 			return nil, err
 		}
+		out = append(out, jsonEntry{t.(string), value})
 	}
-	return keys, nil
+	return out, nil
 }
 
 // propRow is a NUMBER, BOOLEAN or TEXT property, which the api keeps. The engine keeps DIMENSION properties.
@@ -191,10 +188,14 @@ type appMeta struct {
 	Props []propRow
 }
 
+// propKind is the kind of the input Metric that holds a NUMBER or BOOLEAN property.
+var propKind = map[nanashiv1.PropertyType]string{
+	nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER:  "number",
+	nanashiv1.PropertyType_PROPERTY_TYPE_BOOLEAN: "boolean",
+}
+
 // propMetric is the input Metric that holds a NUMBER or BOOLEAN property.
 func propMetric(list, prop string) string { return list + "." + prop }
-
-// ---------------------------------------------------------------- access
 
 // limit is the members of one list that a user can read and write.
 type limit struct{ read, write map[string]bool }
@@ -297,8 +298,6 @@ func (l limits) checkWrite(metric string, dims []string, coords map[string]strin
 	return nil
 }
 
-// ---------------------------------------------------------------- values
-
 func valueOf(v *nanashiv1.Value) any {
 	switch x := v.GetValue().(type) {
 	case *nanashiv1.Value_Number:
@@ -341,14 +340,14 @@ func parseValue(kind, text string) (any, error) {
 	if text == "" {
 		return nil, nil
 	}
-	switch {
-	case kind == "number":
+	switch kind {
+	case "number":
 		f, err := strconv.ParseFloat(strings.ReplaceAll(text, ",", ""), 64)
 		if err != nil {
 			return nil, fmt.Errorf("%q は数値ではない", text)
 		}
 		return f, nil
-	case kind == "boolean":
+	case "boolean":
 		b, err := strconv.ParseBool(strings.ToLower(text))
 		if err != nil {
 			return nil, fmt.Errorf("%q は TRUE か FALSE ではない", text)
@@ -357,8 +356,6 @@ func parseValue(kind, text string) (any, error) {
 	}
 	return text, nil
 }
-
-// ---------------------------------------------------------------- query
 
 // engineRead is one read of a Metric from the engine: GET /metrics/<metric>/<path>?<query>.
 type engineRead struct {
@@ -450,8 +447,6 @@ func queryCells(metric string, dims []string, cube engineCube) []*nanashiv1.Quer
 	return out
 }
 
-// ---------------------------------------------------------------- writes
-
 // writeOps sets a cell if the coordinates give all dimensions of the Metric. Otherwise it spreads the value.
 func writeOps(writes []*nanashiv1.CellWrite, em engineModel, l limits) ([]op, error) {
 	var ops []op
@@ -483,8 +478,6 @@ func writeOps(writes []*nanashiv1.CellWrite, em engineModel, l limits) ([]op, er
 	return ops, nil
 }
 
-// ---------------------------------------------------------------- members
-
 // editOps changes member edits into engine operations. It also gives the new TEXT property values of the list.
 func editOps(list string, em engineModel, meta appMeta, edits []*nanashiv1.MemberEdit) ([]op, map[string]map[string]string, error) {
 	dim, ok := em.dim(list)
@@ -498,9 +491,6 @@ func editOps(list string, em engineModel, meta appMeta, edits []*nanashiv1.Membe
 	dimProps := map[string]engineProp{}
 	for _, p := range dim.Props {
 		p.Values = maps.Clone(p.Values)
-		if p.Values == nil {
-			p.Values = map[string]string{}
-		}
 		dimProps[p.Name] = p
 	}
 	types := map[string]nanashiv1.PropertyType{}
@@ -537,18 +527,14 @@ func editOps(list string, em engineModel, meta appMeta, edits []*nanashiv1.Membe
 				dirty[prop] = true
 				continue
 			}
-			switch types[prop] {
-			case nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, nanashiv1.PropertyType_PROPERTY_TYPE_BOOLEAN:
-				kind := "number"
-				if types[prop] == nanashiv1.PropertyType_PROPERTY_TYPE_BOOLEAN {
-					kind = "boolean"
-				}
+			switch kind, isMetric := propKind[types[prop]]; {
+			case isMetric:
 				val, err := parseValue(kind, v)
 				if err != nil {
 					return fmt.Errorf("%s.%s: %w", list, prop, err)
 				}
 				ops = append(ops, newOp("set_cell", propMetric(list, prop), val).with(map[string]any{list: member}))
-			case nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+			case types[prop] == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
 				if v == "" {
 					delete(text[prop], member)
 				} else {
@@ -645,8 +631,6 @@ func renameKey(m map[string]string, old, name string) {
 		m[name] = v
 	}
 }
-
-// ---------------------------------------------------------------- import
 
 func parseCSV(text string) (map[string]int, [][]string, error) {
 	r := csv.NewReader(strings.NewReader(strings.TrimPrefix(text, "\ufeff")))
@@ -786,8 +770,6 @@ func importMetricOps(text string, mi *nanashiv1.MetricImport, em engineModel, l 
 	return append(adds, sets...), len(rows), nil
 }
 
-// ---------------------------------------------------------------- calendar and scenarios
-
 // calendarOps makes the ordered lists Year, Quarter and Month and the properties between them.
 func calendarOps(start, years int) ([]op, error) {
 	if years < 1 || years > 50 || start < 1900 || start > 2200 {
@@ -834,8 +816,6 @@ func copyCellOps(metric, dim, to string, cube engineCube) []op {
 	return ops
 }
 
-// ---------------------------------------------------------------- snapshots
-
 // snapshotData is the content of a snapshot. Engine is the body of GET / as the engine sent it.
 type snapshotData struct {
 	Engine json.RawMessage               `json:"engine"`
@@ -860,15 +840,10 @@ func replayOps(em engineModel, inputs map[string]engineCube) []op {
 	}
 	for _, d := range em.Dims {
 		for _, p := range d.Props {
-			values := p.Values
-			if values == nil {
-				values = map[string]string{}
-			}
-			ops = append(ops, newOp("add_property", d.Name, p.Name, p.Target, values))
+			ops = append(ops, newOp("add_property", d.Name, p.Name, p.Target, p.Values))
 		}
 	}
 	for _, m := range em.Metrics {
-		kind := map[string]any{"kind": m.Kind}
 		if m.Formula != "" {
 			ops = append(ops, newOp("add_formula", m.Name, m.Dims, m.Formula).with(map[string]any{"kind": m.Kind, "overridable": m.Overridable}))
 			continue
@@ -886,12 +861,10 @@ func replayOps(em engineModel, inputs map[string]engineCube) []op {
 			}
 			cells = append(cells, []any{coords, c[len(c)-1]})
 		}
-		ops = append(ops, newOp("add_input", m.Name, m.Dims, cells).with(kind))
+		ops = append(ops, newOp("add_input", m.Name, m.Dims, cells).with(map[string]any{"kind": m.Kind}))
 	}
 	return ops
 }
-
-// ---------------------------------------------------------------- model
 
 // modelDef builds the lists and Metrics of ModelDef. propCells has the cells of each NUMBER or BOOLEAN property Metric.
 func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l limits) ([]*nanashiv1.ListDef, []*nanashiv1.MetricDef) {
@@ -902,7 +875,7 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 		if !ok {
 			kind = nanashiv1.ListKind_LIST_KIND_DIMENSION
 		}
-		ld := &nanashiv1.ListDef{Name: d.Name, Kind: kind, Ordered: d.Ordered}
+		ld := &nanashiv1.ListDef{Name: d.Name, Kind: kind}
 		values := map[string]map[string]string{} // member -> property -> text
 		set := func(member, prop, v string) {
 			if values[member] == nil {
