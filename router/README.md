@@ -51,7 +51,7 @@ If a request comes for a model that has no live writer, the router starts `<tess
 The router waits for the lease of the new engine, as it waits for any writer, until `--deadline`.
 An engine that stops with code 0 (idle stop or SIGTERM) starts again on the next request, without a wait.
 After a crash, the router waits 1 second before the next start, and doubles the wait up to 60 seconds.
-If an engine runs for 90 seconds without a lease, the router kills it.
+If an engine runs for 60 seconds without a lease, the router kills it.
 On SIGTERM and SIGINT, the router sends SIGTERM to its engines after it stops, and kills them after 15 seconds.
 
 Without `--tessera`, the router only finds engines that something else started.

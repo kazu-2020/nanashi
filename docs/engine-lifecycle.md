@@ -1,7 +1,7 @@
 # Design note: the router owns the engine processes (issue #51)
 
-This document is a design. We implemented nothing in it yet.
-For the current behavior, see `api/engine.go`, `router/README.md`, and `tessera/docs/server.md`.
+This document is the design, and the code follows it.
+`api/engine.go`, `router/supervisor.go`, `router/README.md`, and `tessera/docs/server.md` give the current behavior.
 
 ## Problem
 
@@ -112,7 +112,7 @@ func afterExit(st state, err error, now time.Time) state // ranFor is now - st.s
 ```
 
 Constants: `quietFails = 3`, `firstRetry = 1s`, `maxRetry = 60s`, `healthyRun = 1m`.
-`bootBudget` is the time that a process may run without a lease. Set it from the measured cold start of a large model, plus the lease time. Too short makes a crash loop out of a slow start.
+`bootBudget = 60s` is the time that a process may run without a lease: 2 times the lease time of the engine. The cold start of the large plan is about 1 second (`tessera/docs/performance.md`), so a slow start does not become a crash loop.
 
 The argv of an engine is `.venv/bin/python -m sparse_engine.server <engine-dir>/<model> --pg <DSN> --model-id <model> --port 0 --idle-exit <seconds>`.
 The engine listens on 127.0.0.1 and advertises the port that it got in the lease. The Supervisor never learns the port.
@@ -185,18 +185,16 @@ Rejected: implicit creation, the strict `expect`, and the advisory lock now, for
 
 ## Open questions
 
-- What is the cold start of a large model (process start plus journal replay)? It sets `--engine-idle`, `bootBudget`, and whether the router deadline of 90 seconds is enough for the first request.
+- The cold start of the large plan from a local snapshot is about 1 second (measured, `tessera/docs/performance.md`). A snapshot in object storage and a long journal after it add time. Is the router deadline of 90 seconds enough for the largest production model?
 - Is 15 minutes a good default for `--engine-idle`? Development wants a short time, production a long one. The router flag covers both.
 - `PUT /models/<id>` uses only the router authentication. Is that enough while the api is the only client?
 
 ## Plan
 
-Each step ends in a check. Do them in this order.
+Each step ended in a check, in this order.
 
-1. Measure the cold start of `examples.fpa` large through `sparse_engine.server` with `--pg`. Record it in `tessera/docs/performance.md`.
-2. tessera: `--idle-exit`. Test: start the server with `--idle-exit 1`, send one request, wait, and make sure that the process exits with code 0 and the lease is released.
-3. router: `plan` and `afterExit` with a table test. Then `Supervisor` with a `Command` that returns a fake script (`exit 1` for the crash loop, a script that inserts a lease for the start). `PUT /models/<id>` and `engine_failing` in `router_test.go`.
-4. api: remove the process management, add `Create`, move the flags to `dev.sh`. `api/e2e.sh` through the router with `--tessera` is the end-to-end check.
+1. Measured the cold start of `examples.fpa` through `sparse_engine.server` with `--pg`. The result is in `tessera/docs/performance.md`.
+2. tessera: `--idle-exit`. The tests start the server with `--idle-exit 1`, send one request, and make sure that the process exits with code 0, also when a monitor probes `/health`.
+3. router: `plan` and `afterExit` with table tests. `Supervisor` with a `Command` of `sh -c 'exit 1'` for the crash loop, and `exit 0` for the clean stop. `PUT /models/<id>` and `engine_failing` in `router_test.go`.
+4. api: the process management is removed, `Create` is added, and the flags moved to `dev.sh`. `api/e2e.sh` through a router with `--tessera` passed, and the engines stopped themselves after the idle time.
 5. Docs: `router/README.md`, `tessera/docs/server.md`, `api/CLAUDE.md`, the comment in `compose.yaml`.
-
-The first thing to write is `plan` and `afterExit` with their table test.
