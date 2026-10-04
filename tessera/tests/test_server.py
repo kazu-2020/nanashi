@@ -3,7 +3,11 @@ import contextlib
 import http.client
 import io
 import json
+import os
+import re
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -13,7 +17,7 @@ import urllib.request
 from unittest import mock
 
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.server import Server, main
+from sparse_engine.server import Server, idle_for, main
 from sparse_engine.workspace import Workspace
 
 from .journals import JournalCase, PgStore
@@ -484,6 +488,56 @@ class PgObservability(Observability):
         status, body = self.c.get("/ready")
         self.assertEqual(status, 503)
         self.assertIn("延長できない", body["reasons"][0])
+
+
+class IdleExit(unittest.TestCase):
+    def test_idle_for(self):
+        for active, last, now, want in [(0, 10.0, 13.5, 3.5), (1, 10.0, 13.5, 0.0), (2, 0.0, 99.0, 0.0),
+                                        (0, 10.0, 10.0, 0.0), (0, 10.0, 9.0, 0.0)]:
+            self.assertEqual(idle_for(active, last, now), want, (active, last, now))
+
+    def start(self, idle_exit: str) -> tuple[subprocess.Popen, str]:
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proc = subprocess.Popen([sys.executable, "-m", "sparse_engine.server", d.name, "--engine", "reference",
+                                 "--port", "0", "--idle-exit", idle_exit],
+                                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        for line in proc.stderr:
+            if m := re.search(r"(http://\S+) で待ち受ける", line):
+                return proc, m.group(1)
+        self.fail("the server did not start")
+
+    def test_stops_after_the_idle_time(self):
+        proc, url = self.start("1")
+        self.assertEqual(Client(url, token=None).get("/")[0], 200)
+        _, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("要求がなかったので止める", err)
+
+    def test_probes_do_not_keep_the_server_alive(self):
+        proc, url = self.start("2")
+        c, start = Client(url, token=None, timeout=1), time.monotonic()
+        while proc.poll() is None and time.monotonic() - start < 5:
+            with contextlib.suppress(OSError):
+                c.get("/health")
+            time.sleep(0.5)
+        self.assertIsNotNone(proc.poll(), "the probes kept the server alive")
+        self.assertEqual(proc.returncode, 0)
+
+
+class ModelHeader(unittest.TestCase):
+    def test_other_model_gets_421_without_leader(self):
+        ws = workspace(self, model(ReferenceEngine()))
+        server = Server(ws, "127.0.0.1", 0, tokens=TOKENS, model_id="m1").start()
+        self.addCleanup(server.stop)
+        status, body = Client(server.url, headers={"X-Nanashi-Model": "other"}).get("/")
+        self.assertEqual((status, body["error"]), (421, "not_leader"))
+        self.assertNotIn("leader", body)
+        self.assertEqual(Client(server.url, headers={"X-Nanashi-Model": "m1"}).get("/")[0], 200)
+        self.assertEqual(Client(server.url).get("/")[0], 200)
 
 
 class WithJournal(JournalCase, unittest.TestCase):

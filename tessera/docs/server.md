@@ -21,6 +21,8 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 | `GET /ready` | Whether the server can receive requests. It returns 503 and the reason in these conditions: the writer stopped, the server could not open the journal again, the server cannot extend the lease, the standby monitor failed, or `Replica` cannot catch up. It also returns the role `role` (`leader`, `standby`, or `follower` with `--follow`). No authentication is necessary. |
 | `GET /stats` | Numbers for monitoring (Prometheus text format). For example: the number and time of commits, cancelled writes, the queue length, whether the server is the writer (`nanashi_leader`), the lease state, the time since the last snapshot, and the delay of `Replica`. |
 
+With `--pg`, if a request has the header `X-Nanashi-Model` and its value is not the `--model-id` of the server, the server answers 421 `not_leader` without a `leader` field.
+
 Authentication, not the request body, sets the user that the audit records.
 With `--tokens`, the server requires `Authorization: Bearer <token>`.
 With `--user-header X-Forwarded-User`, the server uses the value of the header that an authenticating proxy added.
@@ -96,6 +98,8 @@ The default is `http://<host>:<port>`. If the server listens on `0.0.0.0`, `--ad
 On SIGTERM and SIGINT, the server completes the received requests, commits the writes in the queue, releases the lease, and then stops. (Containers on ECS and similar services stop with SIGTERM.)
 The standby receives the notification, gets the right immediately, and becomes the writer.
 If the server crashes (SIGKILL), the failover occurs after the lease expires, within the interval at which the standby tries to get the right (1 second).
+
+With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress, the count does not start. If the value is 0 (the default), the server does not stop for this reason.
 
 In the profit and loss plan (large), a read of 1 cell through HTTP takes 0.24 ms. A write that changes the salary of 1 employee takes 0.9 ms.
 A write while 8 readers read continuously takes 2.2 ms (`bench_http.py`, local loopback, about 2,800 reads per second).

@@ -27,6 +27,12 @@ func NewPgResolver(ctx context.Context, dsn string) (*PgResolver, error) {
 
 func (p *PgResolver) Close() { p.pool.Close() }
 
+// Ready returns an error if the engine schema (nanashi_model) is missing.
+func (p *PgResolver) Ready(ctx context.Context) error {
+	_, err := p.pool.Exec(ctx, "select 1 from nanashi_model limit 1")
+	return err
+}
+
 func (p *PgResolver) Leader(ctx context.Context, model string) (string, error) {
 	var endpoint *string
 	var live *bool
@@ -40,4 +46,10 @@ func (p *PgResolver) Leader(ctx context.Context, model string) (string, error) {
 		return "", err
 	}
 	return *endpoint, nil
+}
+
+// Create adds the row of model. It starts no engine. It is idempotent.
+func (p *PgResolver) Create(ctx context.Context, model string) error {
+	_, err := p.pool.Exec(ctx, "insert into nanashi_model (model_id) values ($1) on conflict do nothing", model)
+	return err
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end check of nanashi-api with real engines.
-# It needs PostgreSQL (NANASHI_PG_DSN) and nanashi-router (ROUTER). It starts nanashi-api, which starts the engines.
-# At the end it stops nanashi-api and the engines that nanashi-api started.
+# It needs PostgreSQL (NANASHI_PG_DSN) with the engine tables, and nanashi-router (ROUTER) with --tessera.
+# The router starts the engines. The script starts nanashi-api, and stops it at the end.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -13,8 +13,7 @@ WORK=$(mktemp -d)
 
 curl -sf "$ROUTER/healthz" >/dev/null || { echo "nanashi-router does not run at $ROUTER"; exit 1; }
 go build -o "$WORK/nanashi-api" ./cmd/nanashi-api
-"$WORK/nanashi-api" --pg "$DSN" --listen "$LISTEN" --router "$ROUTER" --tessera ../tessera --engine-dir "${ENGINE_DIR:-../.nanashi-data}" \
-  >"$WORK/api.log" 2>&1 &
+"$WORK/nanashi-api" --pg "$DSN" --listen "$LISTEN" --router "$ROUTER" >"$WORK/api.log" 2>&1 &
 API_PID=$!
 trap 'kill $API_PID 2>/dev/null; wait $API_PID 2>/dev/null; echo "log: $WORK/api.log"' EXIT
 

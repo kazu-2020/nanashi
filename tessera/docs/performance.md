@@ -257,3 +257,18 @@ To open, the engine reads large changes from Parquet as change blocks, and Rust 
 (Before, the engine converted JSON lines to Python lists and wrote 1 cell at a time.)
 For the history, the file journal reads the journal from the start. But Rust finds the 1 cell in the change blocks, thus the engine does not convert all rows to Python.
 The write of 1 cell does not change, because almost all of its time is the write to the disk (`F_FULLFSYNC`, about 3 ms each time).
+
+## Cold start of the HTTP server
+
+The router starts an engine when the first request for a model comes ([design note](../../docs/engine-lifecycle.md)).
+This table gives the time from the process start of `sparse_engine.server` with `--pg` until `GET /ready` returns 200.
+The snapshot is on the local disk, at the published version, so the journal replay is empty.
+Linux, 4 cores, PostgreSQL on the same host, 3 runs each.
+
+| Model | Cells | Snapshot | Cold start |
+|---|---|---|---|
+| Profit and loss plan (small) | 13,841 | 0.1 MB | 0.30 to 0.58 s |
+| Profit and loss plan (large) | 4,909,264 | 1.5 MB | 0.94 to 1.08 s |
+
+Most of the time is the start of Python and the import of `nanashi_core`.
+A snapshot in object storage adds the download time, and a journal with many entries after the snapshot adds the replay time.

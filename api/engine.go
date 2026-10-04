@@ -1,7 +1,7 @@
 package api
 
-// This file holds the actions on the engine servers: the HTTP client (through the router) and the supervisor
-// that starts one engine process for each application.
+// This file holds the actions on the engine servers: the HTTP client. All requests go through the router,
+// and the router starts the engine of a model when a request comes for it.
 
 import (
 	"bytes"
@@ -10,36 +10,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"sync"
-	"syscall"
-	"time"
 
 	"connectrpc.com/connect"
 )
 
-// Engines sends requests to the engine servers through the router, and starts and stops the engine processes.
+// Engines sends requests to the engine servers through the router.
 type Engines struct {
-	Router  string // Base URL of the router, for example http://127.0.0.1:8090.
-	Tessera string // Path to tessera/.
-	Dir     string // Directory for the engine files. Each application uses <Dir>/<app id>.
-	DSN     string
-	HTTP    *http.Client
-
-	mu    sync.Mutex
-	procs map[string]*engineProc
-}
-
-type engineProc struct {
-	cmd  *exec.Cmd
-	done chan struct{}
+	Router string // Base URL of the router, for example http://127.0.0.1:8090.
+	HTTP   *http.Client
 }
 
 func newID() string {
@@ -48,73 +30,14 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// Start starts the engine of an application if it does not run, and waits until the router finds it.
-func (e *Engines) Start(ctx context.Context, app string) error {
-	e.mu.Lock()
-	p, ok := e.procs[app]
-	if !ok {
-		cmd := exec.Command(filepath.Join(e.Tessera, ".venv/bin/python"), "-m", "sparse_engine.server",
-			filepath.Join(e.Dir, app), "--pg", e.DSN, "--model-id", app, "--migrate", "--port", "0")
-		cmd.Dir = e.Tessera
-		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-		if err := cmd.Start(); err != nil {
-			e.mu.Unlock()
-			return err
-		}
-		p = &engineProc{cmd: cmd, done: make(chan struct{})}
-		go func() {
-			err := cmd.Wait()
-			log.Printf("engine %s stopped: %v", app, err)
-			e.mu.Lock()
-			delete(e.procs, app)
-			e.mu.Unlock()
-			close(p.done)
-		}()
-		if e.procs == nil {
-			e.procs = map[string]*engineProc{}
-		}
-		e.procs[app] = p
+// Create makes the model of an application in the router. It is idempotent and starts no engine.
+func (e *Engines) Create(ctx context.Context, app string) error {
+	req, err := http.NewRequestWithContext(ctx, "PUT", e.Router+"/models/"+app, nil)
+	if err != nil {
+		return err
 	}
-	done := p.done
-	e.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-	for {
-		req, _ := http.NewRequestWithContext(ctx, "GET", e.Router+"/models/"+app+"/ready", nil)
-		if res, err := e.HTTP.Do(req); err == nil {
-			res.Body.Close()
-			if res.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		select {
-		case <-done:
-			return fmt.Errorf("engine %s stopped before it was ready", app)
-		case <-ctx.Done():
-			return fmt.Errorf("engine %s is not ready: %w", app, ctx.Err())
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-}
-
-// StopAll sends SIGTERM to the engines that this process started, and waits until they stop.
-func (e *Engines) StopAll() {
-	e.mu.Lock()
-	procs := make([]*engineProc, 0, len(e.procs))
-	for _, p := range e.procs {
-		procs = append(procs, p)
-	}
-	e.mu.Unlock()
-	for _, p := range procs {
-		p.cmd.Process.Signal(syscall.SIGTERM)
-	}
-	for _, p := range procs {
-		select {
-		case <-p.done:
-		case <-time.After(15 * time.Second):
-			p.cmd.Process.Kill()
-		}
-	}
+	_, err = e.do(req)
+	return err
 }
 
 func (e *Engines) get(ctx context.Context, app, path string, query url.Values) ([]byte, error) {

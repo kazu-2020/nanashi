@@ -51,6 +51,8 @@ Authentication, not the request body, sets the user that the audit records (user
 
 SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き込みを確定させ、リースを手放してから止まる
 （ECS などのコンテナは SIGTERM で止める）。
+With --idle-exit SECONDS, the server stops on the same path when no request comes for that time.
+Requests to /health, /ready, and /stats do not count, so a monitor does not keep the server alive.
 
 標準ライブラリの HTTP サーバーで、要求ごとにスレッドを作る。読み手が多いプロセスでは
 --switch-interval で Python のスレッド切り替えの間隔を短くする（docs/performance.md）。
@@ -147,6 +149,24 @@ def _cell_map(cells) -> dict:
     return {tuple(k): v for k, v in cells}
 
 
+PROBES = {"health", "ready", "stats"}  # monitors call these; they do not count as use (--idle-exit)
+
+
+def is_probe(path: str) -> bool:
+    """Return True if the request path is a probe. It must not raise: do_GET calls it in a finally."""
+    return path.split("?", 1)[0].strip("/") in PROBES
+
+
+def misdirected(header: str | None, model_id: str | None) -> bool:
+    """Return True if the router sent the request for a different model (X-Nanashi-Model)."""
+    return header is not None and model_id is not None and header != model_id
+
+
+def idle_for(active: int, last: float, now: float) -> float:
+    """Return the seconds without use. It is 0 while a request is in progress."""
+    return 0.0 if active else max(0.0, now - last)
+
+
 class Handler(BaseHTTPRequestHandler):
     server: "Server"
 
@@ -191,8 +211,23 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 読み出し
 
+    def _misdirected(self) -> bool:
+        """Answer 421 without a leader and return True if the request names a different model.
+        The router then forgets this address and finds the writer of that model again."""
+        header = self.headers.get("X-Nanashi-Model")
+        if not misdirected(header, self.server.model_id):
+            return False
+        self._fail(ApiError(421, "not_leader", f"このエンジンはモデル {self.server.model_id} のもの（{header} ではない）"))
+        return True
+
     def do_GET(self) -> None:
-        self._run(self._get)
+        if self._misdirected():
+            return
+        try:
+            self._run(self._get)
+        finally:
+            if not is_probe(self.path):
+                self.server.touch()
 
     def _user(self) -> str | None:
         """Return the authenticated user, or None without an authentication setting. Raise 401 on failure."""
@@ -281,7 +316,12 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------ 書き込み
 
     def do_POST(self) -> None:
-        self._run(self._post)
+        if self._misdirected():
+            return
+        try:
+            self._run(self._post)
+        finally:
+            self.server.touch()
 
     def _post(self) -> tuple[int, Any]:
         url = urllib.parse.urlsplit(self.path)
@@ -394,7 +434,8 @@ class Server(ThreadingHTTPServer):
     def __init__(self, workspace: Workspace | Replica | None, host: str = "127.0.0.1", port: int = 8080, *,
                  write_timeout: float | None = 30.0, tokens: dict[str, str] | None = None,
                  user_header: str | None = None, trusted_proxies: Iterable[str] = (), max_body: int = 16 << 20,
-                 max_cells: int = 100_000, max_threads: int = 64, request_timeout: float | None = 30.0):
+                 max_cells: int = 100_000, max_threads: int = 64, request_timeout: float | None = 30.0,
+                 model_id: str | None = None):
         if tokens is not None and user_header is not None:
             raise ValueError("tokens と user_header はどちらか一方")
         trusted = parse_networks(trusted_proxies)
@@ -407,8 +448,11 @@ class Server(ThreadingHTTPServer):
         self.write_timeout = write_timeout
         self.tokens, self.user_header, self.trusted_proxies = tokens, user_header, trusted
         self.max_body, self.max_cells, self.request_timeout = max_body, max_cells, request_timeout
+        self.model_id = model_id  # with a PgJournal: refuse requests that X-Nanashi-Model sends for another model
         self._slots = threading.BoundedSemaphore(max_threads)
         self._thread: threading.Thread | None = None
+        # Connections in progress (probes too) and the monotonic time of the last use (probes not).
+        self._active, self._last, self._use = 0, time.monotonic(), threading.Lock()
 
     def trusted(self, host: str) -> bool:
         """Return True if host is in one of the trusted_proxies."""
@@ -433,6 +477,8 @@ class Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
+        with self._use:
+            self._active += 1
         # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（Ctrl-C）は
         # スレッドを起こしたあとにも届き、そのスレッドも枠を返す。ここでも返すと 2 度返して ValueError になり、
         # socketserver がそれを握りつぶして止まらなくなる（止まるので、枠が 1 つ減っても困らない）
@@ -440,6 +486,8 @@ class Server(ThreadingHTTPServer):
             super().process_request(request, client_address)
         except Exception:
             self._slots.release()
+            with self._use:
+                self._active -= 1
             raise
 
     def process_request_thread(self, request, client_address) -> None:
@@ -453,7 +501,17 @@ class Server(ThreadingHTTPServer):
             self.handle_error(request, client_address)
         finally:
             self._slots.release()
+            with self._use:
+                self._active -= 1
             self.shutdown_request(request)
+
+    def touch(self) -> None:
+        with self._use:
+            self._last = time.monotonic()
+
+    def idle(self) -> float:
+        with self._use:
+            return idle_for(self._active, self._last, time.monotonic())
 
     @property
     def url(self) -> str:
@@ -503,6 +561,8 @@ def main(argv=None) -> None:
     ap.add_argument("--advertise", metavar="URL",
                     help="--pg のとき、書き手としてほかのプロセスに知らせる自分の番地（既定は http://<host>:<port>）")
     ap.add_argument("--lease-ttl", type=float, default=30.0, help="--pg のとき、書き込みの権利（リース）の期限（秒）")
+    ap.add_argument("--idle-exit", type=float, default=0.0, metavar="SECONDS",
+                    help="この秒数のあいだ要求がなければ止まる（/health、/ready、/stats は数えない。0 なら止まらない）")
     args = ap.parse_args(argv)
     tokens = None
     if args.tokens:
@@ -534,7 +594,7 @@ def main(argv=None) -> None:
     # 先に待ち受けて番地を決める（--port 0 でも、知らせる番地に実際の番号が入る）。要求は serve_forever まで受けない
     server = Server(None, args.host, args.port, tokens=tokens, user_header=args.user_header,
                     trusted_proxies=args.trusted_proxy, max_body=args.max_body, max_cells=args.max_cells,
-                    max_threads=args.max_threads)
+                    max_threads=args.max_threads, model_id=args.model_id if args.pg else None)
     if args.pg:
         from .pg_journal import PgJournal, migrate
         if args.migrate:
@@ -553,6 +613,8 @@ def main(argv=None) -> None:
     server.workspace = ws
     log.info("公開中の版 %d、%s で待ち受ける（%s）", ws.seq, server.url, role_of(ws))
     _stop_on_signal(server)
+    if args.idle_exit > 0:
+        _stop_when_idle(server, args.idle_exit)
     try:
         server.serve_forever()
     finally:
@@ -590,6 +652,25 @@ def _stop_on_signal(server: Server) -> None:
     threading.Thread(target=watch, name="nanashi-signal", daemon=True).start()
     for s in (signal.SIGTERM, signal.SIGINT):
         signal.signal(s, on_signal)
+
+
+def _stop_when_idle(server: Server, limit: float) -> None:
+    """Call server.shutdown() after limit seconds without use, or when the parent process (the router) is gone.
+    This is the same path as SIGTERM."""
+    server.touch()  # count from the start of serving; opening the workspace can take a long time
+    parent = os.getppid()
+
+    def watch() -> None:
+        while server.idle() < limit:
+            if os.getppid() != parent:
+                log.info("親のプロセス（ルーター）が止まったので止める")
+                break
+            time.sleep(min(1.0, limit / 4))
+        else:
+            log.info("%g 秒のあいだ要求がなかったので止める", limit)
+        server.shutdown()
+
+    threading.Thread(target=watch, name="nanashi-idle", daemon=True).start()
 
 
 def parse_networks(values: Iterable[str]) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
