@@ -1630,9 +1630,11 @@ func (x *CreateScenarioRequest) GetCopyFrom() string {
 }
 
 type SaveMetricRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
-	Metric        *MetricDef             `protobuf:"bytes,2,opt,name=metric,proto3" json:"metric,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	AppId  string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	Metric *MetricDef             `protobuf:"bytes,2,opt,name=metric,proto3" json:"metric,omitempty"`
+	// If a change deletes the cells of an input Metric, the api refuses it. Set replace to accept the change.
+	Replace       bool `protobuf:"varint,3,opt,name=replace,proto3" json:"replace,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1679,6 +1681,13 @@ func (x *SaveMetricRequest) GetMetric() *MetricDef {
 		return x.Metric
 	}
 	return nil
+}
+
+func (x *SaveMetricRequest) GetReplace() bool {
+	if x != nil {
+		return x.Replace
+	}
+	return false
 }
 
 type RenameMetricRequest struct {
@@ -3870,10 +3879,11 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x15CreateScenarioRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1b\n" +
-	"\tcopy_from\x18\x03 \x01(\tR\bcopyFrom\"Y\n" +
+	"\tcopy_from\x18\x03 \x01(\tR\bcopyFrom\"s\n" +
 	"\x11SaveMetricRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12-\n" +
-	"\x06metric\x18\x02 \x01(\v2\x15.nanashi.v1.MetricDefR\x06metric\"[\n" +
+	"\x06metric\x18\x02 \x01(\v2\x15.nanashi.v1.MetricDefR\x06metric\x12\x18\n" +
+	"\areplace\x18\x03 \x01(\bR\areplace\"[\n" +
 	"\x13RenameMetricRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x19\n" +

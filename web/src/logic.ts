@@ -150,6 +150,19 @@ export function writeCoords(
   return out;
 }
 
+// spreadable tells if an edit of a cell writes the typed value. A spread goes over all members of an open
+// dimension, so a filter with more members must not leave the dimension open. Only SUM is the sum of the spread.
+export function spreadable(
+  metricDims: string[],
+  grid: Grid,
+  filters: Filters,
+  aggregation: string,
+): boolean {
+  if (aggregation !== "" && aggregation !== "SUM") return false;
+  const onAxis = (d: string) => grid.rowDims.includes(d) || grid.colDims.includes(d);
+  return metricDims.every((d) => onAxis(d) || (filters[d]?.length ?? 0) <= 1);
+}
+
 export const keyLabel = (k: string[]) => k.map((m) => m || "(なし)").join(" / ");
 
 function csvField(s: string): string {

@@ -25,6 +25,7 @@ import {
   mergeFilters,
   parseValue,
   total,
+  spreadable,
   writeCoords,
   type Grid,
   type Spec,
@@ -199,7 +200,13 @@ export function Pivot(props: {
           display={spec.display}
           editable={(m) => {
             const d = defs.get(m);
-            return !props.compact && can(Role.CONTRIBUTOR) && !!d && (!d.formula || d.overridable);
+            return (
+              !props.compact &&
+              can(Role.CONTRIBUTOR) &&
+              !!d &&
+              (!d.formula || d.overridable) &&
+              spreadable(d.dimensions, grid, filters, spec.aggregation)
+            );
           }}
           onWrite={(r, c, t) => write(grid, r, c, t)}
           onSelect={(r, c) => {

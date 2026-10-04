@@ -81,6 +81,12 @@ func TestAccessByRole(t *testing.T) {
 	if _, err := client.WriteCells(ctx, write); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Errorf("viewer writes: got %v, want permission denied", err)
 	}
+	// The audit detail has the cell values of the requests, so the access rules of a VIEWER do not apply to it.
+	audit := connect.NewRequest(&nanashiv1.ListAuditRequest{AppId: app})
+	audit.Header().Set("X-Nanashi-User", "bob")
+	if _, err := client.ListAudit(ctx, audit); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("viewer reads the audit trail: got %v, want permission denied", err)
+	}
 	read := connect.NewRequest(&nanashiv1.GetModelRequest{AppId: app})
 	read.Header().Set("X-Nanashi-User", "carol")
 	if _, err := client.GetModel(ctx, read); connect.CodeOf(err) != connect.CodePermissionDenied {

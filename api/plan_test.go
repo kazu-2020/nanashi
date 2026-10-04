@@ -285,3 +285,45 @@ func TestModelDefHidesMembersAndPropertyMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricOpKeepsInputCells(t *testing.T) {
+	em := model(t)
+	budget := func(dims ...string) *nanashiv1.MetricDef {
+		return &nanashiv1.MetricDef{Name: "Budget", Dimensions: dims}
+	}
+	if ops, err := metricOp(em, budget("Product", "Region"), false); err != nil || len(ops) != 0 {
+		t.Errorf("same input Metric: got %v, %v, want no operation", ops, err)
+	}
+	for _, m := range []*nanashiv1.MetricDef{
+		budget("Product"),
+		{Name: "Budget", Dimensions: []string{"Product", "Region"}, Kind: "boolean"},
+		{Name: "Budget", Dimensions: []string{"Product", "Region"}, Formula: "1"},
+	} {
+		if _, err := metricOp(em, m, false); err == nil {
+			t.Errorf("%v: replaced the input cells without replace", m)
+		}
+		if ops, err := metricOp(em, m, true); err != nil || len(ops) != 1 {
+			t.Errorf("%v with replace: got %v, %v", m, ops, err)
+		}
+	}
+	if ops, err := metricOp(em, &nanashiv1.MetricDef{Name: "Revenue", Dimensions: []string{"Product"}, Formula: "2"}, false); err != nil ||
+		opsJSON(t, ops) != `[{"op":"add_formula","args":["Revenue",["Product"],"2"],"kwargs":{"kind":"number","overridable":false}}]` {
+		t.Errorf("formula change: got %s, %v", opsJSON(t, ops), err)
+	}
+}
+
+func TestVisibleComments(t *testing.T) {
+	l := eastOnly().through(model(t))
+	comments := []*nanashiv1.Comment{
+		{Id: "1", Cell: map[string]string{"Region": "East", "Product": "A"}},
+		{Id: "2", Cell: map[string]string{"Region": "West"}},
+		{Id: "3"},
+	}
+	var ids []string
+	for _, c := range visibleComments(comments, l) {
+		ids = append(ids, c.Id)
+	}
+	if got := strings.Join(ids, ","); got != "1,3" {
+		t.Errorf("visible comments: %s, want 1,3", got)
+	}
+}

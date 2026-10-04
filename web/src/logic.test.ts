@@ -8,6 +8,7 @@ import {
   mergeFilters,
   METRIC,
   parseCsv,
+  spreadable,
   writeCoords,
 } from "./logic";
 
@@ -48,4 +49,15 @@ test("csv parse handles quotes and page selectors override view filters", () => 
     A: ["y"],
     B: ["z"],
   });
+});
+
+test("an edit is refused if its spread goes outside the filter or the aggregation is not SUM", () => {
+  const resp = create(QueryResponseSchema, { dimensions: ["Product"], cells: [] });
+  const g = buildGrid(resp, ["Sales"], ["Product"], [], {}, {});
+  const dims = ["Product", "Region"];
+  expect(spreadable(dims, g, { Region: ["East"] }, "SUM")).toBe(true);
+  expect(spreadable(dims, g, {}, "")).toBe(true);
+  expect(spreadable(dims, g, { Region: ["East", "West"] }, "SUM")).toBe(false);
+  for (const agg of ["AVG", "MIN", "MAX", "COUNT"])
+    expect(spreadable(dims, g, {}, agg)).toBe(false);
 });

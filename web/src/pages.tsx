@@ -2,7 +2,8 @@
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
-import { api } from "./api";
+import { Code, ConnectError } from "@connectrpc/connect";
+import { api, errorText } from "./api";
 import {
   ItemType,
   ListKind,
@@ -463,7 +464,13 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
         <Button
           onPress={() =>
             mutate(async () => {
-              await api.saveMetric({ appId, metric: f });
+              const save = (replace: boolean) => api.saveMetric({ appId, metric: f, replace });
+              // The api refuses a change that deletes the input values, until the user accepts it.
+              await save(false).catch(async (e: unknown) => {
+                const refused = e instanceof ConnectError && e.code === Code.FailedPrecondition;
+                if (!refused || !confirm(`${errorText(e)}。変更しますか？`)) throw e;
+                await save(true);
+              });
               props.onSaved(f.name);
             })
           }

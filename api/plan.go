@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -944,4 +945,38 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 		}
 	}
 	return lists, metrics
+}
+
+// metricOp gives the operations that save m. It gives no operation for an input Metric that does not change.
+// add_input and add_formula delete the cells of an input Metric, so a change to one needs replace.
+func metricOp(em engineModel, m *nanashiv1.MetricDef, replace bool) ([]op, error) {
+	kind := cmp.Or(m.Kind, "number")
+	dims := m.Dimensions
+	if dims == nil {
+		dims = []string{}
+	}
+	if old, err := em.metric(m.Name); err == nil && old.Formula == "" {
+		if m.Formula == "" && old.Kind == kind && slices.Equal(old.Dims, dims) {
+			return nil, nil
+		}
+		if !replace {
+			return nil, fmt.Errorf("入力メトリック %s を変更すると、入力した値がすべて消える", m.Name)
+		}
+	}
+	if m.Formula == "" {
+		return []op{newOp("add_input", m.Name, dims, []any{}).with(map[string]any{"kind": kind})}, nil
+	}
+	return []op{newOp("add_formula", m.Name, dims, m.Formula).with(map[string]any{"kind": kind, "overridable": m.Overridable})}, nil
+}
+
+// visibleComments removes the comments on a cell with a member that l hides.
+func visibleComments(comments []*nanashiv1.Comment, l limits) []*nanashiv1.Comment {
+	return slices.DeleteFunc(comments, func(c *nanashiv1.Comment) bool {
+		for list, member := range c.Cell {
+			if !l.visible(list, member) {
+				return true
+			}
+		}
+		return false
+	})
 }

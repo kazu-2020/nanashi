@@ -48,6 +48,8 @@ ok alice EditMembers "{\"appId\": \"$APP\", \"list\": \"Product\", \"edits\": [
   {\"set\": {\"name\": \"A\", \"properties\": {\"Category\": \"Hard\", \"Note\": \"first\"}}},
   {\"set\": {\"name\": \"B\", \"properties\": {\"Category\": \"Hard\"}}},
   {\"set\": {\"name\": \"C\", \"properties\": {\"Category\": \"Soft\"}}}]}" >/dev/null
+check "a property name is used once in a list" '.code == "already_exists"' \
+  "$(call alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Product\", \"property\": {\"name\": \"Note\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"Category\"}}")"
 
 ok alice CreateList "{\"appId\": \"$APP\", \"name\": \"Sales\", \"kind\": \"LIST_KIND_TRANSACTION\"}" >/dev/null
 ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Sales\", \"property\": {\"name\": \"Product\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"Product\"}}" >/dev/null
@@ -103,6 +105,33 @@ check "rename reaches tables and views" '(.tables[0].metrics == ["Budget 2027", 
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 MODEL2=$(ok alice GetModel "{\"appId\": \"$APP2\"}")
 check "restored model" '(.lists[] | select(.name == "Product") | .members[0].properties.Note == "first") and (.views | length == 1) and (.lists[-1].kind == "LIST_KIND_SCENARIO")' "$MODEL2"
+B27='"appId": "'$APP2'", "metric": {"name": "Budget 2027"'
+check "a dimension change of an input Metric is refused" '.code == "failed_precondition"' \
+  "$(call alice SaveMetric "{$B27, \"dimensions\": [\"Product\"]}}")"
+check "a formula over an input Metric is refused" '.code == "failed_precondition"' \
+  "$(call alice SaveMetric "{$B27, \"formula\": \"1\"}}")"
+Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Budget 2027\"], \"rows\": [\"Product\"]}")
+check "the refused change keeps the input values" "$(cell 'Budget 2027' '["A"]').number == 2400" "$Q"
+ok alice SaveMetric "{$B27, \"dimensions\": [\"Product\"]}, \"replace\": true}" >/dev/null
+check "replace changes the input Metric" '.metrics[] | select(.name == "Budget 2027") | .dimensions == ["Product"]' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+ok alice DeleteMetric "{\"appId\": \"$APP2\", \"name\": \"Budget 2027\"}" >/dev/null
+check "delete removes the Metric from tables and views" '(.tables[0].metrics == ["Revenue"]) and ((.views[0].metrics // []) == [])' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+ok alice SaveView "{\"appId\": \"$APP2\", \"name\": \"C only\", \"metrics\": [\"Revenue\"], \"filters\": {\"Product\": {\"names\": [\"C\"]}}}" >/dev/null
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"C\", \"newName\": \" D \"}}]}" >/dev/null
+check "rename gives the view filter the trimmed name" '.views[] | select(.name == "C only") | .filters.Product.names == ["D"]' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+ok alice CreateList "{\"appId\": \"$APP2\", \"name\": \"Load\", \"kind\": \"LIST_KIND_DIMENSION\"}" >/dev/null
+ok alice AddProperty "{\"appId\": \"$APP2\", \"list\": \"Load\", \"property\": {\"name\": \"Note\", \"type\": \"PROPERTY_TYPE_TEXT\"}}" >/dev/null
+PIDS=()
+for i in $(seq 8); do
+  ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Load\", \"edits\": [{\"add\": {\"name\": \"m$i\", \"properties\": {\"Note\": \"n$i\"}}}]}" >/dev/null &
+  PIDS+=($!)
+done
+wait "${PIDS[@]}"
+check "concurrent edits keep all TEXT values" '[.lists[] | select(.name == "Load") | .members[].properties.Note] | sort == ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"]' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 
 ok alice SetMemberRole "{\"appId\": \"$APP\", \"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}" >/dev/null
 ok alice SaveAccessRule "{\"appId\": \"$APP\", \"role\": \"ROLE_VIEWER\", \"list\": \"Product\", \"members\": [\"A\"]}" >/dev/null
@@ -115,6 +144,12 @@ check "bob total is A only" "$(cell Budget '["A"]').number == 2400" "$Q"
 check "bob cannot write" '.code == "permission_denied"' \
   "$(call bob WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Budget\", \"coords\": {\"Product\": \"A\", \"Scenario\": \"Base\", \"Month\": \"2026-01\"}, \"value\": {\"number\": 1}}]}")"
 check "bob cannot model" '.code == "permission_denied"' "$(call bob SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"X\"}}")"
+ok alice AddComment "{\"appId\": \"$APP\", \"target\": \"metric:Budget\", \"cell\": {\"Product\": \"B\"}, \"body\": \"hidden\"}" >/dev/null
+check "bob does not see a comment on a hidden cell" '[.comments[].body] == ["check this"]' \
+  "$(ok bob ListComments "{\"appId\": \"$APP\", \"target\": \"metric:Budget\"}")"
+check "alice sees all comments" '[.comments[].body] == ["check this", "hidden"]' \
+  "$(ok alice ListComments "{\"appId\": \"$APP\", \"target\": \"metric:Budget\"}")"
+check "bob cannot read the audit trail" '.code == "permission_denied"' "$(call bob ListAudit "{\"appId\": \"$APP\"}")"
 ok alice SetMemberRole "{\"appId\": \"$APP\", \"user\": \"carol\", \"role\": \"ROLE_CONTRIBUTOR\"}" >/dev/null
 ok alice SaveAccessRule "{\"appId\": \"$APP\", \"role\": \"ROLE_CONTRIBUTOR\", \"list\": \"Product\", \"members\": [\"A\"], \"write\": true}" >/dev/null
 W='"metric": "Budget", "coords": {"Scenario": "Base", "Month": "2026-02", "Product": '
@@ -125,6 +160,6 @@ check "carol cannot spread over Product" '.code == "permission_denied"' \
   "$(call carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Budget\", \"coords\": {\"Scenario\": \"Base\"}, \"value\": {\"number\": 1}}]}")"
 check "no user" '.code == "unauthenticated"' "$(curl -sS -X POST "$API/ListApplications" -H 'Content-Type: application/json' -d '{}')"
 
-AUDIT=$(ok bob ListAudit "{\"appId\": \"$APP\"}")
+AUDIT=$(ok alice ListAudit "{\"appId\": \"$APP\"}")
 check "audit trail" '([.entries[].action] | index("WriteCells") != null) and ([.entries[].action] | index("Query") == null) and (.entries[0] | .action == "WriteCells" and .user == "carol")' "$AUDIT"
 echo "e2e passed: $APP (restored as $APP2), $(jq '.entries | length' <<<"$AUDIT") audit entries"

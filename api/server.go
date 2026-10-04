@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,16 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 type PlanServer struct {
 	Pool    *pgxpool.Pool
 	Engines *Engines
+	locks   sync.Map // Application ID to *sync.Mutex.
+}
+
+// lock makes the read-modify-write steps of one application run one at a time. Call the result to unlock.
+// ponytail: the lock is in one api process. If more api processes run, use a lock in PostgreSQL.
+func (s *PlanServer) lock(app string) func() {
+	v, _ := s.locks.LoadOrStore(app, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 var _ nanashiv1connect.PlanServiceHandler = (*PlanServer)(nil)
@@ -60,7 +71,9 @@ const (
 var rpcRules = map[string]rpcRule{
 	"ListApplications": {}, "CreateApplication": {audit: true},
 	"GetModel": {min: viewer}, "Query": {min: viewer}, "ListComments": {min: viewer}, "AddComment": {viewer, true},
-	"ListAudit": {min: viewer}, "ListSnapshots": {min: viewer},
+	"ListSnapshots": {min: viewer},
+	// The audit detail has the full requests (cells and CSV), and the access rules do not apply to it.
+	"ListAudit":  {min: modeler},
 	"WriteCells": {contributor, true}, "Import": {contributor, true}, "CreateSnapshot": {contributor, true},
 	"CreateList": {modeler, true}, "AddProperty": {modeler, true}, "EditMembers": {modeler, true},
 	"CreateCalendar": {modeler, true}, "CreateScenario": {modeler, true}, "SaveMetric": {modeler, true},
@@ -380,6 +393,7 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 	if p == nil || strings.TrimSpace(p.Name) == "" {
 		return nil, invalid(errors.New("プロパティの名前が空"))
 	}
+	defer s.lock(app)()
 	em, _, err := s.Engines.model(ctx, app)
 	if err != nil {
 		return nil, err
@@ -388,10 +402,15 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 	if !found {
 		return nil, invalid(fmt.Errorf("リスト %s がない", list))
 	}
-	for _, x := range dim.Props {
-		if x.Name == p.Name {
-			return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("%s にプロパティ %s はすでにある", list, p.Name))
-		}
+	meta, err := s.meta(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	// The engine knows only the DIMENSION properties. The api tables have the other types.
+	exists := slices.ContainsFunc(dim.Props, func(x engineProp) bool { return x.Name == p.Name }) ||
+		slices.ContainsFunc(meta.Props, func(x propRow) bool { return x.List == list && x.Name == p.Name })
+	if exists {
+		return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("%s にプロパティ %s はすでにある", list, p.Name))
 	}
 	var ops []op
 	switch p.Type {
@@ -428,6 +447,7 @@ func (s *PlanServer) EditMembers(ctx context.Context, req *connect.Request[nanas
 }
 
 func (s *PlanServer) editMembers(ctx context.Context, app, list string, edits []*nanashiv1.MemberEdit) (*ack, error) {
+	defer s.lock(app)()
 	em, _, err := s.Engines.model(ctx, app)
 	if err != nil {
 		return nil, err
@@ -455,14 +475,15 @@ func (s *PlanServer) editMembers(ctx context.Context, app, list string, edits []
 		if r == nil {
 			continue
 		}
+		name := strings.TrimSpace(r.NewName) // editOps gives the engine the same name.
 		if _, err := s.Pool.Exec(ctx, `update app_access_rule set members = (select jsonb_agg(case when m = to_jsonb($3::text) then to_jsonb($4::text) else m end)
 			from jsonb_array_elements(members) m) where app_id = $1 and list = $2 and members ? $3`,
-			app, list, r.Name, r.NewName); err != nil {
+			app, list, r.Name, name); err != nil {
 			return nil, dbError(err)
 		}
 		if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, array['filters', $2, 'names'],
 			(select jsonb_agg(case when n = to_jsonb($3::text) then to_jsonb($4::text) else n end) from jsonb_array_elements(def->'filters'->$2->'names') n))
-			where app_id = $1 and def->'filters'->$2->'names' ? $3`, app, list, r.Name, r.NewName); err != nil {
+			where app_id = $1 and def->'filters'->$2->'names' ? $3`, app, list, r.Name, name); err != nil {
 			return nil, dbError(err)
 		}
 	}
@@ -529,29 +550,19 @@ func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanash
 	if m == nil || strings.TrimSpace(m.Name) == "" {
 		return nil, invalid(errors.New("Metric の名前が空"))
 	}
-	kind := m.Kind
-	if kind == "" {
-		kind = "number"
+	defer s.lock(app)()
+	em, _, err := s.Engines.model(ctx, app)
+	if err != nil {
+		return nil, err
 	}
-	dims := m.Dimensions
-	if dims == nil {
-		dims = []string{}
+	ops, err := metricOp(em, m, req.Msg.Replace)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
-	var o op
-	if m.Formula == "" {
-		em, _, err := s.Engines.model(ctx, app)
-		if err != nil {
-			return nil, err
-		}
-		// add_input replaces all cells. Keep an input Metric that does not change.
-		if old, err := em.metric(m.Name); err == nil && old.Formula == "" && old.Kind == kind && strings.Join(old.Dims, "\x00") == strings.Join(dims, "\x00") {
-			return ok()
-		}
-		o = newOp("add_input", m.Name, dims, []any{}).with(map[string]any{"kind": kind})
-	} else {
-		o = newOp("add_formula", m.Name, dims, m.Formula).with(map[string]any{"kind": kind, "overridable": m.Overridable})
+	if len(ops) == 0 {
+		return ok()
 	}
-	if err := s.Engines.write(ctx, app, callerOf(ctx).user, []op{o}); err != nil {
+	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
 		return nil, err
 	}
 	return ok()
@@ -573,6 +584,12 @@ func (s *PlanServer) RenameMetric(ctx context.Context, req *connect.Request[nana
 func (s *PlanServer) DeleteMetric(ctx context.Context, req *connect.Request[nanashiv1.DeleteMetricRequest]) (*ack, error) {
 	if err := s.Engines.write(ctx, req.Msg.AppId, callerOf(ctx).user, []op{newOp("remove_metric", req.Msg.Name)}); err != nil {
 		return nil, err
+	}
+	// A table or a view with a deleted Metric cannot query, so remove the name from them.
+	if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, '{metrics}',
+		coalesce((select jsonb_agg(m) from jsonb_array_elements(def->'metrics') m where m <> to_jsonb($2::text)), '[]'))
+		where app_id = $1 and def->'metrics' ? $2`, req.Msg.AppId, req.Msg.Name); err != nil {
+		return nil, dbError(err)
 	}
 	return ok()
 }
@@ -726,6 +743,13 @@ func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nana
 	})
 	if err != nil {
 		return nil, dbError(err)
+	}
+	if l := callerOf(ctx).limits; len(l) > 0 {
+		em, _, err := s.Engines.model(ctx, req.Msg.AppId)
+		if err != nil {
+			return nil, err
+		}
+		comments = visibleComments(comments, l.through(em))
 	}
 	return connect.NewResponse(&nanashiv1.ListCommentsResponse{Comments: comments}), nil
 }

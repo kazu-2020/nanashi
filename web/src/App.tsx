@@ -31,7 +31,7 @@ const PAGES: { id: string; label: string; page: () => ReactNode; role?: Role }[]
   { id: "scenarios", label: "シナリオ", page: ScenariosPage },
   { id: "calendar", label: "カレンダー", page: CalendarPage },
   { id: "comments", label: "コメント", page: CommentsPage },
-  { id: "audit", label: "監査ログ", page: AuditPage },
+  { id: "audit", label: "監査ログ", page: AuditPage, role: Role.MODELER },
   { id: "snapshots", label: "スナップショット", page: SnapshotsPage },
   { id: "access", label: "アクセス権", page: AccessPage, role: Role.ADMIN },
 ];

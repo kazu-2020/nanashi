@@ -220,6 +220,8 @@ message CreateScenarioRequest {
 message SaveMetricRequest {
   string app_id = 1;
   MetricDef metric = 2;
+  // If a change deletes the cells of an input Metric, the api refuses it. Set replace to accept the change.
+  bool replace = 3;
 }
 
 message RenameMetricRequest {
