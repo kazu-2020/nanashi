@@ -511,6 +511,8 @@ class Model:
         target, mapping = d.properties[prop]
         mapping = dict(mapping)
         for member, value in values.items():
+            if member not in d:
+                raise ValueError(f"{dim}: メンバー {member!r} がない")
             if value is None:
                 mapping.pop(member, None)
             else:

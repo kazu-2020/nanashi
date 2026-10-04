@@ -196,6 +196,8 @@ class Redefine(unittest.TestCase):
             m.set_property_values("Product", "Category", {"A": "Z"})
         with self.assertRaises(ValueError):
             m.set_property_values("Product", "Size", {"A": "X"})
+        with self.assertRaises(ValueError):
+            m.set_property_values("Product", "Category", {"Missing": None})
 
     def test_overrides_survive_redefinition(self):
         self.m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True)
