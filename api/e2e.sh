@@ -72,6 +72,16 @@ check "list kinds" '[.lists[] | .kind] == ["LIST_KIND_CALENDAR", "LIST_KIND_CALE
 check "member properties" '.lists[] | select(.name == "Product") | .members[0].properties == {"Category": "Hard", "Note": "first"}' "$MODEL"
 check "transaction rows" '.lists[] | select(.name == "Sales") | [.members[] | .properties.Amount] == ["100", "50", "25", "10"]' "$MODEL"
 check "property Metric is not a Metric" '[.metrics[].name] == ["Budget", "Revenue"]' "$MODEL"
+for req in "SaveMetric {\"appId\": \"$APP\", \"metric\": {\"name\": \"Sales.Amount\", \"dimensions\": [\"Sales\"], \"kind\": \"boolean\"}, \"replace\": true}" \
+  "RenameMetric {\"appId\": \"$APP\", \"name\": \"Sales.Amount\", \"newName\": \"X\"}" \
+  "RenameMetric {\"appId\": \"$APP\", \"name\": \"Budget\", \"newName\": \"Sales.Amount\"}" \
+  "DeleteMetric {\"appId\": \"$APP\", \"name\": \"Sales.Amount\"}"; do
+  check "${req%% *} refuses a property Metric" '.code == "failed_precondition"' "$(call alice ${req%% *} "${req#* }")"
+done
+ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Product.Cost\", \"dimensions\": [\"Product\"]}}" >/dev/null
+check "a property does not replace a Metric with its name" '.code == "already_exists"' \
+  "$(call alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Product\", \"property\": {\"name\": \"Cost\", \"type\": \"PROPERTY_TYPE_NUMBER\"}}")"
+ok alice DeleteMetric "{\"appId\": \"$APP\", \"name\": \"Product.Cost\"}" >/dev/null
 
 Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"Revenue\"], \"rows\": [\"Product\"]}")
 check "BY SUM of transactions" "[$(cell Revenue '["A"]').number, $(cell Revenue '["C"]').number] == [125, 10]" "$Q"
@@ -104,7 +114,9 @@ Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Revenue\", \"Budget\"
 check "restored data" "[$(cell Revenue '["A", ""]').number, $(cell Budget '["A", "Plan"]').number] == [125, 1200]" "$Q"
 Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Target\"], \"rows\": [\"Product\"]}")
 check "restore keeps an override value" "[$(cell Target '["A"]').number, $(cell Target '["C"]').number] == [999, 20]" "$Q"
+ok alice AddComment "{\"appId\": \"$APP2\", \"target\": \"metric:Budget\", \"cell\": {\"Product\": \"C\"}, \"body\": \"on C\"}" >/dev/null
 ok alice RenameMetric "{\"appId\": \"$APP2\", \"name\": \"Budget\", \"newName\": \"Budget 2027\"}" >/dev/null
+check "rename reaches the comments" '[.comments[].body] == ["on C"]' "$(ok alice ListComments "{\"appId\": \"$APP2\", \"target\": \"metric:Budget 2027\"}")"
 MODEL2=$(ok alice GetModel "{\"appId\": \"$APP2\"}")
 check "rename reaches tables and views" '(.tables[0].metrics == ["Budget 2027", "Revenue"]) and (.views[0].metrics == ["Budget 2027"])' "$MODEL2"
 check "restored model" '(.lists[] | select(.name == "Product") | .members[0].properties.Note == "first") and (.views | length == 1) and (.lists[-1].kind == "LIST_KIND_SCENARIO")' "$MODEL2"
@@ -123,12 +135,16 @@ check "delete removes the Metric from tables and views" '(.tables[0].metrics == 
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 ok alice SaveView "{\"appId\": \"$APP2\", \"name\": \"C only\", \"metrics\": [\"Revenue\"], \"filters\": {\"Product\": {\"names\": [\"C\"]}}}" >/dev/null
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"C\", \"newName\": \" D \"}}]}" >/dev/null
+check "member rename reaches the comment cell" '.comments[0].cell.Product == "D"' \
+  "$(ok alice ListComments "{\"appId\": \"$APP2\", \"target\": \"metric:Budget 2027\"}")"
 check "rename gives the view filter the trimmed name" '.views[] | select(.name == "C only") | .filters.Product.names == ["D"]' \
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 ok alice SetMemberRole "{\"appId\": \"$APP2\", \"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}" >/dev/null
 ok alice SaveAccessRule "{\"appId\": \"$APP2\", \"role\": \"ROLE_VIEWER\", \"list\": \"Product\", \"members\": [\"A\", \"D\"]}" >/dev/null
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"remove\": {\"name\": \"D\"}}]}" >/dev/null
 check "remove takes the member out of access rules" '.rules[0].members == ["A"]' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
+check "remove keeps the comments of the member" '.comments[0].cell.Product == "D"' \
+  "$(ok alice ListComments "{\"appId\": \"$APP2\", \"target\": \"metric:Budget 2027\"}")"
 check "remove takes the member out of view filters" '.views[] | select(.name == "C only") | (.filters.Product.names // []) == []' \
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"add\": {\"name\": \"D\"}}]}" >/dev/null
@@ -144,6 +160,15 @@ done
 wait "${PIDS[@]}"
 check "concurrent edits keep all TEXT values" '[.lists[] | select(.name == "Load") | .members[].properties.Note] | sort == ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"]' \
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+PIDS=()
+for i in $(seq 8); do
+  ok alice Import "$(jq -n --arg app "$APP2" --arg csv "$(printf 'amount\n%s\n' "$i")" \
+    '{appId: $app, csv: $csv, list: {list: "Sales", propertyColumns: {Amount: "amount"}}}')" >/dev/null &
+  PIDS+=($!)
+done
+wait "${PIDS[@]}"
+check "concurrent imports add all transaction rows" '[.lists[] | select(.name == "Sales") | .members[].name] | length == 12' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
 ok alice DeleteItem "{\"appId\": \"$APP2\", \"id\": \"$VIEW\", \"type\": \"ITEM_TYPE_VIEW\"}" >/dev/null
 check "deleting a view removes its board widget" '(.boards[0].widgets | length == 1) and (.boards[0].widgets[0].text == "Notes")' \
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
@@ -156,6 +181,11 @@ check "bob sees only Product A" '.lists[] | select(.name == "Product") | [.membe
 Q=$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"Revenue\", \"Budget\"], \"rows\": [\"Product\"]}")
 check "bob reads only Product A" '[.cells[].coords[0]] | unique == ["A"]' "$Q"
 check "bob total is A only" "$(cell Budget '["A"]').number == 2400" "$Q"
+ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Total\", \"dimensions\": [\"Scenario\", \"Month\"], \"formula\": \"Budget[REMOVE SUM: Product]\"}}" >/dev/null
+check "bob cannot read a total over hidden products" '(.cells // []) == []' \
+  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"Total\"], \"aggregation\": \"SUM\"}")"
+check "bob does not see the total in the model" '[.metrics[].name] | index("Total") == null' "$(ok bob GetModel "{\"appId\": \"$APP\"}")"
+check "alice reads the total" '.cells[0].value.number == 2414' "$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"Total\"], \"aggregation\": \"SUM\"}")"
 ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Pick\", \"dimensions\": [\"Category\"], \"kind\": \"member:Product\"}}" >/dev/null
 ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Pick\", \"coords\": {\"Category\": \"Hard\"}, \"value\": {\"member\": \"B\"}},
   {\"metric\": \"Pick\", \"coords\": {\"Category\": \"Soft\"}, \"value\": {\"member\": \"A\"}}]}" >/dev/null

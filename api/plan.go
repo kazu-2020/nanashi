@@ -188,6 +188,11 @@ type appMeta struct {
 	Props []propRow
 }
 
+// holdsProperty tells if the Metric name is the name of a property Metric. The property owns that Metric.
+func (m appMeta) holdsProperty(name string) bool {
+	return slices.ContainsFunc(m.Props, func(p propRow) bool { return propMetric(p.List, p.Name) == name })
+}
+
 // propKind is the kind of the input Metric that holds a NUMBER or BOOLEAN property.
 var propKind = map[nanashiv1.PropertyType]string{
 	nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER:  "number",
@@ -273,6 +278,17 @@ func intersect(a, b map[string]bool) map[string]bool {
 		}
 	}
 	return out
+}
+
+// hides tells if a formula Metric can show data of hidden members: it lacks a limited list, so it can aggregate the
+// list away (for example Budget[REMOVE SUM: Product]). An input Metric without the list holds no data about it.
+func (l limits) hides(m engineMetric) bool {
+	for list := range l {
+		if m.Formula != "" && !slices.Contains(m.Dims, list) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l limits) visible(list, member string) bool {
@@ -381,6 +397,9 @@ next:
 		if err != nil {
 			return nil, err
 		}
+		if l.hides(m) {
+			continue
+		}
 		q := map[string][]string{}
 		for _, d := range m.Dims {
 			members := req.Filters[d].GetNames()
@@ -398,6 +417,12 @@ next:
 				members = slices.DeleteFunc(slices.Clone(members), func(x string) bool { return !exists[x] || limited && !lim.read[x] })
 				if len(members) == 0 {
 					continue next
+				}
+				// All members is the same as no filter, and a big transaction list does not fit in the URL.
+				// ponytail: a limit that hides some members still sends all readable names in the URL. Past about
+				// 64 KiB the engine refuses the request (414). Upgrade: let the engine take the filter in a POST body.
+				if len(members) == len(dim.Members) {
+					members = nil
 				}
 			}
 			if len(members) > 0 {
@@ -926,7 +951,7 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 	}
 	var metrics []*nanashiv1.MetricDef
 	for _, m := range em.Metrics {
-		if !hidden[m.Name] {
+		if !hidden[m.Name] && !l.hides(m) {
 			metrics = append(metrics, &nanashiv1.MetricDef{Name: m.Name, Dimensions: m.Dims, Kind: m.Kind, Formula: m.Formula, Overridable: m.Overridable})
 		}
 	}

@@ -669,6 +669,12 @@ export function BoardsPage() {
   const [page, setPage] = useState<Record<string, string>>({});
   const [text, setText] = useState("");
   const b = model.boards.find((x) => x.id === sel);
+  // The page selector members of one board must not filter the next board.
+  const choose = (id: string) => {
+    setSel(id);
+    setPage({});
+  };
+  const boardPage = Object.fromEntries((b?.pageSelectors ?? []).map((d) => [d, page[d] ?? ""]));
   const modeler = can(Role.MODELER);
   const save = (
     board: BoardDef,
@@ -690,7 +696,7 @@ export function BoardsPage() {
         <Sel
           label="ボード"
           value={sel}
-          onChange={setSel}
+          onChange={choose}
           empty=""
           options={model.boards.map((x): [string, string] => [x.id, x.name])}
         />
@@ -704,7 +710,7 @@ export function BoardsPage() {
             />
             <Button
               size="sm"
-              onPress={() => mutate(async () => setSel((await api.saveBoard({ appId, name })).id))}
+              onPress={() => mutate(async () => choose((await api.saveBoard({ appId, name })).id))}
             >
               ボードを作成
             </Button>
@@ -740,7 +746,11 @@ export function BoardsPage() {
                 ? model.views.find((x) => x.id === w.content.value)
                 : undefined;
             return (
-              <div key={i} className="rounded border p-2">
+              // Pivot keeps its first spec in state, so a widget with another view or definition needs a new key.
+              <div
+                key={`${i}:${JSON.stringify(w.content)}:${JSON.stringify(v ?? null)}`}
+                className="rounded border p-2"
+              >
                 <div className="flex items-center justify-between">
                   <b>{v?.name ?? ""}</b>
                   {modeler && (
@@ -757,7 +767,11 @@ export function BoardsPage() {
                   <p className="whitespace-pre-wrap">{w.content.value}</p>
                 )}
                 {v && (
-                  <Pivot compact initial={{ ...v, filters: toFilters(v.filters) }} page={page} />
+                  <Pivot
+                    compact
+                    initial={{ ...v, filters: toFilters(v.filters) }}
+                    page={boardPage}
+                  />
                 )}
               </div>
             );

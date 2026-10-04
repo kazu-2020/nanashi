@@ -129,6 +129,7 @@ export function Pivot(props: {
     a.href = URL.createObjectURL(new Blob([gridToCsv(g)], { type: "text/csv" }));
     a.download = `${spec.metrics.join("_")}.csv`;
     a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 0);
   };
 
   return (

@@ -133,16 +133,22 @@ func TestQueryReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := json.Marshal(reads)
+	// Revenue is a formula without Region, so it can show West data. Owner is an input without Region.
 	want := `[{"Metric":"Budget","Path":"summary","Query":{"Product":["A"],"Region":["East"],"agg":["sum"],"keep":["Product,Region"]}},` +
-		`{"Metric":"Revenue","Path":"summary","Query":{"Product":["A"],"agg":["sum"],"keep":["Product"]}},` +
 		`{"Metric":"Owner","Path":"slice","Query":{"Product":["A"]}}]`
 	if string(got) != want {
 		t.Errorf("got %s", got)
 	}
 	// A filter outside the rule leaves no member, so the Metric is left out.
 	req.Filters["Region"] = &nanashiv1.Members{Names: []string{"West"}}
-	if reads, _ := queryReads(req, em, eastOnly()); len(reads) != 2 || reads[0].Metric != "Revenue" {
+	if reads, _ := queryReads(req, em, eastOnly()); len(reads) != 1 || reads[0].Metric != "Owner" {
 		t.Errorf("got %+v", reads)
+	}
+	// A rule that gives all members sends no filter: the names of a big list do not fit in the URL.
+	all := accessLimits(contributor, []*nanashiv1.AccessRule{{Role: contributor, List: "Region", Members: []string{"East", "West"}}})
+	req.Filters = nil
+	if reads, _ := queryReads(req, em, all); reads[0].Query["Region"] != nil {
+		t.Errorf("got %+v", reads[0].Query)
 	}
 	// A removed member in a filter is dropped, not sent to the engine.
 	req.Filters = map[string]*nanashiv1.Members{"Product": {Names: []string{"A", "Gone"}}}
@@ -295,6 +301,9 @@ func TestModelDefHidesMembersAndPropertyMetrics(t *testing.T) {
 	for _, m := range metrics {
 		if m.Name == "Sales.Amount" {
 			t.Error("a property Metric must not be in the Metrics")
+		}
+		if m.Name == "Revenue" {
+			t.Error("a formula Metric without the limited list Region must be hidden")
 		}
 	}
 }

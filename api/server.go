@@ -423,6 +423,10 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 		return nil, invalid(errors.New("プロパティの型を指定する"))
 	}
 	if p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION {
+		// The property Metric must not replace a Metric of the user. add_input replaces the cells.
+		if _, err := em.metric(propMetric(list, p.Name)); err == nil {
+			return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("Metric %s があるので、プロパティ %s を作れない", propMetric(list, p.Name), p.Name))
+		}
 		// Record first: the primary key refuses a second property with the same name.
 		tag, err := s.Pool.Exec(ctx, `insert into app_property (app_id, list, name, type) values ($1, $2, $3, $4)
 			on conflict do nothing`, app, list, p.Name, p.Type)
@@ -441,10 +445,14 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 }
 
 func (s *PlanServer) EditMembers(ctx context.Context, req *connect.Request[nanashiv1.EditMembersRequest]) (*ack, error) {
-	return s.editMembers(ctx, req.Msg.AppId, req.Msg.List, req.Msg.Edits)
+	return s.editMembers(ctx, req.Msg.AppId, req.Msg.List, func(engineModel, appMeta) ([]*nanashiv1.MemberEdit, error) {
+		return req.Msg.Edits, nil
+	})
 }
 
-func (s *PlanServer) editMembers(ctx context.Context, app, list string, edits []*nanashiv1.MemberEdit) (*ack, error) {
+// editMembers makes the edits with editsOf inside the lock, so that the edits see the current members
+// (for example, the next row number of a transaction list).
+func (s *PlanServer) editMembers(ctx context.Context, app, list string, editsOf func(engineModel, appMeta) ([]*nanashiv1.MemberEdit, error)) (*ack, error) {
 	defer s.lock(app)()
 	em, _, err := s.Engines.model(ctx, app)
 	if err != nil {
@@ -453,6 +461,10 @@ func (s *PlanServer) editMembers(ctx context.Context, app, list string, edits []
 	meta, err := s.meta(ctx, app)
 	if err != nil {
 		return nil, err
+	}
+	edits, err := editsOf(em, meta)
+	if err != nil {
+		return nil, invalid(err)
 	}
 	ops, text, err := editOps(list, em, meta, edits)
 	if err != nil {
@@ -489,6 +501,11 @@ func (s *PlanServer) editMembers(ctx context.Context, app, list string, edits []
 			(select jsonb_agg(case when n = to_jsonb($3::text) then to_jsonb($4::text) else n end) from jsonb_array_elements(def->'filters'->$2->'names') n
 			where n <> to_jsonb($3::text) or $4::text is not null), '[]'))
 			where app_id = $1 and def->'filters'->$2->'names' ? $3`, app, list, old, name); err != nil {
+			return nil, dbError(err)
+		}
+		// Cell comments of a removed member stay as they are. The comments list still shows them.
+		if _, err := s.Pool.Exec(ctx, `update app_comment set cell = jsonb_set(cell, array[$2], to_jsonb($4::text))
+			where app_id = $1 and cell->>$2 = $3 and $4::text is not null`, app, list, old, name); err != nil {
 			return nil, dbError(err)
 		}
 	}
@@ -546,6 +563,9 @@ func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanash
 		return nil, invalid(errors.New("Metric の名前が空"))
 	}
 	defer s.lock(app)()
+	if err := s.refusePropertyMetric(ctx, app, m.Name); err != nil {
+		return nil, err
+	}
 	em, _, err := s.Engines.model(ctx, app)
 	if err != nil {
 		return nil, err
@@ -563,20 +583,44 @@ func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanash
 	return ok()
 }
 
+// refusePropertyMetric refuses a change to a Metric with the name of a property Metric. GetModel needs that Metric.
+func (s *PlanServer) refusePropertyMetric(ctx context.Context, app string, names ...string) error {
+	meta, err := s.meta(ctx, app)
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if meta.holdsProperty(n) {
+			return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("%s はプロパティの値を持つ Metric なので、変更できない", n))
+		}
+	}
+	return nil
+}
+
 func (s *PlanServer) RenameMetric(ctx context.Context, req *connect.Request[nanashiv1.RenameMetricRequest]) (*ack, error) {
+	if err := s.refusePropertyMetric(ctx, req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
+		return nil, err
+	}
 	if err := s.Engines.write(ctx, req.Msg.AppId, callerOf(ctx).user, []op{newOp("rename_metric", req.Msg.Name, req.Msg.NewName)}); err != nil {
 		return nil, err
 	}
-	// Tables and views refer to Metrics by name, so give them the new name too.
+	// Tables, views and comments refer to Metrics by name, so give them the new name too.
 	if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, '{metrics}',
 		(select jsonb_agg(case when m = to_jsonb($2::text) then to_jsonb($3::text) else m end) from jsonb_array_elements(def->'metrics') m))
 		where app_id = $1 and def->'metrics' ? $2`, req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
+		return nil, dbError(err)
+	}
+	if _, err := s.Pool.Exec(ctx, "update app_comment set target = 'metric:' || $3 where app_id = $1 and target = 'metric:' || $2",
+		req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
 		return nil, dbError(err)
 	}
 	return ok()
 }
 
 func (s *PlanServer) DeleteMetric(ctx context.Context, req *connect.Request[nanashiv1.DeleteMetricRequest]) (*ack, error) {
+	if err := s.refusePropertyMetric(ctx, req.Msg.AppId, req.Msg.Name); err != nil {
+		return nil, err
+	}
 	if err := s.Engines.write(ctx, req.Msg.AppId, callerOf(ctx).user, []op{newOp("remove_metric", req.Msg.Name)}); err != nil {
 		return nil, err
 	}
@@ -641,18 +685,13 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 		if _, ruled := c.limits.through(em)[t.List.List]; ruled {
 			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s には権限の制限があるので読み込めない", t.List.List))
 		}
-		meta, err := s.meta(ctx, app)
-		if err != nil {
+		if _, err := s.editMembers(ctx, app, t.List.List, func(em engineModel, meta appMeta) ([]*nanashiv1.MemberEdit, error) {
+			edits, n, err := importListEdits(req.Msg.Csv, t.List, em, meta.Kinds[t.List.List])
+			rows = n
+			return edits, err
+		}); err != nil {
 			return nil, err
 		}
-		edits, n, err := importListEdits(req.Msg.Csv, t.List, em, meta.Kinds[t.List.List])
-		if err != nil {
-			return nil, invalid(err)
-		}
-		if _, err := s.editMembers(ctx, app, t.List.List, edits); err != nil {
-			return nil, err
-		}
-		rows = n
 	case *nanashiv1.ImportRequest_Metric:
 		ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limits.through(em))
 		if err != nil {
