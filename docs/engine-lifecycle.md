@@ -108,7 +108,7 @@ func plan(st state, now time.Time) (verb, state)
 //   crash after a run of healthyRun or more -> fails = 1
 //   crash -> fails + 1
 //   retryAt = now + min(firstRetry << (fails-1), maxRetry)
-func afterExit(st state, ranFor time.Duration, err error, now time.Time) state
+func afterExit(st state, err error, now time.Time) state // ranFor is now - st.started
 ```
 
 Constants: `quietFails = 3`, `firstRetry = 1s`, `maxRetry = 60s`, `healthyRun = 1m`.
@@ -123,7 +123,7 @@ The engine listens on 127.0.0.1 and advertises the port that it got in the lease
 - `Router` gets a field `Create func(ctx context.Context, model string) error`. `PUT /models/<id>` calls it and returns 200 `{"ok": true}`. If `Create` is nil, the router returns 405. The `Resolver` interface does not change, so the fakes in the tests do not change.
 - `PgResolver.Create` runs `insert into nanashi_model (model_id) values ($1) on conflict do nothing`. It is the same statement that `PgJournal.__init__` runs. The PostgreSQL role of the router needs the insert permission.
 - In `forward`, next to the `ErrUnknownModel` case: `ErrEngineFailing` returns 503 `engine_failing` with the last crash text at once.
-- `cmd/nanashi-router/main.go` gets `--tessera`, `--engine-dir`, and `--engine-idle` (default 15m). With `--tessera`, the Resolver is a `Supervisor` that wraps the `PgResolver`.
+- `cmd/nanashi-router/main.go` gets `--tessera`, `--engine-dir` (default `../.nanashi-data`, as in the api today), and `--engine-idle` (default 15m). With `--tessera`, the Resolver is a `Supervisor` that wraps the `PgResolver`.
 
 ### tessera/sparse_engine/server.py
 

@@ -52,3 +52,31 @@ func TestPgResolver(t *testing.T) {
 		t.Errorf("missing: got %v, want ErrUnknownModel", err)
 	}
 }
+
+func TestPgResolverCreate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dsn := cmp.Or(os.Getenv("NANASHI_PG_DSN"), "postgresql://postgres@127.0.0.1:55432/nanashi")
+	p, err := NewPgResolver(ctx, dsn)
+	if err != nil {
+		t.Skipf("PostgreSQL (%s) is not reachable: %v", dsn, err)
+	}
+	t.Cleanup(p.Close)
+	var migrated bool
+	if err := p.pool.QueryRow(ctx, "select to_regclass('nanashi_model') is not null").Scan(&migrated); err != nil || !migrated {
+		t.Skipf("nanashi_model is missing (python -m sparse_engine.pg_journal migrate): %v", err)
+	}
+	model := fmt.Sprintf("router-create-%d", time.Now().UnixNano())
+	t.Cleanup(func() { p.pool.Exec(context.Background(), "delete from nanashi_model where model_id = $1", model) })
+	if _, err := p.Leader(ctx, model); !errors.Is(err, ErrUnknownModel) {
+		t.Fatalf("before Create: got %v, want ErrUnknownModel", err)
+	}
+	for range 2 {
+		if err := p.Create(ctx, model); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	if url, err := p.Leader(ctx, model); url != "" || err != nil {
+		t.Errorf("after Create: got %q, %v; want no leader", url, err)
+	}
+}

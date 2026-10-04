@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +42,9 @@ func main() {
 			return nil
 		})
 	deadline := flag.Duration("deadline", 90*time.Second, "1 つの要求を送り直し続ける長さ")
+	tessera := flag.String("tessera", "", "tessera/ の場所。指定すると、要求が来たモデルのエンジンをこのルーターが起動する")
+	engineDir := flag.String("engine-dir", "../.nanashi-data", "エンジンのデータを置く場所（--tessera と一緒に使う）")
+	engineIdle := flag.Duration("engine-idle", 15*time.Minute, "要求がこの時間ないエンジンは自分で止まる（--tessera と一緒に使う）")
 	insecure := flag.Bool("insecure", false, "認証なしで 127.0.0.1 以外でも待ち受ける")
 	flag.Parse()
 	if *dsn == "" {
@@ -81,9 +86,19 @@ func main() {
 		log.Fatalf("PostgreSQL につながらない: %v", err)
 	}
 	defer resolver.Close()
+	var resolve router.Resolver = resolver
+	var supervisor *router.Supervisor
+	if *tessera != "" {
+		supervisor, err = newSupervisor(resolver, *tessera, *engineDir, *dsn, *engineIdle)
+		if err != nil {
+			fail(err.Error())
+		}
+		resolve = supervisor
+	}
 	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           &router.Router{Resolve: resolver, Auth: auth, UserHeader: *userHeader, Deadline: *deadline},
+		Addr: *listen,
+		Handler: &router.Router{Resolve: resolve, Create: resolver.Create, Auth: auth, UserHeader: *userHeader,
+			Deadline: *deadline},
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	ln, err := net.Listen("tcp", *listen)
@@ -107,6 +122,27 @@ func main() {
 	if err := <-done; !errors.Is(err, http.ErrServerClosed) {
 		log.Print(err)
 	}
+	if supervisor != nil {
+		supervisor.Close()
+	}
+}
+
+func newSupervisor(lease router.Resolver, tessera, engineDir, dsn string, idle time.Duration) (*router.Supervisor, error) {
+	tessera, err := filepath.Abs(tessera)
+	if err != nil {
+		return nil, err
+	}
+	engineDir, err = filepath.Abs(engineDir)
+	if err != nil {
+		return nil, err
+	}
+	idleExit := fmt.Sprint(int(idle.Seconds()))
+	return &router.Supervisor{Lease: lease, Command: func(model string) *exec.Cmd {
+		cmd := exec.Command(filepath.Join(tessera, ".venv/bin/python"), "-m", "sparse_engine.server",
+			filepath.Join(engineDir, model), "--pg", dsn, "--model-id", model, "--port", "0", "--idle-exit", idleExit)
+		cmd.Dir = tessera
+		return cmd
+	}}, nil
 }
 
 func readTokens(path string) (map[string]string, error) {

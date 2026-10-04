@@ -41,3 +41,9 @@ func (p *PgResolver) Leader(ctx context.Context, model string) (string, error) {
 	}
 	return *endpoint, nil
 }
+
+// Create adds the row of model. It starts no engine. It is idempotent.
+func (p *PgResolver) Create(ctx context.Context, model string) error {
+	_, err := p.pool.Exec(ctx, "insert into nanashi_model (model_id) values ($1) on conflict do nothing", model)
+	return err
+}

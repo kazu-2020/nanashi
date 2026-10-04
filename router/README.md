@@ -34,7 +34,28 @@ The wait starts at 50 ms and doubles up to 1 second (with jitter).
 The router waits up to 70 seconds for each send (the engine waits up to about 60 seconds for a write commit).
 If the router does not find a writer before `--deadline` (default 90 seconds), it returns 503 `{"error": "no_leader"}`.
 For a model that is not in the journal, it returns 404 `{"error": "no_model"}`.
+If the engine of the model crashed 3 times in a row, the router returns 503 `{"error": "engine_failing"}` immediately (only with `--tessera`).
+The message contains the text of the last crash.
 At the deadline, the router returns the last response that it received (504 if the deadline came before a response).
+
+`PUT /models/<model ID>` adds the model to `nanashi_model` and returns 200 `{"ok": true}`.
+It starts no engine. If the model is already there, it does nothing, so you can send it again.
+The router uses the same authentication as for other requests.
+The PostgreSQL role of the router needs the `insert` permission on `nanashi_model` for this request.
+
+With `--tessera <path to tessera/>`, the router starts the engines on its host.
+If a request comes for a model that has no live writer, the router starts `<tessera>/.venv/bin/python -m sparse_engine.server <engine-dir>/<model ID> --pg <DSN> --model-id <model ID> --port 0 --idle-exit <seconds>`.
+`--engine-dir` is the directory for the engine files (default `../.nanashi-data`).
+`--engine-idle` is the time without requests after which the engine stops itself (default 15m).
+
+The router waits for the lease of the new engine, as it waits for any writer, until `--deadline`.
+An engine that stops with code 0 (idle stop or SIGTERM) starts again on the next request, without a wait.
+After a crash, the router waits 1 second before the next start, and doubles the wait up to 60 seconds.
+If an engine runs for 90 seconds without a lease, the router kills it.
+On SIGTERM and SIGINT, the router sends SIGTERM to its engines after it stops, and kills them after 15 seconds.
+
+Without `--tessera`, the router only finds engines that something else started.
+[engine-lifecycle.md](../docs/engine-lifecycle.md) gives the design.
 
 With `--tokens`, the router finds the user from `Authorization: Bearer <token>`.
 It adds the user to `X-Forwarded-User` and sends it to the engine.

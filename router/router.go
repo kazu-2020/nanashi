@@ -53,9 +53,10 @@ var upstream = &http.Client{
 // Router is an http.Handler for /models/{id}/... that forwards to the model's leader.
 type Router struct {
 	Resolve    Resolver
-	Auth       func(*http.Request) (user string, err error) // nil = no auth (loopback dev); see also ProxyUser
-	UserHeader string                                       // header set toward engines, default "X-Forwarded-User"
-	Deadline   time.Duration                                // overall per request, default 90s
+	Auth       func(*http.Request) (user string, err error)  // nil = no auth (loopback dev); see also ProxyUser
+	UserHeader string                                        // header set toward engines, default "X-Forwarded-User"
+	Deadline   time.Duration                                 // overall per request, default 90s
+	Create     func(ctx context.Context, model string) error // PUT /models/{id}; nil = 405
 
 	leaders sync.Map // model -> leader URL, kept between requests
 }
@@ -79,6 +80,10 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		user = u
 	}
+	if r.Method == http.MethodPut && rest == "/" {
+		rt.create(r.Context(), w, model)
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
 		apiError{http.StatusBadRequest, "bad_request", "本文を読めなかった"}.write(w)
@@ -96,6 +101,18 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := outgoing{method: r.Method, rest: rest, body: body, header: rt.upstreamHeader(r.Header, user)}
 	rt.forward(ctx, model, out).write(w)
+}
+
+func (rt *Router) create(ctx context.Context, w http.ResponseWriter, model string) {
+	if rt.Create == nil {
+		apiError{http.StatusMethodNotAllowed, "method_not_allowed", "このルーターではモデルを作れない"}.write(w)
+		return
+	}
+	if err := rt.Create(ctx, model); err != nil {
+		apiError{http.StatusInternalServerError, "internal", "モデル " + model + " を作れなかった（" + err.Error() + "）"}.write(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // outgoing is the request as sent on every attempt; body is replayed byte for byte.
@@ -121,6 +138,9 @@ func (rt *Router) forward(ctx context.Context, model string, out outgoing) write
 			leader, err := rt.leader(ctx, model)
 			if errors.Is(err, ErrUnknownModel) {
 				return apiError{http.StatusNotFound, "no_model", "モデル " + model + " はない"}
+			}
+			if errors.Is(err, ErrEngineFailing) {
+				return apiError{http.StatusServiceUnavailable, "engine_failing", "モデル " + model + " のエンジンが続けて落ちた（" + err.Error() + "）"}
 			}
 			target, last, resolveErr = leader, attempt{}, err
 		}

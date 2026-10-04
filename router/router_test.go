@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -454,5 +455,38 @@ func TestBodyTooLarge(t *testing.T) {
 	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/plan/writes", make([]byte, maxBody+1), nil)
 	if got.status != 413 || len(e.requests()) != 0 {
 		t.Fatalf("got %d %s, engine got %d", got.status, got.body, len(e.requests()))
+	}
+}
+
+func TestPutCreatesModel(t *testing.T) {
+	var created []string
+	rt := &Router{Resolve: &resolver{err: errors.New("must not resolve")}, Create: func(_ context.Context, model string) error {
+		created = append(created, model)
+		return nil
+	}}
+	for _, target := range []string{"/models/plan", "/models/plan/"} {
+		if got := do(t, rt, "PUT", target, nil, nil); got.status != 200 || got.body != "{\"ok\":true}\n" {
+			t.Errorf("%s: got %d %s", target, got.status, got.body)
+		}
+	}
+	if len(created) != 2 || created[0] != "plan" {
+		t.Errorf("Create got %v, want [plan plan]", created)
+	}
+	rt.Create = nil
+	if got := do(t, rt, "PUT", "/models/plan", nil, nil); got.status != 405 {
+		t.Errorf("nil Create: got %d %s, want 405", got.status, got.body)
+	}
+}
+
+func TestEngineFailingAtOnce(t *testing.T) {
+	res := &resolver{err: fmt.Errorf("%w: exit status 1", ErrEngineFailing)}
+	rt := &Router{Resolve: res, Deadline: 5 * time.Second}
+	start := time.Now()
+	got := do(t, rt, "GET", "/models/plan/", nil, nil)
+	if got.status != 503 || errorKind(t, got.body) != "engine_failing" || !strings.Contains(got.body, "exit status 1") {
+		t.Fatalf("got %d %s", got.status, got.body)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("took %v, want an answer at once", took)
 	}
 }
