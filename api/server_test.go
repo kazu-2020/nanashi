@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
@@ -133,4 +134,14 @@ func opsJSON(t *testing.T, ops []op) string {
 // eastOnly is a CONTRIBUTOR limited to East (read and write).
 func eastOnly() limits {
 	return accessLimits(contributor, []*nanashiv1.AccessRule{{Role: contributor, List: "Region", Members: []string{"East"}, Write: true}})
+}
+
+func TestDBErrorGivesAlreadyExistsForAUniqueViolation(t *testing.T) {
+	err := dbError(fmt.Errorf("insert: %w", &pgconn.PgError{Code: "23505"}))
+	if connect.CodeOf(err) != connect.CodeAlreadyExists {
+		t.Fatalf("got %v, want AlreadyExists", err)
+	}
+	if connect.CodeOf(dbError(errors.New("connection reset"))) != connect.CodeUnavailable {
+		t.Fatal("another database error must stay Unavailable")
+	}
 }

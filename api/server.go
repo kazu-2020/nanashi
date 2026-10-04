@@ -13,6 +13,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -83,6 +84,10 @@ func callerOf(ctx context.Context) caller { return ctx.Value(callerKey{}).(calle
 func dbError(err error) error {
 	if cerr := new(connect.Error); errors.As(err, &cerr) {
 		return err
+	}
+	// Two api processes can pass the same check for a free name. Then the second insert breaks a unique key.
+	if pe := new(pgconn.PgError); errors.As(err, &pe) && pe.Code == "23505" /* unique_violation */ {
+		return connect.NewError(connect.CodeAlreadyExists, errors.New("同じ名前がすでにある"))
 	}
 	log.Printf("database: %v", err)
 	return connect.NewError(connect.CodeUnavailable, errors.New("データベースを読み書きできない"))
