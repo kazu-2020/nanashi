@@ -1,6 +1,14 @@
 import { Alert, Button, CloseButton, Input } from "@heroui/react";
 import { QueryCache, QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { lazy, Suspense, useCallback, useState, type ComponentType } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useCallback,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 import { api, errorText, getUser, setUser } from "./api";
 import { Role } from "./gen/nanashi/v1/plan_pb";
 import { roleName } from "./logic";
@@ -225,11 +233,33 @@ function Shell(props: { appId: string }) {
           ))}
         </nav>
         <div className="min-w-0 flex-1">
-          <Suspense fallback={<p>読み込み中…</p>}>
-            <Page />
-          </Suspense>
+          <PageBoundary key={page}>
+            <Suspense fallback={<p>読み込み中…</p>}>
+              <Page />
+            </Suspense>
+          </PageBoundary>
         </div>
       </div>
     </AppCtx.Provider>
   );
+}
+
+// PageBoundary catches an error of a screen, for example a chunk that did not download after a deploy.
+// The key of the screen resets it when the user opens another screen.
+class PageBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p>画面を表示できませんでした。</p>
+        <Button size="sm" onPress={() => location.reload()}>
+          再読み込み
+        </Button>
+      </div>
+    );
+  }
 }
