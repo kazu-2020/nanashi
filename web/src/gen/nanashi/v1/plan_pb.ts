@@ -1784,7 +1784,9 @@ export const ItemTypeSchema: GenEnum<ItemType> = /*@__PURE__*/
 
 /**
  * PlanService gives the planning features to the frontend.
- * The header X-Nanashi-User identifies the user. Each application is one engine model.
+ * The header X-Nanashi-User identifies the user. The API trusts it only on a connection from this host
+ * (local development) or from an authenticating proxy that sets it again (--trusted-proxy).
+ * Each application is one engine model.
  *
  * @generated from service nanashi.v1.PlanService
  */

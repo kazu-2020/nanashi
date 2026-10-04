@@ -97,7 +97,7 @@ func callerOf(ctx context.Context) caller { return ctx.Value(callerKey{}).(calle
 func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			// ponytail: local development trusts this header. In production, an authenticating proxy sets it.
+			// The API trusts this header only from this host or from a --trusted-proxy (cmd/nanashi-api).
 			user := req.Header().Get("X-Nanashi-User")
 			if user == "" {
 				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("X-Nanashi-User がない"))

@@ -25,7 +25,18 @@ func main() {
 	router := flag.String("router", "http://127.0.0.1:8090", "URL of nanashi-router")
 	tessera := flag.String("tessera", "../tessera", "path to tessera/")
 	engineDir := flag.String("engine-dir", "../.nanashi-data", "directory for the engine files")
+	var proxies []string
+	flag.Func("trusted-proxy", "CIDR or address of the authenticating proxy that sets X-Nanashi-User (repeat for more)",
+		func(v string) error { proxies = append(proxies, v); return nil })
 	flag.Parse()
+	networks, err := api.ParseNetworks(proxies)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Without a trusted proxy, any client can set X-Nanashi-User. Then only local clients can connect.
+	if len(networks) == 0 && !api.Loopback(*listen) {
+		log.Fatalf("%s で待ち受けるには、利用者を認証するプロキシを --trusted-proxy で指定する", *listen)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -56,7 +67,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle(nanashiv1connect.NewPlanServiceHandler(server, connect.WithInterceptors(server.Interceptor())))
 	// The Vite dev server sends /nanashi.v1.* to this server, so the API does not need CORS.
-	srv := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 30 * time.Second}
+	var handler http.Handler = mux
+	if len(networks) > 0 {
+		handler = api.TrustedOnly(networks, mux)
+	}
+	srv := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 30 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)

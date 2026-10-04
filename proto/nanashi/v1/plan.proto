@@ -5,7 +5,9 @@ package nanashi.v1;
 option go_package = "github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1";
 
 // PlanService gives the planning features to the frontend.
-// The header X-Nanashi-User identifies the user. Each application is one engine model.
+// The header X-Nanashi-User identifies the user. The API trusts it only on a connection from this host
+// (local development) or from an authenticating proxy that sets it again (--trusted-proxy).
+// Each application is one engine model.
 service PlanService {
   // Applications.
   rpc ListApplications(ListApplicationsRequest) returns (ListApplicationsResponse) {}

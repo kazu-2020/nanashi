@@ -19,5 +19,6 @@ It uses `connect-go` on `net/http` of the Go standard library. It does not use a
 - `proto/` in the repository root is the contract between `api/` and `web/`. If you change it, run `pnpm generate` in `web/`.
 - Do not edit `gen/`. `buf generate` makes it.
 - The API keeps its own tables (`app_*` in `schema.sql`). It does not write to the engine tables (`nanashi_*`).
+- The API trusts the header `X-Nanashi-User` only from this host or from `--trusted-proxy`. If you listen on an address other than loopback, give `--trusted-proxy`. Otherwise the API does not start.
 - The API sends all engine requests through the router (`/models/<application ID>/...`).
 - `plan.go` has the calculations (engine operations, queries, imports, access limits). `server.go` and `engine.go` have the actions.
