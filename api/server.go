@@ -87,10 +87,13 @@ var rpcRules = map[string]rpcRule{
 
 // caller is the user of a request and the rights of the user in the application of the request.
 type caller struct {
-	user   string
-	role   role
-	limits limits
+	user  string
+	role  role
+	rules []*nanashiv1.AccessRule // The access rules of the application. Empty when role >= MODELER.
 }
+
+// limitsIn gives the limits of the caller in the model em.
+func (c caller) limitsIn(em engineModel) limits { return accessLimits(c.role, c.rules).through(em) }
 
 type callerKey struct{}
 
@@ -117,7 +120,7 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 			}
 			if rule.min != nanashiv1.Role_ROLE_UNSPECIFIED {
 				var err error
-				if c.role, c.limits, err = s.rights(ctx, appID, user); err != nil {
+				if c.role, c.rules, err = s.rights(ctx, appID, user); err != nil {
 					return nil, err
 				}
 				if c.role < rule.min {
@@ -140,7 +143,8 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 	}
 }
 
-func (s *PlanServer) rights(ctx context.Context, app, user string) (role, limits, error) {
+// rights gives the role of the user in the application and, for a role under MODELER, the access rules.
+func (s *PlanServer) rights(ctx context.Context, app, user string) (role, []*nanashiv1.AccessRule, error) {
 	var r int32
 	err := s.Pool.QueryRow(ctx, "select role from app_member where app_id = $1 and user_name = $2", app, user).Scan(&r)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -150,10 +154,10 @@ func (s *PlanServer) rights(ctx context.Context, app, user string) (role, limits
 		return 0, nil, dbError(err)
 	}
 	if role(r) >= modeler {
-		return role(r), limits{}, nil
+		return role(r), nil, nil
 	}
 	rules, err := s.rules(ctx, app)
-	return role(r), accessLimits(role(r), rules), err
+	return role(r), rules, err
 }
 
 // dbError hides the database error from the client. It can contain table names and addresses.
@@ -163,6 +167,26 @@ func dbError(err error) error {
 }
 
 func invalid(err error) error { return connect.NewError(connect.CodeInvalidArgument, err) }
+
+// connectError gives a plan error its Connect code. A *connect.Error passes through, a tagged error gets the
+// code of its tag, and any other error is an input error.
+func connectError(err error) error {
+	if cerr := new(connect.Error); errors.As(err, &cerr) {
+		return err
+	}
+	for sentinel, code := range errorCodes {
+		if errors.Is(err, sentinel) {
+			return connect.NewError(code, err)
+		}
+	}
+	return connect.NewError(connect.CodeInvalidArgument, err)
+}
+
+var errorCodes = map[error]connect.Code{
+	errDenied:       connect.CodePermissionDenied,
+	errExists:       connect.CodeAlreadyExists,
+	errPrecondition: connect.CodeFailedPrecondition,
+}
 
 func ok() (*ack, error) { return connect.NewResponse(&nanashiv1.Ack{}), nil }
 
@@ -315,7 +339,7 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 		}
 	}
 	out := &nanashiv1.ModelDef{Role: c.role}
-	out.Lists, out.Metrics = modelDef(em, meta, propCells, c.limits.through(em))
+	out.Lists, out.Metrics = modelDef(em, meta, propCells, c.limitsIn(em))
 	items, err := s.items(ctx, app)
 	if err != nil {
 		return nil, err
@@ -562,7 +586,7 @@ func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanash
 	}
 	ops, err := metricOp(em, m, kind, req.Msg.Replace)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		return nil, connectError(err)
 	}
 	if len(ops) == 0 {
 		return ok()
@@ -629,7 +653,7 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 	if err != nil {
 		return nil, err
 	}
-	l := callerOf(ctx).limits.through(em)
+	l := callerOf(ctx).limitsIn(em)
 	reads, err := queryReads(req.Msg, em, l)
 	if err != nil {
 		return nil, invalid(err)
@@ -653,9 +677,9 @@ func (s *PlanServer) WriteCells(ctx context.Context, req *connect.Request[nanash
 		return nil, err
 	}
 	c := callerOf(ctx)
-	ops, err := writeOps(req.Msg.Writes, em, c.limits.through(em))
+	ops, err := writeOps(req.Msg.Writes, em, c.limitsIn(em))
 	if err != nil {
-		return nil, connect.NewError(connect.CodePermissionDenied, err)
+		return nil, connectError(err)
 	}
 	if err := s.Engines.write(ctx, req.Msg.AppId, c.user, ops); err != nil {
 		return nil, err
@@ -672,7 +696,7 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 	var rows int
 	switch t := req.Msg.Target.(type) {
 	case *nanashiv1.ImportRequest_List:
-		if _, ruled := c.limits.through(em)[t.List.List]; ruled {
+		if _, ruled := c.limitsIn(em)[t.List.List]; ruled {
 			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s には権限の制限があるので読み込めない", t.List.List))
 		}
 		if _, err := s.editMembers(ctx, app, t.List.List, func(em engineModel, meta appMeta) ([]*nanashiv1.MemberEdit, error) {
@@ -683,9 +707,9 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 			return nil, err
 		}
 	case *nanashiv1.ImportRequest_Metric:
-		ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limits.through(em))
+		ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limitsIn(em))
 		if err != nil {
-			return nil, invalid(err)
+			return nil, connectError(err)
 		}
 		if err := s.Engines.write(ctx, app, c.user, ops); err != nil {
 			return nil, err
@@ -764,12 +788,12 @@ func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nana
 	if err != nil {
 		return nil, dbError(err)
 	}
-	if l := callerOf(ctx).limits; len(l) > 0 {
+	if c := callerOf(ctx); len(c.rules) > 0 {
 		em, _, err := s.Engines.model(ctx, req.Msg.AppId)
 		if err != nil {
 			return nil, err
 		}
-		comments = visibleComments(comments, l.through(em))
+		comments = visibleComments(comments, c.limitsIn(em))
 	}
 	return connect.NewResponse(&nanashiv1.ListCommentsResponse{Comments: comments}), nil
 }

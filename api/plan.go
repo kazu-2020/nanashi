@@ -199,6 +199,21 @@ var propKind = map[nanashiv1.PropertyType]string{
 // propMetric is the input Metric that holds a NUMBER or BOOLEAN property.
 func propMetric(list, prop string) string { return list + "." + prop }
 
+// The tags give an error its Connect code (connectError). An error without a tag is an input error.
+var (
+	errDenied       = errors.New("permission denied")
+	errExists       = errors.New("already exists")
+	errPrecondition = errors.New("failed precondition")
+)
+
+// tagged is an error with a tag. Error() gives only the message of err, so the user sees the Japanese text.
+type tagged struct{ err, tag error }
+
+func (t tagged) Error() string   { return t.err.Error() }
+func (t tagged) Unwrap() []error { return []error{t.err, t.tag} }
+
+func tag(t error, format string, a ...any) error { return tagged{fmt.Errorf(format, a...), t} }
+
 // limit is the members of one list that a user can read and write.
 type limit struct{ read, write map[string]bool }
 
@@ -302,10 +317,10 @@ func (l limits) checkWrite(metric string, dims []string, coords map[string]strin
 		}
 		c, set := coords[d]
 		if !set {
-			return fmt.Errorf("%s: 権限の制限がある %s のメンバーを指定せずに書き込めない", metric, d)
+			return tag(errDenied, "%s: 権限の制限がある %s のメンバーを指定せずに書き込めない", metric, d)
 		}
 		if !lim.write[c] {
-			return fmt.Errorf("%s: %s の %q に書き込む権限がない", metric, d, c)
+			return tag(errDenied, "%s: %s の %q に書き込む権限がない", metric, d, c)
 		}
 	}
 	return nil
@@ -1003,7 +1018,7 @@ func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, replace bool)
 			return nil, nil
 		}
 		if !replace {
-			return nil, fmt.Errorf("入力メトリック %s を変更すると、入力した値がすべて消える", m.Name)
+			return nil, tag(errPrecondition, "入力メトリック %s を変更すると、入力した値がすべて消える", m.Name)
 		}
 	}
 	if m.Formula == "" {

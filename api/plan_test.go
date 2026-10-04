@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -119,9 +120,12 @@ func TestWriteOps(t *testing.T) {
 		"outside the rule":  {"Product": "A", "Region": "West"},
 		"spread over rules": {"Product": "A"},
 	} {
-		if _, err := writeOps([]*nanashiv1.CellWrite{{Metric: "Budget", Coords: coords, Value: num(1)}}, em, eastOnly()); err == nil {
-			t.Errorf("%s: want an error", name)
+		if _, err := writeOps([]*nanashiv1.CellWrite{{Metric: "Budget", Coords: coords, Value: num(1)}}, em, eastOnly()); !errors.Is(err, errDenied) {
+			t.Errorf("%s: got %v, want a permission error", name, err)
 		}
+	}
+	if _, err := writeOps([]*nanashiv1.CellWrite{{Metric: "Nothing", Value: num(1)}}, em, eastOnly()); err == nil || errors.Is(err, errDenied) {
+		t.Errorf("unknown Metric: got %v, want an input error", err)
 	}
 }
 
@@ -243,8 +247,8 @@ func TestImportMetric(t *testing.T) {
 	if got := opsJSON(t, ops); got != want {
 		t.Errorf("got %s", got)
 	}
-	if _, _, err := importMetricOps("p,r,v\nA,West,1\n", imp, em, eastOnly()); err == nil {
-		t.Error("a row outside the access rule must be an error")
+	if _, _, err := importMetricOps("p,r,v\nA,West,1\n", imp, em, eastOnly()); !errors.Is(err, errDenied) {
+		t.Errorf("a row outside the access rule: got %v, want a permission error", err)
 	}
 }
 

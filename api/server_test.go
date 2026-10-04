@@ -3,9 +3,12 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +94,25 @@ func TestAccessByRole(t *testing.T) {
 	read.Header().Set("X-Nanashi-User", "carol")
 	if _, err := client.GetModel(ctx, read); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Errorf("non-member reads: got %v, want permission denied", err)
+	}
+}
+
+func TestConnectError(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		code connect.Code
+	}{
+		{errors.New("入力の誤り"), connect.CodeInvalidArgument},
+		{tag(errDenied, "権限がない"), connect.CodePermissionDenied},
+		{fmt.Errorf("3 行目: %w", tag(errDenied, "権限がない")), connect.CodePermissionDenied},
+		{tag(errExists, "ある"), connect.CodeAlreadyExists},
+		{tag(errPrecondition, "消える"), connect.CodeFailedPrecondition},
+		{connect.NewError(connect.CodeUnavailable, errors.New("x")), connect.CodeUnavailable},
+	} {
+		got := connectError(c.err)
+		if connect.CodeOf(got) != c.code || !strings.Contains(got.Error(), c.err.Error()) {
+			t.Errorf("%v: got %v, want code %v with the same message", c.err, got, c.code)
+		}
 	}
 }
 
