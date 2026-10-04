@@ -72,14 +72,22 @@ func main() {
 		handler = api.TrustedOnly(networks, mux)
 	}
 	srv := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 30 * time.Second}
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdown)
+		if err := srv.Shutdown(shutdown); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
 	}()
 	log.Printf("nanashi-api: listening on %s", *listen)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Print(err)
+		return
 	}
+	// ListenAndServe returns when Shutdown starts. Wait for the requests in flight before the deferred
+	// calls stop the engines and close the pool.
+	<-stopped
 }

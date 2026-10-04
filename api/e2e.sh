@@ -95,11 +95,15 @@ ok alice AddComment "{\"appId\": \"$APP\", \"target\": \"metric:Budget\", \"cell
 check "comment" '.comments[0].user == "alice" and .comments[0].cell.Product == "A"' \
   "$(ok alice ListComments "{\"appId\": \"$APP\", \"target\": \"metric:Budget\"}")"
 
+ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Target\", \"dimensions\": [\"Product\"], \"formula\": \"Revenue * 2\", \"overridable\": true}}" >/dev/null
+ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Target\", \"coords\": {\"Product\": \"A\"}, \"value\": {\"number\": 999}}]}" >/dev/null
 SNAP=$(ok alice CreateSnapshot "{\"appId\": \"$APP\", \"name\": \"before review\"}" | jq -r .id)
 check "snapshot list" ".snapshots[0].id == \"$SNAP\"" "$(ok alice ListSnapshots "{\"appId\": \"$APP\"}")"
 APP2=$(ok alice CreateApplication "{\"name\": \"E2E restored\", \"snapshotId\": \"$SNAP\"}" | jq -r .id)
 Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Revenue\", \"Budget\"], \"rows\": [\"Product\"], \"columns\": [\"Scenario\"]}")
 check "restored data" "[$(cell Revenue '["A", ""]').number, $(cell Budget '["A", "Plan"]').number] == [125, 1200]" "$Q"
+Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Target\"], \"rows\": [\"Product\"]}")
+check "restore keeps an override value" "[$(cell Target '["A"]').number, $(cell Target '["C"]').number] == [999, 20]" "$Q"
 ok alice RenameMetric "{\"appId\": \"$APP2\", \"name\": \"Budget\", \"newName\": \"Budget 2027\"}" >/dev/null
 MODEL2=$(ok alice GetModel "{\"appId\": \"$APP2\"}")
 check "rename reaches tables and views" '(.tables[0].metrics == ["Budget 2027", "Revenue"]) and (.views[0].metrics == ["Budget 2027"])' "$MODEL2"
@@ -121,6 +125,15 @@ ok alice SaveView "{\"appId\": \"$APP2\", \"name\": \"C only\", \"metrics\": [\"
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"C\", \"newName\": \" D \"}}]}" >/dev/null
 check "rename gives the view filter the trimmed name" '.views[] | select(.name == "C only") | .filters.Product.names == ["D"]' \
   "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+ok alice SetMemberRole "{\"appId\": \"$APP2\", \"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}" >/dev/null
+ok alice SaveAccessRule "{\"appId\": \"$APP2\", \"role\": \"ROLE_VIEWER\", \"list\": \"Product\", \"members\": [\"A\", \"D\"]}" >/dev/null
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"remove\": {\"name\": \"D\"}}]}" >/dev/null
+check "remove takes the member out of access rules" '.rules[0].members == ["A"]' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
+check "remove takes the member out of view filters" '.views[] | select(.name == "C only") | (.filters.Product.names // []) == []' \
+  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"add\": {\"name\": \"D\"}}]}" >/dev/null
+check "a member added again does not get the old access" '.lists[] | select(.name == "Product") | [.members[].name] == ["A"]' \
+  "$(ok bob GetModel "{\"appId\": \"$APP2\"}")"
 ok alice CreateList "{\"appId\": \"$APP2\", \"name\": \"Load\", \"kind\": \"LIST_KIND_DIMENSION\"}" >/dev/null
 ok alice AddProperty "{\"appId\": \"$APP2\", \"list\": \"Load\", \"property\": {\"name\": \"Note\", \"type\": \"PROPERTY_TYPE_TEXT\"}}" >/dev/null
 PIDS=()
@@ -143,6 +156,11 @@ check "bob sees only Product A" '.lists[] | select(.name == "Product") | [.membe
 Q=$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"Revenue\", \"Budget\"], \"rows\": [\"Product\"]}")
 check "bob reads only Product A" '[.cells[].coords[0]] | unique == ["A"]' "$Q"
 check "bob total is A only" "$(cell Budget '["A"]').number == 2400" "$Q"
+ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Pick\", \"dimensions\": [\"Category\"], \"kind\": \"member:Product\"}}" >/dev/null
+ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Pick\", \"coords\": {\"Category\": \"Hard\"}, \"value\": {\"member\": \"B\"}},
+  {\"metric\": \"Pick\", \"coords\": {\"Category\": \"Soft\"}, \"value\": {\"member\": \"A\"}}]}" >/dev/null
+check "bob does not see a hidden member as a value" '[.cells[] | .value.member] == ["A"]' \
+  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"Pick\"], \"rows\": [\"Category\"]}")"
 check "bob cannot write" '.code == "permission_denied"' \
   "$(call bob WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Budget\", \"coords\": {\"Product\": \"A\", \"Scenario\": \"Base\", \"Month\": \"2026-01\"}, \"value\": {\"number\": 1}}]}")"
 check "bob cannot model" '.code == "permission_denied"' "$(call bob SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"X\"}}")"

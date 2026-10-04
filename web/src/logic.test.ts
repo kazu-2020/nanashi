@@ -8,6 +8,7 @@ import {
   mergeFilters,
   METRIC,
   parseCsv,
+  parseValue,
   spreadable,
   writeCoords,
 } from "./logic";
@@ -60,4 +61,17 @@ test("an edit is refused if its spread goes outside the filter or the aggregatio
   expect(spreadable(dims, g, { Region: ["East", "West"] }, "SUM")).toBe(false);
   for (const agg of ["AVG", "MIN", "MAX", "COUNT"])
     expect(spreadable(dims, g, {}, agg)).toBe(false);
+});
+
+test("a boolean cell takes TRUE, FALSE, 1 or 0 and refuses other text", () => {
+  for (const [text, value] of [
+    ["true", true],
+    ["TRUE", true],
+    ["1", true],
+    [" False ", false],
+    ["0", false],
+  ] as const)
+    expect(parseValue("boolean", text)).toEqual({ case: "boolean", value });
+  expect(parseValue("boolean", " ")).toBeUndefined();
+  for (const text of ["tru", "yes", "2"]) expect(() => parseValue("boolean", text)).toThrow(text);
 });

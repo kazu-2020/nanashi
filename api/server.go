@@ -214,7 +214,7 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 		if err != nil {
 			return nil, dbError(err)
 		}
-		if err := s.Engines.write(ctx, app, c.user, replayOps(em, snap.Inputs)); err != nil {
+		if err := s.Engines.write(ctx, app, c.user, replayOps(em, snap.Inputs, snap.Overrides)); err != nil {
 			return nil, err
 		}
 	}
@@ -467,21 +467,28 @@ func (s *PlanServer) editMembers(ctx context.Context, app, list string, edits []
 			return nil, dbError(err)
 		}
 	}
-	// Access rules and view filters refer to members by name, so give them the new name too.
+	// Access rules and view filters refer to members by name. Give them the new name, or remove the name of a
+	// removed member: if a later edit adds the name again, an old rule must not give access to it.
 	for _, e := range edits {
-		r := e.GetRename()
-		if r == nil {
+		var old string
+		var name *string // nil removes the name.
+		if r := e.GetRename(); r != nil {
+			n := strings.TrimSpace(r.NewName) // editOps gives the engine the same name.
+			old, name = r.Name, &n
+		} else if r := e.GetRemove(); r != nil {
+			old = r.Name
+		} else {
 			continue
 		}
-		name := strings.TrimSpace(r.NewName) // editOps gives the engine the same name.
-		if _, err := s.Pool.Exec(ctx, `update app_access_rule set members = (select jsonb_agg(case when m = to_jsonb($3::text) then to_jsonb($4::text) else m end)
-			from jsonb_array_elements(members) m) where app_id = $1 and list = $2 and members ? $3`,
-			app, list, r.Name, name); err != nil {
+		if _, err := s.Pool.Exec(ctx, `update app_access_rule set members = coalesce((select jsonb_agg(case when m = to_jsonb($3::text) then to_jsonb($4::text) else m end)
+			from jsonb_array_elements(members) m where m <> to_jsonb($3::text) or $4::text is not null), '[]')
+			where app_id = $1 and list = $2 and members ? $3`, app, list, old, name); err != nil {
 			return nil, dbError(err)
 		}
-		if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, array['filters', $2, 'names'],
-			(select jsonb_agg(case when n = to_jsonb($3::text) then to_jsonb($4::text) else n end) from jsonb_array_elements(def->'filters'->$2->'names') n))
-			where app_id = $1 and def->'filters'->$2->'names' ? $3`, app, list, r.Name, name); err != nil {
+		if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, array['filters', $2, 'names'], coalesce(
+			(select jsonb_agg(case when n = to_jsonb($3::text) then to_jsonb($4::text) else n end) from jsonb_array_elements(def->'filters'->$2->'names') n
+			where n <> to_jsonb($3::text) or $4::text is not null), '[]'))
+			where app_id = $1 and def->'filters'->$2->'names' ? $3`, app, list, old, name); err != nil {
 			return nil, dbError(err)
 		}
 	}
@@ -588,7 +595,8 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 	if err != nil {
 		return nil, err
 	}
-	reads, err := queryReads(req.Msg, em, callerOf(ctx).limits.through(em))
+	l := callerOf(ctx).limits.through(em)
+	reads, err := queryReads(req.Msg, em, l)
 	if err != nil {
 		return nil, invalid(err)
 	}
@@ -599,7 +607,8 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 		if err != nil {
 			return nil, err
 		}
-		out.Cells = append(out.Cells, queryCells(r.Metric, dims, cube)...)
+		m, _ := em.metric(r.Metric) // queryReads found it.
+		out.Cells = append(out.Cells, queryCells(m, dims, cube, l)...)
 	}
 	return connect.NewResponse(out), nil
 }
@@ -790,10 +799,14 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 	if err != nil {
 		return nil, err
 	}
-	data := snapshotData{Engine: raw, Inputs: map[string]engineCube{}}
+	data := snapshotData{Engine: raw, Inputs: map[string]engineCube{}, Overrides: map[string]engineCube{}}
 	for _, m := range em.Metrics {
 		if m.Formula == "" {
 			if data.Inputs[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "slice"}); err != nil {
+				return nil, err
+			}
+		} else if m.Overridable {
+			if data.Overrides[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "overrides"}); err != nil {
 				return nil, err
 			}
 		}

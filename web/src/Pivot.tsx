@@ -67,7 +67,11 @@ export function Pivot(props: {
   const filters = mergeFilters(spec.filters, props.page ?? {});
   const strip = (ds: string[]) => ds.filter((d) => d !== METRIC);
 
-  const { data: resp, refetch: requery } = useQuery({
+  const {
+    data: resp,
+    refetch: requery,
+    isPlaceholderData,
+  } = useQuery({
     queryKey: ["query", appId, String(model.seq), spec, props.page],
     queryFn: () =>
       api.query({
@@ -78,7 +82,8 @@ export function Pivot(props: {
         filters: toProtoFilters(filters),
         aggregation: spec.aggregation,
       }),
-    // The grid keeps the old values while it reads the new ones.
+    // The grid keeps the old values while it reads the new ones. The old cells are read-only then:
+    // a write would use the new axes and filters.
     placeholderData: keepPreviousData,
   });
   const grid = resp && buildGrid(resp, spec.metrics, spec.rows, spec.columns, order, filters);
@@ -208,6 +213,7 @@ export function Pivot(props: {
             const d = defs.get(m);
             return (
               !props.compact &&
+              !isPlaceholderData &&
               can(Role.CONTRIBUTOR) &&
               !!d &&
               (!d.formula || d.overridable) &&

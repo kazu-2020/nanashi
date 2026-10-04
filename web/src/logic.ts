@@ -126,7 +126,10 @@ export function formatValue(v: Value | undefined): string {
 export function parseValue(kind: string, text: string): Value["value"] | undefined {
   const t = text.trim();
   if (t === "") return undefined;
-  if (kind === "boolean") return { case: "boolean", value: /^(true|1)$/i.test(t) };
+  if (kind === "boolean") {
+    if (!/^(true|false|1|0)$/i.test(t)) throw new Error(`TRUE か FALSE ではありません: ${t}`);
+    return { case: "boolean", value: /^(true|1)$/i.test(t) };
+  }
   if (kind.startsWith("member:")) return { case: "member", value: t };
   const n = Number(t);
   if (Number.isNaN(n)) throw new Error(`数値ではありません: ${t}`);

@@ -360,7 +360,7 @@ func parseValue(kind, text string) (any, error) {
 // engineRead is one read of a Metric from the engine: GET /metrics/<metric>/<path>?<query>.
 type engineRead struct {
 	Metric string
-	Path   string // "summary" for a number Metric, "slice" for other kinds.
+	Path   string // "summary" for a number Metric, "slice" for other kinds, "overrides" for the overrides of a formula.
 	Query  map[string][]string
 }
 
@@ -419,7 +419,9 @@ next:
 
 // queryCells changes an engine cube into QueryCells with coordinates in the order of dims.
 // A slice of a non-number Metric can have dimensions that are not shown. Then the first cell wins.
-func queryCells(metric string, dims []string, cube engineCube) []*nanashiv1.QueryCell {
+// It leaves out a cell of a member Metric whose value is a member that l hides.
+func queryCells(m engineMetric, dims []string, cube engineCube, l limits) []*nanashiv1.QueryCell {
+	target, _ := strings.CutPrefix(m.Kind, "member:")
 	index := make([]int, len(dims))
 	for i, d := range dims {
 		index[i] = slices.Index(cube.Dims, d)
@@ -428,7 +430,7 @@ func queryCells(metric string, dims []string, cube engineCube) []*nanashiv1.Quer
 	var out []*nanashiv1.QueryCell
 	for _, c := range cube.Cells {
 		v := toValue(c[len(c)-1])
-		if v == nil {
+		if v == nil || v.GetMember() != "" && !l.visible(target, v.GetMember()) {
 			continue
 		}
 		coords := make([]string, len(dims))
@@ -442,7 +444,7 @@ func queryCells(metric string, dims []string, cube engineCube) []*nanashiv1.Quer
 			continue
 		}
 		seen[key] = true
-		out = append(out, &nanashiv1.QueryCell{Metric: metric, Coords: coords, Value: v})
+		out = append(out, &nanashiv1.QueryCell{Metric: m.Name, Coords: coords, Value: v})
 	}
 	return out
 }
@@ -802,7 +804,7 @@ func calendarOps(start, years int) ([]op, error) {
 	}, nil
 }
 
-// copyCellOps copies the cells of a slice to the member to of the dimension dim.
+// copyCellOps copies the cells of a slice to the member to of the dimension dim. If dim is empty, it sets the cells as they are.
 func copyCellOps(metric, dim, to string, cube engineCube) []op {
 	var ops []op
 	for _, c := range cube.Cells {
@@ -810,19 +812,23 @@ func copyCellOps(metric, dim, to string, cube engineCube) []op {
 		for i, d := range cube.Dims {
 			coords[d] = c[i]
 		}
-		coords[dim] = to
+		if dim != "" {
+			coords[dim] = to
+		}
 		ops = append(ops, newOp("set_cell", metric, c[len(c)-1]).with(coords))
 	}
 	return ops
 }
 
 // snapshotData is the content of a snapshot. Engine is the body of GET / as the engine sent it.
+// Overrides has the cells that override the formula of each overridable Metric.
 type snapshotData struct {
-	Engine json.RawMessage               `json:"engine"`
-	Inputs map[string]engineCube         `json:"inputs"`
-	Kinds  map[string]nanashiv1.ListKind `json:"kinds"`
-	Props  []propRow                     `json:"props"`
-	Items  []itemRow                     `json:"items"`
+	Engine    json.RawMessage               `json:"engine"`
+	Inputs    map[string]engineCube         `json:"inputs"`
+	Overrides map[string]engineCube         `json:"overrides,omitempty"`
+	Kinds     map[string]nanashiv1.ListKind `json:"kinds"`
+	Props     []propRow                     `json:"props"`
+	Items     []itemRow                     `json:"items"`
 }
 
 type itemRow struct {
@@ -832,8 +838,8 @@ type itemRow struct {
 }
 
 // replayOps makes the operations that build the engine model of a snapshot in an empty model.
-// ponytail: formulas replay in the engine order, and the values that override a formula are not kept.
-func replayOps(em engineModel, inputs map[string]engineCube) []op {
+// ponytail: formulas replay in the engine order.
+func replayOps(em engineModel, inputs, overrides map[string]engineCube) []op {
 	var ops []op
 	for _, d := range em.Dims {
 		ops = append(ops, newOp("add_dimension", d.Name, d.Members).with(map[string]any{"ordered": d.Ordered}))
@@ -863,6 +869,11 @@ func replayOps(em engineModel, inputs map[string]engineCube) []op {
 		}
 		ops = append(ops, newOp("add_input", m.Name, m.Dims, cells).with(map[string]any{"kind": m.Kind}))
 	}
+	for _, m := range em.Metrics {
+		if cube, ok := overrides[m.Name]; ok {
+			ops = append(ops, copyCellOps(m.Name, "", "", cube)...)
+		}
+	}
 	return ops
 }
 
@@ -886,7 +897,9 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 		for _, p := range d.Props {
 			ld.Properties = append(ld.Properties, &nanashiv1.PropertyDef{Name: p.Name, Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION, Target: p.Target})
 			for member, v := range p.Values {
-				set(member, p.Name, v)
+				if l.visible(p.Target, v) { // A property value can name a hidden member, for example on a list that refers to itself.
+					set(member, p.Name, v)
+				}
 			}
 		}
 		for _, p := range meta.Props {

@@ -153,9 +153,19 @@ func TestQueryReads(t *testing.T) {
 
 func TestQueryCells(t *testing.T) {
 	cube := engineCube{Dims: []string{"Product"}, Cells: [][]any{{"A", 11.0}, {"B", nil}}}
-	cells := queryCells("Revenue", []string{"Region", "Product"}, cube)
+	revenue, _ := model(t).metric("Revenue")
+	cells := queryCells(revenue, []string{"Region", "Product"}, cube, nil)
 	if len(cells) != 1 || strings.Join(cells[0].Coords, ",") != ",A" || cells[0].Value.GetNumber() != 11 {
 		t.Errorf("got %v", cells)
+	}
+}
+
+func TestQueryCellsHidesMemberValues(t *testing.T) {
+	owner, _ := model(t).metric("Owner") // member:Region
+	cube := engineCube{Dims: []string{"Product"}, Cells: [][]any{{"A", "West"}, {"B", "East"}}}
+	cells := queryCells(owner, []string{"Product"}, cube, eastOnly())
+	if len(cells) != 1 || cells[0].Coords[0] != "B" || cells[0].Value.GetMember() != "East" {
+		t.Errorf("a reader limited to East must not see West as a value: %v", cells)
 	}
 }
 
@@ -254,13 +264,15 @@ func TestReplayOps(t *testing.T) {
 		"Budget":       {Dims: []string{"Region", "Product"}, Cells: [][]any{{"East", "A", 5.0}}},
 		"Sales.Amount": {Dims: []string{"Sales"}, Cells: [][]any{{"1", 10.0}}},
 	}
-	got := opsJSON(t, replayOps(em, inputs))
+	overrides := map[string]engineCube{"Revenue": {Dims: []string{"Product"}, Cells: [][]any{{"A", 99.0}}}}
+	got := opsJSON(t, replayOps(em, inputs, overrides))
 	for _, want := range []string{
 		`{"op":"add_dimension","args":["Sales",["1","2","9"]],"kwargs":{"ordered":false}}`,
 		`{"op":"add_property","args":["Sales","Product","Product",{"1":"A","2":"B"}]}`,
 		`{"op":"add_input","args":["Budget",["Product","Region"],[[["A","East"],5]]],"kwargs":{"kind":"number"}}`,
 		`{"op":"add_formula","args":["Revenue",["Product"],"'Sales.Amount'[BY SUM: Sales.Product]"],"kwargs":{"kind":"number","overridable":false}}`,
 		`{"op":"add_input","args":["Owner",["Product"],[]],"kwargs":{"kind":"member:Region"}}`,
+		`{"op":"set_cell","args":["Revenue",99],"kwargs":{"Product":"A"}}`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %s in %s", want, got)
@@ -270,10 +282,11 @@ func TestReplayOps(t *testing.T) {
 
 func TestModelDefHidesMembersAndPropertyMetrics(t *testing.T) {
 	em := model(t)
+	em.Dims[2].Props = []engineProp{{Name: "Peer", Target: "Region", Values: map[string]string{"East": "West"}}}
 	meta := appMeta{Props: []propRow{{List: "Sales", Name: "Amount", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER}}}
 	cells := map[string]engineCube{"Sales.Amount": {Dims: []string{"Sales"}, Cells: [][]any{{"1", 10.5}}}}
 	lists, metrics := modelDef(em, meta, cells, eastOnly())
-	if r := lists[2]; len(r.Members) != 1 || r.Members[0].Name != "East" {
+	if r := lists[2]; len(r.Members) != 1 || r.Members[0].Name != "East" || r.Members[0].Properties["Peer"] != "" {
 		t.Errorf("Region: %v", r.Members)
 	}
 	if s := lists[1].Members[0].Properties; s["Amount"] != "10.5" || s["Product"] != "A" {

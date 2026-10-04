@@ -24,6 +24,8 @@
     GET  /metrics/<name>/slice?<軸>=a,b        範囲（{"dims": [...], "cells": [[座標..., 値], ...]}）
     GET  /metrics/<name>/rows?<軸>=a&offset=0&limit=50   行の列と全行数
     GET  /metrics/<name>/summary?keep=Month&agg=sum&<軸>=a,b   集計
+    GET  /metrics/<name>/overrides?<軸>=a,b    The cells that override the formula of an overridable Metric
+                                              (the same body as slice)
     POST /writes                              {"client_op_id", "reason", "expect", "ops": [...]}
 
 ops の各要素は {"op": 操作名, "args": [...], "kwargs": {...}} で、Model の操作（set_cell、spread、
@@ -239,6 +241,10 @@ class Handler(BaseHTTPRequestHandler):
             name, what = urllib.parse.unquote(parts[1]), parts[2]
             if name not in v.metrics or name.startswith("__"):
                 raise ApiError(404, "not_found", f"Metric {name} がない")
+            if what == "overrides":  # Read the hidden "__override__" input through its formula Metric.
+                if not v.metrics[name].overridable:
+                    raise ApiError(400, "bad_request", f"{name} は上書きできる計算 Metric ではない")
+                name, what = v.metrics[name].override_name, "slice"
             coords = _coords(query)
             if what == "cell":
                 bad = [k for k, x in coords.items() if not isinstance(x, str)]
