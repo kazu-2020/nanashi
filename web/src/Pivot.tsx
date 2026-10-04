@@ -19,6 +19,7 @@ import { Aggregation, Display, Role } from "./gen/nanashi/v1/plan_pb";
 import {
   buildGrid,
   chartRows,
+  editable,
   dimLabel,
   formatValue,
   gridToCsv,
@@ -27,13 +28,12 @@ import {
   mergeFilters,
   parseValue,
   total,
-  spreadable,
   writeCoords,
   type Grid,
   type Spec,
   toProtoFilters,
 } from "./logic";
-import { cls, time, useApp, useRun } from "./state";
+import { cls, time, useApp, useMutate } from "./state";
 import { Checks, Sel } from "./ui";
 
 const DISPLAYS: [string, string][] = [
@@ -50,35 +50,20 @@ const AGGS = [
   Aggregation.COUNT,
 ].map((a): [string, string] => [String(a), Aggregation[a]]);
 
-export function Pivot(props: {
-  initial: Spec;
-  // A board widget hides the controls and adds the page selector members.
-  compact?: boolean;
-  page?: Record<string, string>;
-  view?: { id: string; name: string };
-}) {
-  const { appId, model, can, reload } = useApp();
-  const run = useRun();
-  const [spec, setSpec] = useState(props.initial);
-  const [cell, setCell] = useState<{ metric: string; coords: Record<string, string> }>();
-  const view = props.view;
-  const [viewName, setViewName] = useState(view?.name ?? "");
+// page holds the page selector members of a board.
+function usePivot(spec: Spec, page?: Record<string, string>) {
+  const { appId, model } = useApp();
   const order = useMemo(
     () => Object.fromEntries(model.lists.map((l) => [l.name, l.members.map((m) => m.name)])),
     [model],
   );
   const defs = new Map(model.metrics.map((m) => [m.name, m]));
   const dims = [...new Set(spec.metrics.flatMap((m) => defs.get(m)?.dimensions ?? []))];
-  const axisDims = spec.metrics.length > 1 ? [METRIC, ...dims] : dims;
-  const filters = mergeFilters(spec.filters, props.page ?? {});
+  const filters = mergeFilters(spec.filters, page ?? {});
   const strip = (ds: string[]) => ds.filter((d) => d !== METRIC);
 
-  const {
-    data: resp,
-    refetch: requery,
-    isPlaceholderData,
-  } = useQuery({
-    queryKey: ["query", appId, String(model.seq), spec, props.page],
+  const { data: resp, isPlaceholderData } = useQuery({
+    queryKey: ["app", appId, "query", spec, page],
     queryFn: () =>
       api.query({
         appId,
@@ -93,6 +78,25 @@ export function Pivot(props: {
     placeholderData: keepPreviousData,
   });
   const grid = resp && buildGrid(resp, spec.metrics, spec.rows, spec.columns, order, filters);
+  return { grid, filters, defs, dims, order, isPlaceholderData };
+}
+
+export function PivotWidget(props: { spec: Spec; page: Record<string, string> }) {
+  const { grid } = usePivot(props.spec, props.page);
+  if (!grid) return <p className="text-sm">読み込み中…</p>;
+  return <Body grid={grid} display={props.spec.display} editable={() => false} />;
+}
+
+export function PivotEditor(props: { initial: Spec; view?: { id: string; name: string } }) {
+  const { appId, can } = useApp();
+  const mutate = useMutate();
+  const writeCells = useMutate("query");
+  const [spec, setSpec] = useState(props.initial);
+  const [cell, setCell] = useState<{ metric: string; coords: Record<string, string> }>();
+  const view = props.view;
+  const [viewName, setViewName] = useState(view?.name ?? "");
+  const { grid, filters, defs, dims, order, isPlaceholderData } = usePivot(spec);
+  const axisDims = spec.metrics.length > 1 ? [METRIC, ...dims] : dims;
 
   const axisOf = (d: string) =>
     spec.rows.includes(d) ? "rows" : spec.columns.includes(d) ? "columns" : "";
@@ -108,27 +112,25 @@ export function Pivot(props: {
     const metric = g.metric(r, c);
     const def = defs.get(metric)!;
     const coords = writeCoords(def.dimensions, g, r, c, filters);
-    return run(async () => {
+    return writeCells(async () => {
       const v = parseValue(def.kind, text);
       await api.writeCells({
         appId,
         writes: [{ metric, coords, value: v ? { value: v } : undefined }],
       });
-      await requery();
     });
   };
 
   const saveView = (id: string) =>
-    run(async () => {
-      await api.saveView({
+    mutate(() =>
+      api.saveView({
         appId,
         id,
         name: viewName,
         ...spec,
         filters: toProtoFilters(spec.filters),
-      });
-      await reload();
-    });
+      }),
+    );
 
   const exportCsv = (g: Grid) => {
     const a = document.createElement("a");
@@ -140,93 +142,85 @@ export function Pivot(props: {
 
   return (
     <div className="flex flex-col gap-3">
-      {!props.compact && (
-        <div className="flex flex-col gap-2 rounded border p-2">
-          <div className="flex flex-wrap gap-3">
-            {axisDims.map((d) => (
-              <Sel
-                key={d}
-                label={dimLabel(d)}
-                value={axisOf(d)}
-                onChange={(a) => setAxis(d, a)}
-                empty="なし"
-                options={[
-                  ["rows", "行"],
-                  ["columns", "列"],
-                ]}
-              />
-            ))}
+      <div className="flex flex-col gap-2 rounded border p-2">
+        <div className="flex flex-wrap gap-3">
+          {axisDims.map((d) => (
             <Sel
-              label="集計"
-              value={String(spec.aggregation || Aggregation.SUM)}
-              onChange={(v) => setSpec({ ...spec, aggregation: Number(v) })}
-              options={AGGS}
+              key={d}
+              label={dimLabel(d)}
+              value={axisOf(d)}
+              onChange={(a) => setAxis(d, a)}
+              empty="なし"
+              options={[
+                ["rows", "行"],
+                ["columns", "列"],
+              ]}
             />
-            <Sel
-              label="表示"
-              value={String(spec.display || Display.GRID)}
-              onChange={(v) => setSpec({ ...spec, display: Number(v) })}
-              options={DISPLAYS}
-            />
-          </div>
-          <details>
-            <summary className="cursor-pointer text-sm">フィルター（ページセレクター）</summary>
-            {dims.map((d) => (
-              <div key={d} className="flex gap-2">
-                <span className="w-24 text-sm font-bold">{d}</span>
-                <Checks
-                  label={d}
-                  options={order[d] ?? []}
-                  value={spec.filters[d] ?? []}
-                  onChange={(v) => setSpec({ ...spec, filters: { ...spec.filters, [d]: v } })}
-                />
-              </div>
-            ))}
-          </details>
-          <div className="flex flex-wrap items-center gap-2">
-            {grid && (
-              <Button size="sm" variant="secondary" onPress={() => exportCsv(grid)}>
-                CSV エクスポート
-              </Button>
-            )}
-            {can(Role.MODELER) && (
-              <>
-                <Input
-                  aria-label="ビュー名"
-                  placeholder="ビュー名"
-                  value={viewName}
-                  onChange={(e) => setViewName(e.target.value)}
-                />
-                <Button size="sm" variant="secondary" onPress={() => saveView("")}>
-                  ビューとして保存
-                </Button>
-                {view && (
-                  <Button size="sm" variant="secondary" onPress={() => saveView(view.id)}>
-                    このビューを上書き保存
-                  </Button>
-                )}
-              </>
-            )}
-          </div>
+          ))}
+          <Sel
+            label="集計"
+            value={String(spec.aggregation || Aggregation.SUM)}
+            onChange={(v) => setSpec({ ...spec, aggregation: Number(v) })}
+            options={AGGS}
+          />
+          <Sel
+            label="表示"
+            value={String(spec.display || Display.GRID)}
+            onChange={(v) => setSpec({ ...spec, display: Number(v) })}
+            options={DISPLAYS}
+          />
         </div>
-      )}
+        <details>
+          <summary className="cursor-pointer text-sm">フィルター（ページセレクター）</summary>
+          {dims.map((d) => (
+            <div key={d} className="flex gap-2">
+              <span className="w-24 text-sm font-bold">{d}</span>
+              <Checks
+                label={d}
+                options={order[d] ?? []}
+                value={spec.filters[d] ?? []}
+                onChange={(v) => setSpec({ ...spec, filters: { ...spec.filters, [d]: v } })}
+              />
+            </div>
+          ))}
+        </details>
+        <div className="flex flex-wrap items-center gap-2">
+          {grid && (
+            <Button size="sm" variant="secondary" onPress={() => exportCsv(grid)}>
+              CSV エクスポート
+            </Button>
+          )}
+          {can(Role.MODELER) && (
+            <>
+              <Input
+                aria-label="ビュー名"
+                placeholder="ビュー名"
+                value={viewName}
+                onChange={(e) => setViewName(e.target.value)}
+              />
+              <Button size="sm" variant="secondary" onPress={() => saveView("")}>
+                ビューとして保存
+              </Button>
+              {view && (
+                <Button size="sm" variant="secondary" onPress={() => saveView(view.id)}>
+                  このビューを上書き保存
+                </Button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
       {!grid ? (
         <p className="text-sm">読み込み中…</p>
       ) : (
         <Body
           grid={grid}
           display={spec.display}
-          editable={(m) => {
-            const d = defs.get(m);
-            return (
-              !props.compact &&
-              !isPlaceholderData &&
-              can(Role.CONTRIBUTOR) &&
-              !!d &&
-              (!d.formula || d.overridable) &&
-              spreadable(d.dimensions, grid, filters, spec.aggregation)
-            );
-          }}
+          editable={(m) =>
+            !isPlaceholderData &&
+            can(Role.CONTRIBUTOR) &&
+            editable(defs.get(m), grid, filters, spec.aggregation)
+          }
           onWrite={(r, c, t) => write(grid, r, c, t)}
           onSelect={(r, c) => {
             const metric = grid.metric(r, c);
@@ -235,7 +229,7 @@ export function Pivot(props: {
           }}
         />
       )}
-      {cell && !props.compact && <CellComments {...cell} />}
+      {cell && <CellComments {...cell} />}
     </div>
   );
 }
@@ -244,8 +238,8 @@ function Body(props: {
   grid: Grid;
   display: Display;
   editable: (metric: string) => boolean;
-  onWrite: (r: string[], c: string[], text: string) => Promise<boolean>;
-  onSelect: (r: string[], c: string[]) => void;
+  onWrite?: (r: string[], c: string[], text: string) => Promise<boolean>;
+  onSelect?: (r: string[], c: string[]) => void;
 }) {
   const g = props.grid;
   if (props.display === Display.KPI)
@@ -302,7 +296,7 @@ function Body(props: {
                   <td
                     key={JSON.stringify(c)}
                     className="text-right"
-                    onClick={() => props.onSelect(r, c)}
+                    onClick={() => props.onSelect?.(r, c)}
                   >
                     {props.editable(g.metric(r, c)) ? (
                       <Input
@@ -314,7 +308,7 @@ function Body(props: {
                           const input = e.target;
                           if (input.value === text) return;
                           // A refused write must not leave the typed value in the grid.
-                          void props.onWrite(r, c, input.value).then((ok) => {
+                          void props.onWrite?.(r, c, input.value).then((ok) => {
                             if (!ok) input.value = text;
                           });
                         }}
@@ -340,10 +334,10 @@ const sameCell = (a: Record<string, string>, b: Record<string, string>) =>
 
 function CellComments(props: { metric: string; coords: Record<string, string> }) {
   const { appId } = useApp();
-  const run = useRun();
+  const mutate = useMutate("comments");
   const [body, setBody] = useState("");
-  const { data: resp, refetch: again } = useQuery({
-    queryKey: ["comments", appId, props.metric],
+  const { data: resp } = useQuery({
+    queryKey: ["app", appId, "comments", props.metric],
     queryFn: () => api.listComments({ appId, metric: props.metric }),
   });
   const list = resp?.comments.filter((c) => sameCell(c.cell, props.coords)) ?? [];
@@ -367,10 +361,9 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
         <Button
           size="sm"
           onPress={() =>
-            run(async () => {
+            mutate(async () => {
               await api.addComment({ appId, metric: props.metric, cell: props.coords, body });
               setBody("");
-              await again();
             })
           }
         >

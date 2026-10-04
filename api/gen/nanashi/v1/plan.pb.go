@@ -955,7 +955,6 @@ func (x *MetricDef) GetOverridable() bool {
 
 type ModelDef struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           int64                  `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
 	Role          Role                   `protobuf:"varint,2,opt,name=role,proto3,enum=nanashi.v1.Role" json:"role,omitempty"`
 	Lists         []*ListDef             `protobuf:"bytes,3,rep,name=lists,proto3" json:"lists,omitempty"`
 	Metrics       []*MetricDef           `protobuf:"bytes,4,rep,name=metrics,proto3" json:"metrics,omitempty"`
@@ -994,13 +993,6 @@ func (x *ModelDef) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ModelDef.ProtoReflect.Descriptor instead.
 func (*ModelDef) Descriptor() ([]byte, []int) {
 	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *ModelDef) GetSeq() int64 {
-	if x != nil {
-		return x.Seq
-	}
-	return 0
 }
 
 func (x *ModelDef) GetRole() Role {
@@ -3962,15 +3954,14 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\vmember_list\x18\x06 \x01(\tR\n" +
 	"memberList\x12\x18\n" +
 	"\aformula\x18\x04 \x01(\tR\aformula\x12 \n" +
-	"\voverridable\x18\x05 \x01(\bR\voverridable\"\xa5\x02\n" +
-	"\bModelDef\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12$\n" +
+	"\voverridable\x18\x05 \x01(\bR\voverridable\"\x9e\x02\n" +
+	"\bModelDef\x12$\n" +
 	"\x04role\x18\x02 \x01(\x0e2\x10.nanashi.v1.RoleR\x04role\x12)\n" +
 	"\x05lists\x18\x03 \x03(\v2\x13.nanashi.v1.ListDefR\x05lists\x12/\n" +
 	"\ametrics\x18\x04 \x03(\v2\x15.nanashi.v1.MetricDefR\ametrics\x12,\n" +
 	"\x06tables\x18\x05 \x03(\v2\x14.nanashi.v1.TableDefR\x06tables\x12)\n" +
 	"\x05views\x18\x06 \x03(\v2\x13.nanashi.v1.ViewDefR\x05views\x12,\n" +
-	"\x06boards\x18\a \x03(\v2\x14.nanashi.v1.BoardDefR\x06boards\"\x82\x01\n" +
+	"\x06boards\x18\a \x03(\v2\x14.nanashi.v1.BoardDefR\x06boardsJ\x04\b\x01\x10\x02R\x03seq\"\x82\x01\n" +
 	"\x11CreateListRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12(\n" +

@@ -149,7 +149,8 @@ message MetricDef {
 }
 
 message ModelDef {
-  int64 seq = 1;
+  reserved 1;
+  reserved "seq";
   Role role = 2;
   repeated ListDef lists = 3;
   repeated MetricDef metrics = 4;

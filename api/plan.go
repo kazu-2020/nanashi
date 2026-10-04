@@ -33,7 +33,6 @@ func (o op) with(kwargs map[string]any) op {
 
 // engineModel is the engine definition (GET /) with the order of dimensions, properties and Metrics kept.
 type engineModel struct {
-	Seq     int64
 	Dims    []engineDim
 	Metrics []engineMetric
 }
@@ -84,7 +83,6 @@ func (m engineModel) metric(name string) (engineMetric, error) {
 
 func parseEngineModel(body []byte) (engineModel, error) {
 	var raw struct {
-		Seq        int64           `json:"seq"`
 		Dimensions json.RawMessage `json:"dimensions"`
 		Metrics    json.RawMessage `json:"metrics"`
 	}
@@ -92,7 +90,7 @@ func parseEngineModel(body []byte) (engineModel, error) {
 		return engineModel{}, err
 	}
 	// Go maps lose the key order. The order of dimensions and Metrics is significant (display, replay).
-	out := engineModel{Seq: raw.Seq}
+	out := engineModel{}
 	dims, err := objectEntries(raw.Dimensions)
 	if err != nil {
 		return engineModel{}, err

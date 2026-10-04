@@ -3,13 +3,13 @@ import { expect, test } from "vite-plus/test";
 import { Aggregation, QueryResponseSchema, ValueKind } from "./gen/nanashi/v1/plan_pb";
 import {
   buildGrid,
+  editable,
   formatValue,
   gridToCsv,
   mergeFilters,
   METRIC,
   parseCsv,
   parseValue,
-  spreadable,
   writeCoords,
 } from "./logic";
 
@@ -55,12 +55,21 @@ test("csv parse handles quotes and page selectors override view filters", () => 
 test("an edit is refused if its spread goes outside the filter or the aggregation is not SUM", () => {
   const resp = create(QueryResponseSchema, { dimensions: ["Product"], cells: [] });
   const g = buildGrid(resp, ["Sales"], ["Product"], [], {}, {});
-  const dims = ["Product", "Region"];
-  expect(spreadable(dims, g, { Region: ["East"] }, Aggregation.SUM)).toBe(true);
-  expect(spreadable(dims, g, {}, Aggregation.UNSPECIFIED)).toBe(true);
-  expect(spreadable(dims, g, { Region: ["East", "West"] }, Aggregation.SUM)).toBe(false);
+  const def = { dimensions: ["Product", "Region"], formula: "", overridable: false };
+  expect(editable(def, g, { Region: ["East"] }, Aggregation.SUM)).toBe(true);
+  expect(editable(def, g, {}, Aggregation.UNSPECIFIED)).toBe(true);
+  expect(editable(def, g, { Region: ["East", "West"] }, Aggregation.SUM)).toBe(false);
   for (const agg of [Aggregation.AVG, Aggregation.MIN, Aggregation.MAX, Aggregation.COUNT])
-    expect(spreadable(dims, g, {}, agg)).toBe(false);
+    expect(editable(def, g, {}, agg)).toBe(false);
+});
+
+test("an edit is refused for an unknown Metric and for a formula Metric that is not overridable", () => {
+  const resp = create(QueryResponseSchema, { dimensions: ["Product"], cells: [] });
+  const g = buildGrid(resp, ["Sales"], ["Product"], [], {}, {});
+  const def = { dimensions: ["Product"], formula: "Price * Units", overridable: false };
+  expect(editable(undefined, g, {}, Aggregation.SUM)).toBe(false);
+  expect(editable(def, g, {}, Aggregation.SUM)).toBe(false);
+  expect(editable({ ...def, overridable: true }, g, {}, Aggregation.SUM)).toBe(true);
 });
 
 test("a boolean cell takes TRUE, FALSE, 1 or 0 and refuses other text", () => {

@@ -1,28 +1,39 @@
 import { Alert, Button, CloseButton, Input } from "@heroui/react";
 import { QueryCache, QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { useCallback, useState, type ReactNode } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useCallback,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 import { api, errorText, getUser, setUser } from "./api";
 import { Role } from "./gen/nanashi/v1/plan_pb";
-import {
-  AccessPage,
-  AuditPage,
-  BoardsPage,
-  CalendarPage,
-  CommentsPage,
-  ImportPage,
-  ListsPage,
-  MetricsPage,
-  ScenariosPage,
-  SnapshotsPage,
-  TablesPage,
-  ViewsPage,
-} from "./pages";
 import { roleName } from "./logic";
 import { AppCtx, Report, useRun } from "./state";
 import { Sel } from "./ui";
 
+const ListsPage = lazy(() => import("./pages/model").then((m) => ({ default: m.ListsPage })));
+const CalendarPage = lazy(() => import("./pages/model").then((m) => ({ default: m.CalendarPage })));
+const ScenariosPage = lazy(() =>
+  import("./pages/model").then((m) => ({ default: m.ScenariosPage })),
+);
+const ImportPage = lazy(() => import("./pages/model").then((m) => ({ default: m.ImportPage })));
+const MetricsPage = lazy(() => import("./pages/metrics").then((m) => ({ default: m.MetricsPage })));
+const TablesPage = lazy(() => import("./pages/metrics").then((m) => ({ default: m.TablesPage })));
+const ViewsPage = lazy(() => import("./pages/metrics").then((m) => ({ default: m.ViewsPage })));
+const BoardsPage = lazy(() => import("./pages/boards").then((m) => ({ default: m.BoardsPage })));
+const CommentsPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.CommentsPage })));
+const AuditPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.AuditPage })));
+const SnapshotsPage = lazy(() =>
+  import("./pages/admin").then((m) => ({ default: m.SnapshotsPage })),
+);
+const AccessPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.AccessPage })));
+
 // PAGES gives the navigation. A page with a role shows only to users with that role or higher.
-const PAGES: { id: string; label: string; page: () => ReactNode; role?: Role }[] = [
+const PAGES: { id: string; label: string; page: ComponentType; role?: Role }[] = [
   { id: "lists", label: "リスト", page: ListsPage },
   { id: "metrics", label: "メトリック", page: MetricsPage },
   { id: "tables", label: "テーブル", page: TablesPage },
@@ -140,7 +151,7 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
   const [from, setFrom] = useState("");
   const [snapshot, setSnapshot] = useState("");
   const { data: snaps } = useQuery({
-    queryKey: ["snapshots", from],
+    queryKey: ["app", from, "snapshots"],
     queryFn: () => api.listSnapshots({ appId: from }),
     enabled: !!from,
   });
@@ -197,20 +208,17 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
 }
 
 function Shell(props: { appId: string }) {
-  const { data: model, refetch } = useQuery({
-    queryKey: ["model", props.appId],
+  const { data: model } = useQuery({
+    queryKey: ["app", props.appId, "model"],
     queryFn: () => api.getModel({ appId: props.appId }),
   });
   const [page, setPage] = useState("lists");
   if (!model) return <p>読み込み中…</p>;
-  const reload = async () => {
-    await refetch();
-  };
   const can = (r: Role) => model.role >= r;
   const pages = PAGES.filter((p) => !p.role || can(p.role));
   const Page = (pages.find((p) => p.id === page) ?? pages[0]).page;
   return (
-    <AppCtx.Provider value={{ appId: props.appId, model, reload, can }}>
+    <AppCtx.Provider value={{ appId: props.appId, model, can }}>
       <div className="flex gap-4">
         <nav className="flex w-40 shrink-0 flex-col gap-1">
           {pages.map((p) => (
@@ -225,9 +233,34 @@ function Shell(props: { appId: string }) {
           ))}
         </nav>
         <div className="min-w-0 flex-1">
-          <Page />
+          <PageBoundary key={page}>
+            <Suspense fallback={<p>読み込み中…</p>}>
+              <Page />
+            </Suspense>
+          </PageBoundary>
         </div>
       </div>
     </AppCtx.Provider>
   );
+}
+
+// PageBoundary catches an error of a screen, for example a chunk that did not download after a deploy.
+// The key of the screen clears the message when the user opens another screen. React.lazy keeps a failed
+// import, so the same screen fails again until the user reloads the page.
+class PageBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p>画面を表示できませんでした。</p>
+        <Button size="sm" onPress={() => location.reload()}>
+          再読み込み
+        </Button>
+      </div>
+    );
+  }
 }
