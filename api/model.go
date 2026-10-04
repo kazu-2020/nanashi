@@ -1,7 +1,5 @@
 package api
 
-// This file holds the lists, the properties and the members of a model.
-
 import (
 	"context"
 	"errors"
@@ -19,8 +17,8 @@ import (
 )
 
 // memberRefs are the places in the api tables that name a member of a list. The arguments of each statement
-// are (app, list, old name, new name). A null new name removes the old name (app_rename in schema.sql): if a
-// later edit adds the name again, an old rule must not give access to it.
+// are (app, list, old name, new name). A null new name removes the old name (app_rename in schema.sql).
+// If a later edit adds the name again, an old rule must not give access to it.
 // A cell comment of a removed member stays as it is. The comments list still shows it.
 var memberRefs = []string{
 	`update app_property set text_values = case when $4::text is null then text_values - $3
@@ -138,7 +136,7 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 				if values[prop] == nil {
 					values[prop] = map[string]*string{}
 				}
-				values[prop][member] = nil // A blank value removes the value of the member.
+				values[prop][member] = nil
 				if v != "" {
 					values[prop][member] = &v
 				}
@@ -210,7 +208,8 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 	return ops, stmts, nil
 }
 
-// textValues sets the TEXT property values of some members. A nil value removes the value of the member.
+// textValues gives the statement that sets the TEXT property values of some members. A nil value removes the
+// value of the member.
 func textValues(app, list, prop string, values map[string]*string) stmt {
 	removed, set := []string{}, map[string]string{}
 	for member, v := range values {
@@ -332,7 +331,7 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 
 const scenarioList = "Scenario"
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 func (s *PlanServer) meta(ctx context.Context, app string) (appMeta, error) {
 	meta := appMeta{Kinds: map[string]nanashiv1.ListKind{}}

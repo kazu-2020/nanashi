@@ -28,9 +28,9 @@
                                               (the same body as slice)
     POST /writes                              {"client_op_id", "reason", "expect", "ops": [...]}
 
-ops の各要素は {"op": 操作名, "args": [...], "kwargs": {...}} で、Model の操作（set_cell、spread、
-add_member、move_member、rename_member、remove_member、add_formula、add_input、add_property、
-set_property_values、add_dimension、remove_metric、rename_metric）を順に呼ぶ。add_input の cells は [[座標の列, 値], ...] で渡す。
+Each element of ops is {"op": <operation name>, "args": [...], "kwargs": {...}}. The server calls the Model
+operations in sequence. WRITE_OPS lists the permitted operations. Give the cells of add_input as
+[[coordinates, value], ...].
 
 応答は JSON。失敗は {"error": 種類, "message": 文言} で、400（式や引数の誤り）、401（認証）、404、
 409（Conflict）、413（本文や読み出しが大きすぎる）、421（待機系。leader に書き手の番地）、429（Overloaded）、

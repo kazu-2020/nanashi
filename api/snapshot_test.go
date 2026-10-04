@@ -6,7 +6,7 @@ import (
 )
 
 func TestSameSeq(t *testing.T) {
-	em := model(t) // seq 7
+	em := model(t)
 	if em.Seq != 7 {
 		t.Fatalf("seq: %d", em.Seq)
 	}

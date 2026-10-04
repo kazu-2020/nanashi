@@ -17,7 +17,7 @@ import (
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
 
-// testPool gives a pool on the test database with the api tables. Without PostgreSQL, it skips the test.
+// testPool gives a pool on the test database with the api tables. If PostgreSQL is missing, it skips the test.
 func testPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
 	// If NANASHI_PG_DSN is set (as in CI), a missing database is a failure, not a skip.

@@ -1,7 +1,5 @@
 package api
 
-// This file holds the items: tables, views and boards.
-
 import (
 	"context"
 	"encoding/json"
@@ -20,7 +18,7 @@ type itemRow struct {
 	Def  json.RawMessage    `json:"def"`
 }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 func (s *PlanServer) items(ctx context.Context, app string) ([]itemRow, error) {
 	rows, _ := s.Pool.Query(ctx, "select type, id, def from app_item where app_id = $1 order by ord", app)

@@ -1,7 +1,5 @@
 package api
 
-// This file holds the Metrics: save, rename and delete.
-
 import (
 	"context"
 	"errors"
@@ -75,7 +73,7 @@ func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, replace bool)
 	return []op{newOp("add_formula", m.Name, dims, m.Formula).with(map[string]any{"kind": kind, "overridable": m.Overridable})}, nil
 }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanashiv1.SaveMetricRequest]) (*ack, error) {
 	app, m := req.Msg.AppId, req.Msg.Metric

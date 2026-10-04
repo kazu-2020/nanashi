@@ -1,7 +1,5 @@
 package api
 
-// This file holds the snapshots and the applications that start from a snapshot.
-
 import (
 	"context"
 	"encoding/json"
@@ -16,7 +14,6 @@ import (
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
 
-// sameSeq tells if every cube comes from the version of em.
 func sameSeq(em engineModel, cubes ...map[string]engineCube) bool {
 	for _, m := range cubes {
 		for _, c := range m {
@@ -79,7 +76,7 @@ func replayOps(em engineModel, inputs, overrides map[string]engineCube) []op {
 	return ops
 }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request[nanashiv1.CreateApplicationRequest]) (*connect.Response[nanashiv1.Application], error) {
 	c := callerOf(ctx)

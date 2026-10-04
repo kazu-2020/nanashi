@@ -1,7 +1,5 @@
 package api
 
-// This file holds the access limits, the roles of the members and the audit log.
-
 import (
 	"context"
 	"errors"
@@ -129,7 +127,7 @@ func (l limits) checkWrite(metric string, dims []string, coords map[string]strin
 	return nil
 }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 // rights gives the role of the user in the application and, for a role under MODELER, the access rules.
 func (s *PlanServer) rights(ctx context.Context, app, user string) (role, []*nanashiv1.AccessRule, error) {

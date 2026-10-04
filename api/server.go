@@ -1,8 +1,6 @@
 // Package api is the application server. It gives the Connect API (nanashi.v1.PlanService) to the frontend.
 package api
 
-// This file holds the parts that every feature uses: the server, the RPC rules, the change of a model and the errors.
-
 import (
 	"context"
 	_ "embed"
@@ -74,7 +72,6 @@ type caller struct {
 	rules []*nanashiv1.AccessRule // The access rules of the application. Empty when role >= MODELER.
 }
 
-// limitsIn gives the limits of the caller in the model em.
 func (c caller) limitsIn(em engineModel) limits { return accessLimits(c.role, c.rules).through(em) }
 
 type callerKey struct{}
@@ -93,8 +90,6 @@ func dbError(err error) error {
 
 func invalid(err error) error { return connect.NewError(connect.CodeInvalidArgument, err) }
 
-// connectError gives a plan error its Connect code. A *connect.Error passes through, a tagged error gets the
-// code of its tag, and any other error is an input error.
 func connectError(err error) error {
 	if cerr := new(connect.Error); errors.As(err, &cerr) {
 		return err
@@ -129,7 +124,7 @@ type plan struct {
 	stmts []stmt
 }
 
-// listKinds records the kind of the lists in app_list.
+// listKinds gives the statements that record the kind of each list in app_list.
 func listKinds(app string, kind nanashiv1.ListKind, lists ...string) []stmt {
 	var out []stmt
 	for _, list := range lists {
@@ -139,7 +134,6 @@ func listKinds(app string, kind nanashiv1.ListKind, lists ...string) []stmt {
 	return out
 }
 
-// stmt is one SQL statement with its arguments.
 type stmt struct {
 	sql  string
 	args []any
@@ -160,7 +154,7 @@ func (t tagged) Unwrap() []error { return []error{t.err, t.tag} }
 
 func tag(t error, format string, a ...any) error { return tagged{fmt.Errorf(format, a...), t} }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 // Migrate makes the api tables (prefix app_) if they are missing.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {

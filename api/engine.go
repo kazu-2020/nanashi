@@ -1,7 +1,6 @@
 package api
 
-// This file holds the engine data and the HTTP client for the engine servers. All requests go through the router,
-// and the router starts the engine of a model when a request comes for it.
+// All engine requests go through the router. The router starts the engine of a model when a request comes for it.
 
 import (
 	"bytes"
@@ -71,7 +70,7 @@ type engineMetric struct {
 }
 
 // engineCube is the body of slice and summary: each cell is the coordinates in dims order and then the value.
-// Seq is the version of the model that the engine read. A snapshot stores it too; replay ignores it.
+// Seq is the version of the model that the engine read. A snapshot stores it too. Replay ignores it.
 type engineCube struct {
 	Seq   int64    `json:"seq"`
 	Dims  []string `json:"dims"`
@@ -192,7 +191,7 @@ type engineRead struct {
 	Query  map[string][]string
 }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 func newID() string {
 	b := make([]byte, 8)

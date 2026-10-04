@@ -1,7 +1,5 @@
 package api
 
-// This file holds the cell data: queries, writes and comments.
-
 import (
 	"context"
 	"errors"
@@ -220,7 +218,7 @@ func visibleComments(comments []*nanashiv1.Comment, l limits) []*nanashiv1.Comme
 	})
 }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.QueryRequest]) (*connect.Response[nanashiv1.QueryResponse], error) {
 	app := req.Msg.AppId

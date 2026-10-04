@@ -1,7 +1,5 @@
 package api
 
-// This file holds the import of CSV data into lists and Metrics.
-
 import (
 	"context"
 	"encoding/csv"
@@ -153,7 +151,7 @@ func importMetricOps(text string, mi *nanashiv1.MetricImport, em engineModel, l 
 	return append(adds, sets...), len(rows), nil
 }
 
-// The actions follow. They do I/O.
+// The actions follow.
 
 func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.ImportRequest]) (*connect.Response[nanashiv1.ImportResponse], error) {
 	app, c := req.Msg.AppId, callerOf(ctx)
