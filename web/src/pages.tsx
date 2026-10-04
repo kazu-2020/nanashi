@@ -1,7 +1,9 @@
 // The screens of an application. Each screen reads the model from AppCtx.
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { Button, Input, TextArea } from "@heroui/react";
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { FileTrigger } from "react-aria-components";
 import { Code, ConnectError } from "@connectrpc/connect";
 import { api, errorText } from "./api";
 import {
@@ -16,8 +18,8 @@ import {
 } from "./gen/nanashi/v1/plan_pb";
 import { defaultSpec, parseCsv, ROLES, roleName, toFilters } from "./logic";
 import { Pivot } from "./Pivot";
-import { cls, memberNames, time, useApp, useLoad, useRun } from "./state";
-import { Checks, Section, Sel } from "./ui";
+import { cls, memberNames, time, useApp, useRun } from "./state";
+import { Check, Checks, Section, Sel } from "./ui";
 
 const KINDS: [string, string][] = [
   [String(ListKind.DIMENSION), "ディメンション"],
@@ -127,7 +129,7 @@ export function ListsPage() {
               {list.members.map((m, i) => (
                 <tr key={m.name}>
                   <td>
-                    <input
+                    <Input
                       key={m.name}
                       aria-label="メンバー名"
                       disabled={!modeler}
@@ -161,13 +163,14 @@ export function ListsPage() {
                       <td key={p.name}>
                         {p.type === PropertyType.DIMENSION ? (
                           <Sel
+                            ariaLabel={p.name}
                             value={v}
                             onChange={set}
                             empty=""
                             options={memberNames(model, p.target)}
                           />
                         ) : (
-                          <input
+                          <Input
                             key={v}
                             aria-label={p.name}
                             disabled={!modeler}
@@ -414,18 +417,14 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
             ]),
           ]}
         />
-        <label className="inline-flex items-center gap-1 text-sm">
-          <input
-            type="checkbox"
-            checked={f.overridable}
-            onChange={(e) => setF({ ...f, overridable: e.target.checked })}
-          />
+        <Check isSelected={f.overridable} onChange={(overridable) => setF({ ...f, overridable })}>
           上書き入力を許可
-        </label>
+        </Check>
       </div>
       <div className="text-sm">
         ディメンション:{" "}
         <Checks
+          label="ディメンション"
           options={model.lists.map((l) => l.name)}
           value={f.dimensions}
           onChange={(dimensions) => setF({ ...f, dimensions })}
@@ -527,10 +526,14 @@ export function MetricsPage() {
         )}
         {model.metrics.map((m) => (
           <li key={m.name}>
-            <button className={m.name === sel ? "font-bold" : ""} onClick={() => setSel(m.name)}>
+            <Button
+              size="sm"
+              variant={m.name === sel ? "primary" : "ghost"}
+              onPress={() => setSel(m.name)}
+            >
               {m.name}
               {m.formula ? " ƒ" : ""}
-            </button>
+            </Button>
           </li>
         ))}
       </ul>
@@ -583,6 +586,7 @@ export function TablesPage() {
             onChange={(e) => setF({ ...f, name: e.target.value })}
           />
           <Checks
+            label="メトリック"
             options={model.metrics.map((m) => m.name)}
             value={f.metrics}
             onChange={(metrics) => setF({ ...f, metrics })}
@@ -825,12 +829,14 @@ export function ImportPage() {
   );
   return (
     <Section title="インポート">
-      <input
-        type="file"
-        accept=".csv,text/csv"
-        aria-label="CSV ファイル"
-        onChange={async (e) => setCsv((await e.target.files?.[0]?.text()) ?? "")}
-      />
+      <FileTrigger
+        acceptedFileTypes={[".csv", "text/csv"]}
+        onSelect={async (files) => setCsv((await files?.[0]?.text()) ?? "")}
+      >
+        <Button variant="secondary" className="self-start">
+          CSV ファイルを選択
+        </Button>
+      </FileTrigger>
       <TextArea
         aria-label="CSV"
         placeholder="CSV を貼り付け（1 行目は見出し）"
@@ -868,14 +874,9 @@ export function ImportPage() {
         {fields.map((f) => colSel(`${f} の列`, map[f] ?? "", (v) => setMap({ ...map, [f]: v })))}
         {to === "metric" && colSel("値の列", valueColumn, setValueColumn)}
         {to === "metric" && (
-          <label className="inline-flex items-center gap-1 text-sm">
-            <input
-              type="checkbox"
-              checked={addMembers}
-              onChange={(e) => setAddMembers(e.target.checked)}
-            />
+          <Check isSelected={addMembers} onChange={setAddMembers}>
             無いメンバーを追加
-          </label>
+          </Check>
         )}
       </div>
       <Button
@@ -905,7 +906,10 @@ export function ImportPage() {
 
 export function CommentsPage() {
   const { appId } = useApp();
-  const [r] = useLoad(() => api.listComments({ appId }), [appId]);
+  const { data: r } = useQuery({
+    queryKey: ["comments", appId],
+    queryFn: () => api.listComments({ appId }),
+  });
   return (
     <Section title="コメント">
       <table className={cls.table}>
@@ -940,7 +944,10 @@ export function CommentsPage() {
 
 export function AuditPage() {
   const { appId, model } = useApp();
-  const [r] = useLoad(() => api.listAudit({ appId, limit: 200 }), [appId, model.seq]);
+  const { data: r } = useQuery({
+    queryKey: ["audit", appId, String(model.seq)],
+    queryFn: () => api.listAudit({ appId, limit: 200 }),
+  });
   return (
     <Section title="監査ログ">
       <table className={cls.table}>
@@ -971,7 +978,10 @@ export function SnapshotsPage() {
   const { appId, can } = useApp();
   const run = useRun();
   const [name, setName] = useState("");
-  const [r, again] = useLoad(() => api.listSnapshots({ appId }), [appId]);
+  const { data: r, refetch: again } = useQuery({
+    queryKey: ["snapshots", appId],
+    queryFn: () => api.listSnapshots({ appId }),
+  });
   return (
     <Section title="スナップショット">
       {can(Role.CONTRIBUTOR) && (
@@ -987,7 +997,7 @@ export function SnapshotsPage() {
               run(async () => {
                 await api.createSnapshot({ appId, name });
                 setName("");
-                again();
+                await again();
               })
             }
           >
@@ -1012,7 +1022,10 @@ export function SnapshotsPage() {
 export function AccessPage() {
   const { appId, model } = useApp();
   const run = useRun();
-  const [r, again] = useLoad(() => api.getAccess({ appId }), [appId]);
+  const { data: r, refetch: again } = useQuery({
+    queryKey: ["access", appId],
+    queryFn: () => api.getAccess({ appId }),
+  });
   const [user, setUser] = useState("");
   const [role, setRole] = useState(String(Role.VIEWER));
   const [rule, setRule] = useState({
@@ -1021,7 +1034,7 @@ export function AccessPage() {
     members: [] as string[],
     write: false,
   });
-  const act = (f: () => Promise<unknown>) => run(async () => (await f(), again()));
+  const act = (f: () => Promise<unknown>) => run(async () => (await f(), await again()));
   return (
     <div>
       <Section title="メンバー">
@@ -1032,6 +1045,7 @@ export function AccessPage() {
                 <td>{m.user}</td>
                 <td>
                   <Sel
+                    ariaLabel={`${m.user} のロール`}
                     value={String(m.role)}
                     onChange={(v) =>
                       act(() => api.setMemberRole({ appId, user: m.user, role: Number(v) }))
@@ -1051,7 +1065,7 @@ export function AccessPage() {
             value={user}
             onChange={(e) => setUser(e.target.value)}
           />
-          <Sel value={role} onChange={setRole} options={ROLES} />
+          <Sel ariaLabel="追加するロール" value={role} onChange={setRole} options={ROLES} />
           <Button onPress={() => act(() => api.setMemberRole({ appId, user, role: Number(role) }))}>
             追加
           </Button>
@@ -1094,18 +1108,14 @@ export function AccessPage() {
             options={model.lists.map((l) => l.name)}
           />
           <Checks
+            label="メンバー"
             options={memberNames(model, rule.list)}
             value={rule.members}
             onChange={(members) => setRule({ ...rule, members })}
           />
-          <label className="inline-flex items-center gap-1 text-sm">
-            <input
-              type="checkbox"
-              checked={rule.write}
-              onChange={(e) => setRule({ ...rule, write: e.target.checked })}
-            />
+          <Check isSelected={rule.write} onChange={(write) => setRule({ ...rule, write })}>
             書き込み可
-          </label>
+          </Check>
           <Button
             onPress={() =>
               act(() => api.saveAccessRule({ appId, ...rule, role: Number(rule.role) }))

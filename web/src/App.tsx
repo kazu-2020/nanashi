@@ -1,7 +1,8 @@
 import { Alert, Button, CloseButton, Input } from "@heroui/react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { QueryCache, QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { useCallback, useState, type ReactNode } from "react";
 import { api, errorText, getUser, setUser } from "./api";
-import { type ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
+import { Role } from "./gen/nanashi/v1/plan_pb";
 import {
   AccessPage,
   AuditPage,
@@ -17,7 +18,7 @@ import {
   ViewsPage,
 } from "./pages";
 import { roleName } from "./logic";
-import { AppCtx, Report, useLoad, useRun } from "./state";
+import { AppCtx, Report, useRun } from "./state";
 import { Sel } from "./ui";
 
 // PAGES gives the navigation. A page with a role shows only to users with that role or higher.
@@ -41,56 +42,69 @@ export default function App() {
   const [user, setCurrentUser] = useState(getUser());
   const [app, setApp] = useState<{ id: string; name: string }>();
   const report = useCallback((e: unknown) => setError(errorText(e)), []);
+  // A failed read shows in the error banner. A retry only delays the message.
+  const [queries] = useState(
+    () =>
+      new QueryClient({
+        queryCache: new QueryCache({ onError: report }),
+        defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+      }),
+  );
   return (
-    <Report.Provider value={report}>
-      <main className="mx-auto flex max-w-7xl flex-col gap-4 p-4">
-        <header className="flex items-center gap-4">
-          <h1 className="text-xl font-bold">nanashi</h1>
-          {app && (
-            <button className="text-sm underline" onClick={() => setApp(undefined)}>
-              アプリケーション一覧
-            </button>
+    <QueryClientProvider client={queries}>
+      <Report.Provider value={report}>
+        <main className="mx-auto flex max-w-7xl flex-col gap-4 p-4">
+          <header className="flex items-center gap-4">
+            <h1 className="text-xl font-bold">nanashi</h1>
+            {app && (
+              <Button size="sm" variant="ghost" onPress={() => setApp(undefined)}>
+                アプリケーション一覧
+              </Button>
+            )}
+            {app && <span className="font-bold">{app.name}</span>}
+            {user && (
+              <span className="ml-auto text-sm">
+                {user}{" "}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onPress={() => {
+                    setUser("");
+                    setCurrentUser("");
+                    setApp(undefined);
+                    // The next user must not see the data of this user.
+                    queries.clear();
+                  }}
+                >
+                  ログアウト
+                </Button>
+              </span>
+            )}
+          </header>
+          {error && (
+            <Alert status="danger">
+              <Alert.Indicator />
+              <Alert.Content>
+                <Alert.Title>{error}</Alert.Title>
+              </Alert.Content>
+              <CloseButton aria-label="閉じる" onPress={() => setError("")} />
+            </Alert>
           )}
-          {app && <span className="font-bold">{app.name}</span>}
-          {user && (
-            <span className="ml-auto text-sm">
-              {user}{" "}
-              <button
-                className="underline"
-                onClick={() => {
-                  setUser("");
-                  setCurrentUser("");
-                  setApp(undefined);
-                }}
-              >
-                ログアウト
-              </button>
-            </span>
+          {!user ? (
+            <Login
+              onLogin={(u) => {
+                setUser(u);
+                setCurrentUser(u);
+              }}
+            />
+          ) : !app ? (
+            <Apps onOpen={setApp} />
+          ) : (
+            <Shell key={app.id} appId={app.id} />
           )}
-        </header>
-        {error && (
-          <Alert status="danger">
-            <Alert.Indicator />
-            <Alert.Content>
-              <Alert.Title>{error}</Alert.Title>
-            </Alert.Content>
-            <CloseButton aria-label="閉じる" onPress={() => setError("")} />
-          </Alert>
-        )}
-        {!user ? (
-          <Login
-            onLogin={(u) => {
-              setUser(u);
-              setCurrentUser(u);
-            }}
-          />
-        ) : !app ? (
-          <Apps onOpen={setApp} />
-        ) : (
-          <Shell key={app.id} appId={app.id} />
-        )}
-      </main>
-    </Report.Provider>
+        </main>
+      </Report.Provider>
+    </QueryClientProvider>
   );
 }
 
@@ -118,14 +132,18 @@ function Login(props: { onLogin: (u: string) => void }) {
 
 function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
   const run = useRun();
-  const [apps] = useLoad(() => api.listApplications({}), []);
+  const { data: apps } = useQuery({
+    queryKey: ["apps"],
+    queryFn: () => api.listApplications({}),
+  });
   const [name, setName] = useState("");
   const [from, setFrom] = useState("");
   const [snapshot, setSnapshot] = useState("");
-  const [snaps] = useLoad(
-    async () => (from ? (await api.listSnapshots({ appId: from })).snapshots : []),
-    [from],
-  );
+  const { data: snaps } = useQuery({
+    queryKey: ["snapshots", from],
+    queryFn: () => api.listSnapshots({ appId: from }),
+    enabled: !!from,
+  });
   const create = (snapshotId: string) =>
     run(async () => props.onOpen(await api.createApplication({ name, snapshotId })));
   return (
@@ -134,9 +152,9 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
       <ul className="flex flex-col gap-1">
         {apps?.applications.map((a) => (
           <li key={a.id}>
-            <button className="underline" onClick={() => props.onOpen(a)}>
+            <Button size="sm" variant="ghost" onPress={() => props.onOpen(a)}>
               {a.name}
-            </button>{" "}
+            </Button>{" "}
             <span className="text-sm">（{roleName(a.role)}）</span>
           </li>
         ))}
@@ -168,7 +186,7 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
           value={snapshot}
           onChange={setSnapshot}
           empty=""
-          options={snaps?.map((s): [string, string] => [s.id, s.name]) ?? []}
+          options={snaps?.snapshots.map((s): [string, string] => [s.id, s.name]) ?? []}
         />
         <Button isDisabled={!snapshot} onPress={() => create(snapshot)}>
           新しいアプリケーションに復元
@@ -179,16 +197,15 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
 }
 
 function Shell(props: { appId: string }) {
-  const run = useRun();
-  const [model, setModel] = useState<ModelDef>();
+  const { data: model, refetch } = useQuery({
+    queryKey: ["model", props.appId],
+    queryFn: () => api.getModel({ appId: props.appId }),
+  });
   const [page, setPage] = useState("lists");
-  const reload = useCallback(async () => {
-    await run(async () => setModel(await api.getModel({ appId: props.appId })));
-  }, [run, props.appId]);
-  useEffect(() => {
-    void reload();
-  }, [reload]);
   if (!model) return <p>読み込み中…</p>;
+  const reload = async () => {
+    await refetch();
+  };
   const can = (r: Role) => model.role >= r;
   const pages = PAGES.filter((p) => !p.role || can(p.role));
   const Page = (pages.find((p) => p.id === page) ?? pages[0]).page;

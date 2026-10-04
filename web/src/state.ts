@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext } from "react";
 import { errorText } from "./api";
 import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
 
@@ -30,30 +30,10 @@ export function useRun() {
   );
 }
 
-// useLoad reads data when deps change. The second value reads again.
-export function useLoad<T>(f: () => Promise<T>, deps: unknown[]): [T | undefined, () => void] {
-  const report = useContext(Report);
-  const [data, setData] = useState<T>();
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    let live = true;
-    f().then(
-      (d) => live && setData(d),
-      (e) => live && report(errorText(e)),
-    );
-    return () => {
-      live = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick]);
-  return [data, () => setTick((t) => t + 1)];
-}
-
 export const memberNames = (model: ModelDef, list: string) =>
   model.lists.find((l) => l.name === list)?.members.map((m) => m.name) ?? [];
 
 export const cls = {
-  input: "rounded border border-gray-300 px-2 py-1 text-sm",
   table:
     "border-collapse text-sm [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:bg-gray-100 [&_th]:px-2 [&_th]:py-1",
 };

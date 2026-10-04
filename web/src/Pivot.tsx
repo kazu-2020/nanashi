@@ -1,5 +1,6 @@
 // The pivot of Metrics: axes, filters, grid with cell edits, charts, CSV export, views and cell comments.
 import { Button, Input } from "@heroui/react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import {
   Bar,
@@ -32,7 +33,7 @@ import {
   type Spec,
   toProtoFilters,
 } from "./logic";
-import { cls, time, useApp, useLoad, useRun } from "./state";
+import { cls, time, useApp, useRun } from "./state";
 import { Checks, Sel } from "./ui";
 
 const DISPLAYS: [string, string][] = [
@@ -66,8 +67,9 @@ export function Pivot(props: {
   const filters = mergeFilters(spec.filters, props.page ?? {});
   const strip = (ds: string[]) => ds.filter((d) => d !== METRIC);
 
-  const [resp, requery] = useLoad(
-    () =>
+  const { data: resp, refetch: requery } = useQuery({
+    queryKey: ["query", appId, String(model.seq), spec, props.page],
+    queryFn: () =>
       api.query({
         appId,
         metrics: spec.metrics,
@@ -76,8 +78,9 @@ export function Pivot(props: {
         filters: toProtoFilters(filters),
         aggregation: spec.aggregation,
       }),
-    [appId, model.seq, JSON.stringify(spec), JSON.stringify(props.page)],
-  );
+    // The grid keeps the old values while it reads the new ones.
+    placeholderData: keepPreviousData,
+  });
   const grid = resp && buildGrid(resp, spec.metrics, spec.rows, spec.columns, order, filters);
 
   const axisOf = (d: string) =>
@@ -100,7 +103,7 @@ export function Pivot(props: {
         appId,
         writes: [{ metric, coords, value: v ? { value: v } : undefined }],
       });
-      requery();
+      await requery();
     });
   };
 
@@ -160,6 +163,7 @@ export function Pivot(props: {
               <div key={d} className="flex gap-2">
                 <span className="w-24 text-sm font-bold">{d}</span>
                 <Checks
+                  label={d}
                   options={order[d] ?? []}
                   value={spec.filters[d] ?? []}
                   onChange={(v) => setSpec({ ...spec, filters: { ...spec.filters, [d]: v } })}
@@ -288,10 +292,10 @@ function Body(props: {
                     onClick={() => props.onSelect(r, c)}
                   >
                     {props.editable(g.metric(r, c)) ? (
-                      <input
+                      <Input
                         key={text}
                         aria-label={`${keyLabel(r)} ${keyLabel(c) || "値"}`}
-                        className="w-24 text-right"
+                        className="h-7 w-24 px-1 py-0 text-right"
                         defaultValue={text}
                         onBlur={(e) => {
                           const input = e.target;
@@ -326,7 +330,10 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
   const run = useRun();
   const target = `metric:${props.metric}`;
   const [body, setBody] = useState("");
-  const [resp, again] = useLoad(() => api.listComments({ appId, target }), [appId, target]);
+  const { data: resp, refetch: again } = useQuery({
+    queryKey: ["comments", appId, target],
+    queryFn: () => api.listComments({ appId, target }),
+  });
   const list = resp?.comments.filter((c) => sameCell(c.cell, props.coords)) ?? [];
   return (
     <div className="rounded border p-2 text-sm">
@@ -351,7 +358,7 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
             run(async () => {
               await api.addComment({ appId, target, cell: props.coords, body });
               setBody("");
-              again();
+              await again();
             })
           }
         >

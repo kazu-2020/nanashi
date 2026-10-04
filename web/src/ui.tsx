@@ -1,33 +1,60 @@
-import type { ReactNode } from "react";
-import { cls } from "./state";
+import { Checkbox, CheckboxGroup, Label, ListBox, Select } from "@heroui/react";
+import type { ComponentProps, ReactNode } from "react";
+
+// React Aria does not accept "" as an item key, so the empty option uses this key.
+const EMPTY = "\u0000";
 
 export function Sel(props: {
   value: string;
   onChange: (v: string) => void;
   options: (string | [string, string])[];
   label?: string;
+  // ariaLabel names a Sel that shows no label.
+  ariaLabel?: string;
   empty?: string;
 }) {
+  const items = props.options.map((o) => (typeof o === "string" ? [o, o] : o));
+  if (props.empty !== undefined) items.unshift([EMPTY, props.empty]);
   return (
-    <label className="inline-flex items-center gap-1 text-sm">
-      {props.label}
-      <select
-        aria-label={props.label}
-        className={cls.input}
-        value={props.value}
-        onChange={(e) => props.onChange(e.target.value)}
-      >
-        {props.empty !== undefined && <option value="">{props.empty}</option>}
-        {props.options.map((o) => {
-          const [v, l] = typeof o === "string" ? [o, o] : o;
-          return (
-            <option key={v} value={v}>
+    <Select
+      aria-label={props.label ? undefined : props.ariaLabel}
+      className="w-auto min-w-36"
+      placeholder=""
+      value={props.value === "" ? EMPTY : props.value}
+      onChange={(k) => props.onChange(k === EMPTY ? "" : String(k ?? ""))}
+    >
+      {props.label && <Label>{props.label}</Label>}
+      <Select.Trigger>
+        <Select.Value />
+        <Select.Indicator />
+      </Select.Trigger>
+      <Select.Popover>
+        <ListBox>
+          {items.map(([v, l]) => (
+            <ListBox.Item key={v} id={v} textValue={l || " "}>
               {l}
-            </option>
-          );
-        })}
-      </select>
-    </label>
+              <ListBox.ItemIndicator />
+            </ListBox.Item>
+          ))}
+        </ListBox>
+      </Select.Popover>
+    </Select>
+  );
+}
+
+export function Check({
+  children,
+  ...rest
+}: Omit<ComponentProps<typeof Checkbox>, "children"> & { children: ReactNode }) {
+  return (
+    <Checkbox {...rest}>
+      <Checkbox.Content>
+        <Checkbox.Control>
+          <Checkbox.Indicator />
+        </Checkbox.Control>
+        {children}
+      </Checkbox.Content>
+    </Checkbox>
   );
 }
 
@@ -35,24 +62,21 @@ export function Checks(props: {
   options: string[];
   value: string[];
   onChange: (v: string[]) => void;
+  label: string;
 }) {
   return (
-    <span className="inline-flex flex-wrap gap-2 text-sm">
+    <CheckboxGroup
+      aria-label={props.label}
+      className="flex flex-row flex-wrap gap-3 text-sm"
+      value={props.value}
+      onChange={props.onChange}
+    >
       {props.options.map((o) => (
-        <label key={o} className="inline-flex items-center gap-1">
-          <input
-            type="checkbox"
-            checked={props.value.includes(o)}
-            onChange={(e) =>
-              props.onChange(
-                e.target.checked ? [...props.value, o] : props.value.filter((x) => x !== o),
-              )
-            }
-          />
+        <Check key={o} value={o}>
           {o}
-        </label>
+        </Check>
       ))}
-    </span>
+    </CheckboxGroup>
   );
 }
 
