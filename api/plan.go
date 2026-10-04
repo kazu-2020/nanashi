@@ -229,9 +229,14 @@ type appMeta struct {
 	Props []propRow
 }
 
-// holdsProperty tells if the Metric name is the name of a property Metric. The property owns that Metric.
-func (m appMeta) holdsProperty(name string) bool {
-	return slices.ContainsFunc(m.Props, func(p propRow) bool { return propMetric(p.List, p.Name) == name })
+// refuseProperty refuses a change to a Metric with the name of a property Metric. GetModel needs that Metric.
+func (m appMeta) refuseProperty(names ...string) error {
+	for _, n := range names {
+		if slices.ContainsFunc(m.Props, func(p propRow) bool { return propMetric(p.List, p.Name) == n }) {
+			return tag(errPrecondition, "%s はプロパティの値を持つ Metric なので、変更できない", n)
+		}
+	}
+	return nil
 }
 
 // propKind is the kind of the input Metric that holds a NUMBER or BOOLEAN property.

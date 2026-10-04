@@ -276,22 +276,6 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 	return connect.NewResponse(&nanashiv1.Application{Id: app, Name: name, Role: admin}), nil
 }
 
-// run executes the statements in one transaction.
-func (s *PlanServer) run(ctx context.Context, stmts []stmt) error {
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		for _, st := range stmts {
-			if _, err := tx.Exec(ctx, st.sql, st.args...); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return dbError(err)
-	}
-	return nil
-}
-
 func textJSON(m map[string]string) string {
 	if m == nil {
 		m = map[string]string{}
@@ -386,6 +370,56 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 	return connect.NewResponse(out), nil
 }
 
+// plan is one change to an application: the statements for the api tables and the engine operations.
+type plan struct {
+	ops   []op
+	stmts []stmt
+}
+
+// change applies the plan that planOf makes from the current model and api data of the application. The lock
+// makes the plan and the write see the same model. The statements and the engine write are one transaction: an
+// engine error rolls the rows back.
+func (s *PlanServer) change(ctx context.Context, app string, planOf func(engineModel, appMeta) (plan, error)) (*ack, error) {
+	defer s.lock(app)()
+	em, _, err := s.Engines.model(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := s.meta(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	p, err := planOf(em, meta)
+	if err != nil {
+		return nil, connectError(err)
+	}
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		for _, st := range p.stmts {
+			if _, err := tx.Exec(ctx, st.sql, st.args...); err != nil {
+				return err
+			}
+		}
+		return s.Engines.write(ctx, app, callerOf(ctx).user, p.ops)
+	})
+	if cerr := new(connect.Error); errors.As(err, &cerr) {
+		return nil, err
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return ok()
+}
+
+// listKinds records the kind of the lists in app_list.
+func listKinds(app string, kind nanashiv1.ListKind, lists ...string) []stmt {
+	var out []stmt
+	for _, list := range lists {
+		out = append(out, stmt{`insert into app_list (app_id, name, kind) values ($1, $2, $3)
+			on conflict (app_id, name) do update set kind = excluded.kind`, []any{app, list, kind}})
+	}
+	return out
+}
+
 func (s *PlanServer) CreateList(ctx context.Context, req *connect.Request[nanashiv1.CreateListRequest]) (*ack, error) {
 	m := req.Msg
 	if m.Kind != nanashiv1.ListKind_LIST_KIND_DIMENSION && m.Kind != nanashiv1.ListKind_LIST_KIND_TRANSACTION {
@@ -398,21 +432,9 @@ func (s *PlanServer) CreateList(ctx context.Context, req *connect.Request[nanash
 	if members == nil {
 		members = []string{}
 	}
-	return s.writeWithList(ctx, m.AppId, m.Kind, []op{newOp("add_dimension", m.Name, members)}, m.Name)
-}
-
-// writeWithList writes the operations and then records the kind of the new lists.
-func (s *PlanServer) writeWithList(ctx context.Context, app string, kind nanashiv1.ListKind, ops []op, lists ...string) (*ack, error) {
-	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
-		return nil, err
-	}
-	for _, list := range lists {
-		if _, err := s.Pool.Exec(ctx, `insert into app_list (app_id, name, kind) values ($1, $2, $3)
-			on conflict (app_id, name) do update set kind = excluded.kind`, app, list, kind); err != nil {
-			return nil, dbError(err)
-		}
-	}
-	return ok()
+	return s.change(ctx, m.AppId, func(engineModel, appMeta) (plan, error) {
+		return plan{[]op{newOp("add_dimension", m.Name, members)}, listKinds(m.AppId, m.Kind, m.Name)}, nil
+	})
 }
 
 func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanashiv1.AddPropertyRequest]) (*ack, error) {
@@ -420,97 +442,50 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 	if p == nil || strings.TrimSpace(p.Name) == "" {
 		return nil, invalid(errors.New("プロパティの名前が空"))
 	}
-	defer s.lock(app)()
-	em, _, err := s.Engines.model(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	dim, found := em.dim(list)
-	if !found {
-		return nil, invalid(fmt.Errorf("リスト %s がない", list))
-	}
-	meta, err := s.meta(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	// The engine knows only the DIMENSION properties. The api tables have the other types.
-	exists := slices.ContainsFunc(dim.Props, func(x engineProp) bool { return x.Name == p.Name }) ||
-		slices.ContainsFunc(meta.Props, func(x propRow) bool { return x.List == list && x.Name == p.Name })
-	if exists {
-		return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("%s にプロパティ %s はすでにある", list, p.Name))
-	}
-	var ops []op
-	switch kind, isMetric := propKind[p.Type]; {
-	case isMetric:
-		ops = []op{newOp("add_input", propMetric(list, p.Name), []string{list}, []any{}).with(map[string]any{"kind": kind})}
-	case p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION:
-		ops = []op{newOp("add_property", list, p.Name, p.Target, map[string]string{})}
-	case p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
-		return nil, invalid(errors.New("プロパティの型を指定する"))
-	}
-	if p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION {
-		// The property Metric must not replace a Metric of the user. add_input replaces the cells.
-		if _, err := em.metric(propMetric(list, p.Name)); err == nil {
-			return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("Metric %s があるので、プロパティ %s を作れない", propMetric(list, p.Name), p.Name))
+	return s.change(ctx, app, func(em engineModel, meta appMeta) (plan, error) {
+		dim, found := em.dim(list)
+		if !found {
+			return plan{}, fmt.Errorf("リスト %s がない", list)
 		}
-		// Record first: the primary key refuses a second property with the same name.
-		tag, err := s.Pool.Exec(ctx, `insert into app_property (app_id, list, name, type) values ($1, $2, $3, $4)
-			on conflict do nothing`, app, list, p.Name, p.Type)
-		if err != nil {
-			return nil, dbError(err)
+		// The engine knows only the DIMENSION properties. The api tables have the other types.
+		exists := slices.ContainsFunc(dim.Props, func(x engineProp) bool { return x.Name == p.Name }) ||
+			slices.ContainsFunc(meta.Props, func(x propRow) bool { return x.List == list && x.Name == p.Name })
+		if exists {
+			return plan{}, tag(errExists, "%s にプロパティ %s はすでにある", list, p.Name)
 		}
-		if tag.RowsAffected() == 0 {
-			return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("%s にプロパティ %s はすでにある", list, p.Name))
+		switch kind, isMetric := propKind[p.Type]; {
+		case p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION:
+			return plan{ops: []op{newOp("add_property", list, p.Name, p.Target, map[string]string{})}}, nil
+		case !isMetric && p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+			return plan{}, errors.New("プロパティの型を指定する")
+		default:
+			// The property Metric must not replace a Metric of the user. add_input replaces the cells.
+			if _, err := em.metric(propMetric(list, p.Name)); err == nil {
+				return plan{}, tag(errExists, "Metric %s があるので、プロパティ %s を作れない", propMetric(list, p.Name), p.Name)
+			}
+			out := plan{stmts: []stmt{{"insert into app_property (app_id, list, name, type) values ($1, $2, $3, $4)", []any{app, list, p.Name, p.Type}}}}
+			if isMetric {
+				out.ops = []op{newOp("add_input", propMetric(list, p.Name), []string{list}, []any{}).with(map[string]any{"kind": kind})}
+			}
+			return out, nil
 		}
-	}
-	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
-		s.Pool.Exec(ctx, "delete from app_property where app_id = $1 and list = $2 and name = $3", app, list, p.Name)
-		return nil, err
-	}
-	return ok()
-}
-
-func (s *PlanServer) EditMembers(ctx context.Context, req *connect.Request[nanashiv1.EditMembersRequest]) (*ack, error) {
-	return s.editMembers(ctx, req.Msg.AppId, req.Msg.List, func(engineModel, appMeta) ([]*nanashiv1.MemberEdit, error) {
-		return req.Msg.Edits, nil
 	})
 }
 
-// editMembers makes the edits with editsOf inside the lock, so that the edits see the current members
-// (for example, the next row number of a transaction list).
-func (s *PlanServer) editMembers(ctx context.Context, app, list string, editsOf func(engineModel, appMeta) ([]*nanashiv1.MemberEdit, error)) (*ack, error) {
-	defer s.lock(app)()
-	em, _, err := s.Engines.model(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	meta, err := s.meta(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	edits, err := editsOf(em, meta)
-	if err != nil {
-		return nil, invalid(err)
-	}
-	ops, stmts, err := editOps(app, list, em, meta, edits)
-	if err != nil {
-		return nil, invalid(err)
-	}
-	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
-		return nil, err
-	}
-	if err := s.run(ctx, stmts); err != nil {
-		return nil, err
-	}
-	return ok()
+func (s *PlanServer) EditMembers(ctx context.Context, req *connect.Request[nanashiv1.EditMembersRequest]) (*ack, error) {
+	app, list := req.Msg.AppId, req.Msg.List
+	return s.change(ctx, app, func(em engineModel, meta appMeta) (plan, error) {
+		ops, stmts, err := editOps(app, list, em, meta, req.Msg.Edits)
+		return plan{ops, stmts}, err
+	})
 }
 
 func (s *PlanServer) CreateCalendar(ctx context.Context, req *connect.Request[nanashiv1.CreateCalendarRequest]) (*ack, error) {
-	ops, err := calendarOps(int(req.Msg.StartYear), int(req.Msg.Years))
-	if err != nil {
-		return nil, invalid(err)
-	}
-	return s.writeWithList(ctx, req.Msg.AppId, nanashiv1.ListKind_LIST_KIND_CALENDAR, ops, "Year", "Quarter", "Month")
+	app := req.Msg.AppId
+	return s.change(ctx, app, func(engineModel, appMeta) (plan, error) {
+		ops, err := calendarOps(int(req.Msg.StartYear), int(req.Msg.Years))
+		return plan{ops, listKinds(app, nanashiv1.ListKind_LIST_KIND_CALENDAR, "Year", "Quarter", "Month")}, err
+	})
 }
 
 const scenarioList = "Scenario"
@@ -520,34 +495,29 @@ func (s *PlanServer) CreateScenario(ctx context.Context, req *connect.Request[na
 	if name == "" {
 		return nil, invalid(errors.New("シナリオの名前が空"))
 	}
-	em, _, err := s.Engines.model(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	if _, found := em.dim(scenarioList); !found {
+	return s.change(ctx, app, func(em engineModel, _ appMeta) (plan, error) {
+		if _, found := em.dim(scenarioList); !found {
+			if from != "" {
+				return plan{}, fmt.Errorf("シナリオ %s がない", from)
+			}
+			return plan{[]op{newOp("add_dimension", scenarioList, []string{name})}, listKinds(app, nanashiv1.ListKind_LIST_KIND_SCENARIO, scenarioList)}, nil
+		}
+		ops := []op{newOp("add_member", scenarioList, name)}
 		if from != "" {
-			return nil, invalid(fmt.Errorf("シナリオ %s がない", from))
-		}
-		return s.writeWithList(ctx, app, nanashiv1.ListKind_LIST_KIND_SCENARIO,
-			[]op{newOp("add_dimension", scenarioList, []string{name})}, scenarioList)
-	}
-	ops := []op{newOp("add_member", scenarioList, name)}
-	if from != "" {
-		for _, m := range em.Metrics {
-			if m.Formula != "" || !slices.Contains(m.Dims, scenarioList) {
-				continue
+			// The reads are under the lock, so they see the model that the write changes.
+			for _, m := range em.Metrics {
+				if m.Formula != "" || !slices.Contains(m.Dims, scenarioList) {
+					continue
+				}
+				cube, err := s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "slice", Query: map[string][]string{scenarioList: {from}}})
+				if err != nil {
+					return plan{}, err
+				}
+				ops = append(ops, copyCellOps(m.Name, scenarioList, name, cube)...)
 			}
-			cube, err := s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "slice", Query: map[string][]string{scenarioList: {from}}})
-			if err != nil {
-				return nil, err
-			}
-			ops = append(ops, copyCellOps(m.Name, scenarioList, name, cube)...)
 		}
-	}
-	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
-		return nil, err
-	}
-	return ok()
+		return plan{ops: ops}, nil
+	})
 }
 
 func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanashiv1.SaveMetricRequest]) (*ack, error) {
@@ -555,71 +525,39 @@ func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanash
 	if m == nil || strings.TrimSpace(m.Name) == "" {
 		return nil, invalid(errors.New("Metric の名前が空"))
 	}
-	defer s.lock(app)()
-	if err := s.refusePropertyMetric(ctx, app, m.Name); err != nil {
-		return nil, err
-	}
-	em, _, err := s.Engines.model(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	kind, err := engineKind(em, m)
-	if err != nil {
-		return nil, invalid(err)
-	}
-	ops, err := metricOp(em, m, kind, req.Msg.Replace)
-	if err != nil {
-		return nil, connectError(err)
-	}
-	if len(ops) == 0 {
-		return ok()
-	}
-	if err := s.Engines.write(ctx, app, callerOf(ctx).user, ops); err != nil {
-		return nil, err
-	}
-	return ok()
-}
-
-// refusePropertyMetric refuses a change to a Metric with the name of a property Metric. GetModel needs that Metric.
-func (s *PlanServer) refusePropertyMetric(ctx context.Context, app string, names ...string) error {
-	meta, err := s.meta(ctx, app)
-	if err != nil {
-		return err
-	}
-	for _, n := range names {
-		if meta.holdsProperty(n) {
-			return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("%s はプロパティの値を持つ Metric なので、変更できない", n))
+	return s.change(ctx, app, func(em engineModel, meta appMeta) (plan, error) {
+		if err := meta.refuseProperty(m.Name); err != nil {
+			return plan{}, err
 		}
-	}
-	return nil
+		kind, err := engineKind(em, m)
+		if err != nil {
+			return plan{}, err
+		}
+		ops, err := metricOp(em, m, kind, req.Msg.Replace)
+		return plan{ops: ops}, err
+	})
 }
 
 func (s *PlanServer) RenameMetric(ctx context.Context, req *connect.Request[nanashiv1.RenameMetricRequest]) (*ack, error) {
-	if err := s.refusePropertyMetric(ctx, req.Msg.AppId, req.Msg.Name, req.Msg.NewName); err != nil {
-		return nil, err
-	}
-	if err := s.Engines.write(ctx, req.Msg.AppId, callerOf(ctx).user, []op{newOp("rename_metric", req.Msg.Name, req.Msg.NewName)}); err != nil {
-		return nil, err
-	}
-	// Tables, views and comments refer to Metrics by name, so give them the new name too.
-	if err := s.run(ctx, metricRenames(req.Msg.AppId, req.Msg.Name, &req.Msg.NewName)); err != nil {
-		return nil, err
-	}
-	return ok()
+	app, old, name := req.Msg.AppId, req.Msg.Name, req.Msg.NewName
+	return s.change(ctx, app, func(_ engineModel, meta appMeta) (plan, error) {
+		if err := meta.refuseProperty(old, name); err != nil {
+			return plan{}, err
+		}
+		// Tables, views and comments refer to Metrics by name, so give them the new name too.
+		return plan{[]op{newOp("rename_metric", old, name)}, metricRenames(app, old, &name)}, nil
+	})
 }
 
 func (s *PlanServer) DeleteMetric(ctx context.Context, req *connect.Request[nanashiv1.DeleteMetricRequest]) (*ack, error) {
-	if err := s.refusePropertyMetric(ctx, req.Msg.AppId, req.Msg.Name); err != nil {
-		return nil, err
-	}
-	if err := s.Engines.write(ctx, req.Msg.AppId, callerOf(ctx).user, []op{newOp("remove_metric", req.Msg.Name)}); err != nil {
-		return nil, err
-	}
-	// A table or a view with a deleted Metric cannot query, so remove the name from them.
-	if err := s.run(ctx, metricRenames(req.Msg.AppId, req.Msg.Name, nil)); err != nil {
-		return nil, err
-	}
-	return ok()
+	app, name := req.Msg.AppId, req.Msg.Name
+	return s.change(ctx, app, func(_ engineModel, meta appMeta) (plan, error) {
+		if err := meta.refuseProperty(name); err != nil {
+			return plan{}, err
+		}
+		// A table or a view with a deleted Metric cannot query, so remove the name from them.
+		return plan{[]op{newOp("remove_metric", name)}, metricRenames(app, name, nil)}, nil
+	})
 }
 
 func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.QueryRequest]) (*connect.Response[nanashiv1.QueryResponse], error) {
@@ -647,51 +585,42 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 }
 
 func (s *PlanServer) WriteCells(ctx context.Context, req *connect.Request[nanashiv1.WriteCellsRequest]) (*ack, error) {
-	em, _, err := s.Engines.model(ctx, req.Msg.AppId)
-	if err != nil {
-		return nil, err
-	}
 	c := callerOf(ctx)
-	ops, err := writeOps(req.Msg.Writes, em, c.limitsIn(em))
-	if err != nil {
-		return nil, connectError(err)
-	}
-	if err := s.Engines.write(ctx, req.Msg.AppId, c.user, ops); err != nil {
-		return nil, err
-	}
-	return ok()
+	return s.change(ctx, req.Msg.AppId, func(em engineModel, _ appMeta) (plan, error) {
+		ops, err := writeOps(req.Msg.Writes, em, c.limitsIn(em))
+		return plan{ops: ops}, err
+	})
 }
 
 func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.ImportRequest]) (*connect.Response[nanashiv1.ImportResponse], error) {
 	app, c := req.Msg.AppId, callerOf(ctx)
-	em, _, err := s.Engines.model(ctx, app)
-	if err != nil {
-		return nil, err
-	}
 	var rows int
+	var planOf func(engineModel, appMeta) (plan, error)
 	switch t := req.Msg.Target.(type) {
 	case *nanashiv1.ImportRequest_List:
-		if _, ruled := c.limitsIn(em)[t.List.List]; ruled {
-			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s には権限の制限があるので読み込めない", t.List.List))
-		}
-		if _, err := s.editMembers(ctx, app, t.List.List, func(em engineModel, meta appMeta) ([]*nanashiv1.MemberEdit, error) {
+		planOf = func(em engineModel, meta appMeta) (plan, error) {
+			if _, ruled := c.limitsIn(em)[t.List.List]; ruled {
+				return plan{}, tag(errDenied, "%s には権限の制限があるので読み込めない", t.List.List)
+			}
 			edits, n, err := importListEdits(req.Msg.Csv, t.List, em, meta.Kinds[t.List.List])
+			if err != nil {
+				return plan{}, err
+			}
 			rows = n
-			return edits, err
-		}); err != nil {
-			return nil, err
+			ops, stmts, err := editOps(app, t.List.List, em, meta, edits)
+			return plan{ops, stmts}, err
 		}
 	case *nanashiv1.ImportRequest_Metric:
-		ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limitsIn(em))
-		if err != nil {
-			return nil, connectError(err)
+		planOf = func(em engineModel, _ appMeta) (plan, error) {
+			ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limitsIn(em))
+			rows = n
+			return plan{ops: ops}, err
 		}
-		if err := s.Engines.write(ctx, app, c.user, ops); err != nil {
-			return nil, err
-		}
-		rows = n
 	default:
 		return nil, invalid(errors.New("読み込み先を指定する"))
+	}
+	if _, err := s.change(ctx, app, planOf); err != nil {
+		return nil, err
 	}
 	return connect.NewResponse(&nanashiv1.ImportResponse{Rows: int32(rows)}), nil
 }
