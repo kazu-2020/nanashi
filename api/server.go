@@ -41,7 +41,9 @@ type PlanServer struct {
 }
 
 // lock makes the read-modify-write steps of one application run one at a time. Call the result to unlock.
-// ponytail: the lock is in one api process. If more api processes run, use a lock in PostgreSQL.
+// ponytail: the lock is in one api process. If a second api process runs, change only this body to
+// pg_advisory_xact_lock(<2-key>, hashtext(app)) in a transaction on a dedicated connection outside the pool.
+// The 2-key form does not collide with the 1-key locks of tessera (docs/engine-lifecycle.md).
 func (s *PlanServer) lock(app string) func() {
 	v, _ := s.locks.LoadOrStore(app, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
@@ -206,7 +208,7 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 		}
 	}
 	app := "app-" + newID()
-	if err := s.Engines.Start(ctx, app); err != nil {
+	if err := s.Engines.Create(ctx, app); err != nil {
 		log.Printf("CreateApplication: %v", err)
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンを起動できない"))
 	}
@@ -256,23 +258,6 @@ func textJSON(m map[string]string) string {
 	}
 	b, _ := json.Marshal(m)
 	return string(b)
-}
-
-// StartAll starts the engines of all applications. It logs the failures.
-func (s *PlanServer) StartAll(ctx context.Context) error {
-	rows, _ := s.Pool.Query(ctx, "select id from app_application order by id")
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return err
-	}
-	for _, id := range ids {
-		go func() {
-			if err := s.Engines.Start(ctx, id); err != nil {
-				log.Printf("start engine: %v", err)
-			}
-		}()
-	}
-	return nil
 }
 
 func (s *PlanServer) meta(ctx context.Context, app string) (appMeta, error) {

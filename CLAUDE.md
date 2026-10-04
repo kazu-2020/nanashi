@@ -11,7 +11,7 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 - `proto/`: the Connect contract between `api/` and `web/`. `buf.gen.yaml` makes `api/gen/` and `web/src/gen/` from it.
 - `docs/`: design notes that span more than one directory (for example `docs/engine-lifecycle.md`).
 - `compose.yaml`: PostgreSQL (port 55432) and RustFS (port 59000) for development and tests. Start them with `docker compose up -d`.
-- `dev.sh`: starts the full local stack (PostgreSQL, router, `api/` with the engines, `web/`).
+- `dev.sh`: starts the full local stack (PostgreSQL, router with the engines, `api/`, `web/`).
 
 ## Skills for the work
 

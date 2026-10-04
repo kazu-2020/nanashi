@@ -1,4 +1,4 @@
-// nanashi-api starts the application server. It also starts one engine server for each application.
+// nanashi-api starts the application server. It sends the engine requests to nanashi-router, which starts the engines.
 package main
 
 import (
@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -23,8 +22,6 @@ func main() {
 	dsn := flag.String("pg", "postgresql://postgres@127.0.0.1:55432/nanashi", "DSN of PostgreSQL (the api tables and the engine journal)")
 	listen := flag.String("listen", "127.0.0.1:8080", "address to listen on")
 	router := flag.String("router", "http://127.0.0.1:8090", "URL of nanashi-router")
-	tessera := flag.String("tessera", "../tessera", "path to tessera/")
-	engineDir := flag.String("engine-dir", "../.nanashi-data", "directory for the engine files")
 	var proxies []string
 	flag.Func("trusted-proxy", "CIDR or address of the authenticating proxy that sets X-Nanashi-User (repeat for more)",
 		func(v string) error { proxies = append(proxies, v); return nil })
@@ -48,21 +45,8 @@ func main() {
 	if err := api.Migrate(ctx, pool); err != nil {
 		log.Fatal(err)
 	}
-	tesseraAbs, err := filepath.Abs(*tessera)
-	if err != nil {
-		log.Fatal(err)
-	}
-	dirAbs, err := filepath.Abs(*engineDir)
-	if err != nil {
-		log.Fatal(err)
-	}
-	engines := &api.Engines{Router: *router, Tessera: tesseraAbs, Dir: dirAbs, DSN: *dsn,
-		HTTP: &http.Client{Timeout: 100 * time.Second}}
-	defer engines.StopAll()
+	engines := &api.Engines{Router: *router, HTTP: &http.Client{Timeout: 100 * time.Second}}
 	server := &api.PlanServer{Pool: pool, Engines: engines}
-	if err := server.StartAll(ctx); err != nil {
-		log.Fatal(err)
-	}
 
 	mux := http.NewServeMux()
 	mux.Handle(nanashiv1connect.NewPlanServiceHandler(server, connect.WithInterceptors(server.Interceptor())))
@@ -88,6 +72,6 @@ func main() {
 		return
 	}
 	// ListenAndServe returns when Shutdown starts. Wait for the requests in flight before the deferred
-	// calls stop the engines and close the pool.
+	// call closes the pool.
 	<-stopped
 }
