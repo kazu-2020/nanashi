@@ -12,6 +12,12 @@ Issue #30 gives the full structure of the service.
 | `proto/` | The Connect contract between `api/` and `web/` |
 | `compose.yaml` | PostgreSQL and the S3-compatible object storage (RustFS) for development and tests |
 
+## Start the local environment
+
+Set up `tessera/.venv` (`tessera/CLAUDE.md`) and run `pnpm install` in `web/`. Then run `./dev.sh`.
+It starts PostgreSQL, the router, `nanashi-api` with one engine for each application, and the web dev server.
+Open http://127.0.0.1:5173 and log in with a user name. The planning features are in `proto/nanashi/v1/plan.proto`.
+
 ## License
 
 MIT License (`LICENSE`).

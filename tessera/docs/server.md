@@ -10,11 +10,12 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 
 | Request | Content |
 |---|---|
-| `GET /` | The definitions of dimensions and Metrics, and the sequence number of the current published version |
+| `GET /` | The definitions of dimensions and Metrics, the property values of the dimensions, and the sequence number of the current published version |
 | `GET /metrics/<name>/cell?<dimension>=<member>` | 1 cell |
 | `GET /metrics/<name>/slice?<dimension>=a,b` | The cells of a range |
 | `GET /metrics/<name>/rows?<dimension>=a&offset=0&limit=50` | A list of rows and the total number of rows |
 | `GET /metrics/<name>/summary?keep=Month&agg=sum&<dimension>=a,b` | Aggregation |
+| `GET /metrics/<name>/overrides?<dimension>=a,b` | The cells that override the formula of an overridable Metric (`set_cell` on the Metric). The body is the same as slice. |
 | `POST /writes` | `{"client_op_id", "reason", "expect", "ops": [{"op": "set_cell", "args": [...], "kwargs": {...}}, ...]}` |
 | `GET /health` | Whether the server is alive (the sequence number of the current published version and the role `role`). No authentication is necessary. |
 | `GET /ready` | Whether the server can receive requests. It returns 503 and the reason in these conditions: the writer stopped, the server could not open the journal again, the server cannot extend the lease, the standby monitor failed, or `Replica` cannot catch up. It also returns the role `role` (`leader`, `standby`, or `follower` with `--follow`). No authentication is necessary. |

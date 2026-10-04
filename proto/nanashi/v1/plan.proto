@@ -1,0 +1,494 @@
+syntax = "proto3";
+
+package nanashi.v1;
+
+option go_package = "github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1";
+
+// PlanService gives the planning features to the frontend.
+// The header X-Nanashi-User identifies the user. The API trusts it only on a connection from this host
+// (local development) or from an authenticating proxy that sets it again (--trusted-proxy).
+// Each application is one engine model.
+service PlanService {
+  // Applications.
+  rpc ListApplications(ListApplicationsRequest) returns (ListApplicationsResponse) {}
+  // CreateApplication makes an empty application, or restores a snapshot into a new application.
+  rpc CreateApplication(CreateApplicationRequest) returns (Application) {}
+
+  // Modeling.
+  rpc GetModel(GetModelRequest) returns (ModelDef) {}
+  rpc CreateList(CreateListRequest) returns (Ack) {}
+  rpc AddProperty(AddPropertyRequest) returns (Ack) {}
+  rpc EditMembers(EditMembersRequest) returns (Ack) {}
+  rpc CreateCalendar(CreateCalendarRequest) returns (Ack) {}
+  // CreateScenario adds a member to the dimension "Scenario" and copies the input cells of copy_from.
+  rpc CreateScenario(CreateScenarioRequest) returns (Ack) {}
+  // SaveMetric makes or changes a Metric. An empty formula makes an input Metric.
+  rpc SaveMetric(SaveMetricRequest) returns (Ack) {}
+  rpc RenameMetric(RenameMetricRequest) returns (Ack) {}
+  rpc DeleteMetric(DeleteMetricRequest) returns (Ack) {}
+
+  // Data.
+  rpc Query(QueryRequest) returns (QueryResponse) {}
+  // WriteCells sets a cell, or spreads a value if the coordinates do not give all dimensions.
+  rpc WriteCells(WriteCellsRequest) returns (Ack) {}
+  rpc Import(ImportRequest) returns (ImportResponse) {}
+
+  // Tables, views and boards.
+  rpc SaveTable(TableDef) returns (TableDef) {}
+  rpc SaveView(ViewDef) returns (ViewDef) {}
+  rpc SaveBoard(BoardDef) returns (BoardDef) {}
+  rpc DeleteItem(DeleteItemRequest) returns (Ack) {}
+
+  // Collaboration.
+  rpc ListComments(ListCommentsRequest) returns (ListCommentsResponse) {}
+  rpc AddComment(Comment) returns (Comment) {}
+  rpc ListAudit(ListAuditRequest) returns (ListAuditResponse) {}
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse) {}
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (Snapshot) {}
+
+  // Access rights. Only an ADMIN can change them.
+  rpc GetAccess(GetAccessRequest) returns (Access) {}
+  rpc SetMemberRole(AppMember) returns (Ack) {}
+  rpc SaveAccessRule(AccessRule) returns (AccessRule) {}
+  rpc DeleteAccessRule(DeleteAccessRuleRequest) returns (Ack) {}
+}
+
+message Ack {}
+
+// Role is the role of a user in an application. A higher role has all the rights of a lower role.
+enum Role {
+  ROLE_UNSPECIFIED = 0; // No access.
+  ROLE_VIEWER = 1; // Reads data.
+  ROLE_CONTRIBUTOR = 2; // Also writes input cells and imports data.
+  ROLE_MODELER = 3; // Also changes lists, Metrics, tables, views and boards.
+  ROLE_ADMIN = 4; // Also changes access rights and members.
+}
+
+message Application {
+  string id = 1;
+  string name = 2;
+  Role role = 3;
+}
+
+message ListApplicationsRequest {}
+
+message ListApplicationsResponse {
+  repeated Application applications = 1;
+}
+
+message CreateApplicationRequest {
+  string name = 1;
+  // If set, the new application starts with the content of this snapshot.
+  string snapshot_id = 2;
+}
+
+message GetModelRequest {
+  string app_id = 1;
+}
+
+enum ListKind {
+  LIST_KIND_UNSPECIFIED = 0;
+  LIST_KIND_DIMENSION = 1;
+  LIST_KIND_TRANSACTION = 2;
+  LIST_KIND_CALENDAR = 3;
+  LIST_KIND_SCENARIO = 4;
+}
+
+enum PropertyType {
+  PROPERTY_TYPE_UNSPECIFIED = 0;
+  // A member of the list in target. Formulas use it with BY.
+  PROPERTY_TYPE_DIMENSION = 1;
+  // A number. It is the input Metric "<list>.<property>" on the list.
+  PROPERTY_TYPE_NUMBER = 2;
+  // TRUE or FALSE. It is the input Metric "<list>.<property>" on the list.
+  PROPERTY_TYPE_BOOLEAN = 3;
+  // Text. Formulas cannot use it.
+  PROPERTY_TYPE_TEXT = 4;
+}
+
+message PropertyDef {
+  string name = 1;
+  PropertyType type = 2;
+  // The target list of a DIMENSION property.
+  string target = 3;
+}
+
+message Member {
+  string name = 1;
+  // The value of each property as text. A blank value is missing.
+  map<string, string> properties = 2;
+}
+
+message ListDef {
+  string name = 1;
+  ListKind kind = 2;
+  reserved 3;
+  // The members in their order. Access rules can hide members.
+  repeated Member members = 4;
+  repeated PropertyDef properties = 5;
+}
+
+// ValueKind is the type of the values of a Metric.
+enum ValueKind {
+  VALUE_KIND_UNSPECIFIED = 0; // NUMBER.
+  VALUE_KIND_NUMBER = 1;
+  VALUE_KIND_BOOLEAN = 2;
+  VALUE_KIND_MEMBER = 3; // A member of MetricDef.member_list.
+}
+
+message MetricDef {
+  string name = 1;
+  repeated string dimensions = 2;
+  ValueKind kind = 3;
+  // The list of a MEMBER Metric. Empty for the other kinds.
+  string member_list = 6;
+  // Empty for an input Metric.
+  string formula = 4;
+  // True if a user can type over the formula result.
+  bool overridable = 5;
+}
+
+message ModelDef {
+  int64 seq = 1;
+  Role role = 2;
+  repeated ListDef lists = 3;
+  repeated MetricDef metrics = 4;
+  repeated TableDef tables = 5;
+  repeated ViewDef views = 6;
+  repeated BoardDef boards = 7;
+}
+
+message CreateListRequest {
+  string app_id = 1;
+  string name = 2;
+  ListKind kind = 3;
+  repeated string members = 4;
+}
+
+message AddPropertyRequest {
+  string app_id = 1;
+  string list = 2;
+  PropertyDef property = 3;
+}
+
+message EditMembersRequest {
+  string app_id = 1;
+  string list = 2;
+  repeated MemberEdit edits = 3;
+}
+
+message MemberEdit {
+  oneof edit {
+    AddMember add = 1;
+    RenameMember rename = 2;
+    RemoveMember remove = 3;
+    MoveMember move = 4;
+    SetProperties set = 5;
+  }
+}
+
+message AddMember {
+  string name = 1;
+  map<string, string> properties = 2;
+}
+
+message RenameMember {
+  string name = 1;
+  string new_name = 2;
+}
+
+message RemoveMember {
+  string name = 1;
+}
+
+message MoveMember {
+  string name = 1;
+  int32 position = 2;
+}
+
+// SetProperties sets property values of a member. An empty value makes the value blank.
+message SetProperties {
+  string name = 1;
+  map<string, string> properties = 2;
+}
+
+// CreateCalendar makes the ordered lists Year, Quarter and Month with the properties
+// Month.Quarter, Month.Year and Quarter.Year. Member names are "2026", "2026-Q1" and "2026-01".
+message CreateCalendarRequest {
+  string app_id = 1;
+  int32 start_year = 2;
+  int32 years = 3;
+}
+
+message CreateScenarioRequest {
+  string app_id = 1;
+  string name = 2;
+  // An existing scenario. Empty gives an empty scenario.
+  string copy_from = 3;
+}
+
+message SaveMetricRequest {
+  string app_id = 1;
+  MetricDef metric = 2;
+  // If a change deletes the cells of an input Metric, the api refuses it. Set replace to accept the change.
+  bool replace = 3;
+}
+
+message RenameMetricRequest {
+  string app_id = 1;
+  string name = 2;
+  string new_name = 3;
+}
+
+message DeleteMetricRequest {
+  string app_id = 1;
+  string name = 2;
+}
+
+message Members {
+  repeated string names = 1;
+}
+
+message Value {
+  oneof value {
+    double number = 1;
+    bool boolean = 2;
+    string member = 3;
+  }
+}
+
+// Aggregation is how a Query combines the cells of a number Metric.
+enum Aggregation {
+  AGGREGATION_UNSPECIFIED = 0; // SUM.
+  AGGREGATION_SUM = 1;
+  AGGREGATION_AVG = 2;
+  AGGREGATION_MIN = 3;
+  AGGREGATION_MAX = 4;
+  AGGREGATION_COUNT = 5;
+}
+
+// QueryRequest reads the cells of Metrics, aggregated to the dimensions in rows and columns.
+// The response ignores a dimension that a Metric does not have.
+message QueryRequest {
+  string app_id = 1;
+  repeated string metrics = 2;
+  repeated string rows = 3;
+  repeated string columns = 4;
+  // Only these members. A missing dimension gives all members.
+  map<string, Members> filters = 5;
+  // It is used only for number Metrics.
+  Aggregation aggregation = 6;
+}
+
+message QueryCell {
+  string metric = 1;
+  // The member of each dimension in QueryResponse.dimensions. Empty if the Metric does not have the dimension.
+  repeated string coords = 2;
+  Value value = 3;
+}
+
+message QueryResponse {
+  reserved 1;
+  // The dimensions of QueryCell.coords: the rows, then the columns.
+  repeated string dimensions = 2;
+  repeated QueryCell cells = 3;
+}
+
+message CellWrite {
+  string metric = 1;
+  map<string, string> coords = 2;
+  // Missing makes the cell blank.
+  Value value = 3;
+}
+
+message WriteCellsRequest {
+  string app_id = 1;
+  repeated CellWrite writes = 2;
+}
+
+// ImportRequest loads a CSV file (with a header row) into a list or a Metric.
+message ImportRequest {
+  string app_id = 1;
+  string csv = 2;
+  oneof target {
+    ListImport list = 3;
+    MetricImport metric = 4;
+  }
+}
+
+message ListImport {
+  string list = 1;
+  // The column with the member names. Empty for a transaction list gives the row numbers.
+  string member_column = 2;
+  // Property name to column name.
+  map<string, string> property_columns = 3;
+}
+
+message MetricImport {
+  string metric = 1;
+  // Dimension name to column name.
+  map<string, string> dimension_columns = 2;
+  string value_column = 3;
+  // If true, add the members that are not in the lists. If false, such rows are errors.
+  bool add_members = 4;
+}
+
+message ImportResponse {
+  int32 rows = 1;
+}
+
+message TableDef {
+  string app_id = 1;
+  // Empty makes a new table.
+  string id = 2;
+  string name = 3;
+  repeated string metrics = 4;
+}
+
+enum Display {
+  DISPLAY_UNSPECIFIED = 0; // A grid.
+  DISPLAY_GRID = 1;
+  DISPLAY_LINE = 2;
+  DISPLAY_BAR = 3;
+  DISPLAY_KPI = 4;
+}
+
+// ViewDef is a saved pivot of Metrics.
+message ViewDef {
+  string app_id = 1;
+  // Empty makes a new view.
+  string id = 2;
+  string name = 3;
+  repeated string metrics = 4;
+  repeated string rows = 5;
+  repeated string columns = 6;
+  map<string, Members> filters = 7;
+  Display display = 8;
+  Aggregation aggregation = 9;
+}
+
+message Widget {
+  oneof content {
+    string view_id = 1;
+    string text = 2;
+  }
+}
+
+message BoardDef {
+  string app_id = 1;
+  // Empty makes a new board.
+  string id = 2;
+  string name = 3;
+  repeated Widget widgets = 4;
+  // Dimensions with a page selector. The selected member filters all the widgets.
+  repeated string page_selectors = 5;
+}
+
+enum ItemType {
+  ITEM_TYPE_UNSPECIFIED = 0;
+  ITEM_TYPE_TABLE = 1;
+  ITEM_TYPE_VIEW = 2;
+  ITEM_TYPE_BOARD = 3;
+}
+
+message DeleteItemRequest {
+  string app_id = 1;
+  ItemType type = 2;
+  string id = 3;
+}
+
+message Comment {
+  string app_id = 1;
+  string id = 2;
+  // The Metric of the comment.
+  string metric = 3;
+  // The cell, as dimension name to member. Empty for the whole Metric.
+  map<string, string> cell = 4;
+  string user = 5;
+  string body = 6;
+  // Unix time in milliseconds.
+  int64 created_at = 7;
+}
+
+message ListCommentsRequest {
+  string app_id = 1;
+  // Empty gives all comments of the application.
+  string metric = 2;
+}
+
+message ListCommentsResponse {
+  repeated Comment comments = 1;
+}
+
+message AuditEntry {
+  string id = 1;
+  string user = 2;
+  int64 created_at = 3;
+  // The RPC name, for example "WriteCells".
+  string action = 4;
+  // The request as JSON.
+  string detail = 5;
+}
+
+message ListAuditRequest {
+  string app_id = 1;
+  int32 limit = 2;
+}
+
+message ListAuditResponse {
+  repeated AuditEntry entries = 1;
+}
+
+message Snapshot {
+  string id = 1;
+  string name = 2;
+  string user = 3;
+  int64 created_at = 4;
+}
+
+message ListSnapshotsRequest {
+  string app_id = 1;
+}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+}
+
+message CreateSnapshotRequest {
+  string app_id = 1;
+  string name = 2;
+}
+
+message GetAccessRequest {
+  string app_id = 1;
+}
+
+message AppMember {
+  string app_id = 1;
+  string user = 2;
+  // ROLE_UNSPECIFIED removes the user from the application.
+  Role role = 3;
+}
+
+// AccessRule limits the members of a list that the users with a role can read and write.
+// A user with more than one rule must agree with all of them. MODELER and ADMIN ignore rules.
+message AccessRule {
+  string app_id = 1;
+  // Empty makes a new rule.
+  string id = 2;
+  Role role = 3;
+  string list = 4;
+  repeated string members = 5;
+  // If false, the users can read the members but cannot write.
+  bool write = 6;
+}
+
+message DeleteAccessRuleRequest {
+  string app_id = 1;
+  string id = 2;
+}
+
+message Access {
+  repeated AppMember members = 1;
+  repeated AccessRule rules = 2;
+}

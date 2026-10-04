@@ -454,6 +454,9 @@ class Model:
 
     @_operation
     def add_dimension(self, name: str, members, *, ordered: bool = False) -> Dimension:
+        # A replaced dimension would leave the Metrics on it with keys of the old members.
+        if name in self.dimensions:
+            raise ValueError(f"{name}: 同じ名前の軸がある")
         if name in self.metrics:
             raise ValueError(f"{name}: 同じ名前の Metric がある（式の中で軸と区別できなくなる）")
         members = list(members)

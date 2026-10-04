@@ -3,3 +3,5 @@ modules:
   - path: proto
 lint:
   use: [STANDARD]
+  # PlanService shares small messages (Ack, the definitions) between RPCs, so that the contract stays small.
+  except: [RPC_REQUEST_RESPONSE_UNIQUE, RPC_REQUEST_STANDARD_NAME, RPC_RESPONSE_STANDARD_NAME]
