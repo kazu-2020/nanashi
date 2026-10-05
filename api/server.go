@@ -96,6 +96,7 @@ var constraintMessages = map[string]string{
 	"app_property_pkey":    "同じ id のプロパティがすでにある",
 	"app_property_name":    "同じ名前のプロパティがすでにある",
 	"app_item_pkey":        "同じ id がすでにある",
+	"app_metric_pkey":      "同じ id のメトリックがすでにある",
 	"app_comment_pkey":     "同じ id のコメントがすでにある",
 	"app_access_rule_pkey": "同じ id のルールがすでにある",
 	"app_snapshot_pkey":    "同じ id のスナップショットがすでにある",
@@ -282,11 +283,16 @@ type stmt struct {
 	zero error
 }
 
-// madeRow is a row that the first transaction makes. A refusal of the engine deletes it (compensation).
+// madeRow is a row that the first transaction makes or changes. A refusal of the engine deletes it, or for
+// app_metric puts Old back (compensation).
 type madeRow struct {
 	Table  string `json:"table"`
 	ID     string `json:"id"`
 	ListID string `json:"list_id,omitempty"`
+	// app_metric only. New is the values that the change wrote. Old is the values before the change (nil: no row).
+	// The compensation changes the row only if it still has New, so it does not undo a later change.
+	Old *metricRow `json:"old,omitempty"`
+	New *metricRow `json:"new,omitempty"`
 }
 
 // plan is one change to an application: the engine operations, the statements for the api tables, the rows
@@ -342,6 +348,14 @@ func compensation(app string, made []madeRow) []stmt {
 			out = append(out, stmt{sql: "delete from app_list where app_id = $1 and id = $2", args: []any{app, m.ID}})
 		case "app_property":
 			out = append(out, stmt{sql: "delete from app_property where app_id = $1 and list_id = $2 and id = $3", args: []any{app, m.ListID, m.ID}})
+		case "app_metric":
+			key := "where app_id = $1 and metric_id = $2 and description = $3 and folder = $4"
+			args := []any{app, m.ID, m.New.Description, m.New.Folder}
+			if m.Old == nil {
+				out = append(out, stmt{sql: "delete from app_metric " + key, args: args})
+			} else {
+				out = append(out, stmt{sql: "update app_metric set description = $5, folder = $6 " + key, args: append(args, m.Old.Description, m.Old.Folder)})
+			}
 		}
 	}
 	return out
@@ -547,7 +561,7 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 					return st.zero
 				}
 			}
-			// Each statement writes rows of a snapshot (app_list, app_property, app_item). CreateSnapshot compares the version.
+			// Each statement writes rows of a snapshot (app_list, app_property, app_item, app_metric). CreateSnapshot compares the version.
 			if len(p.stmts) > 0 {
 				_, err = tx.Exec(ctx, "update app_application set version = version + 1 where id = $1", app)
 			}

@@ -35,6 +35,7 @@ func TestEngineReplyOutcome(t *testing.T) {
 	}{
 		{http.StatusOK, "", done},
 		{http.StatusBadRequest, "bad_request", failed},
+		{http.StatusBadRequest, "formula", failed}, // A formula error is final: a resend gets the same refusal.
 		{http.StatusConflict, "duplicate_id", failed},
 		{http.StatusConflict, "conflict", conflict},
 		{http.StatusServiceUnavailable, "stale", unknown},

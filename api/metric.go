@@ -72,6 +72,28 @@ func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, create bool) 
 	return []op{newOp("add_formula", map[string]any{"id": m.Id, "name": name, "dims": dims, "formula": m.Formula, "kind": kind, "overridable": m.Overridable})}, nil
 }
 
+// catalogStmt gives the statement that writes the catalog row of m, and the row for the compensation.
+// A create inserts the row with the owner user. An update keeps the owner. An update without a catalog change
+// gives no statement. old is the current row of m, if found.
+func catalogStmt(app, user string, m *nanashiv1.MetricDef, old metricRow, found, create bool) ([]stmt, []madeRow) {
+	next := metricRow{Description: strings.TrimSpace(m.Description), Folder: strings.TrimSpace(m.Folder)}
+	made := madeRow{Table: "app_metric", ID: m.Id, New: &next}
+	if create {
+		return []stmt{{`insert into app_metric (app_id, metric_id, description, folder, owner) values ($1, $2, $3, $4, $5) on conflict do nothing`,
+			[]any{app, m.Id, next.Description, next.Folder, user}, tag(errExists, "同じ id のメトリックがすでにある")}}, []madeRow{made}
+	}
+	if found && old.Description == next.Description && old.Folder == next.Folder {
+		return nil, nil
+	}
+	if found {
+		made.Old = &metricRow{Description: old.Description, Folder: old.Folder}
+	}
+	// A Metric from before the catalog has no row. The update makes it with the user as the owner.
+	return []stmt{{`insert into app_metric (app_id, metric_id, description, folder, owner) values ($1, $2, $3, $4, $5)
+		on conflict (app_id, metric_id) do update set description = excluded.description, folder = excluded.folder`,
+		[]any{app, m.Id, next.Description, next.Folder, user}, nil}}, []madeRow{made}
+}
+
 // The actions follow.
 
 func (s *PlanServer) CreateMetric(ctx context.Context, req *connect.Request[nanashiv1.CreateMetricRequest]) (*ack, error) {
@@ -95,7 +117,12 @@ func (s *PlanServer) saveMetric(ctx context.Context, app string, req message, m 
 			return plan{}, err
 		}
 		ops, err := metricOp(em, m, kind, create)
-		return plan{ops: ops}, err
+		if err != nil {
+			return plan{}, err
+		}
+		old, found := meta.Metrics[m.Id]
+		stmts, made := catalogStmt(app, callerOf(ctx).user, m, old, found, create)
+		return plan{ops: ops, stmts: stmts, made: made}, nil
 	}))
 }
 

@@ -12,7 +12,7 @@ drop function if exists app_rename(jsonb, text, text);
 create table if not exists app_application (
   id uuid primary key,
   name text not null,
-  -- A transaction that writes a row of a snapshot (app_list, app_property, app_item) adds 1. CreateSnapshot compares it.
+  -- A transaction that writes a row of a snapshot (app_list, app_property, app_item, app_metric) adds 1. CreateSnapshot compares it.
   version bigint not null default 0,
   created_at timestamptz not null default now()
 );
@@ -54,6 +54,16 @@ create table if not exists app_item (
   def jsonb not null,
   ord bigserial,
   primary key (app_id, id)
+);
+-- app_metric is the Metric catalog: the attributes of a Metric that only the api keeps. The engine keeps the name.
+-- metric_id is the Metric UUID. A row for a Metric that the model does not have stays, and the readers skip it.
+create table if not exists app_metric (
+  app_id uuid not null references app_application (id) on delete cascade,
+  metric_id uuid not null,
+  description text not null default '',
+  folder text not null default '',
+  owner text not null,
+  primary key (app_id, metric_id)
 );
 create table if not exists app_comment (
   app_id uuid not null references app_application (id) on delete cascade,

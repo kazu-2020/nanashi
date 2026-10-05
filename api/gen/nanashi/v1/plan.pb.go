@@ -920,7 +920,12 @@ type MetricDef struct {
 	// Empty for an input Metric. A formula names the Metrics, lists and members by their names.
 	Formula string `protobuf:"bytes,4,opt,name=formula,proto3" json:"formula,omitempty"`
 	// True if a user can type over the formula result.
-	Overridable   bool `protobuf:"varint,5,opt,name=overridable,proto3" json:"overridable,omitempty"`
+	Overridable bool `protobuf:"varint,5,opt,name=overridable,proto3" json:"overridable,omitempty"`
+	// The catalog attributes (app_metric). The api keeps them, not the engine.
+	Description string `protobuf:"bytes,8,opt,name=description,proto3" json:"description,omitempty"`
+	Folder      string `protobuf:"bytes,9,opt,name=folder,proto3" json:"folder,omitempty"`
+	// The user who made the Metric. Output only: the api ignores it in a request.
+	Owner         string `protobuf:"bytes,10,opt,name=owner,proto3" json:"owner,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1002,6 +1007,27 @@ func (x *MetricDef) GetOverridable() bool {
 		return x.Overridable
 	}
 	return false
+}
+
+func (x *MetricDef) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *MetricDef) GetFolder() string {
+	if x != nil {
+		return x.Folder
+	}
+	return ""
+}
+
+func (x *MetricDef) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
 }
 
 type ModelDef struct {
@@ -4859,7 +4885,7 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\amembers\x18\x04 \x03(\v2\x12.nanashi.v1.MemberR\amembers\x127\n" +
 	"\n" +
 	"properties\x18\x05 \x03(\v2\x17.nanashi.v1.PropertyDefR\n" +
-	"propertiesJ\x04\b\x03\x10\x04\"\xd7\x01\n" +
+	"propertiesJ\x04\b\x03\x10\x04\"\xa7\x02\n" +
 	"\tMetricDef\x12\x0e\n" +
 	"\x02id\x18\a \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
@@ -4870,7 +4896,11 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\vmember_list\x18\x06 \x01(\tR\n" +
 	"memberList\x12\x18\n" +
 	"\aformula\x18\x04 \x01(\tR\aformula\x12 \n" +
-	"\voverridable\x18\x05 \x01(\bR\voverridable\"\x9e\x02\n" +
+	"\voverridable\x18\x05 \x01(\bR\voverridable\x12 \n" +
+	"\vdescription\x18\b \x01(\tR\vdescription\x12\x16\n" +
+	"\x06folder\x18\t \x01(\tR\x06folder\x12\x14\n" +
+	"\x05owner\x18\n" +
+	" \x01(\tR\x05owner\"\x9e\x02\n" +
 	"\bModelDef\x12$\n" +
 	"\x04role\x18\x02 \x01(\x0e2\x10.nanashi.v1.RoleR\x04role\x12)\n" +
 	"\x05lists\x18\x03 \x03(\v2\x13.nanashi.v1.ListDefR\x05lists\x12/\n" +

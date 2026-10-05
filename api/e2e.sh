@@ -89,7 +89,8 @@ ok alice CreateScenario "{\"appId\": \"$APP\", \"id\": \"$BASE\", \"name\": \"Ba
 MODEL=$(model "$APP")
 SCENARIO=$(list "$MODEL" Scenario) MONTH=$(list "$MODEL" Month) JAN=$(member "$MODEL" Month 2026-01)
 BUDGET=$(uuid) REVENUE=$(uuid)
-ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BUDGET\", \"name\": \"Budget\", \"dimensions\": [\"$PRODUCT\", \"$SCENARIO\", \"$MONTH\"]}}" >/dev/null
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BUDGET\", \"name\": \"Budget\", \"dimensions\": [\"$PRODUCT\", \"$SCENARIO\", \"$MONTH\"],
+  \"description\": \"Sales budget\", \"folder\": \"Plan\", \"owner\": \"mallory\"}}" >/dev/null
 ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$REVENUE\", \"name\": \"Revenue\", \"dimensions\": [\"$PRODUCT\"], \"formula\": \"'Sales.Amount'[BY SUM: Sales.Product]\"}}" >/dev/null
 ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [
   {\"metric\": \"$BUDGET\", \"coords\": {\"$PRODUCT\": \"$A\", \"$SCENARIO\": \"$BASE\"}, \"value\": {\"number\": 1200}},
@@ -101,6 +102,21 @@ check "list kinds" '[.lists[] | .kind] == ["LIST_KIND_CALENDAR", "LIST_KIND_CALE
 check "the ids of the lists come back" ".lists[] | select(.name == \"Product\") | .id == \"$PRODUCT\" and .members[0].id == \"$A\"" "$MODEL"
 check "member properties" ".lists[] | select(.name == \"Product\") | .members[0].properties == {\"$PCAT\": \"$HARD\", \"$NOTE\": \"first\"}" "$MODEL"
 check "transaction rows" ".lists[] | select(.name == \"Sales\") | [.members[] | .properties[\"$AMOUNT\"]] == [\"100\", \"50\", \"25\", \"10\"]" "$MODEL"
+check "the catalog gives the description, the folder and the owner" \
+  ".metrics[] | select(.id == \"$BUDGET\") | .description == \"Sales budget\" and .folder == \"Plan\" and .owner == \"alice\"" "$MODEL"
+ok alice UpdateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BUDGET\", \"name\": \"Budget\", \"dimensions\": [\"$PRODUCT\", \"$SCENARIO\", \"$MONTH\"],
+  \"description\": \"Sales budget\", \"folder\": \"Plan 2026\"}}" >/dev/null
+check "an update changes the folder and keeps the input values" \
+  ".metrics[] | select(.id == \"$BUDGET\") | .folder == \"Plan 2026\" and .owner == \"alice\"" "$(model "$APP")"
+ok alice UpdateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BUDGET\", \"name\": \"Budget\", \"dimensions\": [\"$PRODUCT\", \"$SCENARIO\", \"$MONTH\"],
+  \"description\": \"Sales budget\", \"folder\": \"Plan\"}}" >/dev/null
+# The engine refuses the formula. The refused create must leave no catalog row, so a second create with the id works.
+BROKEN=$(uuid)
+check "the engine refuses a bad formula" '.code == "invalid_argument"' \
+  "$(call alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BROKEN\", \"name\": \"Broken\", \"formula\": \"Budget +\", \"description\": \"x\"}}")"
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BROKEN\", \"name\": \"Broken\", \"description\": \"y\"}}" >/dev/null
+check "a refused create leaves no catalog row" ".metrics[] | select(.id == \"$BROKEN\") | .description == \"y\"" "$(model "$APP")"
+ok alice DeleteMetric "{\"appId\": \"$APP\", \"id\": \"$BROKEN\"}" >/dev/null
 check "property Metric is not a Metric" '[.metrics[].name] == ["Budget", "Revenue"]' "$MODEL"
 # The Metric of a property has an id that the api made. Find it through the engine: the api refuses its change.
 AMOUNT_METRIC=$(curl -sS "$ROUTER/models/$APP/" | jq -r '.metrics | to_entries[] | select(.value.name == "Sales.Amount") | .key')
@@ -163,6 +179,8 @@ ok alice RenameMetric "{\"appId\": \"$APP2\", \"id\": \"$BUDGET\", \"name\": \"B
 check "a rename keeps the comments" '[.comments[].body] == ["on C"]' "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
 MODEL2=$(model "$APP2")
 check "a rename keeps the tables and views" "(.tables[0].metrics == [\"$BUDGET\", \"$REVENUE\"]) and (.views[0].metrics == [\"$BUDGET\"]) and (.metrics[] | select(.id == \"$BUDGET\") | .name == \"Budget 2027\")" "$MODEL2"
+check "a rename and a restore keep the catalog" \
+  ".metrics[] | select(.id == \"$BUDGET\") | .description == \"Sales budget\" and .folder == \"Plan\" and .owner == \"alice\"" "$MODEL2"
 check "restored model" "(.lists[] | select(.name == \"Product\") | .members[0].properties[\"$NOTE\"] == \"first\") and (.views | length == 1) and (.lists[-1].kind == \"LIST_KIND_SCENARIO\")" "$MODEL2"
 B27='"appId": "'$APP2'", "metric": {"id": "'$BUDGET'", "name": "Budget 2027"'
 check "create of an existing Metric is refused" '.code == "already_exists"' \

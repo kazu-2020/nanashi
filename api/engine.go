@@ -249,7 +249,7 @@ type outcome int
 
 const (
 	done     outcome = iota // 200: the engine committed the write, now or at an earlier send.
-	failed                  // 400 bad_request or 409 duplicate_id: the engine refused the write and records the refusal.
+	failed                  // 400 (bad_request or formula) or 409 duplicate_id: the engine refused the write and records the refusal.
 	conflict                // 409 conflict: a write in between changed the cells that expect protects. Plan again.
 	unknown                 // Anything else: the result is not known. The write stays pending.
 )
@@ -258,7 +258,7 @@ func (r engineReply) outcome() outcome {
 	switch {
 	case r.Status == http.StatusOK:
 		return done
-	case r.Status == http.StatusBadRequest && r.Code == "bad_request", r.Status == http.StatusConflict && r.Code == "duplicate_id":
+	case r.Status == http.StatusBadRequest, r.Status == http.StatusConflict && r.Code == "duplicate_id":
 		return failed
 	case r.Status == http.StatusConflict && r.Code == "conflict":
 		return conflict

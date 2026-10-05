@@ -35,6 +35,8 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void })
     memberList: d?.memberList ?? "",
     formula: d?.formula ?? "",
     overridable: d?.overridable ?? false,
+    description: d?.description ?? "",
+    folder: d?.folder ?? "",
   });
   const [newName, setNewName] = useState("");
   const kinds = [
@@ -69,6 +71,21 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void })
           上書き入力を許可
         </Check>
       </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          aria-label="フォルダー"
+          placeholder="フォルダー"
+          value={f.folder}
+          onChange={(e) => setF({ ...f, folder: e.target.value })}
+        />
+        {d?.owner && <span className="text-sm">作成者: {d.owner}</span>}
+      </div>
+      <TextArea
+        aria-label="説明"
+        placeholder="説明"
+        value={f.description}
+        onChange={(e) => setF({ ...f, description: e.target.value })}
+      />
       <div className="text-sm">
         ディメンション:{" "}
         <Checks
@@ -178,16 +195,31 @@ export function MetricsPage() {
             </Button>
           </li>
         )}
-        {model.metrics.map((m) => (
-          <li key={m.id}>
-            <Button
-              size="sm"
-              variant={m.id === sel ? "primary" : "ghost"}
-              onPress={() => setSel(m.id)}
-            >
-              {m.name}
-              {m.formula ? " ƒ" : ""}
-            </Button>
+        {/* The Metrics grouped by folder. The Metrics without a folder come first. */}
+        {[...new Set(model.metrics.map((m) => m.folder))].sort().map((folder) => (
+          <li key={folder}>
+            {folder && <div className="mt-2 font-bold">{folder}</div>}
+            <ul className="flex flex-col gap-1">
+              {model.metrics
+                .filter((m) => m.folder === folder)
+                .map((m) => (
+                  <li key={m.id}>
+                    <Button
+                      size="sm"
+                      variant={m.id === sel ? "primary" : "ghost"}
+                      onPress={() => setSel(m.id)}
+                    >
+                      {m.name}
+                      {m.formula ? " ƒ" : ""}
+                    </Button>
+                    {m.description && (
+                      <div className="truncate px-3 text-xs" title={m.description}>
+                        {m.description}
+                      </div>
+                    )}
+                  </li>
+                ))}
+            </ul>
           </li>
         ))}
       </ul>

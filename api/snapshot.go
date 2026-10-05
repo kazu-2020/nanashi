@@ -32,6 +32,7 @@ type snapshotData struct {
 	Kinds     map[string]nanashiv1.ListKind `json:"kinds"`
 	Props     []propRow                     `json:"props"`
 	Items     []itemRow                     `json:"items"`
+	Metrics   map[string]metricRow          `json:"metrics,omitempty"` // The Metric catalog, by Metric id.
 }
 
 // replayOps makes the operations that build the engine model of a snapshot in an empty model, with the same ids.
@@ -100,6 +101,10 @@ func restoreStmts(app string, snap snapshotData) []stmt {
 		}
 		out = append(out, stmt{sql: "insert into app_property (app_id, list_id, id, name, type, metric_id, text_values) values ($1, $2, $3, $4, $5, $6, $7)",
 			args: []any{app, p.ListID, p.ID, p.Name, p.Type, metric, textJSON(p.Text)}})
+	}
+	for id, c := range snap.Metrics {
+		out = append(out, stmt{sql: "insert into app_metric (app_id, metric_id, description, folder, owner) values ($1, $2, $3, $4, $5)",
+			args: []any{app, id, c.Description, c.Folder, c.Owner}})
 	}
 	for _, it := range snap.Items {
 		out = append(out, stmt{sql: "insert into app_item (app_id, id, type, def) values ($1, $2, $3, $4)", args: []any{app, it.ID, it.Type, string(it.Def)}})
@@ -212,7 +217,7 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 			if err != nil {
 				return nil, err
 			}
-			data.Kinds, data.Props = meta.Kinds, meta.Props
+			data.Kinds, data.Props, data.Metrics = meta.Kinds, meta.Props, meta.Metrics
 			if data.Items, err = itemsIn(ctx, tx, app); err != nil {
 				return nil, err
 			}

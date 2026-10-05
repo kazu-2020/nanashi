@@ -27,10 +27,18 @@ type propRow struct {
 	Text     map[string]string      `json:"text,omitempty"` // Member id to value, for TEXT only.
 }
 
+// metricRow is a row of the Metric catalog app_metric. Owner is empty in the values of a madeRow.
+type metricRow struct {
+	Description string `json:"description"`
+	Folder      string `json:"folder"`
+	Owner       string `json:"owner,omitempty"`
+}
+
 // appMeta is the api data of an application that the engine does not know.
 type appMeta struct {
-	Kinds map[string]nanashiv1.ListKind // By list id.
-	Props []propRow
+	Kinds   map[string]nanashiv1.ListKind // By list id.
+	Props   []propRow
+	Metrics map[string]metricRow // The catalog, by Metric id. It can have rows of deleted Metrics.
 }
 
 // listOfKind gives the id of the first list of the kind.
@@ -385,7 +393,9 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 	for _, m := range em.Metrics {
 		if !hidden[m.ID] && !l.hides(m) {
 			kind, list := valueKind(m.Kind)
-			metrics = append(metrics, &nanashiv1.MetricDef{Id: m.ID, Name: m.Name, Dimensions: m.Dims, Kind: kind, MemberList: list, Formula: m.Formula, Overridable: m.Overridable})
+			c := meta.Metrics[m.ID] // A Metric without a catalog row has empty values.
+			metrics = append(metrics, &nanashiv1.MetricDef{Id: m.ID, Name: m.Name, Dimensions: m.Dims, Kind: kind, MemberList: list, Formula: m.Formula, Overridable: m.Overridable,
+				Description: c.Description, Folder: c.Folder, Owner: c.Owner})
 		}
 	}
 	return lists, metrics
@@ -429,7 +439,7 @@ func (s *PlanServer) meta(ctx context.Context, app string) (appMeta, error) {
 }
 
 func metaIn(ctx context.Context, q querier, app string) (appMeta, error) {
-	meta := appMeta{Kinds: map[string]nanashiv1.ListKind{}}
+	meta := appMeta{Kinds: map[string]nanashiv1.ListKind{}, Metrics: map[string]metricRow{}}
 	rows, _ := q.Query(ctx, "select id, kind from app_list where app_id = $1", app)
 	var id string
 	var kind int32
@@ -448,6 +458,14 @@ func metaIn(ctx context.Context, q querier, app string) (appMeta, error) {
 		return meta, dbError(err)
 	}
 	meta.Props = props
+	rows, _ = q.Query(ctx, "select metric_id, description, folder, owner from app_metric where app_id = $1", app)
+	var c metricRow
+	if _, err := pgx.ForEachRow(rows, []any{&id, &c.Description, &c.Folder, &c.Owner}, func() error {
+		meta.Metrics[id] = c
+		return nil
+	}); err != nil {
+		return meta, dbError(err)
+	}
 	return meta, nil
 }
 

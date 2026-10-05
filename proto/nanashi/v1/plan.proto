@@ -175,6 +175,11 @@ message MetricDef {
   string formula = 4;
   // True if a user can type over the formula result.
   bool overridable = 5;
+  // The catalog attributes (app_metric). The api keeps them, not the engine.
+  string description = 8;
+  string folder = 9;
+  // The user who made the Metric. Output only: the api ignores it in a request.
+  string owner = 10;
 }
 
 message ModelDef {

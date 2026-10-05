@@ -76,6 +76,16 @@ An op is a flat object: `{"op": "<name>", <argument>: <value>, ...}`, for exampl
 - If the name belongs to a different UUID, the engine returns 400 `{"error": "bad_request"}`.
 - The engine records each rejected operation (400, and 409 `duplicate_id`) with its `client_op_id` for the `op_window`. If a client sends the same `client_op_id` again, the engine returns the same rejection. A 409 `conflict` is not recorded: the client plans again with the new version.
 
+## The Metric catalog
+
+- `app_metric` in `api/` keeps the attributes of a Metric that the engine does not know: the description, the folder and the owner. The key is `(app_id, metric_id)`. `metric_id` is the Metric UUID.
+- The catalog does not keep the name. The engine keeps the name, so a rename changes no catalog row.
+- `CreateMetric` inserts the row in the same outbox plan as the engine operation. The owner is the user of the request. If the engine refuses the operation, the compensation deletes the row.
+- `UpdateMetric` writes the description and the folder in the same plan. If the engine refuses the operation, the compensation puts the old values back. It changes the row only if the row still has the new values, so it does not undo a later change.
+- `DeleteMetric` does not delete the row. The engine keeps the UUID as a tombstone, and the readers skip a row for a Metric that the model does not have.
+- `GetModel` shows empty values for a Metric without a row, for example a Metric from before the catalog.
+- A snapshot keeps the rows. A restore inserts them with the same Metric UUIDs.
+
 ## Inside the engine
 
 - The engine keys its internal state by name, as before. A map in the model connects each UUID to a handle. The engine changes a UUID to a name at the HTTP boundary.
