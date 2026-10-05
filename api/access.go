@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/protobuf/proto"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
@@ -208,7 +209,7 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 	if strings.TrimSpace(m.GetUser()) == "" {
 		return nil, invalid(errors.New("利用者が空"))
 	}
-	return ackOf(s.apiOnly(ctx, app, req.Msg, func(tx pgx.Tx) (any, error) {
+	return ackOf(s.apiOnly(ctx, app, req.Msg, pgx.TxOptions{}, func(tx pgx.Tx) (any, error) {
 		// Lock the members of the application, so that two ADMINs cannot remove each other at the same time.
 		if _, err := tx.Exec(ctx, "select 1 from app_member where app_id = $1 for update", app); err != nil {
 			return nil, err
@@ -244,7 +245,7 @@ func (s *PlanServer) UpdateAccessRule(ctx context.Context, req *connect.Request[
 
 // saveAccessRule makes the rule r (create) or changes it. If create is true, an existing id gives AlreadyExists.
 // If create is false, a missing id gives NotFound.
-func (s *PlanServer) saveAccessRule(ctx context.Context, app string, req message, r *nanashiv1.AccessRule, create bool) (*ack, error) {
+func (s *PlanServer) saveAccessRule(ctx context.Context, app string, req proto.Message, r *nanashiv1.AccessRule, create bool) (*ack, error) {
 	if r.GetId() == "" || r.GetList() == "" {
 		return nil, invalid(errors.New("ルールの id とリストが要る"))
 	}
@@ -268,24 +269,20 @@ func (s *PlanServer) saveAccessRule(ctx context.Context, app string, req message
 	if members == nil {
 		members = []string{}
 	}
-	sql := "update app_access_rule set role = $3, list = $4, members = $5, write = $6 where app_id = $1 and id = $2"
-	zero := tag(errNotFound, "変更するルールがない")
+	st := stmt{"update app_access_rule set role = $3, list = $4, members = $5, write = $6 where app_id = $1 and id = $2",
+		[]any{app, r.Id, r.Role, r.List, members, r.Write}, tag(errNotFound, "変更するルールがない")}
 	if create {
-		sql = `insert into app_access_rule (app_id, id, role, list, members, write) values ($1, $2, $3, $4, $5, $6)
+		st.sql = `insert into app_access_rule (app_id, id, role, list, members, write) values ($1, $2, $3, $4, $5, $6)
 			on conflict (app_id, id) do nothing`
-		zero = tag(errExists, "同じ id のルールがすでにある")
+		st.zero = tag(errExists, "同じ id のルールがすでにある")
 	}
-	return ackOf(s.apiOnly(ctx, app, req, func(tx pgx.Tx) (any, error) {
-		res, err := tx.Exec(ctx, sql, app, r.Id, r.Role, r.List, members, r.Write)
-		if err == nil && res.RowsAffected() == 0 {
-			err = zero
-		}
-		return nil, err
+	return ackOf(s.apiOnly(ctx, app, req, pgx.TxOptions{}, func(tx pgx.Tx) (any, error) {
+		return nil, execStmt(ctx, tx, st)
 	}))
 }
 
 func (s *PlanServer) DeleteAccessRule(ctx context.Context, req *connect.Request[nanashiv1.DeleteAccessRuleRequest]) (*ack, error) {
-	return ackOf(s.apiOnly(ctx, req.Msg.AppId, req.Msg, func(tx pgx.Tx) (any, error) {
+	return ackOf(s.apiOnly(ctx, req.Msg.AppId, req.Msg, pgx.TxOptions{}, func(tx pgx.Tx) (any, error) {
 		_, err := tx.Exec(ctx, "delete from app_access_rule where app_id = $1 and id = $2", req.Msg.AppId, req.Msg.Id)
 		return nil, err
 	}))

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
@@ -42,8 +43,9 @@ func valueKind(kind string) (nanashiv1.ValueKind, string) {
 
 // metricOp gives the operations that make m (create) or change m with the engine kind.
 // If create is true and the id exists, it gives an errExists error. If create is false and the id is missing, it
-// gives an errNotFound error. It gives no operation for an input Metric that does not change. Other changes to
-// an input Metric delete its cells.
+// gives an errNotFound error. An update keeps the current name: RenameMetric changes it, and a stale name from the
+// client must not rename the Metric back. It gives no operation for an input Metric that does not change. Other
+// changes to an input Metric delete its cells.
 func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, create bool) ([]op, error) {
 	dims := m.Dimensions
 	if dims == nil {
@@ -56,6 +58,9 @@ func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, create bool) 
 	}
 	name := strings.TrimSpace(m.Name)
 	old, found := em.metric(m.Id)
+	if !create && found {
+		name = old.Name
+	}
 	switch {
 	case create && found:
 		return nil, tag(errExists, "Metric %s はすでにある", old.Name)
@@ -63,7 +68,7 @@ func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, create bool) 
 		return nil, tag(errNotFound, "Metric %s がない", name)
 	case slices.ContainsFunc(em.Metrics, func(x engineMetric) bool { return x.Name == name && x.ID != m.Id }):
 		return nil, tag(errExists, "Metric %s の名前はすでにある", name)
-	case !create && old.Formula == "" && m.Formula == "" && old.Kind == kind && old.Name == name && slices.Equal(old.Dims, dims):
+	case !create && old.Formula == "" && m.Formula == "" && old.Kind == kind && slices.Equal(old.Dims, dims):
 		return nil, nil
 	}
 	if m.Formula == "" {
@@ -104,8 +109,8 @@ func (s *PlanServer) UpdateMetric(ctx context.Context, req *connect.Request[nana
 	return s.saveMetric(ctx, req.Msg.AppId, req.Msg, req.Msg.Metric, false)
 }
 
-func (s *PlanServer) saveMetric(ctx context.Context, app string, req message, m *nanashiv1.MetricDef, create bool) (*ack, error) {
-	if m == nil || strings.TrimSpace(m.Name) == "" || m.Id == "" {
+func (s *PlanServer) saveMetric(ctx context.Context, app string, req proto.Message, m *nanashiv1.MetricDef, create bool) (*ack, error) {
+	if m == nil || m.Id == "" || (create && strings.TrimSpace(m.Name) == "") {
 		return nil, invalid(errors.New("Metric の id と名前が要る"))
 	}
 	return ackOf(s.change(ctx, app, req, func(em engineModel, meta appMeta) (plan, error) {

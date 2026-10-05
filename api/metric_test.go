@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,15 @@ func TestMetricOpCreateAndUpdate(t *testing.T) {
 	}
 	if ops, err := metricOp(em, budgetDef(product, region), "number", false); err != nil || len(ops) != 0 {
 		t.Errorf("same input Metric: got %v, %v, want no operation", ops, err)
+	}
+	// Another user renamed the Metric. An update with the old name must not rename it back or delete its cells.
+	stale := &nanashiv1.MetricDef{Id: budget, Name: "Old Budget", Dimensions: []string{product, region}}
+	if ops, err := metricOp(em, stale, "number", false); err != nil || len(ops) != 0 {
+		t.Errorf("input Metric with a stale name: got %s, %v, want no operation", opsJSON(t, ops), err)
+	}
+	stale.Formula = "1"
+	if ops, err := metricOp(em, stale, "number", false); err != nil || !strings.Contains(opsJSON(t, ops), `"name":"Budget"`) {
+		t.Errorf("formula with a stale name: got %s, %v, want the current name", opsJSON(t, ops), err)
 	}
 	for _, c := range []struct {
 		m    *nanashiv1.MetricDef

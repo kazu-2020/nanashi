@@ -116,14 +116,6 @@ func (d engineDim) member(id string) (engineMember, bool) {
 	return d.Members[i], true
 }
 
-func (d engineDim) memberIDs() []string {
-	out := make([]string, len(d.Members))
-	for i, m := range d.Members {
-		out[i] = m.ID
-	}
-	return out
-}
-
 func (d engineDim) prop(id string) (engineProp, bool) {
 	i := slices.IndexFunc(d.Props, func(p engineProp) bool { return p.ID == id })
 	if i < 0 {
@@ -241,7 +233,6 @@ type engineReply struct {
 	Body    []byte
 	Code    string
 	Message string
-	Seq     int64
 }
 
 // outcome is what a write reply means for the outbox.
@@ -367,10 +358,9 @@ func (e *Engines) do(req *http.Request) (engineReply, error) {
 	var fail struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
-		Seq     int64  `json:"seq"`
 	}
 	json.Unmarshal(body, &fail)
-	r.Code, r.Message, r.Seq = fail.Error, fail.Message, fail.Seq
+	r.Code, r.Message = fail.Error, fail.Message
 	if r.Status != http.StatusOK {
 		log.Printf("engine %s: %d %s", req.URL.Path, r.Status, body)
 	}

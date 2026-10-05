@@ -83,6 +83,12 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 		members[m.ID] = m.Name
 		names[m.Name] = true
 	}
+	adds := map[string]bool{} // The ids that the edits add.
+	for _, e := range edits {
+		if a := e.GetAdd(); a != nil {
+			adds[a.Id] = true
+		}
+	}
 	props := map[string]propRow{} // By property id.
 	for _, p := range meta.Props {
 		if p.ListID == dim.ID {
@@ -138,14 +144,14 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 			case isDim, known && pr.Type == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
 				if isDim && v != "" {
 					// The value is a member id of the target list. On a list that refers to itself, the member can be
-					// one that this edit adds.
+					// one that an edit of this request adds, also a later edit (an import in any row order).
 					if _, err := parseID(ep.Name, v); err != nil {
 						return err
 					}
 					target, _ := em.dim(ep.Target)
 					_, inTarget := target.member(v)
 					_, inEdit := members[v]
-					if !inTarget && !(ep.Target == dim.ID && inEdit) {
+					if !inTarget && !(ep.Target == dim.ID && (inEdit || adds[v])) {
 						return fmt.Errorf("%s に %s がない", target.Name, v)
 					}
 				}
@@ -458,7 +464,7 @@ func metaIn(ctx context.Context, q querier, app string) (appMeta, error) {
 	}); err != nil {
 		return meta, dbError(err)
 	}
-	rows, _ = q.Query(ctx, "select list_id, id, name, type, coalesce(metric_id::text, ''), text_values from app_property where app_id = $1 and not deleted order by ord", app)
+	rows, _ = q.Query(ctx, "select list_id, id, name, type, coalesce(metric_id::text, ''), text_values from app_property where app_id = $1 order by ord", app)
 	props, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (propRow, error) {
 		var p propRow
 		return p, row.Scan(&p.ListID, &p.ID, &p.Name, &p.Type, &p.MetricID, &p.Text)
@@ -560,20 +566,6 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 		return nil, invalid(errors.New("プロパティの id と名前が要る"))
 	}
 	name := strings.TrimSpace(p.Name)
-	if p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT {
-		// A TEXT property has no engine object, so the api tables take it alone.
-		return ackOf(s.apiOnly(ctx, app, req.Msg, func(tx pgx.Tx) (any, error) {
-			st, _ := propertyStmt(app, list, p.Id, name, p.Type, "")
-			tag, err := tx.Exec(ctx, st.sql, st.args...)
-			if err == nil && tag.RowsAffected() == 0 {
-				err = st.zero
-			}
-			if err == nil {
-				_, err = tx.Exec(ctx, "update app_application set version = version + 1 where id = $1", app)
-			}
-			return nil, err
-		}))
-	}
 	return ackOf(s.change(ctx, app, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
 		dim, found := em.dim(list)
 		if !found {
@@ -584,6 +576,10 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 		}
 		kind, isMetric := propKind[p.Type]
 		switch {
+		case p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+			// A TEXT property has no engine object, so the plan has no operation.
+			st, made := propertyStmt(app, list, p.Id, name, p.Type, "")
+			return plan{stmts: []stmt{st}, made: []madeRow{made}}, nil
 		case p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION:
 			if _, ok := em.dim(p.Target); !ok {
 				return plan{}, fmt.Errorf("対象のリスト %s がない", p.Target)

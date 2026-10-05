@@ -37,7 +37,8 @@ service PlanService {
   // CreateMetric makes a Metric. An empty formula makes an input Metric. An existing id gives ALREADY_EXISTS.
   rpc CreateMetric(CreateMetricRequest) returns (Ack) {}
   // UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
-  // A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
+  // It keeps the name (RenameMetric changes it). A change to the dimensions, the kind or the formula of
+  // an input Metric deletes its cells.
   rpc UpdateMetric(UpdateMetricRequest) returns (Ack) {}
   rpc RenameMetric(RenameMetricRequest) returns (Ack) {}
   rpc DeleteMetric(DeleteMetricRequest) returns (Ack) {}

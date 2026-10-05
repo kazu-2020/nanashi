@@ -60,7 +60,7 @@ var rpcRules = map[string]rpcRule{
 	"GetModel": {min: viewer}, "Query": {min: viewer}, "ListComments": {min: viewer}, "AddComment": {viewer, true},
 	"ListSnapshots": {min: viewer},
 	// The audit detail has the full requests (cells and CSV), and the access rules do not apply to it.
-	"ListAudit":  {min: modeler},
+	"ListAudit": {min: modeler},
 	// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
 	// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
 	"WriteCells": {contributor, true}, "Import": {min: contributor}, "CreateSnapshot": {min: contributor},
@@ -83,9 +83,6 @@ type caller struct {
 }
 
 func (c caller) limitsIn(em engineModel) limits { return accessLimits(c.role, c.rules, em).through(em) }
-
-// message is a request message.
-type message = proto.Message
 
 type callerKey struct{}
 
@@ -399,6 +396,15 @@ func tag(t error, format string, a ...any) error { return tagged{fmt.Errorf(form
 
 // The actions follow.
 
+// execStmt runs st in tx. If st.zero is not nil and st changes no row, it gives st.zero.
+func execStmt(ctx context.Context, tx pgx.Tx, st stmt) error {
+	tag, err := tx.Exec(ctx, st.sql, st.args...)
+	if err == nil && st.zero != nil && tag.RowsAffected() == 0 {
+		return st.zero
+	}
+	return err
+}
+
 // Migrate makes the api tables (prefix app_) if they are missing.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, schema)
@@ -573,12 +579,8 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 			}
 			inserted = true
 			for _, st := range p.stmts {
-				tag, err := tx.Exec(ctx, st.sql, st.args...)
-				if err != nil {
+				if err := execStmt(ctx, tx, st); err != nil {
 					return err
-				}
-				if st.zero != nil && tag.RowsAffected() == 0 {
-					return st.zero
 				}
 			}
 			// Each statement writes rows of a snapshot (app_list, app_property, app_item, app_metric). CreateSnapshot compares the version.
@@ -671,7 +673,7 @@ func (s *PlanServer) settle(ctx context.Context, app string, r opRow) (json.RawM
 				return err
 			}
 			for _, st := range compensation(app, r.made) {
-				if _, err := tx.Exec(ctx, st.sql, st.args...); err != nil {
+				if err := execStmt(ctx, tx, st); err != nil {
 					return err
 				}
 			}
@@ -692,11 +694,8 @@ func (s *PlanServer) settle(ctx context.Context, app string, r opRow) (json.RawM
 
 // apiOnly applies a change that only the api tables take, in one transaction with its app_operation row (done)
 // and its audit row. A resend with the same client_op_id gives the stored result. f gives the result to store.
-func (s *PlanServer) apiOnly(ctx context.Context, app string, req proto.Message, f func(tx pgx.Tx) (any, error)) (json.RawMessage, error) {
-	return s.apiOnlyTx(ctx, app, req, pgx.TxOptions{}, f)
-}
-
-func (s *PlanServer) apiOnlyTx(ctx context.Context, app string, req proto.Message, opts pgx.TxOptions, f func(tx pgx.Tx) (any, error)) (json.RawMessage, error) {
+// opts sets the isolation level of the transaction.
+func (s *PlanServer) apiOnly(ctx context.Context, app string, req proto.Message, opts pgx.TxOptions, f func(tx pgx.Tx) (any, error)) (json.RawMessage, error) {
 	c := callerOf(ctx)
 	hash := requestHash(req)
 	var result json.RawMessage

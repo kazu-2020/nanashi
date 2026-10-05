@@ -148,8 +148,9 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
       };
       if (id) return api.updateView(req);
       await createOrUpdate(
-        () => api.createView(req),
-        () => api.updateView(req),
+        req,
+        (r) => api.createView(r),
+        (r) => api.updateView(r),
       );
     }).then((ok) => ok !== null && !id && setDraftId(newId()));
 
@@ -317,8 +318,7 @@ function Body(props: {
               {g.colKeys.map((c) => {
                 const v = g.value(r, c);
                 // A member value is an id: show its name. An edit of a member cell takes a name.
-                const text =
-                  v?.value.case === "member" ? label(names, v.value.value) : formatValue(v);
+                const text = formatValue(v, names);
                 return (
                   <td
                     key={JSON.stringify(c)}

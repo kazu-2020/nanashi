@@ -65,26 +65,41 @@ func importListEdits(text string, li *nanashiv1.ListImport, em engineModel, dim 
 	} else if meta.Kinds[dim.ID] != nanashiv1.ListKind_LIST_KIND_TRANSACTION {
 		return nil, 0, errors.New("メンバーの名前の列を指定する")
 	}
+	members := byName(dim)
 	propCols := map[string]int{}
 	targets := map[string]map[string]string{} // DIMENSION property id to the member ids of its target by name.
 	for prop, col := range li.PropertyColumns {
 		if propCols[prop], err = column(header, col); err != nil {
 			return nil, 0, err
 		}
-		if p, ok := dim.prop(prop); ok {
+		if p, ok := dim.prop(prop); ok && p.Target == dim.ID {
+			targets[prop] = members // The members that this import adds are values too.
+		} else if ok {
 			target, _ := em.dim(p.Target)
 			targets[prop] = byName(target)
 		}
 	}
-	members := byName(dim)
+	// First give each row its member, so a property value can name a member of any row.
+	names, adds := make([]string, len(rows)), make([]bool, len(rows))
 	next := first
+	for i, row := range rows {
+		if nameCol < 0 {
+			names[i] = strconv.Itoa(next)
+			next++
+		} else if names[i] = strings.TrimSpace(row[nameCol]); names[i] == "" {
+			return nil, 0, fmt.Errorf("%d 行目: メンバーの名前が空", i+2)
+		}
+		if _, ok := members[names[i]]; !ok {
+			members[names[i]], adds[i] = newID(), true
+		}
+	}
 	var edits []*nanashiv1.MemberEdit
 	for i, row := range rows {
 		props := map[string]string{}
 		for prop, col := range propCols {
 			v := strings.TrimSpace(row[col])
-			if names, ok := targets[prop]; ok && v != "" {
-				id, ok := names[v]
+			if ids, ok := targets[prop]; ok && v != "" {
+				id, ok := ids[v]
 				if !ok {
 					return nil, 0, fmt.Errorf("%d 行目: %q がない", i+2, v)
 				}
@@ -92,19 +107,12 @@ func importListEdits(text string, li *nanashiv1.ListImport, em engineModel, dim 
 			}
 			props[prop] = v
 		}
-		var name string
-		if nameCol < 0 {
-			name = strconv.Itoa(next)
-			next++
-		} else if name = strings.TrimSpace(row[nameCol]); name == "" {
-			return nil, 0, fmt.Errorf("%d 行目: メンバーの名前が空", i+2)
-		}
-		if id, ok := members[name]; ok {
+		id := members[names[i]]
+		if adds[i] {
+			edits = append(edits, &nanashiv1.MemberEdit{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: id, Name: names[i], Properties: props}}})
+		} else {
 			edits = append(edits, &nanashiv1.MemberEdit{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Id: id, Properties: props}}})
-			continue
 		}
-		members[name] = newID()
-		edits = append(edits, &nanashiv1.MemberEdit{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: members[name], Name: name, Properties: props}}})
 	}
 	return edits, len(rows), nil
 }

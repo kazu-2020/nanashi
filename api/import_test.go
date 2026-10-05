@@ -57,6 +57,29 @@ func TestImportTransactionList(t *testing.T) {
 	}
 }
 
+// TestImportSelfReference: a property of a list can name a member that the same import adds, in any row.
+func TestImportSelfReference(t *testing.T) {
+	emp, mgr := "0192f3a4-0000-7000-8000-0000000000c1", "0192f3a4-0000-7000-8000-0000000000c2"
+	dim := engineDim{ID: emp, Name: "Employee", Props: []engineProp{{ID: mgr, Name: "Manager", Target: emp}}}
+	em := engineModel{Dims: []engineDim{dim}}
+	edits, _, err := importListEdits("name,manager\nBob,Alice\nAlice,\n", &nanashiv1.ListImport{List: emp, MemberColumn: "name",
+		PropertyColumns: map[string]string{mgr: "manager"}}, em, dim, appMeta{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, alice := edits[0].GetAdd(), edits[1].GetAdd()
+	if bob.Name != "Bob" || alice.Name != "Alice" || bob.Properties[mgr] != alice.Id {
+		t.Errorf("Bob.Manager = %q, want the id of Alice %q", bob.Properties[mgr], alice.Id)
+	}
+	// The engine gets the property values after it adds both members.
+	p, err := editOps("app", em, dim, appMeta{}, edits)
+	want := fmt.Sprintf(`[{"dim":%q,"id":%q,"name":"Bob","op":"add_member"},{"dim":%q,"id":%q,"name":"Alice","op":"add_member"},`+
+		`{"dim":%q,"op":"set_property_values","prop":%q,"values":{%q:%q,%q:null}}]`, emp, bob.Id, emp, alice.Id, emp, mgr, bob.Id, alice.Id, alice.Id)
+	if err != nil || opsJSON(t, p.ops) != want {
+		t.Errorf("editOps: got %s, %v\nwant %s", opsJSON(t, p.ops), err, want)
+	}
+}
+
 func TestLargestRow(t *testing.T) {
 	em := model(t)
 	dim, _ := em.dim(sales)

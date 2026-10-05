@@ -66,8 +66,9 @@ export function BoardsPage() {
                 mutate(async (clientOpId) => {
                   const req = { appId, clientOpId, board: { id: draftId, name } };
                   await createOrUpdate(
-                    () => api.createBoard(req),
-                    () => api.updateBoard(req),
+                    req,
+                    (r) => api.createBoard(r),
+                    (r) => api.updateBoard(r),
                   );
                   choose(draftId);
                 }).then((ok) => ok !== null && setDraftId(newId()))

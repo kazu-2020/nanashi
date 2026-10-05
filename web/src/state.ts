@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useRef } from "react";
 import { errorText, newId } from "./api";
 import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
-import { METRIC, type Names } from "./logic";
+import { followOpId, METRIC, type Names } from "./logic";
 
 export const Report = createContext<(e: unknown) => void>(() => {});
 
@@ -80,16 +80,23 @@ export function useMutate(part?: "query" | "comments" | "snapshots") {
     });
 }
 
-// createOrUpdate runs create. If the id already exists (an earlier send of the same create committed), it runs update.
-export async function createOrUpdate(
-  create: () => Promise<unknown>,
-  update: () => Promise<unknown>,
+// createOrUpdate runs create. If create gives AlreadyExists, the id can exist (an earlier send of the same create
+// committed) or the name can be taken. Then it runs update with its own client_op_id. If update gives NotFound, the
+// id does not exist, so the create error goes to the user.
+export async function createOrUpdate<R extends { clientOpId: string }>(
+  req: R,
+  create: (r: R) => Promise<unknown>,
+  update: (r: R) => Promise<unknown>,
 ) {
   try {
-    await create();
+    await create(req);
   } catch (e) {
     if (!(e instanceof ConnectError && e.code === Code.AlreadyExists)) throw e;
-    await update();
+    try {
+      await update({ ...req, clientOpId: followOpId(req.clientOpId) });
+    } catch (u) {
+      throw u instanceof ConnectError && u.code === Code.NotFound ? e : u;
+    }
   }
 }
 

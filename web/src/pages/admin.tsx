@@ -244,8 +244,9 @@ export function AccessPage() {
                   rule: { ...rule, id: ruleId, role: Number(rule.role) },
                 };
                 await createOrUpdate(
-                  () => api.createAccessRule(req),
-                  () => api.updateAccessRule(req),
+                  req,
+                  (r) => api.createAccessRule(r),
+                  (r) => api.updateAccessRule(r),
                 );
               }).then((ok) => ok !== null && setRuleId(newId()))
             }

@@ -29,8 +29,8 @@ test("grid follows member order and puts Metrics on an axis", () => {
   const g = buildGrid(resp, ["Sales", "Rate"], [METRIC], ["Product"], { Product: ["B", "A"] }, {});
   expect(g.rowKeys).toEqual([["Sales"], ["Rate"]]);
   expect(g.colKeys).toEqual([["B"], ["A"], [""]]);
-  expect(formatValue(g.value(["Sales"], ["A"]))).toBe("1");
-  expect(formatValue(g.value(["Rate"], [""]))).toBe("9");
+  expect(formatValue(g.value(["Sales"], ["A"]), {})).toBe("1");
+  expect(formatValue(g.value(["Rate"], [""]), {})).toBe("9");
   const names = { [METRIC]: "メトリック", Sales: "売上", Rate: "率", A: "a", B: "b" };
   expect(gridToCsv(g, names)).toBe("メトリック,b,a,(なし)\n売上,2,1,\n率,,,9\n");
 });
@@ -118,4 +118,13 @@ test("only a change that makes an input Metric again deletes its cells", () => {
   expect(dropsInputCells(input, { ...input, formula: "1" })).toBe(true);
   expect(dropsInputCells(input, { ...input, kind: ValueKind.BOOLEAN })).toBe(true);
   expect(dropsInputCells({ ...input, formula: "1" }, { ...input, formula: "2" })).toBe(false);
+});
+
+test("CSV export shows the name of a member value", () => {
+  const resp = create(QueryResponseSchema, {
+    dimensions: ["Emp"],
+    cells: [{ metric: "Mgr", coords: ["E1"], value: { value: { case: "member", value: "M1" } } }],
+  });
+  const g = buildGrid(resp, ["Mgr"], ["Emp"], [], { Emp: ["E1"] }, {});
+  expect(gridToCsv(g, { Emp: "社員", E1: "Bob", M1: "Alice" })).toBe("社員,値\nBob,Alice\n");
 });

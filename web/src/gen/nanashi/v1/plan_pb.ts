@@ -2470,7 +2470,8 @@ export const PlanService: GenService<{
   },
   /**
    * UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
-   * A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
+   * It keeps the name (RenameMetric changes it). A change to the dimensions, the kind or the formula of
+   * an input Metric deletes its cells.
    *
    * @generated from rpc nanashi.v1.PlanService.UpdateMetric
    */

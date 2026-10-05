@@ -132,7 +132,8 @@ type PlanServiceClient interface {
 	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing id gives ALREADY_EXISTS.
 	CreateMetric(context.Context, *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error)
 	// UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
-	// A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
+	// It keeps the name (RenameMetric changes it). A change to the dimensions, the kind or the formula of
+	// an input Metric deletes its cells.
 	UpdateMetric(context.Context, *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error)
 	RenameMetric(context.Context, *connect.Request[v1.RenameMetricRequest]) (*connect.Response[v1.Ack], error)
 	DeleteMetric(context.Context, *connect.Request[v1.DeleteMetricRequest]) (*connect.Response[v1.Ack], error)
@@ -584,7 +585,8 @@ type PlanServiceHandler interface {
 	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing id gives ALREADY_EXISTS.
 	CreateMetric(context.Context, *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error)
 	// UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
-	// A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
+	// It keeps the name (RenameMetric changes it). A change to the dimensions, the kind or the formula of
+	// an input Metric deletes its cells.
 	UpdateMetric(context.Context, *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error)
 	RenameMetric(context.Context, *connect.Request[v1.RenameMetricRequest]) (*connect.Response[v1.Ack], error)
 	DeleteMetric(context.Context, *connect.Request[v1.DeleteMetricRequest]) (*connect.Response[v1.Ack], error)

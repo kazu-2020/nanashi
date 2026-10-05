@@ -59,12 +59,12 @@ export function Check({
 }
 
 export function Checks(props: {
-  options: (string | [string, string])[];
+  // [value, label] pairs.
+  options: [string, string][];
   value: string[];
   onChange: (v: string[]) => void;
   label: string;
 }) {
-  const items = props.options.map((o) => (typeof o === "string" ? [o, o] : o));
   return (
     <CheckboxGroup
       aria-label={props.label}
@@ -72,7 +72,7 @@ export function Checks(props: {
       value={props.value}
       onChange={props.onChange}
     >
-      {items.map(([v, l]) => (
+      {props.options.map(([v, l]) => (
         <Check key={v} value={v}>
           {l}
         </Check>

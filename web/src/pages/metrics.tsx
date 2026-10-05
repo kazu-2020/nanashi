@@ -133,8 +133,9 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void })
               if (d) await api.updateMetric(req);
               else
                 await createOrUpdate(
-                  () => api.createMetric(req),
-                  () => api.updateMetric(req),
+                  req,
+                  (r) => api.createMetric(r),
+                  (r) => api.updateMetric(r),
                 );
               props.onSaved(f.id);
             }).then((ok) => ok === false && !d && setF((x) => ({ ...x, id: newId() })))
@@ -287,8 +288,9 @@ export function TablesPage() {
                   const req = { appId, clientOpId, table: { id: t ? t.id : draftId, ...f } };
                   if (t) return api.updateTable(req);
                   await createOrUpdate(
-                    () => api.createTable(req),
-                    () => api.updateTable(req),
+                    req,
+                    (r) => api.createTable(r),
+                    (r) => api.updateTable(r),
                   );
                   setSel(draftId);
                 }).then((ok) => ok !== null && !t && setDraftId(newId()))

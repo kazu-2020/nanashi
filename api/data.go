@@ -334,17 +334,14 @@ func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanash
 		return nil, invalid(err)
 	}
 	c.AppId, c.User = req.Msg.AppId, callerOf(ctx).user
-	result, err := s.apiOnly(ctx, req.Msg.AppId, req.Msg, func(tx pgx.Tx) (any, error) {
-		res, err := tx.Exec(ctx, `insert into app_comment (app_id, id, metric, cell, user_name, body) values ($1, $2, $3, $4, $5, $6) on conflict do nothing`,
-			c.AppId, c.Id, c.Metric, textJSON(c.Cell), c.User, c.Body)
-		if err != nil {
-			return nil, err
-		}
-		if res.RowsAffected() == 0 {
+	result, err := s.apiOnly(ctx, req.Msg.AppId, req.Msg, pgx.TxOptions{}, func(tx pgx.Tx) (any, error) {
+		var ms int64
+		err := tx.QueryRow(ctx, `insert into app_comment (app_id, id, metric, cell, user_name, body) values ($1, $2, $3, $4, $5, $6)
+			on conflict do nothing returning (extract(epoch from created_at) * 1000)::bigint`,
+			c.AppId, c.Id, c.Metric, textJSON(c.Cell), c.User, c.Body).Scan(&ms)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tag(errExists, "同じ id のコメントがすでにある")
 		}
-		var ms int64
-		err = tx.QueryRow(ctx, "select (extract(epoch from created_at) * 1000)::bigint from app_comment where app_id = $1 and id = $2", c.AppId, c.Id).Scan(&ms)
 		return map[string]int64{"created_at": ms}, err
 	})
 	if err != nil {

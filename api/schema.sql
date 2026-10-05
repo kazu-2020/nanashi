@@ -31,7 +31,6 @@ create table if not exists app_list (
   next_row bigint not null default 1,
   primary key (app_id, id)
 );
-alter table app_list add column if not exists next_row bigint not null default 1;
 -- app_property has a row for each property. The engine keeps the values of a DIMENSION property. The api keeps the
 -- values of a TEXT property. The Metric metric_id keeps the values of a NUMBER or BOOLEAN property.
 create table if not exists app_property (
@@ -42,11 +41,12 @@ create table if not exists app_property (
   type integer not null,
   metric_id uuid,
   text_values jsonb not null default '{}',
-  deleted boolean not null default false,
   ord bigserial,
   primary key (app_id, list_id, id)
 );
-create unique index if not exists app_property_name on app_property (app_id, list_id, name) where not deleted;
+-- The drop also drops the old partial index app_property_name, so the next statement makes it again.
+alter table app_property drop column if exists deleted;
+create unique index if not exists app_property_name on app_property (app_id, list_id, name);
 create table if not exists app_item (
   app_id uuid not null references app_application (id) on delete cascade,
   id uuid not null,

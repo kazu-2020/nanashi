@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -59,7 +60,7 @@ func replayOps(em engineModel, inputs, overrides map[string]engineCube) []op {
 		cube := inputs[m.ID]
 		index := make([]int, len(m.Dims))
 		for i, d := range m.Dims {
-			index[i] = slicesIndex(cube.Dims, d)
+			index[i] = slices.Index(cube.Dims, d)
 		}
 		cells := [][]any{}
 		for _, c := range cube.Cells {
@@ -77,15 +78,6 @@ func replayOps(em engineModel, inputs, overrides map[string]engineCube) []op {
 		}
 	}
 	return ops
-}
-
-func slicesIndex(s []string, x string) int {
-	for i, v := range s {
-		if v == x {
-			return i
-		}
-	}
-	return -1
 }
 
 // restoreStmts gives the statements that copy the api rows of a snapshot into the application app.
@@ -212,7 +204,7 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 		if err != nil {
 			return nil, err
 		}
-		result, err := s.apiOnlyTx(ctx, app, req.Msg, pgx.TxOptions{IsoLevel: pgx.RepeatableRead}, func(tx pgx.Tx) (any, error) {
+		result, err := s.apiOnly(ctx, app, req.Msg, pgx.TxOptions{IsoLevel: pgx.RepeatableRead}, func(tx pgx.Tx) (any, error) {
 			var now, pending int64
 			if err := tx.QueryRow(ctx, versionAndPending, app).Scan(&now, &pending); err != nil {
 				return nil, err

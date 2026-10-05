@@ -117,15 +117,15 @@ export function buildGrid(
   };
 }
 
-// formatValue gives the text of a value. A member value is an id: the caller shows its name.
-export function formatValue(v: Value | undefined): string {
+// formatValue gives the text of a value. A member value is an id: the text is its name.
+export function formatValue(v: Value | undefined, names: Names): string {
   switch (v?.value.case) {
     case "number":
       return String(Math.round(v.value.value * 1e6) / 1e6);
     case "boolean":
       return v.value.value ? "TRUE" : "FALSE";
     case "member":
-      return v.value.value;
+      return label(names, v.value.value);
     default:
       return "";
   }
@@ -192,7 +192,7 @@ export function gridToCsv(g: Grid, names: Names): string {
   ];
   const lines = g.rowKeys.map((r) => [
     ...r.map((m) => label(names, m)),
-    ...g.colKeys.map((c) => formatValue(g.value(r, c))),
+    ...g.colKeys.map((c) => formatValue(g.value(r, c), names)),
   ]);
   return [header, ...lines].map((l) => l.map(csvField).join(",")).join("\n") + "\n";
 }
@@ -309,6 +309,11 @@ export function uuidv7(ms: number, random: Uint8Array): string {
   const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
+
+// followOpId gives the client_op_id of the second write of one user action. It adds 1 to the last 48 bits of
+// id, so a retry of the action gives the same value again, and the value is not id.
+export const followOpId = (id: string) =>
+  id.slice(0, 24) + ((parseInt(id.slice(24), 16) + 1) % 2 ** 48).toString(16).padStart(12, "0");
 
 // dropsInputCells tells if saving next over the input Metric old deletes its cells: the engine makes the Metric again.
 export const dropsInputCells = (
