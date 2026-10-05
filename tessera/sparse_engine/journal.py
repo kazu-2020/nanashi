@@ -36,6 +36,7 @@ from typing import Any, Callable, Iterator, NamedTuple
 
 from .core import Dimension
 from .engine import native, parquet_value
+from .evaluate import bind
 
 BLOCK_MIN = 1000  # 書き換えたセルがこれ以上なら、行の列でなく変更の塊で持つ（Rust のエンジン）
 from .expr import Expr
@@ -110,8 +111,10 @@ def _kind(model, kind: str) -> Any:
 
 
 def _definition(model, m) -> dict:
-    return {"id": m.id, "name": m.name, "dims": [model.dimension(d).id for d in m.dims],
-            "kind": _kind(model, m.kind), "formula": None if m.written is None else to_formula(m.written),
+    """The definition of a Metric in a record. "id" is the handle (model.ids[m.id]); the formula is text with
+    the current names (unit 4 of issue 68 changes both to the UUID and the id AST)."""
+    return {"id": model.ids[m.id], "name": m.name, "dims": [model.dimension(d).id for d in m.dims],
+            "kind": _kind(model, m.kind), "formula": None if m.written is None else to_formula(m.written, model),
             "partition": None if m.partition is None else model.dimension(m.partition).id,
             "overridable": m.overridable}
 
@@ -168,20 +171,18 @@ def changes(before, after) -> dict:
             if old is None:
                 new_handles.append(d.property_ids[prop])
 
-    old_metrics = {m.id: m for m in before.metrics.values()}
     defs = []
     for m in after.metrics.values():
-        o = old_metrics.get(m.id)
+        o = before.metrics.get(m.id)
         if o is None:
-            new_handles.append(m.id)
+            new_handles.append(after.ids[m.id])
         elif (o.name, o.dims, o.kind, o.partition, o.overridable) == \
                 (m.name, m.dims, m.kind, m.partition, m.overridable) and o.written is m.written:
             continue
         d = _definition(after, m)
         if o is None or d != _definition(before, o):
             defs.append(d)
-    alive = {m.id for m in after.metrics.values()}
-    removed = [i for i in old_metrics if i not in alive]
+    removed = [before.ids[i] for i in before.metrics if i not in after.metrics]
     uuids = {h: after._uuids[h] for h in new_handles if h in after._uuids}
     tombstones = sorted(after.tombstones - before.tombstones)
 
@@ -189,11 +190,11 @@ def changes(before, after) -> dict:
     for m in after.metrics.values():
         if m.formula is not None:
             continue
-        o = old_metrics.get(m.id)
-        old_store = before._values.get(o.name) if o is not None and o.formula is None else None
-        rows = _cell_changes(before, o, old_store, after, m, after._values[m.name])
+        o = before.metrics.get(m.id)
+        old_store = before._values.get(o.id) if o is not None and o.formula is None else None
+        rows = _cell_changes(before, o, old_store, after, m, after._values[m.id])
         if len(rows):
-            cells.append({"metric": m.id, "dims": [after.dimension(d).id for d in m.dims], "rows": rows})
+            cells.append({"metric": after.ids[m.id], "dims": [after.dimension(d).id for d in m.dims], "rows": rows})
 
     for key, value in (("dimensions", added_dims), ("members", members), ("member_order", orders),
                        ("properties", props), ("metrics", defs), ("metrics_removed", removed),
@@ -292,7 +293,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
         _apply_uuids(model, ch)
         model._next_id = ch["next_id"]
         return
-    metric_of = lambda i: model.metrics_by_id().get(i)
+    _apply_uuids(model, ch)  # first: a new Metric is keyed by its UUID, which the record binds to the handle
 
     for d in ch.get("dimensions", []):
         model.dimensions[d["name"]] = dims_by_id[d["id"]] = Dimension(
@@ -314,17 +315,10 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     _apply_orders(model, ch.get("member_order", []), dim_of)
 
     for i in ch.get("metrics_removed", []):
-        m = metric_of(i)
-        model._uuids.pop(i, None)
-        model.metrics.pop(m.name)
-        model._state.pop(m.name, None)
-    defs = ch.get("metrics", [])
-    for spec in defs:  # 名前を入れ替える変更もあるので、一度仮の名前にする
-        m = metric_of(spec["id"])
-        if m is not None and m.name != spec["name"]:
-            _rename_metric_raw(model, m.name, f"\0{spec['id']}")
-    for spec in defs:
-        _define(model, spec)
+        mid = model._uuids.pop(i)
+        del model.metrics[mid]
+        model._state.pop(mid, None)
+    _define(model, ch.get("metrics", []))
 
     for p in ch.get("properties", []):
         d, t = dim_of(p["dim"]), dim_of(p["target"])
@@ -338,17 +332,16 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
         d.property_ids[p["prop"]] = p["id"]
         model.engine.dimension_changed(model, d.name)
 
-    by_id = model.metrics_by_id()
     for c in ch.get("cells", []):
-        m = by_id[c["metric"]]
+        m = model.metrics[model._uuids[c["metric"]]]
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
-        store = model._values[m.name]
+        store = model._values[m.id]
         if not isinstance(c["rows"], list):  # 変更の塊は、書けるエンジンならまとめて書く
             written = model.engine.apply_block(store, c["rows"], [d.ids for d in dims],
                                                None if vdim is None else vdim.ids)
             if written is not None:
-                model._values[m.name] = written
+                model._values[m.id] = written
                 continue
         for ids, _, new in c["rows"]:
             if len(ids) != len(dims) or not all(i in d._by_id for d, i in zip(dims, ids)):
@@ -359,29 +352,27 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             elif new is not None and m.kind == "boolean":
                 new = bool(new)
             store = model.engine.write(store, key, new, model)
-        model._values[m.name] = store
+        model._values[m.id] = store
 
-    _apply_uuids(model, ch)
     model._next_id = ch["next_id"]
     model._invalidate()
 
 
 def _apply_cells(model, cells: list[dict]) -> None:
     """記録のセルの変更を、入力の変更として書き込む（変更範囲を Model の Pending に積む）。"""
-    by_id = model.metrics_by_id()
     for c in cells:
-        m = by_id[c["metric"]]
+        m = model.metrics[model._uuids[c["metric"]]]
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
         rows = c["rows"]
         if not isinstance(rows, list):
-            if model._plan is not None and m.name in model._delta_sources():
-                model._keep_old(m.name)  # 差分集計には変更前の値が要る
-            written = model.engine.apply_block(model._values[m.name], rows, [d.ids for d in dims],
+            if model._plan is not None and m.id in model._delta_sources():
+                model._keep_old(m.id)  # 差分集計には変更前の値が要る
+            written = model.engine.apply_block(model._values[m.id], rows, [d.ids for d in dims],
                                                None if vdim is None else vdim.ids)
             if written is not None:
-                model._values[m.name] = written
-                model._pending.changed[m.name] = {}  # 変わったセルを数えずに、Metric 全体を変わったとする
+                model._values[m.id] = written
+                model._pending.changed[m.id] = {}  # 変わったセルを数えずに、Metric 全体を変わったとする
                 continue
         cols: list[list[int]] = [[] for _ in dims]
         values = []
@@ -396,37 +387,36 @@ def _apply_cells(model, cells: list[dict]) -> None:
                 new = bool(new)
             values.append(new)
         if values:
-            model._write_many(m.name, cols, values)
+            model._write_many(m.id, cols, values)
 
 
-def _rename_metric_raw(model, old: str, new: str) -> None:
-    m = model.metrics.pop(old)
-    m.name = new
-    model.metrics[new] = m
-    if old in model._state:
-        model._state[new] = model._state.pop(old)
-
-
-def _define(model, spec: dict) -> None:
-    """記録にある Metric の定義にする（新しい Metric なら作る）。"""
-    dims = tuple(next(d.name for d in model.dimensions.values() if d.id == i) for i in spec["dims"])
-    kind = spec["kind"]
-    if isinstance(kind, dict):
-        kind = "member:" + next(d.name for d in model.dimensions.values() if d.id == kind["member"])
-    partition = None if spec["partition"] is None else next(
-        d.name for d in model.dimensions.values() if d.id == spec["partition"])
-    name = spec["name"]
-    old = next((m for m in model.metrics.values() if m.id == spec["id"]), None)
-    if old is not None and old.name != name:
-        _rename_metric_raw(model, old.name, name)
-    formula = None if spec["formula"] is None else parse(spec["formula"], self_name=name)
+def _define(model, specs: list[dict]) -> None:
+    """Make the Metric definitions of a record (a new Metric is made). The names and shapes come first, then the
+    formulas: a formula can refer to a Metric that the same record defines or renames."""
     from .model import Metric
-    model.metrics[name] = Metric(name, dims, kind, formula, partition, formula, spec["overridable"], id=spec["id"])
-    if formula is not None:
-        model._values.pop(name, None)  # 計算 Metric の値は再生のあとで計算し直す
-    elif (old is None or old.formula is not None or name not in model._values
-          or (old.dims, old.kind) != (dims, kind)):
-        model._values[name] = model.engine.from_cells(dims, kind, {}, model, partition)
+    dim_name = lambda i: next(d.name for d in model.dimensions.values() if d.id == i)
+    olds = {}
+    for spec in specs:
+        mid = model._uuids[spec["id"]]
+        kind = spec["kind"]
+        if isinstance(kind, dict):
+            kind = "member:" + dim_name(kind["member"])
+        partition = None if spec["partition"] is None else dim_name(spec["partition"])
+        olds[mid] = model.metrics.get(mid)
+        model.metrics[mid] = Metric(spec["name"], tuple(dim_name(i) for i in spec["dims"]), kind,
+                                    partition=partition, overridable=spec["overridable"], id=mid)
+    model._metric_ids = {m.name: i for i, m in model.metrics.items()}
+    for spec in specs:
+        m = model.metrics[model._uuids[spec["id"]]]
+        old = olds[m.id]
+        if spec["formula"] is not None:
+            m.written = m.formula = bind(parse(spec["formula"], self_name=m.name), model)
+            model._values.pop(m.id, None)  # 計算 Metric の値は再生のあとで計算し直す
+        elif (old is None or old.formula is not None or m.id not in model._values
+              or (old.dims, old.kind) != (m.dims, m.kind)):
+            model._values[m.id] = model.engine.from_cells(m.dims, m.kind, {}, model, m.partition)
+        if m.overridable:
+            m.override = model._metric_ids[m.override_name]
 
 
 # ---------------------------------------------------------------- ファイルへの記録
@@ -503,12 +493,13 @@ class Journal:
 
     def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
         """セルの変更の履歴（古い順）。メンバー型の値は今の名前に直す（消したメンバーは ID のまま）。"""
-        m = model.metrics[metric]
+        m = model.metric(metric)
+        handle = model.ids[m.id]
         key = [model.dimension(d).id_of(coords[d]) for d in m.dims]
         out = []
         for rec in self.records():
             for c in rec["changes"].get("cells", []):
-                if c["metric"] != m.id:
+                if c["metric"] != handle:
                     continue
                 rows = c["rows"]
                 found = ([(old, new) for ids, old, new in rows if list(ids) == key] if isinstance(rows, list)

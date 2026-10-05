@@ -85,6 +85,7 @@ from .core import Dimension
 from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
 from .model import DuplicateId, Metric
+from .parser import to_formula
 from .workspace import Conflict, NotLeader, Overloaded, Rejected, Replica, Role, Workspace, rejection_of
 
 log = logging.getLogger(__name__)
@@ -123,7 +124,7 @@ class Names:
         return d
 
     def metric(self, id) -> Metric:
-        m = self.m.metrics_by_id().get(self._handle(id))
+        m = self.m.metrics.get(id) if isinstance(id, str) else None
         if m is None or m.name.startswith("__"):
             raise ValueError(f"Metric {id} がない")
         return m
@@ -315,7 +316,7 @@ def _target(m, n, metric, override: bool) -> Metric:
         return mt
     if not mt.overridable:
         raise ValueError(f"{mt.name} は上書きできる計算 Metric ではない")
-    return m.metrics[mt.override_name]
+    return m.metrics[mt.override]
 
 
 def _op_set_cell(m, n, metric, value, coords=None, override=False):
@@ -470,7 +471,7 @@ class Handler(BaseHTTPRequestHandler):
             if what == "overrides":  # Read the hidden "__override__" input through its formula Metric.
                 if not m.overridable:
                     raise ApiError(400, "bad_request", f"{m.name} は上書きできる計算 Metric ではない")
-                m, what = v.metrics[m.override_name], "slice"
+                m, what = v.metrics[m.override], "slice"
             name = m.name
             coords = n.coords_in(_coords(query))
             if what == "cell":
@@ -586,9 +587,9 @@ def _dimensions_out(n: Names) -> dict:
 
 def _metrics_out(n: Names) -> dict:
     """The Metrics of GET /, keyed by UUID. Names starting with "__" stay hidden."""
-    return {n.m.uuid_of(m.id): {"name": m.name, "dims": [n.dim_id(d) for d in m.dims], "kind": n.kind_out(m.kind),
-                                "overridable": m.overridable,
-                                "formula": None if m.written is None else _formula(m.written)}
+    return {m.id: {"name": m.name, "dims": [n.dim_id(d) for d in m.dims], "kind": n.kind_out(m.kind),
+                   "overridable": m.overridable,
+                   "formula": None if m.written is None else to_formula(m.written, n.m)}
             for m in n.m.metrics.values() if not m.name.startswith("__")}
 
 
@@ -636,11 +637,6 @@ def stats_text(ws) -> str:
             continue
         out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}", f"{name} {value}"]
     return "\n".join(out) + "\n"
-
-
-def _formula(written) -> str:
-    from .parser import to_formula
-    return to_formula(written)
 
 
 class Server(ThreadingHTTPServer):

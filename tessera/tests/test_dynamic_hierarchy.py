@@ -86,7 +86,7 @@ class Transfer(unittest.TestCase):
 
     def test_salary_change_and_transfer_use_delta(self):
         m = model()
-        self.assertEqual(m._delta["DeptCost"].aux, ("DeptOf",))
+        self.assertEqual(m._delta[m.metric("DeptCost").id].aux, (m.metric("DeptOf").id,))
         m.set_cell("Salary", 150, Employee="e1", Month="Jan")
         m.recalc()
         self.assertIn("DeptCost", m.delta_log)  # 対応表は変わっていないので差分を足し込む
@@ -144,7 +144,7 @@ def random_round(rng: random.Random, models: list[Model], counter: list[int]) ->
             m.add_member(kind, f"{kind[0]}{counter[0]}")
         return
     name = rng.choice(["Salary", "DeptOf", "DeptOf", "HireMonth", "Budget"])
-    meta = m0.metrics[name]
+    meta = m0.metric(name)
     coords = {d: rng.choice(m0.dimensions[d].members) for d in meta.dims}
     if rng.random() < 0.25:
         value = None
@@ -167,7 +167,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
@@ -182,7 +182,7 @@ class RustMatchesReference(unittest.TestCase):
         for round_ in range(150):
             for _ in range(rng.randint(1, 3)):
                 random_round(rng, [ref_m, rs], counter)
-            for name in ref_m.metrics:
+            for name in ref_m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     a, b = ref_m.value(name).cells, rs.value(name).cells
                     self.assertTrue(same(a, b), f"{name}\n参照: {a}\nRust: {b}")

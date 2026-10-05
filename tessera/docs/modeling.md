@@ -61,7 +61,7 @@ In the engine, members have numbers, and the numbers become compact when you rem
 ```python
 pid = m.dimensions["Product"].id_of("p9")      # The ID of a member
 m.dimensions["Product"].member_of(pid)         # The current name from the ID
-m.metrics["Revenue"].id, m.metric_name(mid)    # The ID of a Metric, and the current name from the ID
+m.metric("Revenue").id, m.metric(mid).name     # The id (UUID) of a Metric, and the current name from the id
 ```
 
 A copy (`fork`) continues to give IDs from the same counter. Thus, an item that you add in the copy and an item that you add in the original can get the same ID.

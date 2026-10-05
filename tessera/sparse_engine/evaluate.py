@@ -352,6 +352,37 @@ def estimate(expr: Expr, cat: Catalog, cells: Mapping[str, float]) -> tuple[tupl
 
 # ---------------------------------------------------------------- 名前の解決
 
+def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
+    """Change the Metric names of a parsed formula to Metric ids: Ref, and By.prop when it names a Metric.
+
+    names gives more name -> id pairs (the Metric that the formula defines). A Ref that already holds an id
+    stays. A Ref to a dimension name stays a name (resolve makes it a DimRef). A Ref to an unknown name
+    raises FormulaError unknown_metric with the name that the user wrote.
+    """
+    def id_of(name: str) -> str | None:
+        if names and name in names:
+            return names[name]
+        return cat._metric_ids.get(name)
+
+    def go(e: Expr) -> Expr:
+        if isinstance(e, Ref):
+            if e.name in cat.metrics or e.name in cat.dimensions:
+                return e
+            if (id := id_of(e.name)) is not None:
+                return Ref(id)
+            raise FormulaError("unknown_metric", name=e.name)
+        changes = {f.name: r for f in fields(e)
+                   if isinstance(v := getattr(e, f.name), Expr) and (r := go(v)) is not v}
+        out = replace(e, **changes) if changes else e
+        if isinstance(out, By):
+            d = cat.dimensions.get(out.dim)
+            if d is not None and out.prop not in d.properties and out.prop not in cat.metrics \
+                    and (id := id_of(out.prop)) is not None:
+                out = replace(out, prop=id)
+        return out
+    return go(expr)
+
+
 def resolve(expr: Expr, cat, by_metric: bool = True) -> Expr:
     """式を評価できる形に直す。変わらなければ同じオブジェクトを返す
     （エンジンが式の変換結果を同一性でキャッシュしているため）。

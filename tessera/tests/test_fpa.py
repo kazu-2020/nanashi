@@ -85,7 +85,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]), name)
 
@@ -98,7 +98,7 @@ class RustMatchesReference(unittest.TestCase):
         for round_ in range(60):
             for _ in range(rng.randint(1, 2)):
                 apply_random(rng, [ref_m, rs])
-            for name in ref_m.metrics:
+            for name in ref_m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(ref_m.value(name).cells, rs.value(name).cells), name)
 

@@ -120,7 +120,7 @@ class RustRepacksWhenKeysOverflow(unittest.TestCase):
             for i in range(10):
                 model.add_member("Region", f"R{i}")
                 model.set_cell("Volume", float(i + 1), Product="A", Region=f"R{i}", Month="Mar")
-        for name in ref.metrics:
+        for name in ref._metric_ids:
             with self.subTest(name):
                 self.assertTrue(same(ref.value(name).cells, rs.value(name).cells))
 
@@ -138,9 +138,9 @@ def random_round(rng: random.Random, models: list[Model], counter: list[int]) ->
         for m in models:
             m.add_member(kind, name, **props)
         return
-    inputs = [n for n, x in m0.metrics.items() if x.formula is None]
+    inputs = [x.name for x in m0.metrics.values() if x.formula is None]
     name = rng.choice(inputs)
-    meta = m0.metrics[name]
+    meta = m0.metric(name)
     coords = {d: rng.choice(m0.dimensions[d].members) for d in meta.dims}
     if rng.random() < 0.3:
         value = None
@@ -164,7 +164,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
@@ -180,7 +180,7 @@ class RustMatchesReference(unittest.TestCase):
         for round_ in range(120):
             for _ in range(rng.randint(1, 3)):
                 random_round(rng, [ref, rs], counter)
-            for name in ref.metrics:
+            for name in ref._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     a, b = ref.value(name).cells, rs.value(name).cells
                     self.assertTrue(same(a, b), f"{name}\n参照: {a}\nRust: {b}")

@@ -47,16 +47,17 @@ def dump(model) -> dict[str, bytes]:
     metrics = []
     files: dict[str, bytes] = {}
     for m in model.metrics.values():
-        metrics.append({"name": m.name, "id": m.id, "uuid": model.uuid_of(m.id), "dims": list(m.dims), "kind": m.kind,
+        handle = model.ids[m.id]  # the format still names a Metric by its handle (unit 4 of issue 68 changes this)
+        metrics.append({"name": m.name, "id": handle, "uuid": m.id, "dims": list(m.dims), "kind": m.kind,
                         "partition": m.partition,
-                        "formula": None if m.written is None else to_formula(m.written),
+                        "formula": None if m.written is None else to_formula(m.written, model),
                         "overridable": m.overridable})
         if m.formula is not None:
             continue
         # Rust なら、格納データから GIL を外して、Python のオブジェクトを作らずに書く
-        files[input_file(m.id)] = model.engine.to_parquet(
-            model._values[m.name], m.dims, m.kind, model,
-            {"nanashi": json.dumps({"format": FORMAT_VERSION, "metric": m.id})})
+        files[input_file(handle)] = model.engine.to_parquet(
+            model._values[m.id], m.dims, m.kind, model,
+            {"nanashi": json.dumps({"format": FORMAT_VERSION, "metric": handle})})
     meta = {"format": FORMAT_VERSION, "next_id": model._next_id, "dimensions": dims, "metrics": metrics,
             "tombstones": sorted(model.tombstones),
             "options": {"auto_layout": model.auto_layout, "delta_aggregation": model.delta_aggregation,
@@ -92,19 +93,20 @@ def read(file: Callable[[str], bytes], engine: Store | None = None):
     for d in meta["dimensions"]:  # 参照先の軸がそろってからプロパティを付ける
         for prop, spec in d["properties"].items():
             m.add_property(d["name"], prop, spec["target"], spec["mapping"])
+    formulas = [spec for spec in meta["metrics"] if spec["formula"] is not None]
     for spec in meta["metrics"]:
         if spec["formula"] is not None:
             continue
         dims, kind = tuple(spec["dims"]), spec["kind"]
         storage = engine.from_parquet(file(input_file(spec["id"])), dims, kind, m, spec["partition"])
-        m.add_input(spec["name"], dims, kind=kind, storage=storage, partition=spec["partition"])
-    for spec in meta["metrics"]:
-        if spec["formula"] is not None:
-            m.add_formula(spec["name"], spec["dims"], spec["formula"], kind=spec["kind"],
-                          partition=spec["partition"], overridable=spec["overridable"])
-    for spec in meta["metrics"]:  # Restore the saved IDs in place of the IDs that the load gave
-        m.metrics[spec["name"]].id = spec["id"]
-    # Restore the UUIDs in place of the UUIDs that the load made (the handles above changed too)
+        m.add_input(spec["name"], dims, kind=kind, storage=storage, partition=spec["partition"], id=spec["uuid"])
+    for spec in formulas:  # an empty input first: a formula can refer to a Metric that comes later in the file
+        m.add_input(spec["name"], spec["dims"], kind=spec["kind"], partition=spec["partition"], id=spec["uuid"])
+    for spec in formulas:
+        m.add_formula(spec["name"], spec["dims"], spec["formula"], kind=spec["kind"],
+                      partition=spec["partition"], overridable=spec["overridable"], id=spec["uuid"])
+    # Restore the UUIDs of the dimensions, members and properties, and the handles, in place of the ones that
+    # the load made
     m.ids, m._uuids, m.tombstones = {}, {}, set(meta["tombstones"])
     for d in meta["dimensions"]:
         m._bind(d["uuid"], d["id"])

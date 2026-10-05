@@ -37,8 +37,9 @@ def model() -> Model:
     f("OnCost", ["Product", "Month"], "Price[ON: Cost] + Cost")
     f("Expanded", ["Product", "Month"], "Price[EXPAND: Month] + Margin[SELECT: Month - 1]")
     f("Missing", ["Product", "Month"], "ISBLANK(Cost) AND Flag[EXPAND: Month]", kind="boolean")
-    f("Outflow", ["Product", "Month"], "IF(Stock[SELECT: Month - 1] > 50, 10)")
+    m.add_input("Outflow", ["Product", "Month"])  # Outflow and Stock refer to each other: an input first
     f("Stock", ["Product", "Month"], "PREVIOUS(Month) + Margin - Outflow")
+    f("Outflow", ["Product", "Month"], "IF(Stock[SELECT: Month - 1] > 50, 10)", id=m.metric("Outflow").id)
     f("Total", [], "Stock[REMOVE SUM: Product, Month]")
     f("CatShare", ["Product", "Month"],
       "Margin / RevByCat[REMOVE SUM: Region][BY: Product.Category]")
@@ -53,7 +54,7 @@ def cells(m: Model, name: str) -> dict:
 
 
 def snapshot(m: Model) -> dict:
-    return {n: cells(m, n) for n in m.metrics}
+    return {n: cells(m, n) for n in m._metric_ids}
 
 
 def same(a, b) -> bool:
@@ -68,7 +69,7 @@ def check_full(test, m: Model) -> None:
     incremental = snapshot(m)
     m._invalidate()
     full = snapshot(m)
-    for name in m.metrics:
+    for name in m._metric_ids:
         test.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
 
 
@@ -79,11 +80,11 @@ class MatchesFullRecalc(unittest.TestCase):
         rng = random.Random(20260930)
         m = model()
         m.recalc()
-        inputs = [n for n, x in m.metrics.items() if x.formula is None]
+        inputs = [x.name for x in m.metrics.values() if x.formula is None]
         for round_ in range(300):
             for _ in range(rng.randint(1, 3)):
                 name = rng.choice(inputs)
-                meta = m.metrics[name]
+                meta = m.metric(name)
                 coords = {d: rng.choice(m.dimensions[d].members) for d in meta.dims}
                 if rng.random() < 0.3:
                     value = None
@@ -97,7 +98,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
@@ -138,7 +139,7 @@ class RecomputesOnlyTheSlice(unittest.TestCase):
         self.assertEqual(set(self.regions()), {"Picked", "Missing"})
 
     def test_formula_change_recomputes_only_that_metric(self):
-        self.m.add_formula("Plus1", ["Product"], "Price + 2", id=self.m.metric_id("Plus1"))  # no Metric refers to Plus1
+        self.m.add_formula("Plus1", ["Product"], "Price + 2", id=self.m.metric("Plus1").id)  # no Metric refers to Plus1
         self.m.recalc()
         self.assertEqual(list(self.m.slice_log), [("Plus1", {})])
         self.assertEqual(self.m.get("Plus1", Product="A"), 12)

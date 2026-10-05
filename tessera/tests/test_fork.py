@@ -91,12 +91,13 @@ class RustFork(Fork):
         """分割軸の選択に使う影響範囲（入力ごと。分割軸を選ぶ Rust のエンジンだけが持つ）も、複製と元で別々に持つ。"""
         original = small(self.engine())
         before = {src: set(regions) for src, regions in original._samples.items()}
-        self.assertTrue(any("PlanOI" in r for r in before.values()))
+        plan_oi = original.metric("PlanOI").id
+        self.assertTrue(any(plan_oi in r for r in before.values()))
         fork = original.fork()
         fork.rename_metric("PlanOI", "PlanOI2")
         fork.remove_metric("PlanOI2")
         self.assertEqual({src: set(regions) for src, regions in original._samples.items()}, before)
-        self.assertFalse(any("PlanOI" in r or "PlanOI2" in r for r in fork._samples.values()))
+        self.assertFalse(any(plan_oi in r for r in fork._samples.values()))
 
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@ class Rename(unittest.TestCase):
 
     def test_formulas_use_the_new_name(self):
         self.m.rename_member("Month", "Jan", "January")
-        self.assertEqual(to_formula(self.m.metrics["Jan"].written), 'X[SELECT: Month."January"]')
+        self.assertEqual(to_formula(self.m.metric("Jan").written, self.m), 'X[SELECT: Month."January"]')
         self.assertEqual(self.m.get("Jan", Product="A"), 1)
         self.m.set_cell("X", 5, Product="A", Month="January")
         self.assertEqual(self.m.get("Jan", Product="A"), 5)
@@ -105,7 +105,7 @@ class Rename(unittest.TestCase):
         fork = self.m.fork()
         fork.rename_member("Month", "Jan", "January")
         self.assertEqual(snapshot(self.m), self.before)
-        self.assertEqual(to_formula(self.m.metrics["Jan"].written), 'X[SELECT: Month."Jan"]')
+        self.assertEqual(to_formula(self.m.metric("Jan").written, self.m), 'X[SELECT: Month."Jan"]')
         self.assertEqual(fork.get("Jan", Product="A"), 1)
 
 
@@ -241,7 +241,7 @@ def structural(rng: random.Random, models: list[Model], dims: list[str], counter
             m.rename_member(d, old, f"{old}~{counter[0]}")
     else:
         victim = rng.choice(members)
-        if any(f'{d}."{victim}"' in to_formula(x.written) for x in m0.metrics.values() if x.written is not None):
+        if any(f'{d}."{victim}"' in to_formula(x.written, m0) for x in m0.metrics.values() if x.written is not None):
             return  # 式が参照しているメンバーは消せない
         for m in models:
             m.remove_member(d, victim)

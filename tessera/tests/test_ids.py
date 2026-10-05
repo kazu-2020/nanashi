@@ -22,10 +22,11 @@ except ImportError:
     nanashi_core = None
 
 
-def all_ids(m: Model) -> list[int]:
-    ids = [d.id for d in m.dimensions.values()] + [x.id for x in m.metrics.values()]
+def all_ids(m: Model) -> list[str]:
+    """The UUIDs of the dimensions, the Metrics and the members."""
+    ids = [m.uuid_of(d.id) for d in m.dimensions.values()] + [x.id for x in m.metrics.values()]
     for d in m.dimensions.values():
-        ids += d.ids
+        ids += [m.uuid_of(h) for h in d.ids]
     return ids
 
 
@@ -39,7 +40,6 @@ class Ids(unittest.TestCase):
     def test_unique_in_the_model(self):
         ids = all_ids(self.m)
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertNotIn(0, ids)
 
     def test_members_keep_their_id(self):
         d = self.m.dimensions["Product"]
@@ -63,36 +63,53 @@ class Ids(unittest.TestCase):
         ids = all_ids(self.m)
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_per_metric_state_moves_as_one(self):
+    def test_per_metric_state_stays_with_the_id(self):
         m = build_with(ReferenceEngine())
         m.add_formula("Double", ["Product", "Month"], "Margin * 2", overridable=True)
         m.recalc()
-        fields = lambda name: {f for f in m._state[name].__slots__ if getattr(m._state[name], f) is not _UNSET}
-        margin = fields("Margin")
+        fields = lambda id: {f for f in m._state[id].__slots__ if getattr(m._state[id], f) is not _UNSET}
+        margin = m.metric("Margin").id
+        before = fields(margin)
         m.rename_metric("Margin", "Profit")
-        self.assertNotIn("Margin", m._state)
-        self.assertEqual(fields("Profit"), margin)  # 格納データ、計画、分割軸、見積もりなどが一緒に移る
+        self.assertEqual(fields(margin), before)  # the stored data, plan, partition and estimates stay under the id
+        self.assertIs(m.metric("Profit"), m.metrics[margin])
+        double, hidden = m.metric("Double").id, m.metric("__override__Double").id
         m.remove_metric("Double")
-        self.assertFalse({"Double", "__override__Double"} & set(m._state))
+        self.assertFalse({double, hidden} & set(m._state))
         self.assertEqual(set(m._state), set(m.metrics))
         check_full = snapshot(m)
         m._invalidate()
         self.assertEqual(snapshot(m), check_full)
 
     def test_metrics_keep_their_id(self):
-        margin = self.m.metrics["Margin"].id
-        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2", id=self.m.metric_id("Margin"))
-        self.assertEqual(self.m.metrics["Margin"].id, margin)
-        price = self.m.metrics["Price"].id
-        self.m.add_input("Price", ["Product"], {("A",): 1}, id=self.m.metric_id("Price"))
-        self.assertEqual(self.m.metrics["Price"].id, price)
+        margin = self.m.metric("Margin").id
+        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2", id=self.m.metric("Margin").id)
+        self.assertEqual(self.m.metric("Margin").id, margin)
+        price = self.m.metric("Price").id
+        self.m.add_input("Price", ["Product"], {("A",): 1}, id=self.m.metric("Price").id)
+        self.assertEqual(self.m.metric("Price").id, price)
         self.m.rename_metric("Margin", "Profit")
-        self.assertEqual(self.m.metrics["Profit"].id, margin)
-        self.assertEqual(self.m.metric_name(margin), "Profit")
+        self.assertEqual(self.m.metric("Profit").id, margin)
+        self.assertEqual(self.m.metric(margin).name, "Profit")
 
     def test_fork_keeps_ids(self):
         fork = self.m.fork()
         self.assertEqual(all_ids(fork), all_ids(self.m))
+
+    def test_metrics_are_keyed_by_uuid(self):
+        m = self.m
+        for key, x in m.metrics.items():
+            self.assertEqual(key, x.id)
+            self.assertEqual(uuid.UUID(key).version, 7)
+        margin = m.metric("Margin")
+        self.assertIs(m.metric(margin.id), margin)
+        self.assertIs(m.metric(margin.id), margin)  # a string argument is an id first, then a name
+        with self.assertRaisesRegex(ValueError, "がない"):
+            m.metric("Nope")
+        with self.assertRaisesRegex(ValueError, "UUID"):  # a name in the UUID form cannot collide with an id
+            m.add_input(str(uuid.uuid4()), ["Product"])
+        with self.assertRaisesRegex(ValueError, "UUID"):
+            m.rename_metric("Margin", uuid7())
 
 
 class Uuids(unittest.TestCase):
@@ -105,12 +122,12 @@ class Uuids(unittest.TestCase):
 
     def test_every_object_has_a_uuid(self):
         m = self.m
-        handles = all_ids(m) + [h for d in m.dimensions.values() for h in d.property_ids.values()]
-        self.assertEqual(sorted(m._uuids), sorted(handles))
+        uuids = all_ids(m) + [m.uuid_of(h) for d in m.dimensions.values() for h in d.property_ids.values()]
+        self.assertEqual(sorted(m.ids), sorted(uuids))
         self.assertEqual({u: h for h, u in m._uuids.items()}, m.ids)
         for u in m.ids:
             self.assertEqual(uuid.UUID(u).version, 7)
-        self.assertEqual(m.metric_id("Margin"), m.uuid_of(m.metrics["Margin"].id))
+        self.assertIn(m.metric("Margin").id, m.ids)  # a Metric also has a handle, for the journal and storage formats
         self.assertEqual(m.member_id("Product", "A"), m.uuid_of(m.dimensions["Product"].id_of("A")))
         self.assertEqual(m.ids[m.property_id("Product", "Category")], m.dimensions["Product"].property_ids["Category"])
 
@@ -122,14 +139,14 @@ class Uuids(unittest.TestCase):
 
     def test_redefine_by_uuid_can_rename(self):
         m = self.m
-        margin = m.metric_id("Margin")
+        margin = m.metric("Margin").id
         m.add_formula("Profit", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2", id=margin)
-        self.assertNotIn("Margin", m.metrics)
-        self.assertEqual(m.metric_id("Profit"), margin)
-        self.assertEqual(to_formula(m.metrics["Picked"].written), "Profit[FILTER: Flag]")
+        self.assertNotIn("Margin", m._metric_ids)
+        self.assertEqual(m.metric("Profit").id, margin)
+        self.assertEqual(to_formula(m.metric("Picked").written, m), "Profit[FILTER: Flag]")
         check_full(self, m)
         m.add_input("Profit", ["Product", "Month"], {("A", "Jan"): 1.0}, id=margin)  # a formula becomes an input
-        self.assertEqual(m.metric_id("Profit"), margin)
+        self.assertEqual(m.metric("Profit").id, margin)
         a = m.member_id("Product", "A")
         m.add_member("Product", "Alpha", id=a, at=2, Category="Y")
         self.assertEqual((m.dimensions["Product"].in_order()[2], m.member_id("Product", "Alpha")), ("Alpha", a))
@@ -157,7 +174,7 @@ class Uuids(unittest.TestCase):
 
     def test_uuid_of_another_kind_or_a_tombstone_is_duplicate_id(self):
         m = self.m
-        margin, b = m.metric_id("Margin"), m.member_id("Product", "B")
+        margin, b = m.metric("Margin").id, m.member_id("Product", "B")
         with self.assertRaises(DuplicateId):
             m.add_member("Product", "X", id=margin)
         with self.assertRaises(DuplicateId):
@@ -166,7 +183,7 @@ class Uuids(unittest.TestCase):
             m.add_formula("X", ["Product"], "Price", id=m.dimension_id("Product"))
         with self.assertRaises(DuplicateId):
             m.add_property("Product", "X", "Category", {}, id=b)
-        share = m.metric_id("CatShare")
+        share = m.metric("CatShare").id
         m.remove_member("Product", "B")
         m.remove_metric("CatShare")
         self.assertEqual(m.tombstones, {b, share})
@@ -183,7 +200,7 @@ class Uuids(unittest.TestCase):
     def test_removed_override_input_is_a_tombstone_too(self):
         m = self.m
         m.add_formula("Bonus", ["Product"], "Price * 0.1", overridable=True, id="bonus")
-        hidden = m.metric_id("__override__Bonus")
+        hidden = m.metric("__override__Bonus").id
         m.remove_metric("Bonus")
         self.assertLessEqual({"bonus", hidden}, m.tombstones)
 
@@ -221,7 +238,7 @@ class RemoveMetric(unittest.TestCase):
         self.m.remove_metric("CatShare")
         self.m.recalc()
         self.assertEqual(list(self.m.eval_log), [])  # 誰も参照していないので、何も計算し直さない
-        self.assertNotIn("CatShare", self.m.metrics)
+        self.assertNotIn("CatShare", self.m._metric_ids)
         del before["CatShare"]
         self.assertEqual(snapshot(self.m), before)
         self.m.set_cell("Price", 7, Product="A")
@@ -230,7 +247,7 @@ class RemoveMetric(unittest.TestCase):
     def test_referenced(self):
         with self.assertRaisesRegex(ValueError, "Margin は .*Adjusted.* の式が参照している"):
             self.m.remove_metric("Margin")
-        self.assertIn("Margin", self.m.metrics)
+        self.assertIn("Margin", self.m._metric_ids)
 
     def test_mapping_of_a_dynamic_hierarchy_is_referenced(self):
         m = build_fpa(self.engine(), employees=8, products=4, months=6, seed=2)
@@ -238,12 +255,12 @@ class RemoveMetric(unittest.TestCase):
             m.remove_metric("DeptOf")
 
     def test_input_then_readd(self):
-        old = self.m.metrics["Flag"].id
+        old = self.m.metric("Flag").id
         self.m.remove_metric("Picked")
         self.m.remove_metric("Missing")
         self.m.remove_metric("Flag")
         self.m.add_input("Flag", ["Product"], {("C",): True}, kind="boolean")
-        self.assertNotEqual(self.m.metrics["Flag"].id, old)
+        self.assertNotEqual(self.m.metric("Flag").id, old)
         self.m.add_formula("Picked", ["Product", "Month"], "Margin[FILTER: Flag]")
         self.assertEqual(dict(self.m.value("Picked").cells), {("C", "Jan"): 40.0})
         check_full(self, self.m)
@@ -254,7 +271,7 @@ class RemoveMetric(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "隠し入力"):
             self.m.remove_metric("__override__Bonus")
         self.m.remove_metric("Bonus")
-        self.assertNotIn("__override__Bonus", self.m.metrics)
+        self.assertNotIn("__override__Bonus", self.m._metric_ids)
         check_full(self, self.m)
 
     def test_unknown(self):
@@ -275,7 +292,7 @@ class RenameMetric(unittest.TestCase):
         self.m.rename_metric("Margin", "Profit")
         self.m.recalc()
         self.assertEqual(list(self.m.eval_log), [])  # 値は変わらないので、何も計算し直さない
-        self.assertEqual(to_formula(self.m.metrics["Picked"].written), "Profit[FILTER: Flag]")
+        self.assertEqual(to_formula(self.m.metric("Picked").written, self.m), "Profit[FILTER: Flag]")
         after = snapshot(self.m)
         before["Profit"] = before.pop("Margin")
         self.assertEqual(after, before)
@@ -295,15 +312,15 @@ class RenameMetric(unittest.TestCase):
     def test_scan_members(self):
         self.m.rename_metric("Stock", "Inventory")
         self.m.set_cell("Cost", 100, Product="A", Month="Feb")
-        self.assertIn("Inventory", to_formula(self.m.metrics["Outflow"].written))
+        self.assertIn("Inventory", to_formula(self.m.metric("Outflow").written, self.m))
         check_full(self, self.m)
 
     def test_overrides_follow(self):
         self.m.add_formula("Bonus", ["Product"], "Price * 0.1", overridable=True)
         self.m.set_cell("Bonus", 9, Product="A")
         self.m.rename_metric("Bonus", "Reward")
-        self.assertIn("__override__Reward", self.m.metrics)
-        self.assertNotIn("__override__Bonus", self.m.metrics)
+        self.assertIn("__override__Reward", self.m._metric_ids)
+        self.assertNotIn("__override__Bonus", self.m._metric_ids)
         self.assertEqual(self.m.get("Reward", Product="A"), 9)
         self.m.set_cell("Reward", None, Product="A")
         self.assertEqual(self.m.get("Reward", Product="A"), 1)
@@ -313,9 +330,65 @@ class RenameMetric(unittest.TestCase):
         m = build_fpa(self.engine(), employees=8, products=4, months=6, seed=2)
         m.recalc()
         m.rename_metric("DeptOf", "Assignment")
-        self.assertIn("Employee.Assignment", to_formula(m.metrics["Payroll"].written))
+        self.assertIn("Employee.Assignment", to_formula(m.metric("Payroll").written, m))
         e, t = m.dimensions["Employee"].members[0], m.dimensions["Month"].members[2]
         m.set_cell("Assignment", "管理", Employee=e, Month=t)
+        check_full(self, m)
+
+    def test_rename_is_an_attribute_change(self):
+        """A rename calculates nothing, not even the changes that wait for the next recalc. Every formula
+        shows the new name, and the next read applies the waiting change under the new name."""
+        m = self.m
+        m.set_cell("Cost", 1, Product="A", Month="Jan")  # a change that waits
+        m.eval_log.clear()
+        m.slice_log.clear()
+        m.rename_metric("Margin", "Profit")
+        self.assertEqual(list(m.eval_log), [])
+        self.assertEqual(list(m.slice_log), [])
+        formulas = {x.name: to_formula(x.written, m) for x in m.metrics.values() if x.written is not None}
+        for name, text in formulas.items():
+            self.assertNotRegex(text, r"\bMargin\b", name)
+        self.assertEqual(formulas["Picked"], "Profit[FILTER: Flag]")
+        self.assertEqual(formulas["Stock"], "Stock[SELECT: Month - 1] + Profit - Outflow")
+        self.assertIn("Profit", formulas["Adjusted"])
+        self.assertIn("Profit", formulas["CatShare"])
+        self.assertEqual(m.get("Picked", Product="A", Month="Jan"), 30 - 1)
+        self.assertIn("Profit", m.eval_log)  # the log shows the current name
+        check_full(self, m)
+
+    def test_logs_show_current_names(self):
+        m = self.m
+        m.set_cell("Salary", 50, Employee="e2")
+        m.recalc()
+        self.assertIn("DeptSalary", m.eval_log)
+        self.assertIn("DeptSalary", m.delta_log)
+        m.rename_metric("DeptSalary", "DeptPay")
+        self.assertIn("DeptPay", m.eval_log)
+        self.assertNotIn("DeptSalary", m.eval_log)
+        self.assertIn("DeptPay", m.delta_log)
+        self.assertIn("DeptPay", [n for n, _ in m.slice_log])
+        self.assertEqual(m.eval_log.count("DeptPay"), list(m.eval_log).count("DeptPay"))
+
+    def test_rename_of_a_metric_by_target_and_of_an_overridable_source(self):
+        """The Metric of a Metric BY (`[BY: Employee.DeptOf]`) and the source of an overridable formula
+        follow a rename without a recalculation, while a change waits."""
+        m = build_fpa(self.engine(), employees=8, products=4, months=6, seed=2)
+        m.add_formula("Bonus", ["Employee", "Version"], "Salary * 0.1", overridable=True)
+        e, t = m.dimensions["Employee"].members[0], m.dimensions["Month"].members[2]
+        v = m.dimensions["Version"].members[0]
+        m.set_cell("Bonus", 9, Employee=e, Version=v)
+        m.recalc()
+        m.set_cell("DeptOf", "管理", Employee=e, Month=t)  # a change that waits
+        m.eval_log.clear()
+        m.rename_metric("DeptOf", "Assignment")
+        m.rename_metric("Salary", "Pay")
+        self.assertEqual(list(m.eval_log), [])
+        self.assertIn("Employee.Assignment", to_formula(m.metric("Payroll").written, m))
+        self.assertEqual(to_formula(m.metric("Bonus").written, m), "Pay * 0.1")
+        self.assertEqual(m.get("Bonus", Employee=e, Version=v), 9)
+        self.assertIn("__override__Bonus", m._metric_ids)
+        m.set_cell("Bonus", None, Employee=e, Version=v)
+        self.assertEqual(m.get("Bonus", Employee=e, Version=v), m.get("Pay", Employee=e, Version=v) * 0.1)
         check_full(self, m)
 
     def test_errors(self):

@@ -84,7 +84,7 @@ class Overrides(unittest.TestCase):
             m.save(tmp)
             loaded = Model.load(tmp, ReferenceEngine())
         self.assertEqual(loaded.get("Bonus", Employee="e1", Month="Jan"), 50)
-        self.assertTrue(loaded.metrics["Bonus"].overridable)
+        self.assertTrue(loaded.metric("Bonus").overridable)
 
 
 class Spread(unittest.TestCase):
@@ -158,10 +158,10 @@ class Spread(unittest.TestCase):
                 incremental = snapshot(m)
                 m._invalidate()
                 full = snapshot(m)
-                for name in m.metrics:
+                for name in m._metric_ids:
                     with self.subTest(round=round_, engine=m.engine.name, metric=name):
                         self.assertTrue(same(incremental[name], full[name]), name)
-            for name in ms[0].metrics:
+            for name in ms[0]._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(all(same(ms[0].value(name).cells, m.value(name).cells) for m in ms[1:]), name)
 
@@ -195,7 +195,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]), name)
 
@@ -207,7 +207,7 @@ class RustMatchesReference(unittest.TestCase):
         for round_ in range(150):
             for m in (ref_m, rs):  # 同じ種の乱数で、同じ操作を加える
                 random_round(random.Random(round_), m)
-            for name in ref_m.metrics:
+            for name in ref_m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(ref_m.value(name).cells, rs.value(name).cells), name)
         self.assertTrue(math.isfinite(rs.get("Total") or 0.0))

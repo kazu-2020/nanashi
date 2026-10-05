@@ -12,6 +12,7 @@ from sparse_engine.evaluate import affected, collect_refs, estimate, infer
 from sparse_engine.expr import Expr, _children
 from sparse_engine.planner import PyPlanner
 
+from .test_engines import build_with
 from .test_incremental import same
 
 try:
@@ -76,12 +77,12 @@ class python_resolved:
                 x.formula = resolve(x.written, self.m)
                 if x.overridable:
                     from sparse_engine.expr import Coalesce, Ref
-                    x.formula = Coalesce(Ref(x.override_name), x.formula)
+                    x.formula = Coalesce(Ref(x.override), x.formula)
         return self.m
 
     def __exit__(self, *exc):
         for n, f in self.saved.items():
-            self.m.metrics[n].formula = f
+            self.m.metric(n).formula = f
 
 
 class EveryNodeEverywhere(unittest.TestCase):
@@ -101,7 +102,7 @@ class EveryNodeEverywhere(unittest.TestCase):
         for x in m.metrics.values():
             if x.written is None:
                 continue
-            text = to_formula(x.written)                     # 文字列への変換
+            text = to_formula(x.written, m)                  # 文字列への変換
             self.assertEqual(to_formula(parse(text, self_name=x.name)), text)  # 構文の解析（往復で安定）
             infer(x.formula, m, [])                          # 型推論
             list(collect_refs(x.formula, m))                 # 依存の収集
@@ -113,7 +114,7 @@ class EveryNodeEverywhere(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_rust_handles_every_node_and_agrees(self):
         ref, rust = model(ReferenceEngine()), model(RustEngine())
-        for name in ref.metrics:
+        for name in ref._metric_ids:
             a, b = ref.value(name).cells, rust.value(name).cells
             self.assertTrue(same(a, b), f"{name}\n参照: {a}\nRust: {b}")
         ref.add_member("Month", "Apr")
@@ -122,7 +123,7 @@ class EveryNodeEverywhere(unittest.TestCase):
             m.set_cell("Volume", 7, Product="A", Month="Apr")
             m.set_cell("DeptOf", "Eng", Employee="e1", Month="Apr")
             m.remove_member("Month", "Feb")
-        for name in ref.metrics:
+        for name in ref._metric_ids:
             a, b = ref.value(name).cells, rust.value(name).cells
             self.assertTrue(same(a, b), f"{name}\n参照: {a}\nRust: {b}")
 
@@ -177,21 +178,23 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
         ref, rust = model(ReferenceEngine()), model(RustEngine())
         ref.recalc()
         rust.recalc()
-        self.assertEqual(ref.cell_estimates.keys(), rust.cell_estimates.keys())
-        for name, want in ref.cell_estimates.items():
-            self.assertAlmostEqual(rust.cell_estimates[name], want, msg=name)
-            self.assertGreaterEqual(want, ref.engine.size(ref._values[name]), name)
+        estimated = lambda m: {m.metrics[i].name: n for i, n in m.cell_estimates.items()}
+        self.assertEqual(estimated(ref).keys(), estimated(rust).keys())
+        for name, want in estimated(ref).items():
+            self.assertAlmostEqual(estimated(rust)[name], want, msg=name)
+            self.assertGreaterEqual(want, ref.engine.size(ref._values[ref.metric(name).id]), name)
         # 頭打ちにならない大きさ（1 より小さいセル数）でも、式ごとに一致する
-        cells = {n: 0.5 + 0.01 * i for i, n in enumerate(ref.metrics)}
+        sizes = {x.name: 0.5 + 0.01 * i for i, x in enumerate(ref.metrics.values())}
+        by_id = lambda m: {x.id: sizes[x.name] for x in m.metrics.values()}
         with python_resolved(ref):
             for x in ref.metrics.values():
                 if x.formula is not None:
-                    want = estimate(x.formula, ref, cells)[1]
-                    self.assertAlmostEqual(rust.engine.planner.estimate(rust.metrics[x.name].formula, rust, cells), want,
-                                           msg=x.name)
+                    want = estimate(x.formula, ref, by_id(ref))[1]
+                    self.assertAlmostEqual(rust.engine.planner.estimate(rust.metric(x.name).formula, rust, by_id(rust)),
+                                           want, msg=x.name)
 
     def test_error_messages(self):
-        from sparse_engine.evaluate import FormulaError as FE, infer, resolve
+        from sparse_engine.evaluate import FormulaError as FE, bind, infer, resolve
         for dims, text in BAD_FORMULAS:
             ref, rust = model(ReferenceEngine()), model(RustEngine())
             messages = []
@@ -207,7 +210,7 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
         m = model(ReferenceEngine())
         for dims, text in BAD_FORMULAS:
             with self.assertRaises(FE):
-                infer(resolve(parse(text, self_name="Bad"), m), m, [])
+                infer(resolve(bind(parse(text, self_name="Bad"), m), m), m, [])
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -225,10 +228,10 @@ class RustAffectedMatchesPython(unittest.TestCase):
             inputs = [n for n, x in m.metrics.items() if x.formula is None]
             cases = []
             for name in inputs:
-                dims = m.metrics[name].dims
+                dims = m.metric(name).dims
                 cases.append(({name: {d: frozenset([m.dimensions[d].members[0]]) for d in dims}}, None))
                 cases.append(({name: {}}, None))
-            cases.append(({n: {d: frozenset(m.dimensions[d].members[:2]) for d in m.metrics[n].dims} for n in inputs[:3]},
+            cases.append(({n: {d: frozenset(m.dimensions[d].members[:2]) for d in m.metric(n).dims} for n in inputs[:3]},
                           {"Month": frozenset(["Zzz"])}))
             for changed, added in cases:
                 if added:
@@ -259,13 +262,13 @@ class RustAffectedMatchesPython(unittest.TestCase):
         for m in self.models():
             m.recalc()
             inputs = [n for n, x in m.metrics.items() if x.formula is None]
-            regions = {n: {d: frozenset(m.dimensions[d].members[:1]) for d in m.metrics[n].dims} for n in inputs}
+            regions = {n: {d: frozenset(m.dimensions[d].members[:1]) for d in m.metric(n).dims} for n in inputs}
             for x in m.metrics.values():
                 if x.formula is not None:
                     with self.subTest(metric=x.name):
                         got = m.engine.planner.affected(x.formula, m, regions)
                         with python_resolved(m):
-                            want = affected(m.metrics[x.name].formula, m, regions)
+                            want = affected(m.metric(x.name).formula, m, regions)
                         self.assertEqual(got, want)
 
 
@@ -338,18 +341,9 @@ class RustPlanMatchesPython(unittest.TestCase):
 
     def models(self):
         from examples.fpa import build
-        from .test_incremental import model as incremental
         yield model(RustEngine())
         yield build(RustEngine(), employees=12, products=6, months=8, seed=3)
-        m = incremental()
-        fresh = Model(engine=RustEngine())
-        fresh.dimensions = m.dimensions
-        for name, x in m.metrics.items():
-            if x.formula is None:
-                fresh.add_input(name, x.dims, m.value(name).cells, kind=x.kind)
-            else:
-                fresh.add_formula(name, x.dims, x.formula, kind=x.kind)
-        yield fresh
+        yield build_with(RustEngine())
 
     def test_steps_and_levels(self):
         for m in self.models():
@@ -369,9 +363,11 @@ class RustPlanMatchesPython(unittest.TestCase):
             for engine in (ReferenceEngine, RustEngine):
                 m = model(engine())
                 with self.subTest(defs=[d[0] + "=" + d[2] for d in defs], engine=m.engine.name):
+                    for name, dims, _ in defs:  # the formulas refer to each other: inputs first
+                        m.add_input(name, dims)
                     with self.assertRaisesRegex(FE, "循環参照") as cm:
                         for name, dims, text in defs:
-                            m.add_formula(name, dims, text)
+                            m.add_formula(name, dims, text, id=m.metric(name).id)
                         m.recalc()
                     e = cm.exception
                     messages.append((e.code, e.params, str(e)))
@@ -386,24 +382,15 @@ class RustDeltaPlanMatchesPython(unittest.TestCase):
         from sparse_engine.delta import plan_for
         from sparse_engine.evaluate import resolve
         from examples.fpa import build
-        from .test_incremental import model as incremental
         models = [model(RustEngine()), build(RustEngine(), employees=12, products=6, months=8, seed=3)]
-        m = incremental()
-        fresh = Model(engine=RustEngine())
-        fresh.dimensions = m.dimensions
-        for name, x in m.metrics.items():
-            if x.formula is None:
-                fresh.add_input(name, x.dims, m.value(name).cells, kind=x.kind)
-            else:
-                fresh.add_formula(name, x.dims, x.formula, kind=x.kind)
-        models.append(fresh)
+        models.append(build_with(RustEngine()))
         seen = 0
         for m in models:
             m.recalc()
             for x in m.metrics.values():
                 if x.written is None:
                     continue
-                got = m.engine.planner.delta_plan(m.metrics[x.name].formula, m)
+                got = m.engine.planner.delta_plan(m.metric(x.name).formula, m)
                 want = plan_for(resolve(x.written, m), m)
                 with self.subTest(metric=x.name):
                     if want is None:

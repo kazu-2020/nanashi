@@ -111,12 +111,12 @@ class PgJournalTests(unittest.TestCase):
         (rec,) = j.conn.execute("select record from nanashi_operation where model_id = %s and cells_uri is not null",
                                 (self.model_id,)).fetchone()
         (f,) = rec["cells_blob"]["files"]
-        v = m.metrics["V"]
+        v = m.metric("V")
         self.assertTrue(f["uri"].startswith(f"{self.model_id}/cells/"))  # 置き場所の中の相対的なキー
-        self.assertTrue(f["uri"].endswith(f"-{v.id}.parquet"))
+        self.assertTrue(f["uri"].endswith(f"-{m.ids[v.id]}.parquet"))
         data = self.objects.get(f["uri"])
         meta = dict(nanashi_core.parquet_metadata(data))
-        self.assertEqual(json.loads(meta["nanashi"]), {"metric": v.id})
+        self.assertEqual(json.loads(meta["nanashi"]), {"metric": m.ids[v.id]})
         block = nanashi_core.CellBlock.from_parquet(data)
         self.assertEqual(len(block), 11_999)
         for e in (ReferenceEngine, RustEngine):

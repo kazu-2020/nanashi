@@ -137,7 +137,7 @@ class Basics(unittest.TestCase):
         self.assertEqual((good.result(), good2.result()), (1, 2))
         with self.assertRaises(Exception):
             bad.result()
-        self.assertNotIn("Bad", self.ws.version.metrics)
+        self.assertNotIn("Bad", self.ws.version._metric_ids)
         self.assertEqual(self.ws.version.get("Stock", Product="p3", Month="Jan"), 101)
 
     def test_conflict_on_the_same_cells(self):

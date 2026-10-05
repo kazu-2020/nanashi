@@ -38,12 +38,12 @@ class BlankSemantics(unittest.TestCase):
     def test_scalar_multiply_keeps_sparsity(self):
         self.m.add_formula("Z", ["Product"], ref("X") * 2)
         self.assertEqual(self.m.value("Z").cells, {("A",): 2, ("B",): 4})
-        self.assertEqual(self.m.warnings["Z"], [])
+        self.assertEqual(self.m.warnings[self.m.metric("Z").id], [])
 
     def test_plus_constant_densifies_and_warns(self):
         self.m.add_formula("Z", ["Product"], ref("X") + 1)
         self.assertEqual(self.m.value("Z").cells, {("A",): 2, ("B",): 3, ("C",): 1})
-        self.assertEqual(len(self.m.warnings["Z"]), 1)
+        self.assertEqual(len(self.m.warnings[self.m.metric("Z").id]), 1)
 
     def test_ifblank(self):
         self.m.add_formula("Z", ["Product"], ref("X").ifblank(0))
@@ -85,7 +85,7 @@ class ImplicitExpansion(unittest.TestCase):
         z = self.m.value("Z")
         self.assertEqual([z.get(Product="A", Month=t) for t in MONTHS], [105, 100, 100, 100])
         self.assertEqual(z.get(Product="B", Month="Feb"), 7)
-        self.assertEqual(self.m.warnings["Z"], [])  # 明示したので警告しない
+        self.assertEqual(self.m.warnings[self.m.metric("Z").id], [])  # 明示したので警告しない
 
     def test_on_restricts_to_other_support(self):
         self.m.add_formula("Z", ["Product", "Month"], ref("Fixed").on(ref("Variable")) + ref("Variable"))
@@ -94,7 +94,7 @@ class ImplicitExpansion(unittest.TestCase):
     def test_constant_expands_with_warning(self):
         self.m.add_formula("Z", ["Product", "Month"], ref("Variable") + 1)
         self.assertEqual(len(self.m.value("Z")), len(self.m.dimensions["Product"].members) * len(MONTHS))
-        self.assertTrue(self.m.warnings["Z"])
+        self.assertTrue(self.m.warnings[self.m.metric("Z").id])
 
     def test_scalar_metric_is_treated_like_constant(self):
         self.m.add_input("Offset", [], {(): 1})
@@ -154,15 +154,18 @@ class TimeRecursion(unittest.TestCase):
         self.assertIsNone(s.get(Product="C", Month="Apr"))  # 疎のまま
 
     def test_mutual_recursion(self):
+        self.m.add_input("Closing", ["Product", "Month"])  # the two refer to each other: an input first
         self.m.add_formula("Opening", ["Product", "Month"], ref("Closing").prev("Month"))
-        self.m.add_formula("Closing", ["Product", "Month"], ref("Opening") + ref("In") - ref("Out"))
+        self.m.add_formula("Closing", ["Product", "Month"], ref("Opening") + ref("In") - ref("Out"),
+                           id=self.m.metric("Closing").id)
         c = self.m.value("Closing")
         self.assertEqual([c.get(Product="A", Month=t) for t in MONTHS], [10, 7, 12, 12])
         self.assertEqual(self.m.get("Opening", Product="A", Month="Mar"), 7)
 
     def test_cycle_without_lag_is_rejected(self):
+        self.m.add_input("Q", ["Product", "Month"])
         self.m.add_formula("P", ["Product", "Month"], ref("Q") + ref("In"))
-        self.m.add_formula("Q", ["Product", "Month"], ref("P") * 2)
+        self.m.add_formula("Q", ["Product", "Month"], ref("P") * 2, id=self.m.metric("Q").id)
         with self.assertRaisesRegex(FormulaError, "循環参照"):
             self.m.recalc()
 

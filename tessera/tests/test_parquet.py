@@ -33,7 +33,7 @@ def model(engine) -> Model:
 
 
 def cells(m: Model, name: str) -> dict:
-    return m.engine.to_cube(m._values[name], m).cells
+    return m.engine.to_cube(m._values[m.metric(name).id], m).cells
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
@@ -47,9 +47,9 @@ class ParquetRoundTrip(unittest.TestCase):
             for reader in self.engines():
                 dst = model(reader())
                 for name in ("Salary", "Active", "DeptOf", "Empty"):
-                    m = src.metrics[name]
+                    m = src.metric(name)
                     with self.subTest(writer=writer.name, reader=reader.name, metric=name):
-                        data = src.engine.to_parquet(src._values[name], m.dims, m.kind, src, {"metric": str(m.id)})
+                        data = src.engine.to_parquet(src._values[src.metric(name).id], m.dims, m.kind, src, {"metric": str(m.id)})
                         self.assertIsInstance(data, bytes)
                         store = dst.engine.from_parquet(data, m.dims, m.kind, dst, m.partition)
                         self.assertEqual(dst.engine.to_cube(store, dst).cells, cells(src, name))
@@ -59,8 +59,8 @@ class ParquetRoundTrip(unittest.TestCase):
         for engine in self.engines():
             m = model(engine())
             with self.subTest(engine=engine.name):
-                meta = m.metrics["Active"]
-                data = m.engine.to_parquet(m._values["Active"], meta.dims, meta.kind, m, {})
+                meta = m.metric("Active")
+                data = m.engine.to_parquet(m._values[m.metric("Active").id], meta.dims, meta.kind, m, {})
                 store = m.engine.from_parquet(data, meta.dims, meta.kind, m)
                 self.assertTrue(all(isinstance(v, bool) for v in m.engine.to_cube(store, m).cells.values()))
 
@@ -69,7 +69,7 @@ class ParquetRoundTrip(unittest.TestCase):
         for engine in self.engines():
             m = model(engine())
             with self.subTest(engine=engine.name):
-                data = m.engine.to_parquet(m._values["Salary"], ("Employee", "Month"), "number", m, {})
+                data = m.engine.to_parquet(m._values[m.metric("Salary").id], ("Employee", "Month"), "number", m, {})
                 before = cells(m, "Salary")
                 m.rename_member("Employee", "e3", "Eve")
                 store = m.engine.from_parquet(data, ("Employee", "Month"), "number", m)
@@ -79,7 +79,7 @@ class ParquetRoundTrip(unittest.TestCase):
     def test_rejects_mismatch(self):
         for engine in self.engines():
             m = model(engine())
-            data = m.engine.to_parquet(m._values["Salary"], ("Employee", "Month"), "number", m, {})
+            data = m.engine.to_parquet(m._values[m.metric("Salary").id], ("Employee", "Month"), "number", m, {})
             with self.subTest(engine=engine.name, case="値の種類"):
                 with self.assertRaisesRegex(ValueError, "列が合わない"):
                     m.engine.from_parquet(data, ("Employee", "Month"), "boolean", m)
@@ -117,7 +117,7 @@ class CellBlocks(unittest.TestCase):
 
     def test_rejects_other_parquet(self):
         m = model(RustEngine())
-        data = m.engine.to_parquet(m._values["Salary"], ("Employee", "Month"), "number", m, {})
+        data = m.engine.to_parquet(m._values[m.metric("Salary").id], ("Employee", "Month"), "number", m, {})
         with self.assertRaisesRegex(ValueError, "変更の形でない"):
             nanashi_core.CellBlock.from_parquet(data)
 
@@ -159,7 +159,7 @@ class ApplyBlock(unittest.TestCase):
         for n in (50, 3000):  # 1024 件未満は差分に入れ、それ以上は本体を作り直す
             for name in ("V", "M"):
                 a, b = self.model(), self.model()
-                x = a.metrics[name]
+                x = a.metric(name)
                 dims = [a.dimension(d) for d in x.dims]
                 vdim = a.dimension("D") if name == "M" else None
                 rows = []
@@ -172,9 +172,9 @@ class ApplyBlock(unittest.TestCase):
                     rows.append([ids, None, new])
                 with self.subTest(n=n, metric=name):
                     block = nanashi_core.CellBlock.from_rows(rows)
-                    a._values[name] = a.engine.apply_block(a._values[name], block, [d.ids for d in dims],
+                    a._values[a.metric(name).id] = a.engine.apply_block(a._values[a.metric(name).id], block, [d.ids for d in dims],
                                                            None if vdim is None else vdim.ids)
-                    store = b._values[name]
+                    store = b._values[b.metric(name).id]
                     for ids, _, new in rows:  # journal.apply の 1 セルずつの経路と同じ
                         if not all(i in d._by_id for d, i in zip(dims, ids)):
                             continue

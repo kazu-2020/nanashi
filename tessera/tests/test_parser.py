@@ -173,8 +173,9 @@ class ModelWithText(unittest.TestCase):
         m = model()
         m.add_input("In", ["Month"], {("Jan",): 10})
         m.add_input("Demand", ["Month"], {(t,): 4 for t in MONTHS})
+        m.add_input("Stock", ["Month"])  # Order and Stock refer to each other: an input first
         m.add_formula("Order", ["Month"], "IF(Stock[SELECT: Month - 1] < 5, 10, 0)")
-        m.add_formula("Stock", ["Month"], "PREVIOUS(Month) + In + Order - Demand")
+        m.add_formula("Stock", ["Month"], "PREVIOUS(Month) + In + Order - Demand", id=m.metric("Stock").id)
         self.assertEqual([m.get("Stock", Month=t) for t in MONTHS], [6, 2, 8, 4])
 
     def test_type_errors_still_come_from_checker(self):

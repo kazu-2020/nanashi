@@ -479,14 +479,14 @@ class PgJournal(Journal):
     def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
         """セルの変更の履歴を、セルの索引で引く（記録を先頭から読まない）。"""
         self.index_pending()  # 確定の後に回した分を先に反映する
-        m = model.metrics[metric]
+        m = model.metric(metric)
         key = [model.dimension(d).id_of(coords[d]) for d in m.dims]
         with self._lock:
             rows = self.conn.execute(
             "select c.seq, o.at, o.user_name, o.reason, c.old_value, c.new_value"
             " from nanashi_cell_change c join nanashi_operation o on o.model_id = c.model_id and o.seq = c.seq"
                 " where c.model_id = %s and c.metric_id = %s and c.coords = %s::bigint[] order by c.seq",
-                (self.model_id, m.id, key)).fetchall()
+                (self.model_id, model.ids[m.id], key)).fetchall()
         return _shown(model, m, [{"seq": s, "at": _iso(a), "user": u, "reason": r, "old": o, "new": n}
                                  for s, a, u, r, o, n in rows])
 

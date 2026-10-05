@@ -69,7 +69,7 @@ class IfSemantics(unittest.TestCase):
     def test_blank_condition_gives_blank(self):
         m = model()
         self.assertEqual(cells(m, "R", ["Product"], if_(X > 2, 100, 0)), {"A": 0, "B": 100})
-        self.assertEqual(m.warnings["R"], [])  # 条件より密にならない
+        self.assertEqual(m.warnings[m.metric("R").id], [])  # 条件より密にならない
 
     def test_without_else_false_is_blank(self):
         m = model()
@@ -83,14 +83,14 @@ class IfSemantics(unittest.TestCase):
         m = model()
         r = cells(m, "R", ["Product"], if_((X > 2).ifblank(False), 1, 0))
         self.assertEqual(r, {"A": 0, "B": 1, "C": 0, "D": 0})
-        self.assertIn("IFBLANK", m.warnings["R"][0])
+        self.assertIn("IFBLANK", m.warnings[m.metric("R").id][0])
 
     def test_branch_with_extra_dim(self):
         m = model()
         r = cells(m, "R", ["Product", "Month"], if_(X > 2, ref("Z"), 0))
         expected = {("B", "Jan"): 7} | {("A", t): 0 for t in ["Jan", "Feb", "Mar", "Apr"]}
         self.assertEqual(r, expected)
-        self.assertEqual(len(m.warnings["R"]), 1)  # ELSE の 0 が Month 方向に展開される
+        self.assertEqual(len(m.warnings[m.metric("R").id]), 1)  # ELSE の 0 が Month 方向に展開される
 
     def test_metric_branch_missing_dim_is_rejected(self):
         m = model()
@@ -126,7 +126,7 @@ class IsBlank(unittest.TestCase):
         m = model()
         r = cells(m, "R", ["Product"], X.isblank(), "boolean")
         self.assertEqual(r, {"A": False, "B": False, "C": True, "D": True})
-        self.assertIn("ISBLANK", m.warnings["R"][0])
+        self.assertIn("ISBLANK", m.warnings[m.metric("R").id][0])
 
 
 class KindChecking(unittest.TestCase):
@@ -177,9 +177,10 @@ class IfInsideScan(unittest.TestCase):
         m.add_dimension("Month", ["Jan", "Feb", "Mar", "Apr"], ordered=True)
         m.add_input("In", ["Month"], {("Jan",): 10})
         m.add_input("Demand", ["Month"], {(t,): 4 for t in ["Jan", "Feb", "Mar", "Apr"]})
+        m.add_input("Stock", ["Month"])  # Order and Stock refer to each other: an input first
         m.add_formula("Order", ["Month"], if_(ref("Stock").prev("Month") < 5, 10, 0))
         m.add_formula("Stock", ["Month"],
-                      ref("Stock").prev("Month") + ref("In") + ref("Order") - ref("Demand"))
+                      ref("Stock").prev("Month") + ref("In") + ref("Order") - ref("Demand"), id=m.metric("Stock").id)
         stock = m.value("Stock")
         self.assertEqual([stock.get(Month=t) for t in ["Jan", "Feb", "Mar", "Apr"]], [6, 2, 8, 4])
         # Jan は前月の在庫が空なので、発注も空（0 ではない）

@@ -61,7 +61,7 @@ class MemberOrder(unittest.TestCase):
         self.assertEqual(m.dimensions["Account"].in_order(), ["販管費", "原価", "売上"])
         self.assertEqual(list(m.slice_log), [])  # 何も計算し直さない
         for name, store in stores.items():
-            self.assertIs(m._values[name], store, name)  # 格納データにも触れない
+            self.assertIs(m._values[m.metric(name).id], store, name)  # 格納データにも触れない
         self.assertEqual(self.rows(), [("販管費", "Mar"), ("原価", "Jan"), ("売上", "Jan"), ("売上", "Feb")])
         self.assertEqual([k for k, _ in m.rows("Plan", offset=1, limit=2)[0]], [("原価", "Jan"), ("売上", "Jan")])
         self.assertEqual(m.rows("Plan", offset=1, limit=2)[1], 4)
@@ -145,7 +145,7 @@ class RustMemberOrder(MemberOrder):
 
     def test_rank_tables_are_checked(self):
         m = self.m
-        store, core = m._values["Plan"], m.engine.core
+        store, core = m._values[m.metric("Plan").id], m.engine.core
         region = m.engine._region(m, None)
         for ranks in ([[0, 1]], [[0, 0, 1], None], [[0, 1, 3], None]):
             with self.subTest(ranks=ranks), self.assertRaisesRegex(ValueError, "並び順の表"):

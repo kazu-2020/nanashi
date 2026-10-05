@@ -19,13 +19,13 @@ class FailedRecalc(unittest.TestCase):
     def failing(self, metric: str | None, panic: bool = False) -> None:
         """metric を書き戻すところで Rust の再計算を失敗させる（None なら戻す）。"""
         _, names = self.m.engine.planner._plan_for(self.m.compiled(), self.m)
-        self.m.engine.core.configure(fail_at=None if metric is None else (names.index(metric), panic))
+        self.m.engine.core.configure(fail_at=None if metric is None else (names.index(self.m.metric(metric).id), panic))
 
     def check(self, panic: bool) -> None:
         self.m = build_with(RustEngine())
         ref = build_with(ReferenceEngine())
         self.m.recalc()
-        inputs = {n: self.m.value(n).cells for n, x in self.m.metrics.items() if x.formula is None}
+        inputs = {x.name: self.m.value(x.id).cells for x in self.m.metrics.values() if x.formula is None}
         for m in (self.m, ref):
             m.set_cell("Volume", 50, Product="B", Region="S", Month="Feb")
             m.set_cell("Price", 7, Product="A")
@@ -37,7 +37,7 @@ class FailedRecalc(unittest.TestCase):
             self.m.get("Margin", Product="A", Month="Jan")
         for n, cells in inputs.items():  # 入力の格納データは失われない（計算し直さずに読む）
             if n not in ("Volume", "Price"):
-                self.assertEqual(self.m.engine.to_cube(self.m._values[n], self.m).cells, cells)
+                self.assertEqual(self.m.engine.to_cube(self.m._values[self.m.metric(n).id], self.m).cells, cells)
         self.failing(None)
         expected, actual = snapshot(ref), snapshot(self.m)
         for n in expected:
@@ -132,7 +132,7 @@ class MemoryBudget(unittest.TestCase):
         m.add_formula("Filled", ["Customer", "Sku"], "IFBLANK(Sales, 0)")  # 20 億セル（32 GB）
         with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
             m.recalc()
-        m.add_formula("Filled", ["Customer", "Sku"], "Sales * 2", id=m.metric_id("Filled"))  # the corrected formula can calculate
+        m.add_formula("Filled", ["Customer", "Sku"], "Sales * 2", id=m.metric("Filled").id)  # the corrected formula can calculate
         self.assertEqual(m.get("Filled", Customer="c1", Sku="s1"), 10.0)
 
     def test_split_budget_gives_the_same_results(self):

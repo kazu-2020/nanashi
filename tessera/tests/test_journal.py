@@ -35,7 +35,7 @@ def definitions(m: Model) -> dict:
     dims = {d.name: (d.id, d.ordered, list(zip(d.ids, d.members)), d.in_order(),
                      {p: (t, dict(mp)) for p, (t, mp) in d.properties.items()})
             for d in m.dimensions.values()}
-    metrics = {x.name: (x.id, x.dims, x.kind, None if x.written is None else to_formula(x.written),
+    metrics = {x.name: (x.id, x.dims, x.kind, None if x.written is None else to_formula(x.written, m),
                         x.partition, x.overridable) for x in m.metrics.values()}
     return {"dims": dims, "metrics": metrics, "next_id": m._next_id}
 
@@ -82,7 +82,7 @@ class Transactions(unittest.TestCase):
             with self.m.transaction():
                 self.m.set_cell("Price", 99, Product="A")
                 self.m.add_formula("Bad", ["Product"], "Nope + 1")
-        self.assertNotIn("Bad", self.m.metrics)
+        self.assertNotIn("Bad", self.m._metric_ids)
         self.assertEqual(snapshot(self.m), before)
 
     def test_record(self):
@@ -92,11 +92,11 @@ class Transactions(unittest.TestCase):
         rec = txn.record
         self.assertEqual((rec["user"], rec["reason"]), ("alice", "値上げ"))
         self.assertEqual([op["op"] for op in rec["ops"]], ["set_cell", "spread"])  # 按分の中の set_cell は記録しない
-        cells = {c["metric"]: c["rows"] for c in rec["changes"]["cells"]}
+        cells = {c["metric"]: c["rows"] for c in rec["changes"]["cells"]}  # keyed by the Metric handle
         product = self.m.dimensions["Product"]
-        self.assertEqual(cells[self.m.metrics["Price"].id], [[[product.id_of("A")], 10.0, 12.0]])
+        self.assertEqual(cells[self.m.ids[self.m.metric("Price").id]], [[[product.id_of("A")], 10.0, 12.0]])
         month = self.m.dimensions["Month"]
-        self.assertEqual(cells[self.m.metrics["Cost"].id], [[[product.id_of("B"), month.id_of("Mar")], 30.0, 60.0]])
+        self.assertEqual(cells[self.m.ids[self.m.metric("Cost").id]], [[[product.id_of("B"), month.id_of("Mar")], 30.0, 60.0]])
         self.assertNotIn("metrics", rec["changes"])
 
     def test_nested_transactions_join_the_outer_one(self):
@@ -166,8 +166,8 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"}, id=self.m.property_id("Product", "Category"))  # D loses its mapping
             self.m.set_property_values("Product", "Category", {"A": "X", "C": None, "D": "Y"})
             self.m.remove_metric("CatShare")
-        self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric_id("Salary"))  # replace an input
-        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric_id("Stock"))  # a formula Metric becomes an input
+        self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric("Salary").id)  # replace an input
+        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric("Stock").id)  # a formula Metric becomes an input
         check_same_state(self, self.m, self.reopen())
 
     def test_rolled_back_transactions_are_not_recorded(self):
@@ -406,7 +406,7 @@ def random_operation(rng: random.Random, models: list[Model], counters: list[lis
         m0 = models[0]
         p = rng.choice(m0.dimensions["Product"].members)
         total = float(rng.randint(10, 200))
-        if "Volume" in m0.metrics and m0.metrics["Volume"].formula is None:
+        if "Volume" in m0._metric_ids and m0.metric("Volume").formula is None:
             for m in models:
                 m.spread("Volume", total, Product=p)
     elif kind < 0.7:
@@ -520,7 +520,7 @@ class CellFiles(unittest.TestCase):
                 m.spread("V", 24_000.0, how="even")
             m.set_cell("V", 1.0, K="k7", T="t1")  # 少ないセルは、これまでどおり行に書く
             (f,) = (Path(tmp) / "cells").glob("*.parquet")
-            self.assertTrue(f.name.endswith(f"-{m.metrics['V'].id}.parquet"))
+            self.assertTrue(f.name.endswith(f"-{m.ids[m.metric('V').id]}.parquet"))
             lines = FileJournal(tmp).log_path.read_text().splitlines()
             self.assertLess(len(lines[0]), 1000)  # 記録の行には、ファイルの名前とハッシュだけ
             self.assertIn('"cells":[', lines[1])

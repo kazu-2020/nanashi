@@ -42,7 +42,7 @@ class RoundTrip(unittest.TestCase):
             loaded = Model.load(tmp, loading_engine)
         self.assertEqual(loaded.dimensions["Employee"].members, original.dimensions["Employee"].members)
         a, b = snapshot(original), snapshot(loaded)
-        for name in original.metrics:
+        for name in original._metric_ids:
             with self.subTest(metric=name):
                 self.assertTrue(same(a[name], b[name]), name)
         return original, loaded
@@ -55,7 +55,7 @@ class RoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
             names = sorted(p.name for p in Path(tmp).iterdir())
-        inputs = sorted(f"inputs.{x.id}.parquet" for x in m.metrics.values() if x.formula is None)
+        inputs = sorted(f"inputs.{m.ids[x.id]}.parquet" for x in m.metrics.values() if x.formula is None)
         self.assertEqual(names, sorted(inputs + ["model.json"]))
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -71,8 +71,8 @@ class RoundTrip(unittest.TestCase):
         for name, m in original.metrics.items():
             if m.written is not None:
                 with self.subTest(metric=name):
-                    self.assertEqual(to_formula(loaded.metrics[name].written), to_formula(m.written))
-        self.assertIn("Employee.DeptOf", to_formula(loaded.metrics["Payroll"].written))
+                    self.assertEqual(to_formula(loaded.metric(name).written, loaded), to_formula(m.written, original))
+        self.assertIn("Employee.DeptOf", to_formula(loaded.metric("Payroll").written, loaded))
 
     def test_loaded_model_keeps_working(self):
         _, loaded = self.check(ReferenceEngine(), ReferenceEngine())
@@ -83,7 +83,7 @@ class RoundTrip(unittest.TestCase):
             incremental = snapshot(loaded)
             loaded._invalidate()
             full = snapshot(loaded)
-            for name in loaded.metrics:
+            for name in loaded._metric_ids:
                 with self.subTest(metric=name):
                     self.assertTrue(same(incremental[name], full[name]), name)
 

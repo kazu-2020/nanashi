@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, to_formula
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import model as build, same
@@ -18,14 +18,16 @@ def build_with(engine) -> Model:
     fresh = Model(engine=engine)
     fresh.dimensions = m.dimensions
     fresh._next_id = m._next_id  # 軸のメンバーに振った ID と重ならないように、続きから振る
-    gone = {x.id for x in m.metrics.values()}  # keep the UUIDs of the dimensions, members, and properties only
-    fresh.ids = {u: h for u, h in m.ids.items() if h not in gone}
+    fresh.ids = {u: h for u, h in m.ids.items() if u not in m.metrics}  # the dimensions, members, and properties only
     fresh._uuids = {h: u for u, h in fresh.ids.items()}
-    for name, meta in m.metrics.items():
-        if meta.formula is None:
-            fresh.add_input(name, meta.dims, m.value(name).cells, kind=meta.kind)
-        else:
-            fresh.add_formula(name, meta.dims, meta.formula, kind=meta.kind)
+    formulas = [x for x in m.metrics.values() if x.formula is not None]
+    for x in m.metrics.values():
+        if x.formula is None:
+            fresh.add_input(x.name, x.dims, m.value(x.id).cells, kind=x.kind)
+    for x in formulas:  # an empty input first: the formulas can refer to each other (a scan)
+        fresh.add_input(x.name, x.dims, kind=x.kind)
+    for x in formulas:
+        fresh.add_formula(x.name, x.dims, to_formula(x.written, m), kind=x.kind, id=fresh.metric(x.name).id)
     return fresh
 
 
@@ -38,11 +40,11 @@ class MatchesReference:
     def test_random_edits(self):
         rng = random.Random(7)
         ref, pol = build_with(ReferenceEngine()), build_with(self.other())
-        inputs = [n for n, x in ref.metrics.items() if x.formula is None]
+        inputs = [x.name for x in ref.metrics.values() if x.formula is None]
         for round_ in range(150):
             for _ in range(rng.randint(1, 3)):
                 name = rng.choice(inputs)
-                meta = ref.metrics[name]
+                meta = ref.metric(name)
                 coords = {d: rng.choice(ref.dimensions[d].members) for d in meta.dims}
                 if rng.random() < 0.3:
                     value = None
@@ -52,7 +54,7 @@ class MatchesReference:
                     value = float(rng.randint(-5, 60))
                 ref.set_cell(name, value, **coords)
                 pol.set_cell(name, value, **coords)
-            for name in ref.metrics:
+            for name in ref._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     a, b = ref.value(name).cells, pol.value(name).cells
                     self.assertTrue(same(a, b), f"{name}\n参照: {a}\n比較先: {b}")
@@ -83,15 +85,15 @@ class WriteMany(unittest.TestCase):
             cols = [[rng.randrange(n) for _ in range(count)] for n in sizes.values()]
             values = [None if rng.random() < 0.2 else float(rng.randint(-9, 9)) for _ in range(count)]
             for m in models:  # 同じセルが何度も出るので、後のものが勝つことも確かめる
-                m._values["X"] = m.engine.write_many(m._values["X"], cols, values, m)
+                m._values[m.metric("X").id] = m.engine.write_many(m._values[m.metric("X").id], cols, values, m)
             ref_m, rs = models
             with self.subTest(count=count):
-                self.assertEqual(ref_m.engine.to_cube(ref_m._values["X"], ref_m).cells,
-                                 rs.engine.to_cube(rs._values["X"], rs).cells)
+                self.assertEqual(ref_m.engine.to_cube(ref_m._values[ref_m.metric("X").id], ref_m).cells,
+                                 rs.engine.to_cube(rs._values[rs.metric("X").id], rs).cells)
                 region = {"A": frozenset(["a1", "a7", "a30"]), "C": frozenset(["c2", "c4"])}
                 read = []
                 for m in models:
-                    cols, values = m.engine.columns(m._values["X"], region, m)
+                    cols, values = m.engine.columns(m._values[m.metric("X").id], region, m)
                     read.append(sorted(zip(*cols, values)))
                 self.assertEqual(read[0], read[1])
                 self.assertTrue(read[0])
@@ -101,9 +103,9 @@ class WriteMany(unittest.TestCase):
         m.add_dimension("A", ["a0", "a1"])
         m.add_input("X", ["A"], {})
         with self.assertRaisesRegex(ValueError, "メンバー番号 2"):
-            m.engine.write_many(m._values["X"], [[0, 2]], [1.0, 2.0], m)
+            m.engine.write_many(m._values[m.metric("X").id], [[0, 2]], [1.0, 2.0], m)
         with self.assertRaisesRegex(ValueError, "列の数"):
-            m.engine.write_many(m._values["X"], [[0], [1]], [1.0], m)
+            m.engine.write_many(m._values[m.metric("X").id], [[0], [1]], [1.0], m)
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ class Client:
 def mid(ws, name: str) -> str:
     """The UUID of the Metric (a name that the model does not have is taken as a UUID)."""
     v = ws.version
-    return v.metric_id(name) if name in v.metrics else name
+    return v.metric(name).id if name in v._metric_ids else name
 
 
 def did(ws, name: str) -> str:
@@ -126,10 +126,10 @@ class Api:
         self.assertEqual([m["name"] for m in month["members"]], ["Jan", "Feb", "Mar", "Apr"])
         self.assertEqual(month["members"][0]["id"], v.member_id("Month", "Jan"))
         self.assertEqual((month["name"], month["ordered"]), ("Month", True))
-        total = body["metrics"][v.metric_id("Total")]
+        total = body["metrics"][v.metric("Total").id]
         self.assertEqual(total, {"name": "Total", "dims": [], "kind": "number", "overridable": False,
                                  "formula": "ByMonth[REMOVE SUM: Month]"})
-        self.assertEqual(body["metrics"][v.metric_id("Stock")]["dims"], [v.dimension_id("Product"), v.dimension_id("Month")])
+        self.assertEqual(body["metrics"][v.metric("Stock").id]["dims"], [v.dimension_id("Product"), v.dimension_id("Month")])
         self.assertNotIn("Stock", body["metrics"])  # the keys are UUIDs, not names
         self.assertEqual(self.c.get("/health"), (200, {"seq": 0, "role": "leader"}))
         self.assertEqual(self.c.get("/nothing")[0], 404)
@@ -172,7 +172,7 @@ class Api:
              "formula": "Stock * 2", "overridable": True},
             write(ws, "m-plan", 7, Product="p1", Month="Jan")]}
         self.assertEqual(self.c.post("/writes", body)[0], 200)
-        self.assertEqual(ws.version.metric_id("Plan"), "m-plan")
+        self.assertEqual(ws.version.metric("Plan").id, "m-plan")
         self.assertEqual(self.cells("Plan", "overrides"), [["p1", "Jan", 7.0]])
         self.assertEqual(self.cells("Plan", "overrides", Product="p2"), [])
         self.assertEqual(self.c.get(path(ws, "Double", "overrides"))[0], 400)
@@ -265,7 +265,7 @@ class Api:
                              "formula": "Stock * 3"})
         self.assertEqual(status, 200, body)
         self.assertEqual(self.c.get("/")[1]["metrics"]["m-1"]["name"], "Thrice")
-        self.assertNotIn("Triple", ws.version.metrics)
+        self.assertNotIn("Triple", ws.version._metric_ids)
         # The same name with a different UUID is a bad request (400)
         status, body = post("d-3", {"op": "add_formula", "id": "m-2", "name": "Thrice", "dims": [product], "formula": "Stock * 3"})
         self.assertEqual((status, body["error"]), (400, "bad_request"))
