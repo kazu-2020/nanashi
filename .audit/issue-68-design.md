@@ -29,11 +29,13 @@ The Rust dense numbers and the member numbers (positions) stay engine-internal, 
 - `to_formula(ast, model)` makes the display text from the current names (GET /, errors, diagnostics).
 - Logs (`eval_log`, `delta_log`, `slice_log`) are observation data. They keep ids and show current names when read (`slice_log` already converts lazily).
 
-## The Python API stays name-based
+## The Model API takes ids only
 
-- Public Model methods take names as now. A string argument for a Metric, dimension, member or property is first looked up as an id of that kind, then as a name. So the server passes ids and Python callers and tests pass names. A name in the canonical UUID form is rejected at definition and rename, so the two never collide. Coordinates stay `**coords` with dimension names (or ids) as keys; a member value is a name or an id.
-- Public reads (`value`, `slice`, `rows`, `summarize`, `get`, `cell_history`) return names as now. The server uses internal id reads, so its boundary does no name step.
-- Add `Model.metric(name_or_id) -> Metric`. `Model.dimension(name_or_id)` exists. Tests that index internals by name (`m.metrics["X"]`, `m.dimensions["X"]`, `m.layout["X"]`, ...) change to these accessors or to `[m.metric("X").id]`. Use a codemod script for the mechanical test edits.
+- Target: each public Model method takes ids for a Metric, dimension, member or property. Coordinates are a mapping dim id -> member id. Reads return ids (cube keys, rows, member-type values). Definitions take an optional id and return the id they used. One argument has one meaning, so no guess between a name and an id.
+- Formula text stays written with names (that is what users write). Binding the text to ids at definition is the only name lookup inside the Model. `to_formula` makes the display text.
+- Name lookup for people (tests, examples, benchmarks, notebooks) is a separate, explicit layer outside the Model core: a small facade that turns names into ids before it calls the Model and turns ids into names in results. The server does not use it.
+- Bridge during units 1-3: a string argument is looked up first as an id, then as a name, so the existing tests stay green while the keys change. A later unit (see Units) deletes the bridge, makes the Model API id-only, and moves tests, examples and benchmarks to the facade.
+- Add `Model.metric(id) -> Metric`. `Model.dimension(id)` exists. Use a codemod script for mechanical test edits.
 
 ## Errors
 
@@ -58,8 +60,9 @@ The Rust dense numbers and the member numbers (positions) stay engine-internal, 
 2. Dimensions and properties keyed by UUID; dim fields of the AST hold ids; `Restrict` keys are dim ids; add `rename_dimension`, `rename_property`.
 3. Members keyed by UUID in `Restrict`, reference cubes, property maps, `Pending.added`, the AST; `rename_member` attribute-only.
 4. Persistence: id AST in the journal and `model.json`; UUIDs in `changes`, parquet and `nanashi_cell_change`; delete `_new_id`, `Model.ids`, `Model._uuids`; replay without rename order.
-5. Server: ids pass through the boundary; `rename_dimension` and `rename_property` HTTP ops; docs (`docs/ids.md`, `tessera/docs/`).
-6. api: `RenameList` and property rename RPCs.
+5. Model API id-only: delete the bridge; add the name facade; move tests, examples and benchmarks to it.
+6. Server: ids pass through the boundary; `rename_dimension` and `rename_property` HTTP ops; docs (`docs/ids.md`, `tessera/docs/`).
+7. api: `RenameList` and property rename RPCs.
 
 ## Gates for every unit
 
