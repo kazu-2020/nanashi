@@ -436,7 +436,7 @@ func TestRenameMetricChangesNoAPIRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := alice.AddComment(ctx, connect.NewRequest(&nanashiv1.AddCommentRequest{AppId: app, ClientOpId: uuid.NewString(),
-		Comment: &nanashiv1.Comment{Id: comment, Metric: budget, Cell: map[string]string{product: memberA}, Body: "hi"}})); err != nil {
+		Comment: &nanashiv1.Comment{Id: comment, Metric: budget, Cell: map[string]string{product: memberA, region: east}, Body: "hi"}})); err != nil {
 		t.Fatal(err)
 	}
 	before := count(t, ctx, pool, "select count(*) from app_item i, app_comment c where i.app_id = $1 and c.app_id = $1 and i.def->'metrics' ? $2 and c.metric = $2::uuid", app, budget)

@@ -1,13 +1,20 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+	"github.com/google/uuid"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
+	"github.com/kazu-2020/nanashi/api/gen/nanashi/v1/nanashiv1connect"
 )
 
 func TestWriteOps(t *testing.T) {
@@ -100,11 +107,14 @@ func TestVisibleComments(t *testing.T) {
 	em := model(t)
 	l := eastOnly().through(em)
 	comments := []*nanashiv1.Comment{
-		{Id: "1", Cell: map[string]string{region: east, product: memberA}},
-		{Id: "2", Cell: map[string]string{region: west}},
-		{Id: "3"},
-		{Id: "4", Cell: map[string]string{product: newMember}}, // A removed member: hidden for a reader with rules.
-		{Id: "5", Cell: map[string]string{newMember: memberA}}, // A removed list.
+		{Id: "1", Metric: budget, Cell: map[string]string{region: east, product: memberA}},
+		{Id: "2", Metric: budget, Cell: map[string]string{region: west, product: memberA}},
+		{Id: "3", Metric: own, Cell: map[string]string{product: memberA}},       // An input Metric without Region.
+		{Id: "4", Metric: own, Cell: map[string]string{product: newMember}},     // A removed member: hidden for a reader with rules.
+		{Id: "5", Metric: own, Cell: map[string]string{newMember: memberA}},     // A removed list.
+		{Id: "6", Metric: revenue, Cell: map[string]string{product: memberA}},   // The limits hide Revenue.
+		{Id: "7", Metric: budget, Cell: map[string]string{product: memberA}},    // A total over the limited Region.
+		{Id: "8", Metric: newMember, Cell: map[string]string{product: memberA}}, // A removed Metric.
 	}
 	var ids []string
 	for _, c := range visibleComments(comments, l, em) {
@@ -112,5 +122,75 @@ func TestVisibleComments(t *testing.T) {
 	}
 	if got := strings.Join(ids, ","); got != "1,3" {
 		t.Errorf("visible comments: %s, want 1,3", got)
+	}
+}
+
+// TestCommentsFollowAccessRules: a reader with rules sees only the comments on cells that a query shows, and
+// AddComment takes only a cell with one member for each dimension of the Metric.
+func TestCommentsFollowAccessRules(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	client := testClient(t, pool, newFakeEngine(t, sample))
+	alice, bob := client("alice"), client("bob")
+	if _, err := pool.Exec(ctx, "insert into app_access_rule (app_id, id, role, list, members, write) values ($1, $2, $3, $4, $5, false)",
+		app, uuid.Must(uuid.NewV7()).String(), viewer, region, []string{east}); err != nil {
+		t.Fatal(err)
+	}
+	add := func(metric string, cell map[string]string, body string) error {
+		_, err := alice.AddComment(ctx, connect.NewRequest(&nanashiv1.AddCommentRequest{AppId: app, ClientOpId: uuid.NewString(),
+			Comment: &nanashiv1.Comment{Id: uuid.Must(uuid.NewV7()).String(), Metric: metric, Cell: cell, Body: body}}))
+		return err
+	}
+	for _, c := range []struct {
+		metric string
+		cell   map[string]string
+	}{
+		{budget, map[string]string{product: memberA}},                             // Region is missing.
+		{budget, map[string]string{product: memberA, region: east, sales: sale1}}, // Sales is not a dimension of Budget.
+		{budget, map[string]string{product: memberA, region: newMember}},          // The model does not have the member.
+		{newMember, map[string]string{product: memberA}},                          // The model does not have the Metric.
+	} {
+		if err := add(c.metric, c.cell, "bad"); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("AddComment %s %v: got %v, want InvalidArgument", c.metric, c.cell, err)
+		}
+	}
+	for _, c := range []struct {
+		metric string
+		cell   map[string]string
+		body   string
+	}{
+		{budget, map[string]string{product: memberA, region: east}, "east"},
+		{budget, map[string]string{product: memberA, region: west}, "west"},
+		{revenue, map[string]string{product: memberA}, "revenue"}, // Revenue can sum Region away, so the limits hide it.
+		{own, map[string]string{product: memberA}, "owner"},       // An input Metric without Region.
+	} {
+		if err := add(c.metric, c.cell, c.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A comment on a total over Region, from a time before AddComment checked the cell.
+	if _, err := pool.Exec(ctx, "insert into app_comment (app_id, id, metric, cell, user_name, body) values ($1, $2, $3, $4, 'alice', 'total')",
+		app, uuid.Must(uuid.NewV7()).String(), budget, textJSON(map[string]string{product: memberA})); err != nil {
+		t.Fatal(err)
+	}
+	bodies := func(c nanashiv1connect.PlanServiceClient) string {
+		res, err := c.ListComments(ctx, connect.NewRequest(&nanashiv1.ListCommentsRequest{AppId: app}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, x := range res.Msg.Comments {
+			out = append(out, x.Body)
+		}
+		slices.Sort(out)
+		return strings.Join(out, ",")
+	}
+	if got := bodies(bob); got != "east,owner" {
+		t.Errorf("bob sees %s, want east,owner", got)
+	}
+	if got := bodies(alice); got != "east,owner,revenue,total,west" {
+		t.Errorf("alice sees %s, want all comments", got)
 	}
 }

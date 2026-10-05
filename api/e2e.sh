@@ -159,7 +159,9 @@ ok alice CreateBoard "{\"appId\": \"$APP\", \"board\": {\"id\": \"$(uuid)\", \"n
 MODEL=$(model "$APP")
 check "table, view and board" "(.tables[0].id == \"$TABLE\") and (.views[0].display == \"DISPLAY_BAR\") and (.boards[0].widgets[0].viewId == \"$VIEW\")" "$MODEL"
 
-ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$A\"}, \"body\": \"check this\"}}" >/dev/null
+ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$A\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"check this\"}}" >/dev/null
+check "a comment needs a member for each dimension" '.code == "invalid_argument"' \
+  "$(call alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$A\"}, \"body\": \"total\"}}")"
 check "comment" ".comments[0].user == \"alice\" and .comments[0].cell[\"$PRODUCT\"] == \"$A\"" \
   "$(ok alice ListComments "{\"appId\": \"$APP\", \"metric\": \"$BUDGET\"}")"
 
@@ -174,7 +176,7 @@ Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"$REVENUE\", \"$BUDGET
 check "restored data" "[$(cell "$REVENUE" "[\"$A\", \"\"]").number, $(cell "$BUDGET" "[\"$A\", \"$PLAN\"]").number] == [125, 1200]" "$Q"
 Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"$TARGET\"], \"rows\": [\"$PRODUCT\"]}")
 check "restore keeps an override value" "[$(cell "$TARGET" "[\"$A\"]").number, $(cell "$TARGET" "[\"$C\"]").number] == [999, 20]" "$Q"
-ok alice AddComment "{\"appId\": \"$APP2\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$C\"}, \"body\": \"on C\"}}" >/dev/null
+ok alice AddComment "{\"appId\": \"$APP2\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$C\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"on C\"}}" >/dev/null
 ok alice RenameMetric "{\"appId\": \"$APP2\", \"id\": \"$BUDGET\", \"name\": \"Budget 2027\"}" >/dev/null
 check "a rename keeps the comments" '[.comments[].body] == ["on C"]' "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
 MODEL2=$(model "$APP2")
@@ -264,7 +266,7 @@ check "bob does not see a hidden member as a value" "[.cells[] | .value.member] 
 check "bob cannot write" '.code == "permission_denied"' \
   "$(call bob WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$BUDGET\", \"coords\": {\"$PRODUCT\": \"$A\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"value\": {\"number\": 1}}]}")"
 check "bob cannot model" '.code == "permission_denied"' "$(call bob CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$(uuid)\", \"name\": \"X\"}}")"
-ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$B\"}, \"body\": \"hidden\"}}" >/dev/null
+ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$B\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"hidden\"}}" >/dev/null
 check "bob does not see a comment on a hidden cell" '[.comments[].body] == ["check this"]' \
   "$(ok bob ListComments "{\"appId\": \"$APP\", \"metric\": \"$BUDGET\"}")"
 check "alice sees all comments" '[.comments[].body] == ["check this", "hidden"]' \

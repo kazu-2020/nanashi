@@ -204,10 +204,39 @@ func writeOps(writes []*nanashiv1.CellWrite, em engineModel, l limits) ([]op, er
 	return ops, nil
 }
 
-// visibleComments removes the comments on a cell with a member that l hides. For a reader with rules, a cell
-// that the model does not have (a removed member or list) is hidden too (fail-closed).
+// checkCommentCell refuses a cell that does not give one member for each dimension of the Metric.
+func checkCommentCell(metric string, cell map[string]string, em engineModel) error {
+	m, ok := em.metric(metric)
+	if !ok {
+		return fmt.Errorf("Metric %s がない", metric)
+	}
+	bad := fmt.Errorf("%s: コメントのセルには各軸のメンバーを 1 つずつ指定する", m.Name)
+	if len(cell) != len(m.Dims) {
+		return bad
+	}
+	for _, list := range m.Dims {
+		d, _ := em.dim(list)
+		if _, ok := d.member(cell[list]); !ok {
+			return bad
+		}
+	}
+	return nil
+}
+
+// visibleComments removes the comments that a query does not show to a reader with the limits l. It removes a
+// comment on a Metric that l hides, on a cell without a member of a limited list, or on a member that l hides.
+// For a reader with rules, a Metric or a cell that the model does not have is hidden too (fail-closed).
 func visibleComments(comments []*nanashiv1.Comment, l limits, em engineModel) []*nanashiv1.Comment {
 	return slices.DeleteFunc(comments, func(c *nanashiv1.Comment) bool {
+		m, ok := em.metric(c.Metric)
+		if !ok || l.hides(m) {
+			return true
+		}
+		for list := range l {
+			if _, set := c.Cell[list]; !set && slices.Contains(m.Dims, list) {
+				return true
+			}
+		}
 		for list, member := range c.Cell {
 			d, ok := em.dim(list)
 			if !ok {
@@ -296,6 +325,13 @@ func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanash
 	c := req.Msg.Comment
 	if strings.TrimSpace(c.GetBody()) == "" || c.GetMetric() == "" || c.GetId() == "" {
 		return nil, invalid(errors.New("コメントの id、メトリックと本文が要る"))
+	}
+	em, _, err := s.Engines.model(ctx, req.Msg.AppId)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkCommentCell(c.Metric, c.Cell, em); err != nil {
+		return nil, invalid(err)
 	}
 	c.AppId, c.User = req.Msg.AppId, callerOf(ctx).user
 	result, err := s.apiOnly(ctx, req.Msg.AppId, req.Msg, func(tx pgx.Tx) (any, error) {
