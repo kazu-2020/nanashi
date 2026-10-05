@@ -2,36 +2,43 @@
 
 Source: https://github.com/kazu-2020/nanashi/issues/68. Read it first.
 
-## Decision: the internal key is the int handle
+## Decision: the internal key is the UUID
 
-`Model._new_id()` gives each dimension, member, property and Metric a handle. Handles are unique in one model across all kinds. The journal `changes`, the parquet columns (`d<id>`), `nanashi_cell_change` and the Workspace conflict check already use handles. UUID keys would change all of those formats. So the internal key is the handle (`int`). The UUID stays at the HTTP boundary (`Model.ids`, `Model._uuids`).
+The operator ruled out change cost as a criterion (nothing is released). On architectural benefit the UUID wins:
+
+- One identifier for one object across web, api, the engine, the journal and the cell history. The UUID -> handle maps (`Model.ids`, `Model._uuids`) and `_new_id()` go away, and the HTTP boundary passes ids through.
+- A UUID is unique everywhere. Handles collide across a fork (see the `_new_id` docstring), so copy, merge, snapshot and restore across models need no renumbering with UUIDs.
+- The journal and `nanashi_cell_change` become readable by `api/` without the engine's private numbers.
+- Measured (scratchpad `keys.py`, 1,000,000 members, Python 3.12): the id maps take 59 MB with UUID keys and 183 MB with handles, because the handle design must also keep both UUID maps. One UUID -> member number lookup at the HTTP boundary is faster (37.7 ms per 100,000) than UUID -> handle -> number (52.2 ms). An internal-only lookup is slower with UUID keys (34.1 ms against 14.1 ms per 100,000). The production calculation runs in Rust on dense member numbers, so this path is the reference engine and the Restrict conversion only.
+
+The Rust dense numbers and the member numbers (positions) stay engine-internal, as now.
 
 ## Target data shapes
 
-- `Model.metrics: dict[int, Metric]` (key = `Metric.id`). `Model.dimensions: dict[int, Dimension]` (key = `Dimension.id`). Insertion order = definition order, as now.
-- One name index per kind, kept in sync by define, rename and remove: Metric name -> handle, dimension name -> handle, and per dimension: property name -> handle, member name -> position (`Dimension._index`, exists).
-- `Metric.dims: tuple[int, ...]` (dim handles). `Metric.partition: int | None`. `Metric.kind`: `"number"`, `"boolean"` or `"member:<dim handle>"`.
-- The hidden override input: link it by handle from its owner (for example `Metric.override: int | None`). Its name stays `__override__<owner name>` and changes with the owner name.
-- `Dimension.properties: dict[int, tuple[int, dict[int, int]]]` = prop handle -> (target dim handle, {member handle: member handle}). Property names are an attribute (prop handle -> name, plus the name index).
-- `Restrict = dict[int, frozenset[int]]` = dim handle -> member handles.
-- Reference engine `Cube`: `dims` are dim handles, keys are tuples of member handles. Member-type values stay member numbers (positions) inside the engines, as now.
-- `Pending`, `MetricState`, `_plan` (`Step.names`), `_edges`, `DeltaPlan.source/aux`, estimates, samples: all keyed by Metric handle.
-- Planner synthetic refs (`__new{i}`, `__old_value`, ...): use keys that cannot collide with handles (for example negative ints).
-- AST reference nodes hold handles: `Ref.name` (Metric), `DimRef.dim`, `Member.dim/member`, `Expand.dims`, `By.dim/prop` (prop = property handle or member-type Metric handle; handles are unique, so no ambiguity), `Remove.dim`, `Shift.dim`, `AsAxis.dim`, `Select.dim/member`.
-- `parse(text)` still gives a name AST. A bind step (name AST -> handle AST) runs at definition time (`add_formula`). Bind errors are `FormulaError` with the names the user wrote (`unknown_metric`, `unknown_dim`, `unknown_member`, `no_property`). The Python builders in `expr.py` (`ref("Price")`) also make name ASTs that go through bind.
+- `Model.metrics: dict[str, Metric]` (key = `Metric.id`, the UUID). `Model.dimensions: dict[str, Dimension]` (key = `Dimension.id`). Insertion order = definition order, as now.
+- One name index per kind, kept in sync by define, rename and remove: Metric name -> id, dimension name -> id, and per dimension: property name -> id, member name -> position (`Dimension._index`, exists).
+- `Metric.dims: tuple[str, ...]` (dim ids). `Metric.partition: str | None`. `Metric.kind`: `"number"`, `"boolean"` or `"member:<dim id>"`.
+- The hidden override input: link it by id from its owner (for example `Metric.override: str | None`). Its name stays `__override__<owner name>` and changes with the owner name.
+- `Dimension.properties: dict[str, tuple[str, dict[str, str]]]` = prop id -> (target dim id, {member id: member id}). Property names are an attribute (prop id -> name, plus the name index). `Dimension.ids` holds the member UUIDs by position, `_by_id` maps a member id to its position.
+- `Restrict = dict[str, frozenset[str]]` = dim id -> member ids.
+- Reference engine `Cube`: `dims` are dim ids, keys are tuples of member ids. Member-type values stay member numbers (positions) inside the engines, as now.
+- `Pending`, `MetricState`, `_plan` (`Step.names`), `_edges`, `DeltaPlan.source/aux`, estimates, samples: all keyed by Metric id.
+- Planner synthetic refs (`__new{i}`, `__old_value`, ...): use keys that are not in the canonical UUID form (for example `__new0`).
+- AST reference nodes hold ids: `Ref.name` (Metric), `DimRef.dim`, `Member.dim/member`, `Expand.dims`, `By.dim/prop` (prop = property id or member-type Metric id; ids are unique, so no ambiguity), `Remove.dim`, `Shift.dim`, `AsAxis.dim`, `Select.dim/member`.
+- `parse(text)` still gives a name AST. A bind step (name AST -> id AST) runs at definition time (`add_formula`). Bind errors are `FormulaError` with the names the user wrote (`unknown_metric`, `unknown_dim`, `unknown_member`, `no_property`). The Python builders in `expr.py` (`ref("Price")`) also make name ASTs that go through bind.
 - `to_formula(ast, model)` makes the display text from the current names (GET /, errors, diagnostics).
-- Logs (`eval_log`, `delta_log`, `slice_log`) are observation data. They keep handles and show current names when read (`slice_log` already converts lazily).
+- Logs (`eval_log`, `delta_log`, `slice_log`) are observation data. They keep ids and show current names when read (`slice_log` already converts lazily).
 
 ## The Python API stays name-based
 
-- Public Model methods take names as now. They also accept a handle (`int`) for a Metric, dimension, member or property argument, so the server can pass handles. Coordinates stay `**coords` with dimension names as keys; a member value is a name or a handle.
-- Public reads (`value`, `slice`, `rows`, `summarize`, `get`, `cell_history`) return names as now. The server can use internal handle reads to skip the name step.
-- Add `Model.metric(name_or_handle) -> Metric`. `Model.dimension(name_or_handle)` exists. Tests that index internals by name (`m.metrics["X"]`, `m.dimensions["X"]`, `m.layout["X"]`, ...) change to these accessors or to `[m.metric("X").id]`. Use a codemod script for the mechanical test edits.
+- Public Model methods take names as now. A string argument for a Metric, dimension, member or property is first looked up as an id of that kind, then as a name. So the server passes ids and Python callers and tests pass names. A name in the canonical UUID form is rejected at definition and rename, so the two never collide. Coordinates stay `**coords` with dimension names (or ids) as keys; a member value is a name or an id.
+- Public reads (`value`, `slice`, `rows`, `summarize`, `get`, `cell_history`) return names as now. The server uses internal id reads, so its boundary does no name step.
+- Add `Model.metric(name_or_id) -> Metric`. `Model.dimension(name_or_id)` exists. Tests that index internals by name (`m.metrics["X"]`, `m.dimensions["X"]`, `m.layout["X"]`, ...) change to these accessors or to `[m.metric("X").id]`. Use a codemod script for the mechanical test edits.
 
 ## Errors
 
 - Error text that the user sees stays Japanese and shows current names.
-- Python type check and plan errors may carry handles in `FormulaError.params`. Translate them to names at one point when they leave the Model (a table of param keys in `messages.py` says which params are a Metric, a dimension, a list of dims, a property or a member). `FormulaError.params` that callers see hold names, as now.
+- Python type check and plan errors may carry ids in `FormulaError.params`. Translate them to names at one point when they leave the Model (a table of param keys in `messages.py` says which params are a Metric, a dimension, a list of dims, a property or a member). `FormulaError.params` that callers see hold names, as now.
 - Rust diagnostics use `DimInfo.name` and the per-call Metric names. Keep `DimInfo.name` current when a dimension is renamed (add a small Rust call), or change the Rust diagnostics to numbers. Pick the smaller change.
 
 ## Renames become attribute changes
@@ -41,16 +48,17 @@ Source: https://github.com/kazu-2020/nanashi/issues/68. Read it first.
 
 ## Persistence (no compatibility needed: the system is not in production)
 
-- journal `changes` and `model.json` keep formulas as the handle AST (a JSON tree), not as text. Replay does not depend on the order of renames. Bump `LOG_VERSION` and `FORMAT_VERSION`.
+- journal `changes` and `model.json` keep formulas as the id AST (a JSON tree), not as text.
+- journal `changes`, parquet column names, `nanashi_cell_change` (`metric_id`, `coords`) and the Workspace conflict keys use UUIDs instead of handles. A member-type value in the cell history is a member UUID. Replay does not depend on the order of renames. Bump `LOG_VERSION` and `FORMAT_VERSION`.
 - `changes` records dimension and property renames.
 
 ## Units (each ends green on both engines)
 
-1. Metrics keyed by handle; `Ref` and Metric `By` hold handles; `rename_metric` attribute-only.
-2. Dimensions and properties keyed by handle; dim fields of the AST hold handles; `Restrict` keys are dim handles; add `rename_dimension`, `rename_property`.
-3. Members keyed by handle in `Restrict`, reference cubes, property maps, `Pending.added`, the AST; `rename_member` attribute-only.
-4. Persistence: handle AST in the journal and `model.json`; replay without rename order.
-5. Server: UUID -> handle at the boundary; `rename_dimension` and `rename_property` HTTP ops; docs (`docs/ids.md`, `tessera/docs/`).
+1. Metrics keyed by UUID; `Ref` and Metric `By` hold ids; `rename_metric` attribute-only.
+2. Dimensions and properties keyed by UUID; dim fields of the AST hold ids; `Restrict` keys are dim ids; add `rename_dimension`, `rename_property`.
+3. Members keyed by UUID in `Restrict`, reference cubes, property maps, `Pending.added`, the AST; `rename_member` attribute-only.
+4. Persistence: id AST in the journal and `model.json`; UUIDs in `changes`, parquet and `nanashi_cell_change`; delete `_new_id`, `Model.ids`, `Model._uuids`; replay without rename order.
+5. Server: ids pass through the boundary; `rename_dimension` and `rename_property` HTTP ops; docs (`docs/ids.md`, `tessera/docs/`).
 6. api: `RenameList` and property rename RPCs.
 
 ## Gates for every unit
