@@ -69,7 +69,7 @@ m.dimensions["Product"].member_of(pid)         # The current name from the ID
 m.metric("Revenue").id, m.metric(mid).name     # The id (UUID) of a Metric, and the current name from the id
 ```
 
-A copy (`fork`) continues to give IDs from the same counter. Thus, an item that you add in the copy and an item that you add in the original can get the same ID.
+Each ID is a UUID. Thus, an item that you add in a copy (`fork`) and an item that you add in the original do not get the same ID.
 
 In the engine, the cells, the property maps and the formulas hold the member id. Thus, a rename changes only the name and does not cause a recalculation.
 

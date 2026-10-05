@@ -18,15 +18,18 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 | `GET /metrics/<uuid>/overrides?<dimension uuid>=a,b` | The cells that override the formula of an overridable Metric (`set_cell` on the Metric). The body is the same as slice. |
 | `GET /operations/<client_op_id>` | The result of a write: `{"state": "committed", "seq"}` or `{"state": "rejected", "status", "body"}`. If the server does not know the operation, it returns 404 `unknown_operation` |
 | `POST /writes` | `{"client_op_id", "reason", "expect", "ops": [{"op": "set_cell", "metric": "<uuid>", "value": 1, "coords": {"<dimension uuid>": "<member uuid>"}}, ...]}` |
-
-Each reference in a path, a query, or an op is a UUID. [ids.md](../../docs/ids.md) gives the rules and the arguments of each op.
-The engine changes a UUID to the name of the object at the boundary, and changes the names in a result to UUIDs.
-In a result, a dimension is a dimension UUID, a member is a member UUID, and a value of a member-type Metric is a member UUID.
-An op is an object with `op` (the operation name) and the arguments by name, for example `{"op": "add_member", "dim": "<uuid>", "id": "<uuid>", "name": "A"}`.
-`WRITE_OPS` in `server.py` lists the permitted operations.
 | `GET /health` | Whether the server is alive (the sequence number of the current published version and the role `role`). No authentication is necessary. |
 | `GET /ready` | Whether the server can receive requests. It returns 503 and the reason in these conditions: the writer stopped, the server could not open the journal again, the server cannot extend the lease, the standby monitor failed, or `Replica` cannot catch up. It also returns the role `role` (`leader`, `standby`, or `follower` with `--follow`). No authentication is necessary. |
 | `GET /stats` | Numbers for monitoring (Prometheus text format). For example: the number and time of commits, cancelled writes, the queue length, whether the server is the writer (`nanashi_leader`), the lease state, the time since the last snapshot, and the delay of `Replica`. |
+
+Each reference in a path, a query, or an op is a UUID. [ids.md](../../docs/ids.md) gives the rules and the arguments of each op.
+The server checks that the model has each UUID and gives the UUIDs to the Model API. The Model API takes and gives ids, so the server does not look up names.
+In a result, a dimension is a dimension UUID, a member is a member UUID, and a value of a member-type Metric is a member UUID.
+An op is an object with `op` (the operation name) and the arguments by name, for example `{"op": "add_member", "dim": "<uuid>", "id": "<uuid>", "name": "A"}`.
+`WRITE_OPS` in `server.py` lists the permitted operations:
+
+- Definitions: `add_dimension`, `rename_dimension`, `add_member`, `rename_member`, `move_member`, `remove_member`, `add_property`, `rename_property`, `set_property_values`, `add_input`, `add_formula`, `rename_metric`, `remove_metric`.
+- Cells: `set_cell`, `spread`.
 
 With `--pg`, if a request has the header `X-Nanashi-Model` and its value is not the `--model-id` of the server, the server answers 421 `not_leader` without a `leader` field.
 

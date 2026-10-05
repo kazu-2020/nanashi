@@ -8,7 +8,7 @@ This note gives the identifier rules for `web/`, `api/` and `tessera/`. It follo
 - Usually `web/` makes the identifier. If `api/` makes an object for the user, `api/` makes the identifier one time, in the plan of the RPC.
 - A name is an attribute. It is not an identifier.
 - Each identifier in a request must be in the canonical form (lowercase, with hyphens). If it is not, `api/` returns InvalidArgument and does not change it. `tessera/` does not parse identifiers. It compares them as strings, so each identifier has one spelling only.
-- The internal numbers of the engine do not go out of the engine. These are the handles (`Model._new_id()`), the member numbers and the Rust dense numbers.
+- The internal numbers of the engine do not go out of the engine. These are the member numbers and the Rust dense numbers.
 - The engine does not use an identifier again after a delete. It keeps the deleted identifiers as tombstones.
 
 ## The engine HTTP contract
@@ -57,11 +57,13 @@ An op is a flat object: `{"op": "<name>", <argument>: <value>, ...}`, for exampl
 | Op | Arguments |
 |---|---|
 | `add_dimension` | `id`, `name`, `ordered`? |
+| `rename_dimension` | `id`, `name` |
 | `add_member` | `dim`, `id`, `name`, `at`? |
 | `rename_member` | `dim`, `id`, `name` |
 | `move_member` | `dim`, `id`, `at` |
 | `remove_member` | `dim`, `id` |
 | `add_property` | `dim`, `id`, `name`, `target` (dim uuid) |
+| `rename_property` | `dim`, `id`, `name` |
 | `set_property_values` | `dim`, `prop`, `values` (`{member uuid: member uuid or null}`) |
 | `add_input` | `id`, `name`, `dims`, `kind`?, `cells`?, and the other current options |
 | `add_formula` | `id`, `name`, `formula` (text with names), `dims`?, `overridable`? |
@@ -70,8 +72,8 @@ An op is a flat object: `{"op": "<name>", <argument>: <value>, ...}`, for exampl
 | `set_cell` | `metric` (uuid), `value`, `override`? (true to write the hidden override input), `coords` (`{dim uuid: member uuid}`). A value of a member-type Metric is a member uuid |
 | `spread` | `metric` (uuid), `total`, `how`?, `where`? (`{"<dim uuid>.<prop uuid>": member uuid}`), `coords` |
 
-- If an op defines an object with a UUID that the model has, and the object has the same kind, the op defines the object again (it can also change the name).
-  A dimension or a property cannot change its name in this way: the engine returns 400, because the formulas keep the names of dimensions and properties, and the engine has no rename operation for them. The Metric and member renames go through the formulas, as before.
+- If an op defines an object with a UUID that the model has, and the object has the same kind, the op defines the object again. If the name is different, the op renames the object.
+- If a rename op or a definition op gives an unknown UUID for an existing object (for example the `dim` of `rename_property`), the engine returns 400 `{"error": "bad_request"}`.
 - If the UUID belongs to an object of a different kind, or it is a tombstone, the engine returns 409 `{"error": "duplicate_id"}`.
 - If the name belongs to a different UUID, the engine returns 400 `{"error": "bad_request"}`.
 - The engine records each rejected operation (400, and 409 `duplicate_id`) with its `client_op_id` for the `op_window`. If a client sends the same `client_op_id` again, the engine returns the same rejection. A 409 `conflict` is not recorded: the client plans again with the new version.
@@ -88,8 +90,10 @@ An op is a flat object: `{"op": "<name>", <argument>: <value>, ...}`, for exampl
 
 ## Inside the engine
 
-- The engine keys its internal state by name, as before. A map in the model connects each UUID to a handle. The engine changes a UUID to a name at the HTTP boundary.
-- The journal records the UUID of each new object in `changes`. `model.json` keeps the map and the tombstones. A replay makes the same handles and the same UUIDs again.
-- A formula stays as text with names. A rename changes the formulas inside the engine, as before. The display text in `GET /` always uses the current names.
+- The engine keys its internal state by UUID: Metrics, dimensions, members, properties, the journal `changes`, the saved model and the cell history. The member numbers and the Rust dense numbers stay inside the engine.
+- The Model API takes ids and gives ids. The server gives the request UUIDs to the Model API and does not look up names.
+- The engine keeps a formula as a syntax tree that holds ids. At definition, it binds the names in the formula text to ids one time.
+- A rename changes only the name and the name index. It does not change a formula and does not calculate again. The display text of a formula (`GET /`, errors) uses the current names.
+- `Named` (`sparse_engine/named.py`) takes names and gives names, for people: tests, examples, benchmarks and notebooks. The server does not use it.
 - If the Python API gets no `id`, the engine makes a UUIDv7.
 - The hidden override input of an overridable Metric (`__override__<name>`) also has a UUID. `GET /` does not show it. The op `set_cell` with `override: true` writes it through the UUID of its Metric.

@@ -391,6 +391,68 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "d3", "ops": other})[0], 400)
         self.assertEqual(names(ws, self.c.get("/")[1])["Region"]["members"], ["N", "S", "W"])
 
+    def test_dimension_and_property_renames(self):
+        post = lambda op_id, *ops: self.c.post("/writes", {"client_op_id": op_id, "ops": list(ops)})
+        status, body = post(
+            "r-1", {"op": "add_dimension", "id": "d-grp", "name": "Grp"},
+            {"op": "add_member", "dim": "d-grp", "id": "g-1", "name": "G1"},
+            {"op": "add_dimension", "id": "d-region", "name": "Region"},
+            {"op": "add_member", "dim": "d-region", "id": "r-n", "name": "N"},
+            {"op": "add_member", "dim": "d-region", "id": "r-s", "name": "S"},
+            {"op": "add_property", "dim": "d-region", "id": "p-grp", "name": "Group", "target": "d-grp"},
+            {"op": "set_property_values", "dim": "d-region", "prop": "p-grp", "values": {"r-n": "g-1", "r-s": "g-1"}},
+            {"op": "add_input", "id": "m-budget", "name": "Budget", "dims": ["d-grp"], "cells": [[["g-1"], 10.0]]},
+            {"op": "add_input", "id": "m-weight", "name": "Weight", "dims": ["d-region"],
+             "cells": [[["r-n"], 1.0], [["r-s"], 3.0]]},
+            {"op": "add_formula", "id": "m-share", "name": "Share", "dims": ["d-region"],
+             "formula": "Weight / Weight[REMOVE SUM: Region] * Budget[BY: Region.Group]"})
+        self.assertEqual(status, 200, body)
+        cell = lambda: self.c.get("/metrics/m-share/cell?d-region=r-s")[1]["value"]
+        formula = lambda: self.c.get("/")[1]["metrics"]["m-share"]["formula"]
+        self.assertEqual(cell(), 7.5)
+        before = formula()
+        self.assertIn("Region.Group", before)
+        rename = {"op": "rename_dimension", "id": "d-region", "name": "Area"}
+        seq = post("r-2", rename)
+        self.assertEqual(seq[0], 200, seq[1])
+        self.assertEqual(post("r-2", rename), seq)  # the resend does not commit two times
+        status, body = post("r-3", {"op": "rename_property", "dim": "d-region", "id": "p-grp", "name": "Team"})
+        self.assertEqual(status, 200, body)
+        model = self.c.get("/")[1]
+        region = model["dimensions"]["d-region"]
+        self.assertEqual((region["name"], region["properties"]), ("Area", {"p-grp": {"name": "Team", "target": "d-grp"}}))
+        self.assertEqual(formula(), before.replace("Region", "Area").replace("Group", "Team"))
+        self.assertEqual(cell(), 7.5)  # the values do not change
+        # A rename to a name that another object has is 400, and the resend gets the same rejection
+        clash = post("r-4", {"op": "rename_dimension", "id": "d-region", "name": "Grp"})
+        self.assertEqual((clash[0], clash[1]["error"]), (400, "bad_request"))
+        self.assertEqual(post("r-4", {"op": "rename_dimension", "id": "d-region", "name": "Zone"}), clash)
+        status, body = post("r-5", {"op": "add_property", "dim": "d-region", "id": "p-two", "name": "Team2", "target": "d-grp"},
+                            {"op": "rename_property", "dim": "d-region", "id": "p-two", "name": "Team"})
+        self.assertEqual((status, body["error"]), (400, "bad_request"))
+        # An unknown id is 400
+        for op_id, op in [("r-6", {"op": "rename_dimension", "id": "d-none", "name": "X"}),
+                          ("r-7", {"op": "rename_property", "dim": "d-region", "id": "p-none", "name": "X"}),
+                          ("r-8", {"op": "rename_property", "dim": "d-none", "id": "p-grp", "name": "X"})]:
+            status, body = post(op_id, op)
+            self.assertEqual((status, body["error"]), (400, "bad_request"), op)
+        # A definition again by UUID with a new name renames the dimension or the property
+        status, body = post("r-9", {"op": "add_dimension", "id": "d-region", "name": "Zone"},
+                            {"op": "add_property", "dim": "d-region", "id": "p-grp", "name": "Crew", "target": "d-grp"},
+                            {"op": "set_property_values", "dim": "d-region", "prop": "p-grp", "values": {"r-n": "g-1", "r-s": "g-1"}})
+        self.assertEqual(status, 200, body)
+        region = self.c.get("/")[1]["dimensions"]["d-region"]
+        self.assertEqual((region["name"], region["properties"]["p-grp"]["name"]), ("Zone", "Crew"))
+        self.assertEqual(formula(), before.replace("Region", "Zone").replace("Group", "Crew"))
+        self.assertEqual(cell(), 7.5)
+        # The Metric and member renames also show in the formula text
+        status, body = post("r-10", {"op": "rename_metric", "id": "m-weight", "name": "Mass"},
+                            {"op": "rename_member", "dim": "d-region", "id": "r-n", "name": "North"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(formula(), before.replace("Region", "Zone").replace("Group", "Crew").replace("Weight", "Mass"))
+        self.assertEqual(self.c.get("/")[1]["dimensions"]["d-region"]["members"][0], {"id": "r-n", "name": "North"})
+        self.assertEqual(cell(), 7.5)
+
     def test_member_order_through_the_api(self):
         ws = self.ws
         product = did(ws, "Product")
