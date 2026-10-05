@@ -1,0 +1,6 @@
+ts	phase	decision	why	evidence	result
+2026-10-05T06:26:22Z	frame	keep the internal key as the int handle, not the UUID	the journal changes, parquet columns, nanashi_cell_change coords and workspace conflicts already use handles; UUID keys would change all of those formats	journal.py:119-203, engine.py:295, pg_journal nanashi_cell_change	decided
+2026-10-05T06:26:22Z	frame	captured the test baseline before any change	so each unit compares against the old result	tests.parallel reference: 756 tests, 42 skipped	baseline
+2026-10-05T06:28:44Z	design	split the work into 6 units, each green on both engines: metrics, dimensions+properties, members, persistence, server, api	each unit changes one kind of key, so a break shows at the unit that caused it	.audit/issue-68-design.md	planned
+2026-10-05T06:28:44Z	design	keep the public Python API name-based and also accept int handles	about 295 test calls use names; the server can pass handles	.audit/issue-68-design.md	planned
+2026-10-05T06:28:44Z	U1	gave unit 1 (metrics by handle) to a fresh subagent	the change crosses every module; the main thread keeps review and the gates	agent run, no commit yet	open
