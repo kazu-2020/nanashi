@@ -91,9 +91,12 @@ class Server:
 
 def seed() -> Model:
     m = Model(engine=RustEngine())
-    m.add_dimension("Item", ITEMS)
-    m.add_input("Value", ["Item"], {(i,): 0 for i in ITEMS})
-    m.add_formula("Double", ["Item"], "Value * 2")
+    # The UUIDs are fixed strings, so the writes can name the objects without a read of GET /
+    m.add_dimension("Item", [], id="dim-item")
+    for i in ITEMS:
+        m.add_member("Item", i, id=i)
+    m.add_input("Value", ["Item"], {(i,): 0 for i in ITEMS}, id="metric-value")
+    m.add_formula("Double", ["Item"], "Value * 2", id="metric-double")
     return m
 
 
@@ -101,7 +104,7 @@ def seed() -> Model:
 def seeded_model() -> Iterator[tuple[str, Path]]:
     """種のモデルを記録先に置き、(モデルの ID, 作業用のディレクトリ) を渡す。抜けるときに記録を消す。"""
     with tempfile.TemporaryDirectory() as tmp:
-        model_id = f"failover-{uuid.uuid4().hex[:12]}"
+        model_id = str(uuid.uuid4())  # The router takes only a canonical UUID as a model ID (docs/ids.md).
         journal = PgJournal(DSN, model_id, Path(tmp) / "objects", heartbeat=False)
         try:
             journal.start(seed())
@@ -193,7 +196,7 @@ def try_post(url: str, write: Write) -> tuple[int, dict]:
     """write を送り、(状態, JSON の本文) を返す（4xx、5xx でも本文を返す）。"""
     return Client(url, None, timeout=CLIENT_TIMEOUT).post("/writes", {
         "client_op_id": write.op_id,
-        "ops": [{"op": "set_cell", "args": ["Value", write.value], "kwargs": {"Item": write.item}}]})
+        "ops": [{"op": "set_cell", "metric": "metric-value", "value": write.value, "coords": {"dim-item": write.item}}]})
 
 
 def post(url: str, write: Write) -> int:

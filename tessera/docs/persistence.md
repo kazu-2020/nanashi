@@ -9,9 +9,10 @@ m2 = Model.load("plan/", RustEngine())
 
 The engine does not save the values of formula Metrics. It calculates them again in the first recalculation after the load.
 The engine saves each formula as the original text that the user wrote.
-It also saves the IDs of dimensions, members, and Metrics.
+It also saves the IDs of dimensions, members, properties, and Metrics, their UUIDs (`uuid`, `member_uuids`), and the tombstones (`tombstones`, the UUIDs of removed objects).
+[ids.md](../../docs/ids.md) gives the rules for the UUIDs.
 
-The engine writes the input values of each input Metric to `inputs.<Metric ID>.parquet` (save format version 4).
+The engine writes the input values of each input Metric to `inputs.<Metric ID>.parquet` (save format version 5).
 The columns are the member numbers of each dimension (`d<dimension ID>`, UInt32) and the value column `v`.
 The type of `v` is Float64 for number, Boolean for boolean, and UInt32 (the member number) for a member type. The engine compresses the file with zstd.
 The column names use the dimension IDs, which do not change when you rename a dimension. Thus other tools, for example DuckDB, can also read the files (the member names are in `model.json`).
@@ -55,6 +56,7 @@ A journal entry has these 2 parts:
 
 - **Intent**: the called operation and its arguments (the total of a spread, the text of a formula, and so on). The engine keeps it for audits.
 - **Result**: the difference of the model before and after the transaction. It uses IDs that do not change to show these items: added, deleted, and renamed dimensions and members, the member order, properties, Metric definitions, and the values of input cells before and after the change.
+  `uuids` has the UUID of each new handle, and `tombstones` the UUIDs that the transaction made tombstones. Thus a replay binds the same UUIDs to the same handles.
   The member order (`member_order`) is a list of member IDs in the member order.
   The engine records it only for dimensions where the order changes in a different way than "remove the deleted members and put the added members at the end".
   A journal entry that changes only the order is not a structural change. Thus `Replica` and other followers do not recalculate when they catch up.
@@ -89,6 +91,7 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
 - `cells/<random number>-<Metric ID>.parquet`: The cell changes of a journal entry that changes more than 10 thousand cells (`bulk_cells`).
   The format is the same as `PgJournal`. The journal line has only the file name (relative to the directory) and the hash.
   The engine writes the file before it appends the line. Thus the files of a committed journal entry are always complete.
+- `rejections.jsonl`: 1 rejected write on each line (`client_op_id`, the head sequence number at that time, the HTTP status and body).
 - `snapshots/<sequence number>-<random number>/`: The model at that time, and `manifest.json` with the hashes of the files.
   The engine puts each file first, and then puts `manifest.json` last. Thus it does not use a snapshot that stopped before completion.
   The engine checks the hashes while it reads the files at open. If a file is damaged, it uses the snapshot before that one and replays more journal entries.
@@ -98,6 +101,10 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
 
 If you give the ID from the sender to `transaction(client_op_id=...)`, and a transaction with the same ID is already committed, the engine raises `AlreadyCommitted`. It does not do the operations in the transaction.
 Thus, if a user does not receive the response and sends again, the engine does not commit twice.
+
+The writer also records a rejected write with its `client_op_id` (`record_rejection`: the HTTP status and body). It records the rejection before it answers the client, so a resend cannot apply the write. If the append of the batch fails, it does not record the rejections, because an earlier write of the batch can cause one.
+`FileJournal` appends them to the file `rejections.jsonl`. When it opens, it reads the rejections in the last `op_window` journal entries. `prune` removes the older lines.
+`PgJournal` keeps them in the table `nanashi_rejection`, so a restarted server gives the same answer.
 
 ### Journal in PostgreSQL
 
@@ -121,15 +128,16 @@ export AWS_ENDPOINT_URL=http://127.0.0.1:59000 AWS_ACCESS_KEY_ID=nanashi AWS_SEC
 
 If the location does not start with `s3://`, the engine puts the files in a local directory (for when you do not have object storage).
 
-There are 4 tables (`nanashi_model`, `nanashi_operation`, `nanashi_cell_change`, `nanashi_snapshot`). 1 database can hold many models.
+There are 5 tables (`nanashi_model`, `nanashi_operation`, `nanashi_cell_change`, `nanashi_snapshot`, `nanashi_rejection`). 1 database can hold many models.
 The schema has a version (`nanashi_schema`). To update it to the latest version, run `python -m sparse_engine.pg_journal migrate <DSN>` (for the server, use `--migrate`).
 The engine does not run DDL at each connection, because DDL gets table locks and competes with other processes that write.
 If the version is not correct, `PgJournal` raises `SchemaError` when it opens.
 `journal.prune(keep=2)` deletes old snapshots and the files for large changes before them.
 The engine first adds those changes to the cell history table and then deletes the files, thus journal replay and the cell history stay available.
-It also forgets the `client_op_id` of journal entries older than the last 100 thousand entries.
+It also forgets the `client_op_id` of journal entries older than the last 100 thousand entries, and the rejections recorded before that point.
 
 - **Operation** (`nanashi_operation`): 1 row for each transaction. It keeps the intent and the results other than cells as JSONB.
+- **Rejection** (`nanashi_rejection`): 1 row for each rejected write (`client_op_id`, the HTTP status and body, and the head sequence number at that time). A resent write gets the same answer.
 - **Cell change** (`nanashi_cell_change`): 1 row for each changed input cell. It keeps the Metric ID and an array of member IDs, and an index finds the history of 1 cell.
   A process (`index_pending`) adds large changes to this table after the commit.
   If many processes call it at the same time, an advisory lock for each model and a mark on each journal entry prevent duplicate writes of the same entry.

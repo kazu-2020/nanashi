@@ -117,9 +117,14 @@ def _definition(model, m) -> dict:
 
 
 def changes(before, after) -> dict:
-    """before（トランザクション前の複製）から after（確定するモデル）への変化。"""
+    """before（トランザクション前の複製）から after（確定するモデル）への変化。
+
+    "uuids" has the UUID of each new handle ({handle: UUID}) and "tombstones" the UUIDs that the transaction
+    made tombstones. A replay binds the same UUIDs to the same handles.
+    """
     out: dict[str, Any] = {"next_id": after._next_id}
     old_dims = {d.id: d for d in before.dimensions.values()}
+    new_handles: list[int] = []
 
     added_dims, members, orders = [], [], []
     for d in after.dimensions.values():
@@ -127,6 +132,7 @@ def changes(before, after) -> dict:
         if o is None:
             added_dims.append({"id": d.id, "name": d.name, "ordered": d.ordered,
                                "members": [[i, n] for i, n in zip(d.ids, d.members)]})
+            new_handles += [d.id, *d.ids]
             if d.rank_table() is not None:
                 orders.append({"dim": d.id, "order": _ids_in_order(d)})
             continue
@@ -137,6 +143,7 @@ def changes(before, after) -> dict:
                             "added": [[i, n] for i, n in zip(d.ids, d.members) if i not in old_names],
                             "renamed": [[i, n] for i, n in zip(d.ids, d.members)
                                         if i in old_names and old_names[i] != n]})
+            new_handles += [i for i, _ in members[-1]["added"]]
         # 並び順は、消したメンバーを除き、足したメンバーを最後に並べただけなら記録しない（再生で同じになる）
         expected = [i for i in _ids_in_order(o) if i in d._by_id] + [i for i in d.ids if i not in o._by_id]
         if _ids_in_order(d) != expected:
@@ -156,13 +163,18 @@ def changes(before, after) -> dict:
             set_ = [[k, v] for k, v in new_ids.items() if old_ids.get(k) != v]
             unset = [k for k in old_ids if k not in new_ids]
             if old is None or set_ or unset:
-                props.append({"dim": d.id, "prop": prop, "target": t.id, "set": set_, "unset": unset})
+                props.append({"dim": d.id, "prop": prop, "id": d.property_ids[prop], "target": t.id,
+                              "set": set_, "unset": unset})
+            if old is None:
+                new_handles.append(d.property_ids[prop])
 
     old_metrics = {m.id: m for m in before.metrics.values()}
     defs = []
     for m in after.metrics.values():
         o = old_metrics.get(m.id)
-        if o is not None and (o.name, o.dims, o.kind, o.partition, o.overridable) == \
+        if o is None:
+            new_handles.append(m.id)
+        elif (o.name, o.dims, o.kind, o.partition, o.overridable) == \
                 (m.name, m.dims, m.kind, m.partition, m.overridable) and o.written is m.written:
             continue
         d = _definition(after, m)
@@ -170,6 +182,8 @@ def changes(before, after) -> dict:
             defs.append(d)
     alive = {m.id for m in after.metrics.values()}
     removed = [i for i in old_metrics if i not in alive]
+    uuids = {h: after._uuids[h] for h in new_handles if h in after._uuids}
+    tombstones = sorted(after.tombstones - before.tombstones)
 
     cells = []
     for m in after.metrics.values():
@@ -182,8 +196,8 @@ def changes(before, after) -> dict:
             cells.append({"metric": m.id, "dims": [after.dimension(d).id for d in m.dims], "rows": rows})
 
     for key, value in (("dimensions", added_dims), ("members", members), ("member_order", orders),
-                       ("properties", props),
-                       ("metrics", defs), ("metrics_removed", removed), ("cells", cells)):
+                       ("properties", props), ("metrics", defs), ("metrics_removed", removed),
+                       ("uuids", uuids), ("tombstones", tombstones), ("cells", cells)):
         if value:
             out[key] = value
     return out
@@ -253,6 +267,15 @@ def _by_id(model, m, store) -> dict:
 STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # 並び順（member_order）は含まない
 
 
+def _apply_uuids(model, ch: dict) -> None:
+    """Bind the UUIDs of the new handles, and add the tombstones."""
+    for h, u in ch.get("uuids", {}).items():
+        model._bind(u, int(h))  # JSON keys are strings
+    for u in ch.get("tombstones", []):
+        model.ids.pop(u, None)
+        model.tombstones.add(u)
+
+
 def apply(model, record: dict, *, incremental: bool = False) -> None:
     """記録の結果を model に書き込む（計算し直さない）。
 
@@ -266,6 +289,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     if incremental and model._plan is not None and not any(k in ch for k in STRUCTURAL):
         _apply_orders(model, ch.get("member_order", []), dim_of)
         _apply_cells(model, ch.get("cells", []))
+        _apply_uuids(model, ch)
         model._next_id = ch["next_id"]
         return
     metric_of = lambda i: model.metrics_by_id().get(i)
@@ -276,6 +300,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     for e in ch.get("members", []):
         d = dim_of(e["dim"])
         for i in e["removed"]:
+            model._uuids.pop(i, None)  # the tombstone comes from "tombstones"
             model._drop_member(d.name, d.member_of(i))
         # 名前を入れ替える変更もあるので、一度仮の名前にしてから付け直す
         for i, _ in e["renamed"]:
@@ -290,6 +315,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
 
     for i in ch.get("metrics_removed", []):
         m = metric_of(i)
+        model._uuids.pop(i, None)
         model.metrics.pop(m.name)
         model._state.pop(m.name, None)
     defs = ch.get("metrics", [])
@@ -309,6 +335,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
         for i, j in p["set"]:
             mapping[d.member_of(i)] = t.member_of(j)
         d.properties[p["prop"]] = (t.name, mapping)
+        d.property_ids[p["prop"]] = p["id"]
         model.engine.dimension_changed(model, d.name)
 
     by_id = model.metrics_by_id()
@@ -334,6 +361,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             store = model.engine.write(store, key, new, model)
         model._values[m.name] = store
 
+    _apply_uuids(model, ch)
     model._next_id = ch["next_id"]
     model._invalidate()
 
@@ -410,7 +438,9 @@ class Journal:
         objects                    The object storage for the snapshots and the large cell changes
         append_many(records)       Append the records, commit them in one write, and return their seqs
         seq_of(client_op_id)       The seq of the record with this ID (None if there is no record)
-        seq_of_many(client_op_ids) The committed client_op_id -> seq, in one lookup
+        record_rejection(client_op_id, status, body)  Keep a rejected write (the HTTP status and body) for op_window
+        outcomes_of_many(client_op_ids)  The committed client_op_id -> seq and the rejected
+                                   client_op_id -> (status, body), in one lookup
         records(after)             The records with a seq after "after" (oldest first)
         save_snapshot(model)       Put a snapshot of model (at seq model.seq)
         snapshots()                The (seq, place) of the snapshots, newest first
@@ -573,6 +603,7 @@ class FileJournal(Journal):
         path/log/<最初の通し番号>.jsonl   1 行 1 トランザクションの記録（区切り）。追記して fsync する
         path/cells/<乱数>-<Metric>.parquet   bulk_cells を超えるセルを書き換えた記録の、セルの変更
         path/snapshots/<通し番号>-<乱数>/   その時点のモデル（Model.save の形式）と manifest.json（通し番号、ハッシュ）
+        path/rejections.jsonl   1 line for each rejected write (client_op_id, head_seq, status, body)
 
     記録はスナップショットを置いたあと（か、区切りが segment_bytes を超えたら）、次の追記から新しい区切りに
     書く。開くときは最後の区切りと、client_op_id を覚えておく範囲（最後の op_window 件）だけを読み、
@@ -590,6 +621,7 @@ class FileJournal(Journal):
     ファイルは必ずそろっている（行を書く前に落ちれば、参照されないファイルが残るだけ）。
 
     client_op_id は最後の op_window 件の記録の分だけ覚える（再送しても二重に確定しないと保証する範囲）。
+    The journal keeps a rejection while its head_seq is in the last op_window entries, as PgJournal does.
     """
 
     def __init__(self, path, *, fsync: bool = True, bulk_cells: int = 10_000, op_window: int = 100_000,
@@ -707,6 +739,15 @@ class FileJournal(Journal):
                 f.truncate(self._size)
                 if self.fsync:
                     _sync(f.fileno())
+        # The rejected writes (client_op_id -> (head_seq, status, body)) in the last op_window entries
+        self._rejected: collections.OrderedDict[str, tuple[int, int, dict]] = collections.OrderedDict()
+        size = 0
+        for rec, n in self._read_segment(0, self._rejections_path):
+            size += n
+            if rec["head_seq"] > oldest:
+                self._rejected.setdefault(rec["client_op_id"], (rec["head_seq"], rec["status"], rec["body"]))
+        if repair and self._rejections_path.exists() and self._rejections_path.stat().st_size > size:
+            os.truncate(self._rejections_path, size)  # Remove a line that a crash cut
 
     def refresh(self) -> int:
         """最後に読んだところより後に追記された記録を読む（全体を読み直さない）。別のプロセスが新しい区切りに
@@ -791,8 +832,29 @@ class FileJournal(Journal):
     def seq_of(self, client_op_id: str) -> int | None:
         return self._by_client_op.get(client_op_id)
 
-    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
-        return {i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op}
+    @property
+    def _rejections_path(self) -> Path:
+        return self.path / "rejections.jsonl"
+
+    def record_rejection(self, client_op_id: str, status: int, body: dict) -> None:
+        """Append the rejection to path/rejections.jsonl, so that a resend after a restart gets the same answer.
+        The first rejection of a client_op_id stays, as in PgJournal."""
+        if client_op_id in self._rejected:
+            return
+        self.acquire()  # The first acquire removes a line that a crash cut. Without it, this line joins that line.
+        line = {"client_op_id": client_op_id, "head_seq": self.head, "status": status, "body": body}
+        fd = os.open(self._rejections_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            _write_all(fd, (json.dumps(line, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+            if self.fsync:
+                _sync(fd)
+        finally:
+            os.close(fd)
+        self._rejected[client_op_id] = (self.head, status, body)
+
+    def outcomes_of_many(self, client_op_ids: list[str]) -> tuple[dict[str, int], dict[str, tuple[int, dict]]]:
+        return ({i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op},
+                {i: self._rejected[i][1:] for i in client_op_ids if i in self._rejected})
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
@@ -834,6 +896,12 @@ class FileJournal(Journal):
                     out["cells"] += 1
             path.unlink()
             out["segments"] += 1
+        # Forget the rejections before the last op_window entries (write the kept lines to a new file)
+        kept = [{"client_op_id": i, "head_seq": q, "status": st, "body": b}
+                for i, (q, st, b) in self._rejected.items() if q > self.head - self.op_window]
+        self.objects.put(self._rejections_path.name, "".join(
+            json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n" for r in kept).encode("utf-8"))
+        self._rejected = collections.OrderedDict((r["client_op_id"], (r["head_seq"], r["status"], r["body"])) for r in kept)
         return out
 
     # ------------------------------------------------ スナップショット

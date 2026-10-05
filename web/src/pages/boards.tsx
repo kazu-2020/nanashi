@@ -1,18 +1,19 @@
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { Button, Input } from "@heroui/react";
 import { useState } from "react";
-import { api } from "../api";
+import { api, newId } from "../api";
 import { type BoardDef, ItemType, type WidgetSchema, Role } from "../gen/nanashi/v1/plan_pb";
-import { toFilters } from "../logic";
+import { label, toFilters } from "../logic";
 import { PivotWidget } from "../Pivot";
-import { memberNames, useApp, useMutate } from "../state";
+import { createOrUpdate, listOptions, memberOptions, useApp, useMutate } from "../state";
 import { Sel } from "../ui";
 
 export function BoardsPage() {
-  const { appId, model, can } = useApp();
+  const { appId, model, names, can } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.boards[0]?.id ?? "");
   const [name, setName] = useState("");
+  const [draftId, setDraftId] = useState(newId);
   const [page, setPage] = useState<Record<string, string>>({});
   const [text, setText] = useState("");
   const b = model.boards.find((x) => x.id === sel);
@@ -27,14 +28,17 @@ export function BoardsPage() {
     board: BoardDef,
     patch: { widgets?: MessageInitShape<typeof WidgetSchema>[]; pageSelectors?: string[] },
   ) =>
-    mutate(() =>
-      api.saveBoard({
+    mutate((clientOpId) =>
+      api.updateBoard({
         appId,
-        id: board.id,
-        name: board.name,
-        widgets: board.widgets,
-        pageSelectors: board.pageSelectors,
-        ...patch,
+        clientOpId,
+        board: {
+          id: board.id,
+          name: board.name,
+          widgets: board.widgets,
+          pageSelectors: board.pageSelectors,
+          ...patch,
+        },
       }),
     );
   return (
@@ -57,7 +61,18 @@ export function BoardsPage() {
             />
             <Button
               size="sm"
-              onPress={() => mutate(async () => choose((await api.saveBoard({ appId, name })).id))}
+              onPress={() =>
+                mutate(async (clientOpId) => {
+                  const req = { appId, clientOpId, board: { id: draftId, name } };
+                  await createOrUpdate(
+                    req,
+                    (r) => api.createBoard(r),
+                    (r) => api.updateBoard(r),
+                  );
+                  choose(draftId);
+                  setDraftId(newId());
+                })
+              }
             >
               ボードを作成
             </Button>
@@ -70,11 +85,11 @@ export function BoardsPage() {
             {b.pageSelectors.map((d) => (
               <Sel
                 key={d}
-                label={d}
+                label={label(names, d)}
                 value={page[d] ?? ""}
                 onChange={(m) => setPage({ ...page, [d]: m })}
                 empty="すべて"
-                options={memberNames(model, d)}
+                options={memberOptions(model, d)}
               />
             ))}
             {modeler && (
@@ -83,7 +98,7 @@ export function BoardsPage() {
                 value=""
                 onChange={(d) => d && save(b, { pageSelectors: [...b.pageSelectors, d] })}
                 empty=""
-                options={model.lists.map((l) => l.name).filter((n) => !b.pageSelectors.includes(n))}
+                options={listOptions(model).filter(([id]) => !b.pageSelectors.includes(id))}
               />
             )}
           </div>
@@ -146,7 +161,9 @@ export function BoardsPage() {
                 size="sm"
                 variant="danger"
                 onPress={() =>
-                  mutate(() => api.deleteItem({ appId, type: ItemType.BOARD, id: b.id }))
+                  mutate((clientOpId) =>
+                    api.deleteItem({ appId, clientOpId, type: ItemType.BOARD, id: b.id }),
+                  )
                 }
               >
                 ボードを削除

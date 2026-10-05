@@ -18,6 +18,9 @@ def build_with(engine) -> Model:
     fresh = Model(engine=engine)
     fresh.dimensions = m.dimensions
     fresh._next_id = m._next_id  # 軸のメンバーに振った ID と重ならないように、続きから振る
+    gone = {x.id for x in m.metrics.values()}  # keep the UUIDs of the dimensions, members, and properties only
+    fresh.ids = {u: h for u, h in m.ids.items() if h not in gone}
+    fresh._uuids = {h: u for u, h in fresh.ids.items()}
     for name, meta in m.metrics.items():
         if meta.formula is None:
             fresh.add_input(name, meta.dims, m.value(name).cells, kind=meta.kind)

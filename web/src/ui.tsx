@@ -59,7 +59,8 @@ export function Check({
 }
 
 export function Checks(props: {
-  options: string[];
+  // [value, label] pairs.
+  options: [string, string][];
   value: string[];
   onChange: (v: string[]) => void;
   label: string;
@@ -71,9 +72,9 @@ export function Checks(props: {
       value={props.value}
       onChange={props.onChange}
     >
-      {props.options.map((o) => (
-        <Check key={o} value={o}>
-          {o}
+      {props.options.map(([v, l]) => (
+        <Check key={v} value={v}>
+          {l}
         </Check>
       ))}
     </CheckboxGroup>

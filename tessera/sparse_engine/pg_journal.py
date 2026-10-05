@@ -1,6 +1,6 @@
 """PostgreSQL に記録する記録先。
 
-表は次の 4 つ（接頭辞 nanashi_）。1 つのデータベースに複数のモデルを置ける。
+表は次の 5 つ（接頭辞 nanashi_）。1 つのデータベースに複数のモデルを置ける。
 
     model        モデルごとの、最後の記録の通し番号（head_seq）と、書き込むプロセスのリース
                  （世代番号 writer_epoch、持ち主、期限、持ち主が公開している番地 lease_endpoint）
@@ -10,6 +10,8 @@
     snapshot     スナップショットの置き場所とハッシュ（ファイルはオブジェクトストレージに置き、
                  各ファイル、manifest.json の順に置き終えてから登録する。ハッシュは読むときに確かめ、
                  合わなければ 1 つ前のものを使う）
+    rejection    1 row for each rejected write (client_op_id, the HTTP status and body, and head_seq at that
+                 time). A resent write gets the same answer. prune forgets the rows older than op_window
 
 ファイルの置き場所（objects.py）は S3 互換のオブジェクトストレージ（s3://…）か、ローカルのディレクトリ。
 表には置き場所の中の相対的なキーだけを保存するので、置き場所を移しても（ディレクトリから S3 へなど）読める。
@@ -95,6 +97,17 @@ create table nanashi_snapshot (
     uri      text not null,
     meta     jsonb not null,
     primary key (model_id, seq)
+);
+"""),
+    (2, """
+create table nanashi_rejection (
+    model_id     text not null,
+    client_op_id text not null,
+    head_seq     bigint not null,
+    at           timestamptz not null default now(),
+    status       integer not null,
+    body         jsonb not null,
+    primary key (model_id, client_op_id)
 );
 """),
 ]
@@ -425,14 +438,24 @@ class PgJournal(Journal):
                                     (self.model_id, client_op_id)).fetchone()
         return None if row is None else row[0]
 
-    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
-        if not client_op_ids:
-            return {}
+    def record_rejection(self, client_op_id: str, status: int, body: dict) -> None:
         with self._lock:
-            rows = self.conn.execute("select client_op_id, seq from nanashi_operation"
+            self.conn.execute("insert into nanashi_rejection (model_id, client_op_id, head_seq, status, body)"
+                              " values (%s, %s, %s, %s, %s) on conflict do nothing",
+                              (self.model_id, client_op_id, self.head, status, Jsonb(body)))
+
+    def outcomes_of_many(self, client_op_ids: list[str]) -> tuple[dict[str, int], dict[str, tuple[int, dict]]]:
+        if not client_op_ids:
+            return {}, {}
+        ids = list(client_op_ids)
+        with self._lock:
+            rows = self.conn.execute("select client_op_id, seq, null::integer, null::jsonb from nanashi_operation"
+                                     " where model_id = %s and client_op_id = any(%s)"
+                                     " union all select client_op_id, null, status, body from nanashi_rejection"
                                      " where model_id = %s and client_op_id = any(%s)",
-                                     (self.model_id, list(client_op_ids))).fetchall()
-        return dict(rows)
+                                     (self.model_id, ids, self.model_id, ids)).fetchall()
+        return ({i: seq for i, seq, _, _ in rows if seq is not None},
+                {i: (status, body) for i, seq, status, body in rows if seq is None})
 
     def records(self, after: int = 0) -> Iterator[dict]:
         with self._lock, self.conn.transaction():
@@ -516,15 +539,19 @@ class PgJournal(Journal):
                     self.conn.execute("update nanashi_operation set record = %s, cells_uri = null"
                                       " where model_id = %s and seq = %s", (Jsonb(rec), self.model_id, seq))
         with self._lock:
+            oldest = self._db_head() - op_window
             out["client_op_ids"] = self.conn.execute(
                 "update nanashi_operation set client_op_id = null where model_id = %s and seq <= %s"
-                " and client_op_id is not null", (self.model_id, self._db_head() - op_window)).rowcount
+                " and client_op_id is not null", (self.model_id, oldest)).rowcount
+            out["rejections"] = self.conn.execute("delete from nanashi_rejection where model_id = %s and head_seq <= %s",
+                                                  (self.model_id, oldest)).rowcount
         return out
 
     def drop(self) -> None:
         """このモデルの記録をすべて消す（テスト用）。"""
         with self._lock, self.conn.transaction():
-            for table in ("nanashi_cell_change", "nanashi_operation", "nanashi_snapshot", "nanashi_model"):
+            for table in ("nanashi_cell_change", "nanashi_operation", "nanashi_snapshot", "nanashi_rejection",
+                          "nanashi_model"):
                 self.conn.execute(f"delete from {table} where model_id = %s", (self.model_id,))
 
 

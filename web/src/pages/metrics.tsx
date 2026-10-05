@@ -1,11 +1,10 @@
 import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
-import { Code, ConnectError } from "@connectrpc/connect";
-import { api, errorText } from "../api";
+import { api, newId } from "../api";
 import { ItemType, type MetricDef, Role, ValueKind } from "../gen/nanashi/v1/plan_pb";
-import { defaultSpec, toFilters } from "../logic";
+import { defaultSpec, dropsInputCells, toFilters } from "../logic";
 import { PivotEditor } from "../Pivot";
-import { cls, useApp, useMutate } from "../state";
+import { cls, createOrUpdate, listOptions, metricOptions, useApp, useMutate } from "../state";
 import { Check, Checks, Sel } from "../ui";
 
 const FORMULA_HELP: [string, string][] = [
@@ -23,17 +22,20 @@ const FORMULA_HELP: [string, string][] = [
   ["トランザクション", "'Sales.Amount'[BY SUM: Sales.Product]"],
 ];
 
-function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void }) {
+function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void }) {
   const { appId, model } = useApp();
   const mutate = useMutate();
   const d = props.def;
   const [f, setF] = useState({
+    id: d?.id ?? newId(),
     name: d?.name ?? "",
     dimensions: d?.dimensions ?? [],
     kind: d?.kind ?? ValueKind.NUMBER,
     memberList: d?.memberList ?? "",
     formula: d?.formula ?? "",
     overridable: d?.overridable ?? false,
+    description: d?.description ?? "",
+    folder: d?.folder ?? "",
   });
   const [newName, setNewName] = useState("");
   const kinds = [
@@ -41,7 +43,7 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
     { kind: ValueKind.BOOLEAN, memberList: "", label: "真偽値" },
     ...model.lists.map((l) => ({
       kind: ValueKind.MEMBER,
-      memberList: l.name,
+      memberList: l.id,
       label: `メンバー: ${l.name}`,
     })),
   ];
@@ -68,11 +70,26 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
           上書き入力を許可
         </Check>
       </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          aria-label="フォルダー"
+          placeholder="フォルダー"
+          value={f.folder}
+          onChange={(e) => setF({ ...f, folder: e.target.value })}
+        />
+        {d?.owner && <span className="text-sm">作成者: {d.owner}</span>}
+      </div>
+      <TextArea
+        aria-label="説明"
+        placeholder="説明"
+        value={f.description}
+        onChange={(e) => setF({ ...f, description: e.target.value })}
+      />
       <div className="text-sm">
         ディメンション:{" "}
         <Checks
           label="ディメンション"
-          options={model.lists.map((l) => l.name)}
+          options={listOptions(model)}
           value={f.dimensions}
           onChange={(dimensions) => setF({ ...f, dimensions })}
         />
@@ -104,16 +121,23 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
       <div className="flex flex-wrap gap-2">
         <Button
           onPress={() =>
-            mutate(async () => {
-              const save = (replace: boolean) => api.saveMetric({ appId, metric: f, replace });
-              // The api refuses a change that deletes the input values, until the user accepts it.
-              await save(false).catch(async (e: unknown) => {
-                const refused = e instanceof ConnectError && e.code === Code.FailedPrecondition;
-                if (!refused || !confirm(`${errorText(e)}。変更しますか？`)) throw e;
-                await save(true);
-              });
-              props.onSaved(f.name);
-            })
+            // A change that deletes the input values needs the consent of the user.
+            (!d ||
+              !dropsInputCells(d, f) ||
+              confirm(
+                `入力メトリック ${d.name} を変更すると、入力した値がすべて消える。変更しますか？`,
+              )) &&
+            mutate(async (clientOpId) => {
+              const req = { appId, clientOpId, metric: f };
+              if (d) await api.updateMetric(req);
+              else
+                await createOrUpdate(
+                  req,
+                  (r) => api.createMetric(r),
+                  (r) => api.updateMetric(r),
+                );
+              props.onSaved(f.id);
+            }).then((ok) => ok === false && !d && setF((x) => ({ ...x, id: newId() })))
           }
         >
           保存
@@ -129,9 +153,9 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
             <Button
               variant="secondary"
               onPress={() =>
-                mutate(async () => {
-                  await api.renameMetric({ appId, name: d.name, newName });
-                  props.onSaved(newName);
+                mutate(async (clientOpId) => {
+                  await api.renameMetric({ appId, clientOpId, id: d.id, name: newName });
+                  props.onSaved(d.id);
                 })
               }
             >
@@ -141,8 +165,8 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
               variant="danger"
               onPress={() =>
                 confirm(`${d.name} を削除しますか？`) &&
-                mutate(async () => {
-                  await api.deleteMetric({ appId, name: d.name });
+                mutate(async (clientOpId) => {
+                  await api.deleteMetric({ appId, clientOpId, id: d.id });
                   props.onSaved("");
                 })
               }
@@ -159,8 +183,8 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
 export function MetricsPage() {
   const { model, can } = useApp();
   // "" shows the form for a new Metric.
-  const [sel, setSel] = useState(model.metrics[0]?.name ?? "");
-  const def = model.metrics.find((m) => m.name === sel);
+  const [sel, setSel] = useState(model.metrics[0]?.id ?? "");
+  const def = model.metrics.find((m) => m.id === sel);
   return (
     <div className="flex gap-4">
       <ul className="flex w-48 shrink-0 flex-col gap-1 text-sm">
@@ -171,16 +195,31 @@ export function MetricsPage() {
             </Button>
           </li>
         )}
-        {model.metrics.map((m) => (
-          <li key={m.name}>
-            <Button
-              size="sm"
-              variant={m.name === sel ? "primary" : "ghost"}
-              onPress={() => setSel(m.name)}
-            >
-              {m.name}
-              {m.formula ? " ƒ" : ""}
-            </Button>
+        {/* The Metrics grouped by folder. The Metrics without a folder come first. */}
+        {[...new Set(model.metrics.map((m) => m.folder))].sort().map((folder) => (
+          <li key={folder}>
+            {folder && <div className="mt-2 font-bold">{folder}</div>}
+            <ul className="flex flex-col gap-1">
+              {model.metrics
+                .filter((m) => m.folder === folder)
+                .map((m) => (
+                  <li key={m.id}>
+                    <Button
+                      size="sm"
+                      variant={m.id === sel ? "primary" : "ghost"}
+                      onPress={() => setSel(m.id)}
+                    >
+                      {m.name}
+                      {m.formula ? " ƒ" : ""}
+                    </Button>
+                    {m.description && (
+                      <div className="truncate px-3 text-xs" title={m.description}>
+                        {m.description}
+                      </div>
+                    )}
+                  </li>
+                ))}
+            </ul>
           </li>
         ))}
       </ul>
@@ -190,8 +229,8 @@ export function MetricsPage() {
         )}
         {def && (
           <PivotEditor
-            key={`${def.name}:${def.dimensions.join()}`}
-            initial={defaultSpec([def.name], def.dimensions)}
+            key={`${def.id}:${def.dimensions.join()}`}
+            initial={defaultSpec([def.id], def.dimensions)}
           />
         )}
       </div>
@@ -203,16 +242,18 @@ export function TablesPage() {
   const { appId, model, can } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.tables[0]?.id ?? "");
+  const [draftId, setDraftId] = useState(newId);
   const t = model.tables.find((x) => x.id === sel);
   const [f, setF] = useState({ name: t?.name ?? "", metrics: t?.metrics ?? [] });
   const open = (id: string) => {
     const x = model.tables.find((y) => y.id === id);
     setSel(id);
+    if (!id) setDraftId(newId());
     setF({ name: x?.name ?? "", metrics: x?.metrics ?? [] });
   };
   const dims = [
     ...new Set(
-      (t?.metrics ?? []).flatMap((m) => model.metrics.find((d) => d.name === m)?.dimensions ?? []),
+      (t?.metrics ?? []).flatMap((m) => model.metrics.find((d) => d.id === m)?.dimensions ?? []),
     ),
   ];
   return (
@@ -234,14 +275,24 @@ export function TablesPage() {
           />
           <Checks
             label="メトリック"
-            options={model.metrics.map((m) => m.name)}
+            options={metricOptions(model)}
             value={f.metrics}
             onChange={(metrics) => setF({ ...f, metrics })}
           />
           <div className="flex gap-2">
             <Button
               onPress={() =>
-                mutate(async () => setSel((await api.saveTable({ appId, id: sel, ...f })).id))
+                mutate(async (clientOpId) => {
+                  const req = { appId, clientOpId, table: { id: t ? t.id : draftId, ...f } };
+                  if (t) return api.updateTable(req);
+                  await createOrUpdate(
+                    req,
+                    (r) => api.createTable(r),
+                    (r) => api.updateTable(r),
+                  );
+                  setSel(draftId);
+                  setDraftId(newId());
+                })
               }
             >
               保存
@@ -250,8 +301,8 @@ export function TablesPage() {
               <Button
                 variant="danger"
                 onPress={() =>
-                  mutate(async () => {
-                    await api.deleteItem({ appId, type: ItemType.TABLE, id: t.id });
+                  mutate(async (clientOpId) => {
+                    await api.deleteItem({ appId, clientOpId, type: ItemType.TABLE, id: t.id });
                     open("");
                   })
                 }
@@ -288,7 +339,11 @@ export function ViewsPage() {
           <Button
             variant="danger"
             size="sm"
-            onPress={() => mutate(() => api.deleteItem({ appId, type: ItemType.VIEW, id: v.id }))}
+            onPress={() =>
+              mutate((clientOpId) =>
+                api.deleteItem({ appId, clientOpId, type: ItemType.VIEW, id: v.id }),
+              )
+            }
           >
             削除
           </Button>

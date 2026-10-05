@@ -74,7 +74,7 @@ This design divides the number into 2 values, thus it keeps 4 values.
 | | Use | Changes? | Current storage |
 |---|---|---|---|
 | Name | For people to read, and to write in formulas (`Month."Mar"`) | `rename_member` changes it | `members[position]` |
-| ID | Journal (the journal and the table of cell changes), exchange with external systems | Does not change. A removed ID is not used again | `ids[position]` |
+| ID | Journal (the journal and the table of cell changes). A map in the model connects it to the UUID that goes out of the engine ([ids.md](../../docs/ids.md)) | Does not change. A removed ID is not used again | `ids[position]` |
 | Number | The key packs it | Does not change after it is set (this design) | `_index[name]` (position) |
 | Rank | Order (Natural Order) | Changes when you reorder members or insert a member in the middle | Same as the number |
 

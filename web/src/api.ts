@@ -1,6 +1,7 @@
 import { ConnectError, createClient, type Interceptor } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
 import { PlanService } from "./gen/nanashi/v1/plan_pb";
+import { uuidv7 } from "./logic";
 
 const USER_KEY = "nanashi-user";
 
@@ -20,6 +21,8 @@ export const api = createClient(
   PlanService,
   createConnectTransport({ baseUrl: "/", interceptors: [withUser] }),
 );
+
+export const newId = () => uuidv7(Date.now(), crypto.getRandomValues(new Uint8Array(16)));
 
 // errorText gives the message for the user. The api sends Japanese messages.
 export const errorText = (e: unknown) =>

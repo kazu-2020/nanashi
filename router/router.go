@@ -37,8 +37,9 @@ const (
 	maxBackoff     = time.Second
 )
 
-// modelID matches what the engine accepts; it uses the id unescaped as an object storage key prefix.
-var modelID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+// modelID is the canonical form of a UUID (lower case, with hyphens). The api sends this form (docs/ids.md).
+// The engine uses the id unescaped as an object storage key prefix.
+var modelID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 var upstream = &http.Client{
 	Timeout: attemptTimeout,
@@ -227,7 +228,7 @@ func route(requestURI string) (model, rest string, fail *apiError) {
 	}
 	model, rest = after[:end], after[end:]
 	if !modelID.MatchString(model) {
-		return "", "", &apiError{http.StatusBadRequest, "bad_request", "モデルの ID は英数字で始まり、英数字と _ と - の 128 文字まで"}
+		return "", "", &apiError{http.StatusBadRequest, "bad_request", "モデルの ID は小文字のハイフン付き UUID"}
 	}
 	if !strings.HasPrefix(rest, "/") {
 		rest = "/" + rest

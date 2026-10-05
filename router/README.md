@@ -2,10 +2,9 @@
 
 `router/` is a Go router (`nanashi-router`) that you put in front of the engine servers.
 It sends each `/models/<model ID>/...` request to the writer server of that model, and removes `/models/<model ID>` from the path.
-For example, it sends `/models/plan-2027/writes` to `/writes` on the writer.
-It sends the path and the query as it received them (it does not decode `%2F` in Metric names).
-A model ID must start with an alphanumeric character and contain only alphanumeric characters, `_` and `-`.
-The maximum length is 128 characters (for other IDs, the router returns 400).
+For example, it sends `/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes` to `/writes` on the writer.
+It sends the path and the query as it received them.
+A model ID is a UUID in the canonical form: lower case, with hyphens ([ids.md](../docs/ids.md)). For other IDs, the router returns 400.
 
 ```bash
 (cd router && go build -o nanashi-router ./cmd/nanashi-router)
@@ -83,7 +82,7 @@ Do not give the engine the address of the OIDC proxy. Only the router connects t
 # oauth2-proxy (10.0.1.5) -> router (10.0.2.0/24) -> engine
 router/nanashi-router --pg postgresql://... --listen 0.0.0.0:8090 \
     --user-header X-Forwarded-Email --trusted-proxy 10.0.1.5
-.venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id plan-2027 \
+.venv/bin/python -m sparse_engine.server s3://nanashi/plans --pg postgresql://... --model-id 0192f3a4-5b6c-7d8e-9f01-23456789abcd \
     --host 0.0.0.0 --advertise http://plan-a:8080 --user-header X-Forwarded-Email --trusted-proxy 10.0.2.0/24
 ```
 

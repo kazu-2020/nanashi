@@ -2,6 +2,8 @@
 # End-to-end check of nanashi-api with real engines.
 # It needs PostgreSQL (NANASHI_PG_DSN) with the engine tables, and nanashi-router (ROUTER) with --tessera.
 # The router starts the engines. The script starts nanashi-api, and stops it at the end.
+# Each reference is an id (docs/ids.md). The script makes the ids of the objects it creates, and reads the ids of
+# the objects that the api makes (the calendar, the scenario list) from GetModel.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,211 +19,277 @@ go build -o "$WORK/nanashi-api" ./cmd/nanashi-api
 API_PID=$!
 trap 'kill $API_PID 2>/dev/null; wait $API_PID 2>/dev/null; echo "log: $WORK/api.log"' EXIT
 
-call() { # user method body
-  curl -sS -X POST "$API/$2" -H 'Content-Type: application/json' -H "X-Nanashi-User: $1" -d "$3"
+uuid() { uuidgen 2>/dev/null | tr 'A-F' 'a-f' || cat /proc/sys/kernel/random/uuid; }
+call() { # user method body: a request that changes data gets a new clientOpId
+  local body=$3
+  case $2 in
+    Create* | Update* | Add* | Edit* | Rename* | Delete* | Write* | Import | Set*) body=$(jq -c --arg op "$(uuid)" '. + {clientOpId: $op}' <<<"$3") ;;
+  esac
+  curl -sS -X POST "$API/$2" -H 'Content-Type: application/json' -H "X-Nanashi-User: $1" -d "$body"
 }
 ok() { # user method body: the call must succeed
   local out
   out=$(call "$@")
-  if jq -e 'has("code")' <<<"$out" >/dev/null; then echo "FAIL $2: $out"; exit 1; fi
+  if jq -e 'has("code")' <<<"$out" >/dev/null; then echo "FAIL $2: $out" >&2; exit 1; fi
   echo "$out"
+}
+waitall() { # waits each background call; one failed call fails the script
+  local pid
+  for pid in "${PIDS[@]}"; do wait "$pid" || { echo "FAIL a background call"; exit 1; }; done
+  PIDS=()
 }
 check() { # description jq-expression json
   if jq -e "$2" <<<"$3" >/dev/null; then echo "ok   $1"; else echo "FAIL $1: $3"; exit 1; fi
 }
-cell() { # metric coords-json: the jq filter for the value of one cell
+cell() { # metric-id coords-json: the jq filter for the value of one cell
   echo "(.cells[] | select(.metric == \"$1\" and .coords == $2) | .value)"
 }
+# The lookups read the ids of the objects by name from the model of an application.
+model() { ok alice GetModel "{\"appId\": \"$1\"}"; }
+list() { jq -r --arg n "$2" '.lists[] | select(.name == $n) | .id' <<<"$1"; }           # model name
+member() { jq -r --arg l "$2" --arg n "$3" '.lists[] | select(.name == $l) | .members[] | select(.name == $n) | .id' <<<"$1"; } # model list name
+prop() { jq -r --arg l "$2" --arg n "$3" '.lists[] | select(.name == $l) | .properties[] | select(.name == $n) | .id' <<<"$1"; }
+metric() { jq -r --arg n "$2" '.metrics[] | select(.name == $n) | .id' <<<"$1"; }
+members() { jq -c --arg l "$2" '.lists[] | select(.name == $l) | .members | map({(.name): .id}) | add' <<<"$1"; } # name -> id
 
 for _ in $(seq 100); do call alice ListApplications '{}' >/dev/null 2>&1 && break; sleep 0.1; done
 
-APP=$(ok alice CreateApplication '{"name": "E2E"}' | jq -r .id)
+APP=$(ok alice CreateApplication "{\"id\": \"$(uuid)\", \"name\": \"E2E\"}" | jq -r .id)
 check "create application" '.role == "ROLE_ADMIN"' "$(ok alice ListApplications '{}' | jq ".applications[] | select(.id == \"$APP\")")"
+check "a second create of the id is refused" '.code == "already_exists"' "$(call alice CreateApplication "{\"id\": \"$APP\", \"name\": \"Again\"}")"
+check "an id that is not a UUID is refused" '.code == "invalid_argument"' "$(call alice GetModel '{"appId": "plan"}')"
 
 ok alice CreateCalendar "{\"appId\": \"$APP\", \"startYear\": 2026, \"years\": 1}" >/dev/null
-ok alice CreateList "{\"appId\": \"$APP\", \"name\": \"Category\", \"kind\": \"LIST_KIND_DIMENSION\", \"members\": [\"Hard\", \"Soft\"]}" >/dev/null
-ok alice CreateList "{\"appId\": \"$APP\", \"name\": \"Product\", \"kind\": \"LIST_KIND_DIMENSION\", \"members\": [\"A\", \"B\", \"C\"]}" >/dev/null
-ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Product\", \"property\": {\"name\": \"Category\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"Category\"}}" >/dev/null
-ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Product\", \"property\": {\"name\": \"Note\", \"type\": \"PROPERTY_TYPE_TEXT\"}}" >/dev/null
-ok alice EditMembers "{\"appId\": \"$APP\", \"list\": \"Product\", \"edits\": [
-  {\"set\": {\"name\": \"A\", \"properties\": {\"Category\": \"Hard\", \"Note\": \"first\"}}},
-  {\"set\": {\"name\": \"B\", \"properties\": {\"Category\": \"Hard\"}}},
-  {\"set\": {\"name\": \"C\", \"properties\": {\"Category\": \"Soft\"}}}]}" >/dev/null
+CATEGORY=$(uuid) HARD=$(uuid) SOFT=$(uuid) PRODUCT=$(uuid) A=$(uuid) B=$(uuid) C=$(uuid) SALES=$(uuid)
+ok alice CreateList "{\"appId\": \"$APP\", \"id\": \"$CATEGORY\", \"name\": \"Category\", \"kind\": \"LIST_KIND_DIMENSION\", \"members\": [{\"id\": \"$HARD\", \"name\": \"Hard\"}, {\"id\": \"$SOFT\", \"name\": \"Soft\"}]}" >/dev/null
+ok alice CreateList "{\"appId\": \"$APP\", \"id\": \"$PRODUCT\", \"name\": \"Product\", \"kind\": \"LIST_KIND_DIMENSION\", \"members\": [{\"id\": \"$A\", \"name\": \"A\"}, {\"id\": \"$B\", \"name\": \"B\"}, {\"id\": \"$C\", \"name\": \"C\"}]}" >/dev/null
+check "create of an existing list id is refused" '.code == "already_exists"' \
+  "$(call alice CreateList "{\"appId\": \"$APP\", \"id\": \"$PRODUCT\", \"name\": \"Product2\", \"kind\": \"LIST_KIND_DIMENSION\"}")"
+PCAT=$(uuid) NOTE=$(uuid)
+ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"$PRODUCT\", \"property\": {\"id\": \"$PCAT\", \"name\": \"Category\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"$CATEGORY\"}}" >/dev/null
+ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"$PRODUCT\", \"property\": {\"id\": \"$NOTE\", \"name\": \"Note\", \"type\": \"PROPERTY_TYPE_TEXT\"}}" >/dev/null
+ok alice EditMembers "{\"appId\": \"$APP\", \"list\": \"$PRODUCT\", \"edits\": [
+  {\"set\": {\"id\": \"$A\", \"properties\": {\"$PCAT\": \"$HARD\", \"$NOTE\": \"first\"}}},
+  {\"set\": {\"id\": \"$B\", \"properties\": {\"$PCAT\": \"$HARD\"}}},
+  {\"set\": {\"id\": \"$C\", \"properties\": {\"$PCAT\": \"$SOFT\"}}}]}" >/dev/null
 check "a property name is used once in a list" '.code == "already_exists"' \
-  "$(call alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Product\", \"property\": {\"name\": \"Note\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"Category\"}}")"
+  "$(call alice AddProperty "{\"appId\": \"$APP\", \"list\": \"$PRODUCT\", \"property\": {\"id\": \"$(uuid)\", \"name\": \"Note\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"$CATEGORY\"}}")"
 
-ok alice CreateList "{\"appId\": \"$APP\", \"name\": \"Sales\", \"kind\": \"LIST_KIND_TRANSACTION\"}" >/dev/null
-ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Sales\", \"property\": {\"name\": \"Product\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"Product\"}}" >/dev/null
-ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Sales\", \"property\": {\"name\": \"Amount\", \"type\": \"PROPERTY_TYPE_NUMBER\"}}" >/dev/null
+ok alice CreateList "{\"appId\": \"$APP\", \"id\": \"$SALES\", \"name\": \"Sales\", \"kind\": \"LIST_KIND_TRANSACTION\"}" >/dev/null
+SPROD=$(uuid) AMOUNT=$(uuid)
+ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"$SALES\", \"property\": {\"id\": \"$SPROD\", \"name\": \"Product\", \"type\": \"PROPERTY_TYPE_DIMENSION\", \"target\": \"$PRODUCT\"}}" >/dev/null
+ok alice AddProperty "{\"appId\": \"$APP\", \"list\": \"$SALES\", \"property\": {\"id\": \"$AMOUNT\", \"name\": \"Amount\", \"type\": \"PROPERTY_TYPE_NUMBER\"}}" >/dev/null
 CSV=$'product,amount\nA,100\nB,50\nA,25\nC,10\n'
-IMPORT=$(ok alice Import "$(jq -n --arg app "$APP" --arg csv "$CSV" \
-  '{appId: $app, csv: $csv, list: {list: "Sales", propertyColumns: {Product: "product", Amount: "amount"}}}')")
+IMPORT=$(ok alice Import "$(jq -n --arg app "$APP" --arg csv "$CSV" --arg sales "$SALES" --arg sprod "$SPROD" --arg amount "$AMOUNT" \
+  '{appId: $app, csv: $csv, list: {list: $sales, propertyColumns: {($sprod): "product", ($amount): "amount"}}}')")
 check "import 4 transactions" '.rows == 4' "$IMPORT"
 
-ok alice CreateScenario "{\"appId\": \"$APP\", \"name\": \"Base\"}" >/dev/null
-ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Budget\", \"dimensions\": [\"Product\", \"Scenario\", \"Month\"]}}" >/dev/null
-ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Revenue\", \"dimensions\": [\"Product\"], \"formula\": \"'Sales.Amount'[BY SUM: Sales.Product]\"}}" >/dev/null
+BASE=$(uuid)
+ok alice CreateScenario "{\"appId\": \"$APP\", \"id\": \"$BASE\", \"name\": \"Base\"}" >/dev/null
+MODEL=$(model "$APP")
+SCENARIO=$(list "$MODEL" Scenario) MONTH=$(list "$MODEL" Month) JAN=$(member "$MODEL" Month 2026-01)
+BUDGET=$(uuid) REVENUE=$(uuid)
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BUDGET\", \"name\": \"Budget\", \"dimensions\": [\"$PRODUCT\", \"$SCENARIO\", \"$MONTH\"],
+  \"description\": \"Sales budget\", \"folder\": \"Plan\", \"owner\": \"mallory\"}}" >/dev/null
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$REVENUE\", \"name\": \"Revenue\", \"dimensions\": [\"$PRODUCT\"], \"formula\": \"'Sales.Amount'[BY SUM: Sales.Product]\"}}" >/dev/null
 ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [
-  {\"metric\": \"Budget\", \"coords\": {\"Product\": \"A\", \"Scenario\": \"Base\"}, \"value\": {\"number\": 1200}},
-  {\"metric\": \"Budget\", \"coords\": {\"Product\": \"B\", \"Scenario\": \"Base\", \"Month\": \"2026-01\"}, \"value\": {\"number\": 7}}]}" >/dev/null
+  {\"metric\": \"$BUDGET\", \"coords\": {\"$PRODUCT\": \"$A\", \"$SCENARIO\": \"$BASE\"}, \"value\": {\"number\": 1200}},
+  {\"metric\": \"$BUDGET\", \"coords\": {\"$PRODUCT\": \"$B\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"value\": {\"number\": 7}}]}" >/dev/null
 
-MODEL=$(ok alice GetModel "{\"appId\": \"$APP\"}")
+MODEL=$(model "$APP")
 check "model lists" '[.lists[].name] == ["Year", "Quarter", "Month", "Category", "Product", "Sales", "Scenario"]' "$MODEL"
 check "list kinds" '[.lists[] | .kind] == ["LIST_KIND_CALENDAR", "LIST_KIND_CALENDAR", "LIST_KIND_CALENDAR", "LIST_KIND_DIMENSION", "LIST_KIND_DIMENSION", "LIST_KIND_TRANSACTION", "LIST_KIND_SCENARIO"]' "$MODEL"
-check "member properties" '.lists[] | select(.name == "Product") | .members[0].properties == {"Category": "Hard", "Note": "first"}' "$MODEL"
-check "transaction rows" '.lists[] | select(.name == "Sales") | [.members[] | .properties.Amount] == ["100", "50", "25", "10"]' "$MODEL"
+check "the ids of the lists come back" ".lists[] | select(.name == \"Product\") | .id == \"$PRODUCT\" and .members[0].id == \"$A\"" "$MODEL"
+check "member properties" ".lists[] | select(.name == \"Product\") | .members[0].properties == {\"$PCAT\": \"$HARD\", \"$NOTE\": \"first\"}" "$MODEL"
+check "transaction rows" ".lists[] | select(.name == \"Sales\") | [.members[] | .properties[\"$AMOUNT\"]] == [\"100\", \"50\", \"25\", \"10\"]" "$MODEL"
+check "the catalog gives the description, the folder and the owner" \
+  ".metrics[] | select(.id == \"$BUDGET\") | .description == \"Sales budget\" and .folder == \"Plan\" and .owner == \"alice\"" "$MODEL"
+ok alice UpdateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BUDGET\", \"name\": \"Budget\", \"dimensions\": [\"$PRODUCT\", \"$SCENARIO\", \"$MONTH\"],
+  \"description\": \"Sales budget\", \"folder\": \"Plan 2026\"}}" >/dev/null
+check "an update changes the folder and keeps the input values" \
+  ".metrics[] | select(.id == \"$BUDGET\") | .folder == \"Plan 2026\" and .owner == \"alice\"" "$(model "$APP")"
+ok alice UpdateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BUDGET\", \"name\": \"Budget\", \"dimensions\": [\"$PRODUCT\", \"$SCENARIO\", \"$MONTH\"],
+  \"description\": \"Sales budget\", \"folder\": \"Plan\"}}" >/dev/null
+# The engine refuses the formula. The refused create must leave no catalog row, so a second create with the id works.
+BROKEN=$(uuid)
+check "the engine refuses a bad formula" '.code == "invalid_argument"' \
+  "$(call alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BROKEN\", \"name\": \"Broken\", \"formula\": \"Budget +\", \"description\": \"x\"}}")"
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$BROKEN\", \"name\": \"Broken\", \"description\": \"y\"}}" >/dev/null
+check "a refused create leaves no catalog row" ".metrics[] | select(.id == \"$BROKEN\") | .description == \"y\"" "$(model "$APP")"
+ok alice DeleteMetric "{\"appId\": \"$APP\", \"id\": \"$BROKEN\"}" >/dev/null
 check "property Metric is not a Metric" '[.metrics[].name] == ["Budget", "Revenue"]' "$MODEL"
-for req in "SaveMetric {\"appId\": \"$APP\", \"metric\": {\"name\": \"Sales.Amount\", \"dimensions\": [\"Sales\"], \"kind\": \"VALUE_KIND_BOOLEAN\"}, \"replace\": true}" \
-  "RenameMetric {\"appId\": \"$APP\", \"name\": \"Sales.Amount\", \"newName\": \"X\"}" \
-  "RenameMetric {\"appId\": \"$APP\", \"name\": \"Budget\", \"newName\": \"Sales.Amount\"}" \
-  "DeleteMetric {\"appId\": \"$APP\", \"name\": \"Sales.Amount\"}"; do
+# The Metric of a property has an id that the api made. Find it through the engine: the api refuses its change.
+AMOUNT_METRIC=$(curl -sS "$ROUTER/models/$APP/" | jq -r '.metrics | to_entries[] | select(.value.name == "Sales.Amount") | .key')
+for req in "UpdateMetric {\"appId\": \"$APP\", \"metric\": {\"id\": \"$AMOUNT_METRIC\", \"name\": \"Sales.Amount\", \"dimensions\": [\"$SALES\"], \"kind\": \"VALUE_KIND_BOOLEAN\"}}" \
+  "RenameMetric {\"appId\": \"$APP\", \"id\": \"$AMOUNT_METRIC\", \"name\": \"X\"}" \
+  "DeleteMetric {\"appId\": \"$APP\", \"id\": \"$AMOUNT_METRIC\"}"; do
   check "${req%% *} refuses a property Metric" '.code == "failed_precondition"' "$(call alice ${req%% *} "${req#* }")"
 done
-ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Product.Cost\", \"dimensions\": [\"Product\"]}}" >/dev/null
-check "a property does not replace a Metric with its name" '.code == "already_exists"' \
-  "$(call alice AddProperty "{\"appId\": \"$APP\", \"list\": \"Product\", \"property\": {\"name\": \"Cost\", \"type\": \"PROPERTY_TYPE_NUMBER\"}}")"
-ok alice DeleteMetric "{\"appId\": \"$APP\", \"name\": \"Product.Cost\"}" >/dev/null
+check "a Metric does not take the name of a property Metric" '.code == "already_exists" or .code == "invalid_argument"' \
+  "$(call alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$(uuid)\", \"name\": \"Sales.Amount\", \"dimensions\": [\"$SALES\"]}}")"
+COST=$(uuid)
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$COST\", \"name\": \"Product.Cost\", \"dimensions\": [\"$PRODUCT\"]}}" >/dev/null
+check "a property does not replace a Metric with its name" '.code == "already_exists" or .code == "invalid_argument"' \
+  "$(call alice AddProperty "{\"appId\": \"$APP\", \"list\": \"$PRODUCT\", \"property\": {\"id\": \"$(uuid)\", \"name\": \"Cost\", \"type\": \"PROPERTY_TYPE_NUMBER\"}}")"
+check "the refused property left no row" ".lists[] | select(.name == \"Product\") | [.properties[].name] == [\"Category\", \"Note\"]" "$(model "$APP")"
+ok alice DeleteMetric "{\"appId\": \"$APP\", \"id\": \"$COST\"}" >/dev/null
 
-Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"Revenue\"], \"rows\": [\"Product\"]}")
-check "BY SUM of transactions" "[$(cell Revenue '["A"]').number, $(cell Revenue '["C"]').number] == [125, 10]" "$Q"
-Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"Budget\"], \"rows\": [\"Product\"], \"columns\": [\"Scenario\"],
-  \"filters\": {\"Month\": {\"names\": [\"2026-01\", \"2026-02\", \"2026-03\"]}}}")
-check "spread over 12 months, Q1 total" "[$(cell Budget '["A", "Base"]').number, $(cell Budget '["B", "Base"]').number] == [300, 7]" "$Q"
+Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$REVENUE\"], \"rows\": [\"$PRODUCT\"]}")
+check "BY SUM of transactions" "[$(cell "$REVENUE" "[\"$A\"]").number, $(cell "$REVENUE" "[\"$C\"]").number] == [125, 10]" "$Q"
+FEB=$(member "$MODEL" Month 2026-02) MAR=$(member "$MODEL" Month 2026-03)
+Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$BUDGET\"], \"rows\": [\"$PRODUCT\"], \"columns\": [\"$SCENARIO\"],
+  \"filters\": {\"$MONTH\": {\"ids\": [\"$JAN\", \"$FEB\", \"$MAR\"]}}}")
+check "spread over 12 months, Q1 total" "[$(cell "$BUDGET" "[\"$A\", \"$BASE\"]").number, $(cell "$BUDGET" "[\"$B\", \"$BASE\"]").number] == [300, 7]" "$Q"
 
-ok alice CreateScenario "{\"appId\": \"$APP\", \"name\": \"Plan\", \"copyFrom\": \"Base\"}" >/dev/null
-Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"Budget\"], \"columns\": [\"Scenario\"], \"aggregation\": \"AGGREGATION_SUM\"}")
-check "scenario copy" "[$(cell Budget '["Base"]').number, $(cell Budget '["Plan"]').number] == [1207, 1207]" "$Q"
+PLAN=$(uuid)
+ok alice CreateScenario "{\"appId\": \"$APP\", \"id\": \"$PLAN\", \"name\": \"Plan\", \"copyFrom\": \"$BASE\"}" >/dev/null
+Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$BUDGET\"], \"columns\": [\"$SCENARIO\"], \"aggregation\": \"AGGREGATION_SUM\"}")
+check "scenario copy" "[$(cell "$BUDGET" "[\"$BASE\"]").number, $(cell "$BUDGET" "[\"$PLAN\"]").number] == [1207, 1207]" "$Q"
 
-TABLE=$(ok alice SaveTable "{\"appId\": \"$APP\", \"name\": \"Sales table\", \"metrics\": [\"Budget\", \"Revenue\"]}" | jq -r .id)
-VIEW=$(ok alice SaveView "{\"appId\": \"$APP\", \"name\": \"Budget by product\", \"metrics\": [\"Budget\"], \"rows\": [\"Product\"],
-  \"columns\": [\"Scenario\"], \"display\": \"DISPLAY_BAR\"}" | jq -r .id)
-ok alice SaveBoard "{\"appId\": \"$APP\", \"name\": \"Overview\", \"widgets\": [{\"viewId\": \"$VIEW\"}, {\"text\": \"Notes\"}],
-  \"pageSelectors\": [\"Scenario\"]}" >/dev/null
-MODEL=$(ok alice GetModel "{\"appId\": \"$APP\"}")
+TABLE=$(uuid) VIEW=$(uuid)
+ok alice CreateTable "{\"appId\": \"$APP\", \"table\": {\"id\": \"$TABLE\", \"name\": \"Sales table\", \"metrics\": [\"$BUDGET\", \"$REVENUE\"]}}" >/dev/null
+check "create of an existing id is refused" '.code == "already_exists"' \
+  "$(call alice CreateTable "{\"appId\": \"$APP\", \"table\": {\"id\": \"$TABLE\", \"name\": \"Again\"}}")"
+check "update of a missing id is refused" '.code == "not_found"' \
+  "$(call alice UpdateTable "{\"appId\": \"$APP\", \"table\": {\"id\": \"$(uuid)\", \"name\": \"Missing\"}}")"
+ok alice CreateView "{\"appId\": \"$APP\", \"view\": {\"id\": \"$VIEW\", \"name\": \"Budget by product\", \"metrics\": [\"$BUDGET\"], \"rows\": [\"$PRODUCT\"],
+  \"columns\": [\"$SCENARIO\"], \"display\": \"DISPLAY_BAR\"}}" >/dev/null
+ok alice CreateBoard "{\"appId\": \"$APP\", \"board\": {\"id\": \"$(uuid)\", \"name\": \"Overview\", \"widgets\": [{\"viewId\": \"$VIEW\"}, {\"text\": \"Notes\"}],
+  \"pageSelectors\": [\"$SCENARIO\"]}}" >/dev/null
+MODEL=$(model "$APP")
 check "table, view and board" "(.tables[0].id == \"$TABLE\") and (.views[0].display == \"DISPLAY_BAR\") and (.boards[0].widgets[0].viewId == \"$VIEW\")" "$MODEL"
 
-ok alice AddComment "{\"appId\": \"$APP\", \"metric\": \"Budget\", \"cell\": {\"Product\": \"A\"}, \"body\": \"check this\"}" >/dev/null
-check "comment" '.comments[0].user == "alice" and .comments[0].cell.Product == "A"' \
-  "$(ok alice ListComments "{\"appId\": \"$APP\", \"metric\": \"Budget\"}")"
+ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$A\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"check this\"}}" >/dev/null
+check "a comment needs a member for each dimension" '.code == "invalid_argument"' \
+  "$(call alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$A\"}, \"body\": \"total\"}}")"
+check "comment" ".comments[0].user == \"alice\" and .comments[0].cell[\"$PRODUCT\"] == \"$A\"" \
+  "$(ok alice ListComments "{\"appId\": \"$APP\", \"metric\": \"$BUDGET\"}")"
 
-ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Target\", \"dimensions\": [\"Product\"], \"formula\": \"Revenue * 2\", \"overridable\": true}}" >/dev/null
-ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Target\", \"coords\": {\"Product\": \"A\"}, \"value\": {\"number\": 999}}]}" >/dev/null
-SNAP=$(ok alice CreateSnapshot "{\"appId\": \"$APP\", \"name\": \"before review\"}" | jq -r .id)
+TARGET=$(uuid)
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$TARGET\", \"name\": \"Target\", \"dimensions\": [\"$PRODUCT\"], \"formula\": \"Revenue * 2\", \"overridable\": true}}" >/dev/null
+ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$TARGET\", \"coords\": {\"$PRODUCT\": \"$A\"}, \"value\": {\"number\": 999}}]}" >/dev/null
+SNAP=$(ok alice CreateSnapshot "{\"appId\": \"$APP\", \"id\": \"$(uuid)\", \"name\": \"before review\"}" | jq -r .id)
 check "snapshot list" ".snapshots[0].id == \"$SNAP\"" "$(ok alice ListSnapshots "{\"appId\": \"$APP\"}")"
-APP2=$(ok alice CreateApplication "{\"name\": \"E2E restored\", \"snapshotId\": \"$SNAP\"}" | jq -r .id)
-Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Revenue\", \"Budget\"], \"rows\": [\"Product\"], \"columns\": [\"Scenario\"]}")
-check "restored data" "[$(cell Revenue '["A", ""]').number, $(cell Budget '["A", "Plan"]').number] == [125, 1200]" "$Q"
-Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Target\"], \"rows\": [\"Product\"]}")
-check "restore keeps an override value" "[$(cell Target '["A"]').number, $(cell Target '["C"]').number] == [999, 20]" "$Q"
-ok alice AddComment "{\"appId\": \"$APP2\", \"metric\": \"Budget\", \"cell\": {\"Product\": \"C\"}, \"body\": \"on C\"}" >/dev/null
-ok alice RenameMetric "{\"appId\": \"$APP2\", \"name\": \"Budget\", \"newName\": \"Budget 2027\"}" >/dev/null
-check "rename reaches the comments" '[.comments[].body] == ["on C"]' "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"Budget 2027\"}")"
-MODEL2=$(ok alice GetModel "{\"appId\": \"$APP2\"}")
-check "rename reaches tables and views" '(.tables[0].metrics == ["Budget 2027", "Revenue"]) and (.views[0].metrics == ["Budget 2027"])' "$MODEL2"
-check "restored model" '(.lists[] | select(.name == "Product") | .members[0].properties.Note == "first") and (.views | length == 1) and (.lists[-1].kind == "LIST_KIND_SCENARIO")' "$MODEL2"
-B27='"appId": "'$APP2'", "metric": {"name": "Budget 2027"'
-check "a dimension change of an input Metric is refused" '.code == "failed_precondition"' \
-  "$(call alice SaveMetric "{$B27, \"dimensions\": [\"Product\"]}}")"
-check "a formula over an input Metric is refused" '.code == "failed_precondition"' \
-  "$(call alice SaveMetric "{$B27, \"formula\": \"1\"}}")"
-Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"Budget 2027\"], \"rows\": [\"Product\"]}")
-check "the refused change keeps the input values" "$(cell 'Budget 2027' '["A"]').number == 2400" "$Q"
-ok alice SaveMetric "{$B27, \"dimensions\": [\"Product\"]}, \"replace\": true}" >/dev/null
-check "replace changes the input Metric" '.metrics[] | select(.name == "Budget 2027") | .dimensions == ["Product"]' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
-ok alice DeleteMetric "{\"appId\": \"$APP2\", \"name\": \"Budget 2027\"}" >/dev/null
-check "delete removes the Metric from tables and views" '(.tables[0].metrics == ["Revenue"]) and ((.views[0].metrics // []) == [])' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
-ok alice SaveView "{\"appId\": \"$APP2\", \"name\": \"C only\", \"metrics\": [\"Revenue\"], \"filters\": {\"Product\": {\"names\": [\"C\"]}}}" >/dev/null
-ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"C\", \"newName\": \" D \"}}]}" >/dev/null
-check "member rename reaches the comment cell" '.comments[0].cell.Product == "D"' \
-  "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"Budget 2027\"}")"
-check "rename gives the view filter the trimmed name" '.views[] | select(.name == "C only") | .filters.Product.names == ["D"]' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
-ok alice SetMemberRole "{\"appId\": \"$APP2\", \"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}" >/dev/null
-ok alice SaveAccessRule "{\"appId\": \"$APP2\", \"role\": \"ROLE_VIEWER\", \"list\": \"Product\", \"members\": [\"A\", \"D\"]}" >/dev/null
-ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"A\", \"newName\": \"A1\"}}]}" >/dev/null
-check "member rename reaches the access rule" '.rules[0].members == ["A1", "D"]' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
-check "member rename keeps the TEXT value and the DIMENSION value" \
-  '.lists[] | select(.name == "Product") | .members[] | select(.name == "A1") | .properties == {"Category": "Hard", "Note": "first"}' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
-ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"rename\": {\"name\": \"A1\", \"newName\": \"A\"}}]}" >/dev/null
-ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"remove\": {\"name\": \"D\"}}]}" >/dev/null
-check "remove takes the member out of access rules" '.rules[0].members == ["A"]' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
-check "remove keeps the comments of the member" '.comments[0].cell.Product == "D"' \
-  "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"Budget 2027\"}")"
-check "remove takes the member out of view filters" '.views[] | select(.name == "C only") | (.filters.Product.names // []) == []' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
-ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Product\", \"edits\": [{\"add\": {\"name\": \"D\"}}]}" >/dev/null
-check "a member added again does not get the old access" '.lists[] | select(.name == "Product") | [.members[].name] == ["A"]' \
-  "$(ok bob GetModel "{\"appId\": \"$APP2\"}")"
-RULE=$(ok alice GetAccess "{\"appId\": \"$APP2\"}" | jq -r '.rules[0].id')
+APP2=$(ok alice CreateApplication "{\"id\": \"$(uuid)\", \"name\": \"E2E restored\", \"snapshotId\": \"$SNAP\"}" | jq -r .id)
+# The restore keeps the ids, so the same ids work in the new application.
+Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"$REVENUE\", \"$BUDGET\"], \"rows\": [\"$PRODUCT\"], \"columns\": [\"$SCENARIO\"]}")
+check "restored data" "[$(cell "$REVENUE" "[\"$A\", \"\"]").number, $(cell "$BUDGET" "[\"$A\", \"$PLAN\"]").number] == [125, 1200]" "$Q"
+Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"$TARGET\"], \"rows\": [\"$PRODUCT\"]}")
+check "restore keeps an override value" "[$(cell "$TARGET" "[\"$A\"]").number, $(cell "$TARGET" "[\"$C\"]").number] == [999, 20]" "$Q"
+ok alice AddComment "{\"appId\": \"$APP2\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$C\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"on C\"}}" >/dev/null
+ok alice RenameMetric "{\"appId\": \"$APP2\", \"id\": \"$BUDGET\", \"name\": \"Budget 2027\"}" >/dev/null
+check "a rename keeps the comments" '[.comments[].body] == ["on C"]' "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
+MODEL2=$(model "$APP2")
+check "a rename keeps the tables and views" "(.tables[0].metrics == [\"$BUDGET\", \"$REVENUE\"]) and (.views[0].metrics == [\"$BUDGET\"]) and (.metrics[] | select(.id == \"$BUDGET\") | .name == \"Budget 2027\")" "$MODEL2"
+check "a rename and a restore keep the catalog" \
+  ".metrics[] | select(.id == \"$BUDGET\") | .description == \"Sales budget\" and .folder == \"Plan\" and .owner == \"alice\"" "$MODEL2"
+check "restored model" "(.lists[] | select(.name == \"Product\") | .members[0].properties[\"$NOTE\"] == \"first\") and (.views | length == 1) and (.lists[-1].kind == \"LIST_KIND_SCENARIO\")" "$MODEL2"
+B27='"appId": "'$APP2'", "metric": {"id": "'$BUDGET'", "name": "Budget 2027"'
+check "create of an existing Metric is refused" '.code == "already_exists"' \
+  "$(call alice CreateMetric "{$B27, \"dimensions\": [\"$PRODUCT\"]}}")"
+check "update of a missing Metric is refused" '.code == "not_found"' \
+  "$(call alice UpdateMetric "{\"appId\": \"$APP2\", \"metric\": {\"id\": \"$(uuid)\", \"name\": \"Nothing\"}}")"
+Q=$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"$BUDGET\"], \"rows\": [\"$PRODUCT\"]}")
+check "the refused change keeps the input values" "$(cell "$BUDGET" "[\"$A\"]").number == 2400" "$Q"
+ok alice UpdateMetric "{$B27, \"dimensions\": [\"$PRODUCT\"]}}" >/dev/null
+check "update changes the input Metric" ".metrics[] | select(.id == \"$BUDGET\") | .dimensions == [\"$PRODUCT\"]" "$(model "$APP2")"
+ok alice DeleteMetric "{\"appId\": \"$APP2\", \"id\": \"$BUDGET\"}" >/dev/null
+check "a deleted Metric leaves the tables and views in GetModel" "(.tables[0].metrics == [\"$REVENUE\"]) and ((.views[0].metrics // []) == [])" "$(model "$APP2")"
+check "a deleted Metric is skipped in a query" '(.cells // []) == []' "$(ok alice Query "{\"appId\": \"$APP2\", \"metrics\": [\"$BUDGET\"], \"rows\": [\"$PRODUCT\"]}")"
+VIEW2=$(uuid)
+ok alice CreateView "{\"appId\": \"$APP2\", \"view\": {\"id\": \"$VIEW2\", \"name\": \"C only\", \"metrics\": [\"$REVENUE\"], \"filters\": {\"$PRODUCT\": {\"ids\": [\"$C\"]}}}}" >/dev/null
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"rename\": {\"id\": \"$C\", \"name\": \" D \"}}]}" >/dev/null
+check "a member rename keeps the comment cell" ".comments[0].cell[\"$PRODUCT\"] == \"$C\"" "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
+check "a member rename gives the trimmed name" ".lists[] | select(.name == \"Product\") | .members[] | select(.id == \"$C\") | .name == \"D\"" "$(model "$APP2")"
+ok alice SetMemberRole "{\"appId\": \"$APP2\", \"member\": {\"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}}" >/dev/null
+RULE=$(uuid)
+ok alice CreateAccessRule "{\"appId\": \"$APP2\", \"rule\": {\"id\": \"$RULE\", \"role\": \"ROLE_VIEWER\", \"list\": \"$PRODUCT\", \"members\": [\"$A\", \"$C\"]}}" >/dev/null
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"rename\": {\"id\": \"$A\", \"name\": \"A1\"}}]}" >/dev/null
+check "a member rename keeps the access rule" ".rules[0].members == [\"$A\", \"$C\"]" "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
+check "a member rename keeps the TEXT value and the DIMENSION value" \
+  ".lists[] | select(.name == \"Product\") | .members[] | select(.id == \"$A\") | .name == \"A1\" and .properties == {\"$PCAT\": \"$HARD\", \"$NOTE\": \"first\"}" "$(model "$APP2")"
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"rename\": {\"id\": \"$A\", \"name\": \"A\"}}]}" >/dev/null
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"remove\": {\"id\": \"$C\"}}]}" >/dev/null
+check "a removed member stays in the rule row and gives no access" ".rules[0].members == [\"$A\", \"$C\"]" "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
+check "a removed member keeps its comments for a MODELER" ".comments[0].cell[\"$PRODUCT\"] == \"$C\"" "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
+check "a removed member stays in the view filter in GetModel" ".views[] | select(.name == \"C only\") | .filters[\"$PRODUCT\"].ids == [\"$C\"]" "$(model "$APP2")"
+D=$(uuid)
+ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"add\": {\"id\": \"$D\", \"name\": \"D\"}}]}" >/dev/null
+check "a member added again does not get the old access" ".lists[] | select(.name == \"Product\") | [.members[].id] == [\"$A\"]" "$(ok bob GetModel "{\"appId\": \"$APP2\"}")"
+check "a removed id cannot come back" '.code == "aborted" or .code == "already_exists"' \
+  "$(call alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"add\": {\"id\": \"$C\", \"name\": \"C again\"}}]}")"
 ok alice DeleteAccessRule "{\"appId\": \"$APP2\", \"id\": \"$RULE\"}" >/dev/null
 check "delete removes the access rule" '(.rules // []) == []' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
-ok alice CreateList "{\"appId\": \"$APP2\", \"name\": \"Load\", \"kind\": \"LIST_KIND_DIMENSION\"}" >/dev/null
-ok alice AddProperty "{\"appId\": \"$APP2\", \"list\": \"Load\", \"property\": {\"name\": \"Note\", \"type\": \"PROPERTY_TYPE_TEXT\"}}" >/dev/null
+LOAD=$(uuid) LNOTE=$(uuid)
+ok alice CreateList "{\"appId\": \"$APP2\", \"id\": \"$LOAD\", \"name\": \"Load\", \"kind\": \"LIST_KIND_DIMENSION\"}" >/dev/null
+ok alice AddProperty "{\"appId\": \"$APP2\", \"list\": \"$LOAD\", \"property\": {\"id\": \"$LNOTE\", \"name\": \"Note\", \"type\": \"PROPERTY_TYPE_TEXT\"}}" >/dev/null
 PIDS=()
 for i in $(seq 8); do
-  ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"Load\", \"edits\": [{\"add\": {\"name\": \"m$i\", \"properties\": {\"Note\": \"n$i\"}}}]}" >/dev/null &
+  ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$LOAD\", \"edits\": [{\"add\": {\"id\": \"$(uuid)\", \"name\": \"m$i\", \"properties\": {\"$LNOTE\": \"n$i\"}}}]}" >/dev/null &
   PIDS+=($!)
 done
-wait "${PIDS[@]}"
-check "concurrent edits keep all TEXT values" '[.lists[] | select(.name == "Load") | .members[].properties.Note] | sort == ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"]' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
-PIDS=()
+waitall
+check "concurrent edits keep all TEXT values" "[.lists[] | select(.name == \"Load\") | .members[].properties[\"$LNOTE\"]] | sort == [\"n1\", \"n2\", \"n3\", \"n4\", \"n5\", \"n6\", \"n7\", \"n8\"]" "$(model "$APP2")"
 for i in $(seq 8); do
-  ok alice Import "$(jq -n --arg app "$APP2" --arg csv "$(printf 'amount\n%s\n' "$i")" \
-    '{appId: $app, csv: $csv, list: {list: "Sales", propertyColumns: {Amount: "amount"}}}')" >/dev/null &
+  ok alice Import "$(jq -n --arg app "$APP2" --arg csv "$(printf 'amount\n%s\n' "$i")" --arg sales "$SALES" --arg amount "$AMOUNT" \
+    '{appId: $app, csv: $csv, list: {list: $sales, propertyColumns: {($amount): "amount"}}}')" >/dev/null &
   PIDS+=($!)
 done
-wait "${PIDS[@]}"
-check "concurrent imports add all transaction rows" '[.lists[] | select(.name == "Sales") | .members[].name] | length == 12' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+waitall
+check "concurrent imports add all transaction rows" '[.lists[] | select(.name == "Sales") | .members[].name] | length == 12' "$(model "$APP2")"
 ok alice DeleteItem "{\"appId\": \"$APP2\", \"id\": \"$VIEW\", \"type\": \"ITEM_TYPE_VIEW\"}" >/dev/null
-check "deleting a view removes its board widget" '(.boards[0].widgets | length == 1) and (.boards[0].widgets[0].text == "Notes")' \
-  "$(ok alice GetModel "{\"appId\": \"$APP2\"}")"
+check "a deleted view leaves the board widget in GetModel" '(.boards[0].widgets | length == 1) and (.boards[0].widgets[0].text == "Notes")' "$(model "$APP2")"
 
-ok alice SetMemberRole "{\"appId\": \"$APP\", \"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}" >/dev/null
-ok alice SaveAccessRule "{\"appId\": \"$APP\", \"role\": \"ROLE_VIEWER\", \"list\": \"Product\", \"members\": [\"A\"]}" >/dev/null
+ok alice SetMemberRole "{\"appId\": \"$APP\", \"member\": {\"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}}" >/dev/null
+ok alice CreateAccessRule "{\"appId\": \"$APP\", \"rule\": {\"id\": \"$(uuid)\", \"role\": \"ROLE_VIEWER\", \"list\": \"$PRODUCT\", \"members\": [\"$A\"]}}" >/dev/null
 check "access" '(.members | length == 2) and (.rules | length == 1)' "$(ok alice GetAccess "{\"appId\": \"$APP\"}")"
 check "bob sees the app as VIEWER" ".applications | map(select(.id == \"$APP\")) | .[0].role == \"ROLE_VIEWER\"" "$(ok bob ListApplications '{}')"
-check "bob sees only Product A" '.lists[] | select(.name == "Product") | [.members[].name] == ["A"]' "$(ok bob GetModel "{\"appId\": \"$APP\"}")"
-Q=$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"Revenue\", \"Budget\"], \"rows\": [\"Product\"]}")
-check "bob reads only Product A" '[.cells[].coords[0]] | unique == ["A"]' "$Q"
-check "bob total is A only" "$(cell Budget '["A"]').number == 2400" "$Q"
-ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Total\", \"dimensions\": [\"Scenario\", \"Month\"], \"formula\": \"Budget[REMOVE SUM: Product]\"}}" >/dev/null
+check "bob sees only Product A" ".lists[] | select(.name == \"Product\") | [.members[].id] == [\"$A\"]" "$(ok bob GetModel "{\"appId\": \"$APP\"}")"
+Q=$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"$REVENUE\", \"$BUDGET\"], \"rows\": [\"$PRODUCT\"]}")
+check "bob reads only Product A" "[.cells[].coords[0]] | unique == [\"$A\"]" "$Q"
+check "bob total is A only" "$(cell "$BUDGET" "[\"$A\"]").number == 2400" "$Q"
+TOTAL=$(uuid)
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$TOTAL\", \"name\": \"Total\", \"dimensions\": [\"$SCENARIO\", \"$MONTH\"], \"formula\": \"Budget[REMOVE SUM: Product]\"}}" >/dev/null
 check "bob cannot read a total over hidden products" '(.cells // []) == []' \
-  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"Total\"], \"aggregation\": \"AGGREGATION_SUM\"}")"
-check "bob does not see the total in the model" '[.metrics[].name] | index("Total") == null' "$(ok bob GetModel "{\"appId\": \"$APP\"}")"
-check "alice reads the total" '.cells[0].value.number == 2414' "$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"Total\"], \"aggregation\": \"AGGREGATION_SUM\"}")"
-ok alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Pick\", \"dimensions\": [\"Category\"], \"kind\": \"VALUE_KIND_MEMBER\", \"memberList\": \"Product\"}}" >/dev/null
-check "a member Metric gives its list" '.metrics[] | select(.name == "Pick") | .kind == "VALUE_KIND_MEMBER" and .memberList == "Product"' \
-  "$(ok alice GetModel "{\"appId\": \"$APP\"}")"
+  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"$TOTAL\"], \"aggregation\": \"AGGREGATION_SUM\"}")"
+check "bob does not see the total in the model" "[.metrics[].id] | index(\"$TOTAL\") == null" "$(ok bob GetModel "{\"appId\": \"$APP\"}")"
+check "alice reads the total" '.cells[0].value.number == 2414' "$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$TOTAL\"], \"aggregation\": \"AGGREGATION_SUM\"}")"
+PICK=$(uuid)
+ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$PICK\", \"name\": \"Pick\", \"dimensions\": [\"$CATEGORY\"], \"kind\": \"VALUE_KIND_MEMBER\", \"memberList\": \"$PRODUCT\"}}" >/dev/null
+check "a member Metric gives its list" ".metrics[] | select(.id == \"$PICK\") | .kind == \"VALUE_KIND_MEMBER\" and .memberList == \"$PRODUCT\"" "$(model "$APP")"
 check "a member Metric needs an existing list" '.code == "invalid_argument"' \
-  "$(call alice SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"Pick2\", \"kind\": \"VALUE_KIND_MEMBER\", \"memberList\": \"Nothing\"}}")"
-ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Pick\", \"coords\": {\"Category\": \"Hard\"}, \"value\": {\"member\": \"B\"}},
-  {\"metric\": \"Pick\", \"coords\": {\"Category\": \"Soft\"}, \"value\": {\"member\": \"A\"}}]}" >/dev/null
-check "bob does not see a hidden member as a value" '[.cells[] | .value.member] == ["A"]' \
-  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"Pick\"], \"rows\": [\"Category\"]}")"
+  "$(call alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$(uuid)\", \"name\": \"Pick2\", \"kind\": \"VALUE_KIND_MEMBER\", \"memberList\": \"$(uuid)\"}}")"
+ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$PICK\", \"coords\": {\"$CATEGORY\": \"$HARD\"}, \"value\": {\"member\": \"$B\"}},
+  {\"metric\": \"$PICK\", \"coords\": {\"$CATEGORY\": \"$SOFT\"}, \"value\": {\"member\": \"$A\"}}]}" >/dev/null
+check "bob does not see a hidden member as a value" "[.cells[] | .value.member] == [\"$A\"]" \
+  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"$PICK\"], \"rows\": [\"$CATEGORY\"]}")"
 check "bob cannot write" '.code == "permission_denied"' \
-  "$(call bob WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Budget\", \"coords\": {\"Product\": \"A\", \"Scenario\": \"Base\", \"Month\": \"2026-01\"}, \"value\": {\"number\": 1}}]}")"
-check "bob cannot model" '.code == "permission_denied"' "$(call bob SaveMetric "{\"appId\": \"$APP\", \"metric\": {\"name\": \"X\"}}")"
-ok alice AddComment "{\"appId\": \"$APP\", \"metric\": \"Budget\", \"cell\": {\"Product\": \"B\"}, \"body\": \"hidden\"}" >/dev/null
+  "$(call bob WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$BUDGET\", \"coords\": {\"$PRODUCT\": \"$A\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"value\": {\"number\": 1}}]}")"
+check "bob cannot model" '.code == "permission_denied"' "$(call bob CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$(uuid)\", \"name\": \"X\"}}")"
+ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$B\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"hidden\"}}" >/dev/null
 check "bob does not see a comment on a hidden cell" '[.comments[].body] == ["check this"]' \
-  "$(ok bob ListComments "{\"appId\": \"$APP\", \"metric\": \"Budget\"}")"
+  "$(ok bob ListComments "{\"appId\": \"$APP\", \"metric\": \"$BUDGET\"}")"
 check "alice sees all comments" '[.comments[].body] == ["check this", "hidden"]' \
-  "$(ok alice ListComments "{\"appId\": \"$APP\", \"metric\": \"Budget\"}")"
+  "$(ok alice ListComments "{\"appId\": \"$APP\", \"metric\": \"$BUDGET\"}")"
 check "bob cannot read the audit trail" '.code == "permission_denied"' "$(call bob ListAudit "{\"appId\": \"$APP\"}")"
-ok alice SetMemberRole "{\"appId\": \"$APP\", \"user\": \"carol\", \"role\": \"ROLE_CONTRIBUTOR\"}" >/dev/null
-ok alice SaveAccessRule "{\"appId\": \"$APP\", \"role\": \"ROLE_CONTRIBUTOR\", \"list\": \"Product\", \"members\": [\"A\"], \"write\": true}" >/dev/null
-W='"metric": "Budget", "coords": {"Scenario": "Base", "Month": "2026-02", "Product": '
-ok carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{$W \"A\"}, \"value\": {\"number\": 1}}]}" >/dev/null
+ok alice SetMemberRole "{\"appId\": \"$APP\", \"member\": {\"user\": \"carol\", \"role\": \"ROLE_CONTRIBUTOR\"}}" >/dev/null
+ok alice CreateAccessRule "{\"appId\": \"$APP\", \"rule\": {\"id\": \"$(uuid)\", \"role\": \"ROLE_CONTRIBUTOR\", \"list\": \"$PRODUCT\", \"members\": [\"$A\"], \"write\": true}}" >/dev/null
+W='"metric": "'$BUDGET'", "coords": {"'$SCENARIO'": "'$BASE'", "'$MONTH'": "'$FEB'", "'$PRODUCT'": '
+ok carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{$W \"$A\"}, \"value\": {\"number\": 1}}]}" >/dev/null
 check "carol cannot write outside her rule" '.code == "permission_denied"' \
-  "$(call carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{$W \"B\"}, \"value\": {\"number\": 1}}]}")"
+  "$(call carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{$W \"$B\"}, \"value\": {\"number\": 1}}]}")"
 check "carol cannot spread over Product" '.code == "permission_denied"' \
-  "$(call carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"Budget\", \"coords\": {\"Scenario\": \"Base\"}, \"value\": {\"number\": 1}}]}")"
+  "$(call carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$BUDGET\", \"coords\": {\"$SCENARIO\": \"$BASE\"}, \"value\": {\"number\": 1}}]}")"
 check "no user" '.code == "unauthenticated"' "$(curl -sS -X POST "$API/ListApplications" -H 'Content-Type: application/json' -d '{}')"
 
+# A resend with the same client_op_id gives the stored result, and another content with that id is refused.
+OP=$(uuid) RESENT=$(uuid)
+BODY="{\"appId\": \"$APP\", \"clientOpId\": \"$OP\", \"id\": \"$RESENT\", \"name\": \"Resent\", \"kind\": \"LIST_KIND_DIMENSION\"}"
+curl -sS -X POST "$API/CreateList" -H 'Content-Type: application/json' -H "X-Nanashi-User: alice" -d "$BODY" >/dev/null
+check "a resend gives the stored result" 'has("code") | not' "$(curl -sS -X POST "$API/CreateList" -H 'Content-Type: application/json' -H "X-Nanashi-User: alice" -d "$BODY")"
+check "another content with the same client_op_id is refused" '.code == "invalid_argument"' \
+  "$(curl -sS -X POST "$API/CreateList" -H 'Content-Type: application/json' -H "X-Nanashi-User: alice" -d "${BODY/Resent/Other}")"
+
 AUDIT=$(ok alice ListAudit "{\"appId\": \"$APP\"}")
-check "audit trail" '([.entries[].action] | index("WriteCells") != null) and ([.entries[].action] | index("Query") == null) and (.entries[0] | .action == "WriteCells" and .user == "carol")' "$AUDIT"
+check "audit trail" '([.entries[].action] | index("WriteCells") != null) and ([.entries[].action] | index("Query") == null) and ([.entries[].action] | index("CreateList") != null)' "$AUDIT"
 echo "e2e passed: $APP (restored as $APP2), $(jq '.entries | length' <<<"$AUDIT") audit entries"

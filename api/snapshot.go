@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"slices"
 	"strings"
 
@@ -26,7 +25,7 @@ func sameSeq(em engineModel, cubes ...map[string]engineCube) bool {
 }
 
 // snapshotData is the content of a snapshot. Engine is the body of GET / as the engine sent it.
-// Overrides has the cells that override the formula of each overridable Metric.
+// Inputs and Overrides are by Metric id. Overrides has the cells that override the formula of each overridable Metric.
 type snapshotData struct {
 	Engine    json.RawMessage               `json:"engine"`
 	Inputs    map[string]engineCube         `json:"inputs"`
@@ -34,26 +33,31 @@ type snapshotData struct {
 	Kinds     map[string]nanashiv1.ListKind `json:"kinds"`
 	Props     []propRow                     `json:"props"`
 	Items     []itemRow                     `json:"items"`
+	Metrics   map[string]metricRow          `json:"metrics,omitempty"`
 }
 
-// replayOps makes the operations that build the engine model of a snapshot in an empty model.
+// replayOps makes the operations that build the engine model of a snapshot in an empty model, with the same ids.
 // ponytail: formulas replay in the engine order.
 func replayOps(em engineModel, inputs, overrides map[string]engineCube) []op {
 	var ops []op
 	for _, d := range em.Dims {
-		ops = append(ops, newOp("add_dimension", d.Name, d.Members).with(map[string]any{"ordered": d.Ordered}))
+		ops = append(ops, newOp("add_dimension", map[string]any{"id": d.ID, "name": d.Name, "ordered": d.Ordered}))
+		for _, m := range d.Members {
+			ops = append(ops, newOp("add_member", map[string]any{"dim": d.ID, "id": m.ID, "name": m.Name}))
+		}
 	}
 	for _, d := range em.Dims {
 		for _, p := range d.Props {
-			ops = append(ops, newOp("add_property", d.Name, p.Name, p.Target, p.Values))
+			ops = append(ops, newOp("add_property", map[string]any{"dim": d.ID, "id": p.ID, "name": p.Name, "target": p.Target}),
+				newOp("set_property_values", map[string]any{"dim": d.ID, "prop": p.ID, "values": p.Values}))
 		}
 	}
 	for _, m := range em.Metrics {
 		if m.Formula != "" {
-			ops = append(ops, newOp("add_formula", m.Name, m.Dims, m.Formula).with(map[string]any{"kind": m.Kind, "overridable": m.Overridable}))
+			ops = append(ops, newOp("add_formula", map[string]any{"id": m.ID, "name": m.Name, "dims": m.Dims, "formula": m.Formula, "kind": m.Kind, "overridable": m.Overridable}))
 			continue
 		}
-		cube := inputs[m.Name]
+		cube := inputs[m.ID]
 		index := make([]int, len(m.Dims))
 		for i, d := range m.Dims {
 			index[i] = slices.Index(cube.Dims, d)
@@ -66,90 +70,93 @@ func replayOps(em engineModel, inputs, overrides map[string]engineCube) []op {
 			}
 			cells = append(cells, []any{coords, c[len(c)-1]})
 		}
-		ops = append(ops, newOp("add_input", m.Name, m.Dims, cells).with(map[string]any{"kind": m.Kind}))
+		ops = append(ops, newOp("add_input", map[string]any{"id": m.ID, "name": m.Name, "dims": m.Dims, "kind": m.Kind, "cells": cells}))
 	}
 	for _, m := range em.Metrics {
-		if cube, ok := overrides[m.Name]; ok {
-			ops = append(ops, copyCellOps(m.Name, "", "", cube)...)
+		if cube, ok := overrides[m.ID]; ok {
+			ops = append(ops, copyCellOps(m.ID, "", "", cube, true)...)
 		}
 	}
 	return ops
 }
 
+func restoreStmts(app string, snap snapshotData) []stmt {
+	var out []stmt
+	for list, kind := range snap.Kinds {
+		out = append(out, stmt{sql: "insert into app_list (app_id, id, kind) values ($1, $2, $3)", args: []any{app, list, kind}})
+	}
+	for _, p := range snap.Props {
+		var metric *string
+		if p.MetricID != "" {
+			metric = &p.MetricID
+		}
+		out = append(out, stmt{sql: "insert into app_property (app_id, list_id, id, name, type, metric_id, text_values) values ($1, $2, $3, $4, $5, $6, $7)",
+			args: []any{app, p.ListID, p.ID, p.Name, p.Type, metric, textJSON(p.Text)}})
+	}
+	for id, c := range snap.Metrics {
+		out = append(out, stmt{sql: "insert into app_metric (app_id, metric_id, description, folder, owner) values ($1, $2, $3, $4, $5)",
+			args: []any{app, id, c.Description, c.Folder, c.Owner}})
+	}
+	for _, it := range snap.Items {
+		out = append(out, stmt{sql: "insert into app_item (app_id, id, type, def) values ($1, $2, $3, $4)", args: []any{app, it.ID, it.Type, string(it.Def)}})
+	}
+	return out
+}
+
 // The actions follow.
 
+// CreateApplication goes through the outbox: the first transaction makes the application and its member, the
+// engine gets the model, and the application shows only when the row is done. A refusal deletes the application.
 func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request[nanashiv1.CreateApplicationRequest]) (*connect.Response[nanashiv1.Application], error) {
 	c := callerOf(ctx)
 	name := strings.TrimSpace(req.Msg.Name)
-	if name == "" {
-		return nil, invalid(errors.New("アプリケーションの名前が空"))
+	if name == "" || req.Msg.Id == "" {
+		return nil, invalid(errors.New("アプリケーションの id と名前が要る"))
 	}
-	var snap snapshotData
-	if req.Msg.SnapshotId != "" {
-		var source, content string
-		err := s.Pool.QueryRow(ctx, "select app_id, content from app_snapshot where id = $1", req.Msg.SnapshotId).Scan(&source, &content)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("スナップショットがない"))
-		}
-		if err != nil {
-			return nil, dbError(err)
-		}
-		// The new application has no access rules, so only a user who reads all data can restore it.
-		r, _, err := s.rights(ctx, source, c.user)
-		if err != nil {
-			return nil, err
-		}
-		if r < modeler {
-			return nil, connect.NewError(connect.CodePermissionDenied, errors.New("このスナップショットを戻す権限がない"))
-		}
-		if err := json.Unmarshal([]byte(content), &snap); err != nil {
-			return nil, dbError(err)
-		}
-	}
-	var em engineModel
-	if snap.Engine != nil {
-		var err error
-		if em, err = parseEngineModel(snap.Engine); err != nil {
-			return nil, dbError(err)
-		}
-	}
-	app := "app-" + newID()
-	// The rows go first, so an error before Engines.Create makes no engine model. A replay error or a commit error
-	// after Engines.Create leaves an engine model without an application in the router (the router has no delete).
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "insert into app_application (id, name) values ($1, $2)", app, name); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, "insert into app_member (app_id, user_name, role) values ($1, $2, $3)", app, c.user, admin); err != nil {
-			return err
-		}
-		for list, kind := range snap.Kinds {
-			if _, err := tx.Exec(ctx, "insert into app_list (app_id, name, kind) values ($1, $2, $3)", app, list, kind); err != nil {
-				return err
+	app := req.Msg.Id
+	_, err := s.outbox(ctx, app, req.Msg, func() (plan, error) {
+		var snap snapshotData
+		if req.Msg.SnapshotId != "" {
+			var source, content string
+			err := s.Pool.QueryRow(ctx, "select app_id, content from app_snapshot where id = $1", req.Msg.SnapshotId).Scan(&source, &content)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return plan{}, connect.NewError(connect.CodeNotFound, errors.New("スナップショットがない"))
+			}
+			if err != nil {
+				return plan{}, dbError(err)
+			}
+			// The new application has no access rules, so only a user who reads all data can restore it.
+			r, _, err := s.rights(ctx, source, c.user)
+			if err != nil {
+				return plan{}, err
+			}
+			if r < modeler {
+				return plan{}, connect.NewError(connect.CodePermissionDenied, errors.New("このスナップショットを戻す権限がない"))
+			}
+			if err := json.Unmarshal([]byte(content), &snap); err != nil {
+				return plan{}, dbError(err)
 			}
 		}
-		for _, p := range snap.Props {
-			if _, err := tx.Exec(ctx, "insert into app_property (app_id, list, name, type, text_values) values ($1, $2, $3, $4, $5)",
-				app, p.List, p.Name, p.Type, textJSON(p.Text)); err != nil {
-				return err
-			}
-		}
-		for _, it := range snap.Items {
-			if _, err := tx.Exec(ctx, "insert into app_item (app_id, id, type, def) values ($1, $2, $3, $4)", app, it.ID, it.Type, string(it.Def)); err != nil {
-				return err
-			}
-		}
-		if err := s.Engines.Create(ctx, app); err != nil {
-			log.Printf("CreateApplication: %v", err)
-			return connect.NewError(connect.CodeUnavailable, errors.New("モデルを作れない"))
+		p := plan{
+			stmts: []stmt{
+				{sql: "insert into app_application (id, name) values ($1, $2) on conflict do nothing", args: []any{app, name}, zero: tag(errExists, "同じ id のアプリケーションがすでにある")},
+				{sql: "insert into app_member (app_id, user_name, role) values ($1, $2, $3)", args: []any{app, c.user, admin}},
+			},
+			made: []madeRow{{Table: "app_application", ID: app}},
 		}
 		if snap.Engine == nil {
-			return nil
+			return p, nil
 		}
-		return s.Engines.write(ctx, app, c.user, replayOps(em, snap.Inputs, snap.Overrides))
+		em, err := parseEngineModel(snap.Engine)
+		if err != nil {
+			return plan{}, dbError(err)
+		}
+		p.stmts = append(p.stmts, restoreStmts(app, snap)...)
+		p.ops = replayOps(em, snap.Inputs, snap.Overrides)
+		return p, nil
 	})
 	if err != nil {
-		return nil, dbError(err)
+		return nil, err
 	}
 	return connect.NewResponse(&nanashiv1.Application{Id: app, Name: name, Role: admin}), nil
 }
@@ -167,52 +174,106 @@ func (s *PlanServer) ListSnapshots(ctx context.Context, req *connect.Request[nan
 	return connect.NewResponse(&nanashiv1.ListSnapshotsResponse{Snapshots: snaps}), nil
 }
 
+// CreateSnapshot reads one version of the application without a lock. It settles the pending operations, reads
+// the version and the pending count, reads the engine (all cubes of one seq), and then reads the api rows in one
+// REPEATABLE READ transaction. A pending row at the first read, a version change, or a pending row at the end
+// means that the api rows can differ from the engine: read again. The first read sees a row that another process
+// made pending after the settle, so the engine read never misses its operations.
 func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[nanashiv1.CreateSnapshotRequest]) (*connect.Response[nanashiv1.Snapshot], error) {
 	app := req.Msg.AppId
-	// The lock makes the engine reads and the api rows (meta, items) read one version of the application.
-	defer s.lock(app)()
+	if req.Msg.Id == "" {
+		return nil, invalid(errors.New("スナップショットの id が要る"))
+	}
+	snap := &nanashiv1.Snapshot{Id: req.Msg.Id, Name: req.Msg.Name, User: callerOf(ctx).user}
+	for try := 0; ; try++ {
+		if err := s.settlePending(ctx, app); err != nil {
+			return nil, err
+		}
+		var version, pending int64
+		if err := s.Pool.QueryRow(ctx, versionAndPending, app).Scan(&version, &pending); err != nil {
+			return nil, dbError(err)
+		}
+		if pending > 0 {
+			if try == 2 {
+				return nil, connect.NewError(connect.CodeUnavailable, errors.New("結果の分からない操作が残っているので、スナップショットを作れない。もう一度試す"))
+			}
+			continue
+		}
+		data, err := s.readEngine(ctx, app)
+		if err != nil {
+			return nil, err
+		}
+		result, err := s.apiOnly(ctx, app, req.Msg, pgx.TxOptions{IsoLevel: pgx.RepeatableRead}, func(tx pgx.Tx) (any, error) {
+			var now, pending int64
+			if err := tx.QueryRow(ctx, versionAndPending, app).Scan(&now, &pending); err != nil {
+				return nil, err
+			}
+			if now != version || pending > 0 {
+				return nil, errChanged
+			}
+			meta, err := metaIn(ctx, tx, app)
+			if err != nil {
+				return nil, err
+			}
+			data.Kinds, data.Props, data.Metrics = meta.Kinds, meta.Props, meta.Metrics
+			if data.Items, err = itemsIn(ctx, tx, app); err != nil {
+				return nil, err
+			}
+			content, err := json.Marshal(data)
+			if err != nil {
+				return nil, err
+			}
+			var ms int64
+			err = tx.QueryRow(ctx, `insert into app_snapshot (id, app_id, name, user_name, content) values ($1, $2, $3, $4, $5)
+				returning (extract(epoch from created_at) * 1000)::bigint`, snap.Id, app, snap.Name, snap.User, string(content)).Scan(&ms)
+			return map[string]int64{"created_at": ms}, err
+		})
+		if errors.Is(err, errChanged) {
+			if try == 2 {
+				return nil, connect.NewError(connect.CodeAborted, errors.New("モデルが変わり続けているので、スナップショットを作れない"))
+			}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		snap.CreatedAt = createdAt(result)
+		return connect.NewResponse(snap), nil
+	}
+}
+
+const versionAndPending = `select a.version, (select count(*) from app_operation o where o.app_id = a.id and o.status = 'pending')
+	from app_application a where a.id = $1`
+
+// errChanged is a Connect error, so dbError passes it through. CreateSnapshot then reads again.
+var errChanged = connect.NewError(connect.CodeAborted, errors.New("changed"))
+
+// readEngine reads the model and the cells of one version of the engine.
+func (s *PlanServer) readEngine(ctx context.Context, app string) (snapshotData, error) {
 	var data snapshotData
-	// A write of a different api process between two reads gives cubes of different versions. Then read all again.
+	// A write between two reads gives cubes of different versions. Then read all again.
 	for try := 0; ; try++ {
 		em, raw, err := s.Engines.model(ctx, app)
 		if err != nil {
-			return nil, err
+			return data, err
 		}
 		data = snapshotData{Engine: raw, Inputs: map[string]engineCube{}, Overrides: map[string]engineCube{}}
 		for _, m := range em.Metrics {
 			if m.Formula == "" {
-				if data.Inputs[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "slice"}); err != nil {
-					return nil, err
+				if data.Inputs[m.ID], err = s.Engines.read(ctx, app, engineRead{Metric: m.ID, Path: "slice"}); err != nil {
+					return data, err
 				}
 			} else if m.Overridable {
-				if data.Overrides[m.Name], err = s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "overrides"}); err != nil {
-					return nil, err
+				if data.Overrides[m.ID], err = s.Engines.read(ctx, app, engineRead{Metric: m.ID, Path: "overrides"}); err != nil {
+					return data, err
 				}
 			}
 		}
 		if sameSeq(em, data.Inputs, data.Overrides) {
-			break
+			return data, nil
 		}
 		if try == 2 {
-			return nil, connect.NewError(connect.CodeAborted, errors.New("モデルが変わり続けているので、スナップショットを作れない"))
+			return data, connect.NewError(connect.CodeAborted, errors.New("モデルが変わり続けているので、スナップショットを作れない"))
 		}
 	}
-	meta, err := s.meta(ctx, app)
-	if err != nil {
-		return nil, err
-	}
-	data.Kinds, data.Props = meta.Kinds, meta.Props
-	if data.Items, err = s.items(ctx, app); err != nil {
-		return nil, err
-	}
-	content, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-	snap := &nanashiv1.Snapshot{Id: newID(), Name: req.Msg.Name, User: callerOf(ctx).user}
-	if err := s.Pool.QueryRow(ctx, `insert into app_snapshot (id, app_id, name, user_name, content) values ($1, $2, $3, $4, $5)
-		returning (extract(epoch from created_at) * 1000)::bigint`, snap.Id, app, snap.Name, snap.User, string(content)).Scan(&snap.CreatedAt); err != nil {
-		return nil, dbError(err)
-	}
-	return connect.NewResponse(snap), nil
 }

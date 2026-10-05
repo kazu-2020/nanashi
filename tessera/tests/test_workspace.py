@@ -286,6 +286,30 @@ class WithJournal(JournalCase, unittest.TestCase):
         reopen(self, ws, self.engine())
 
 
+    def test_journal_failure_does_not_record_a_rejection(self):
+        ws = workspace(self, model(self.engine()))
+
+        def take_all(m):  # Refused only after move("p0", "p1", "Jan", 100) of the same batch
+            if m.get("Stock", Product="p0", Month="Jan") == 0:
+                raise ValueError("在庫がない")
+            m.set_cell("Stock", 0, Product="p0", Month="Jan")
+
+        def broken(records):
+            raise OSError("disk full")
+        original, ws.journal.append_many = ws.journal.append_many, broken
+        release = hold(ws)
+        first = ws.submit(move("p0", "p1", "Jan", 100), client_op_id="r1")
+        second = ws.submit(take_all, client_op_id="r2")
+        release()
+        for f in (first, second):
+            with self.assertRaises(OSError):
+                f.result()
+        ws.journal.append_many = original
+        self.assertEqual(ws.journal.outcomes_of_many(["r2"]), ({}, {}))
+        self.assertEqual(ws.write(take_all, client_op_id="r2"), 1)  # The resend is not refused
+        ws.close()
+
+
 @unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class RustWithJournal(WithJournal):
     engine = staticmethod(RustEngine) if RustEngine is not None else None

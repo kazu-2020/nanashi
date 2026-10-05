@@ -1,17 +1,16 @@
 package api
 
 // All engine requests go through the router. The router starts the engine of a model when a request comes for it.
+// docs/ids.md gives the engine HTTP contract: each reference is a UUID.
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -25,17 +24,13 @@ type Engines struct {
 	HTTP   *http.Client
 }
 
-// op is one Model operation in a write to the engine (POST /writes).
-type op struct {
-	Op     string         `json:"op"`
-	Args   []any          `json:"args"`
-	Kwargs map[string]any `json:"kwargs,omitempty"`
-}
+// op is one Model operation in a write to the engine (POST /writes): {"op": <name>, <argument>: <value>, ...}.
+// The arguments have names, so a stored op is readable and the engine checks the argument names.
+type op map[string]any
 
-func newOp(name string, args ...any) op { return op{Op: name, Args: args} }
-
-func (o op) with(kwargs map[string]any) op {
-	o.Kwargs = kwargs
+func newOp(name string, args map[string]any) op {
+	o := op{"op": name}
+	maps.Copy(o, args)
 	return o
 }
 
@@ -48,24 +43,32 @@ type engineModel struct {
 }
 
 type engineDim struct {
+	ID      string
 	Name    string
-	Members []string
+	Members []engineMember
 	Ordered bool
 	Props   []engineProp
 }
 
-// engineProp is a DIMENSION property: a member of the list maps to a member of Target.
+type engineMember struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// engineProp is a DIMENSION property: a member id of the list maps to a member id of Target.
 type engineProp struct {
+	ID     string
 	Name   string
 	Target string
 	Values map[string]string
 }
 
 type engineMetric struct {
+	ID          string
 	Name        string
-	Dims        []string
-	Kind        string
-	Formula     string // Empty for an input Metric.
+	Dims        []string // List ids.
+	Kind        string   // "number", "boolean" or "member:<list id>".
+	Formula     string   // Empty for an input Metric.
 	Overridable bool
 }
 
@@ -77,20 +80,46 @@ type engineCube struct {
 	Cells [][]any  `json:"cells"`
 }
 
-func (m engineModel) dim(name string) (engineDim, bool) {
-	i := slices.IndexFunc(m.Dims, func(d engineDim) bool { return d.Name == name })
+func (m engineModel) dim(id string) (engineDim, bool) {
+	i := slices.IndexFunc(m.Dims, func(d engineDim) bool { return d.ID == id })
 	if i < 0 {
 		return engineDim{}, false
 	}
 	return m.Dims[i], true
 }
 
-func (m engineModel) metric(name string) (engineMetric, error) {
-	i := slices.IndexFunc(m.Metrics, func(x engineMetric) bool { return x.Name == name })
+func (m engineModel) metric(id string) (engineMetric, bool) {
+	i := slices.IndexFunc(m.Metrics, func(x engineMetric) bool { return x.ID == id })
 	if i < 0 {
-		return engineMetric{}, fmt.Errorf("Metric %s がない", name)
+		return engineMetric{}, false
 	}
-	return m.Metrics[i], nil
+	return m.Metrics[i], true
+}
+
+func (m engineModel) name(id string) string {
+	if d, ok := m.dim(id); ok {
+		return d.Name
+	}
+	if x, ok := m.metric(id); ok {
+		return x.Name
+	}
+	return id
+}
+
+func (d engineDim) member(id string) (engineMember, bool) {
+	i := slices.IndexFunc(d.Members, func(m engineMember) bool { return m.ID == id })
+	if i < 0 {
+		return engineMember{}, false
+	}
+	return d.Members[i], true
+}
+
+func (d engineDim) prop(id string) (engineProp, bool) {
+	i := slices.IndexFunc(d.Props, func(p engineProp) bool { return p.ID == id })
+	if i < 0 {
+		return engineProp{}, false
+	}
+	return d.Props[i], true
 }
 
 func parseEngineModel(body []byte) (engineModel, error) {
@@ -110,7 +139,8 @@ func parseEngineModel(body []byte) (engineModel, error) {
 	}
 	for _, e := range dims {
 		var d struct {
-			Members        []string                     `json:"members"`
+			Name           string                       `json:"name"`
+			Members        []engineMember               `json:"members"`
 			Ordered        bool                         `json:"ordered"`
 			Properties     json.RawMessage              `json:"properties"`
 			PropertyValues map[string]map[string]string `json:"property_values"`
@@ -122,17 +152,20 @@ func parseEngineModel(body []byte) (engineModel, error) {
 		if err != nil {
 			return engineModel{}, err
 		}
-		dim := engineDim{Name: e.key, Members: d.Members, Ordered: d.Ordered}
+		dim := engineDim{ID: e.key, Name: d.Name, Members: d.Members, Ordered: d.Ordered}
 		for _, p := range props {
-			var target string
-			if err := json.Unmarshal(p.value, &target); err != nil {
+			var prop struct {
+				Name   string `json:"name"`
+				Target string `json:"target"`
+			}
+			if err := json.Unmarshal(p.value, &prop); err != nil {
 				return engineModel{}, err
 			}
 			values := d.PropertyValues[p.key]
 			if values == nil {
 				values = map[string]string{}
 			}
-			dim.Props = append(dim.Props, engineProp{Name: p.key, Target: target, Values: values})
+			dim.Props = append(dim.Props, engineProp{ID: p.key, Name: prop.Name, Target: prop.Target, Values: values})
 		}
 		out.Dims = append(out.Dims, dim)
 	}
@@ -142,6 +175,7 @@ func parseEngineModel(body []byte) (engineModel, error) {
 	}
 	for _, e := range metrics {
 		var m struct {
+			Name        string   `json:"name"`
 			Dims        []string `json:"dims"`
 			Kind        string   `json:"kind"`
 			Formula     string   `json:"formula"`
@@ -150,7 +184,7 @@ func parseEngineModel(body []byte) (engineModel, error) {
 		if err := json.Unmarshal(e.value, &m); err != nil {
 			return engineModel{}, err
 		}
-		out.Metrics = append(out.Metrics, engineMetric{Name: e.key, Dims: m.Dims, Kind: m.Kind, Formula: m.Formula, Overridable: m.Overridable})
+		out.Metrics = append(out.Metrics, engineMetric{ID: e.key, Name: m.Name, Dims: m.Dims, Kind: m.Kind, Formula: m.Formula, Overridable: m.Overridable})
 	}
 	return out, nil
 }
@@ -184,20 +218,56 @@ func objectEntries(raw json.RawMessage) ([]jsonEntry, error) {
 	return out, nil
 }
 
-// engineRead is one read of a Metric from the engine: GET /metrics/<metric>/<path>?<query>.
+// engineRead is one read of a Metric from the engine: GET /metrics/<metric id>/<path>?<query>.
 type engineRead struct {
 	Metric string
 	Path   string // "summary" for a number Metric, "slice" for other kinds, "overrides" for the overrides of a formula.
 	Query  map[string][]string
 }
 
-// The actions follow.
-
-func newID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+// engineReply is the status and the body of an engine response. Code and Message come from an error body.
+type engineReply struct {
+	Status  int
+	Body    []byte
+	Code    string
+	Message string
 }
+
+// outcome is what a write reply means for the outbox.
+type outcome int
+
+const (
+	done    outcome = iota // 200: the engine committed the write, now or at an earlier send.
+	failed                 // The engine or the router refused the request: 400, 413 or 409 duplicate_id. A resend gets the same refusal.
+	unknown                // Anything else: the result is not known. The write stays pending.
+)
+
+// outcome tells what a write reply means for the outbox. A 4xx that is a state of the system and not a refusal
+// of the request stays unknown: 404 no_model, 405 read_only, 421 not_leader and 429 overloaded can go away.
+func (r engineReply) outcome() outcome {
+	switch {
+	case r.Status == http.StatusOK:
+		return done
+	case r.Status == http.StatusBadRequest, r.Status == http.StatusRequestEntityTooLarge, r.Status == http.StatusConflict && r.Code == "duplicate_id":
+		return failed
+	}
+	return unknown
+}
+
+func (r engineReply) connectError() error {
+	code := map[int]connect.Code{
+		http.StatusBadRequest:            connect.CodeInvalidArgument,
+		http.StatusNotFound:              connect.CodeNotFound,
+		http.StatusConflict:              connect.CodeAborted,
+		http.StatusRequestEntityTooLarge: connect.CodeResourceExhausted,
+	}[r.Status]
+	if code == 0 || r.Message == "" {
+		return connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンが応答しない"))
+	}
+	return connect.NewError(code, errors.New(r.Message))
+}
+
+// The actions follow.
 
 // Create makes the model of an application in the router. It is idempotent and starts no engine.
 func (e *Engines) Create(ctx context.Context, app string) error {
@@ -205,8 +275,14 @@ func (e *Engines) Create(ctx context.Context, app string) error {
 	if err != nil {
 		return err
 	}
-	_, err = e.do(req)
-	return err
+	r, err := e.do(req)
+	if err != nil {
+		return err
+	}
+	if r.Status != http.StatusOK {
+		return r.connectError()
+	}
+	return nil
 }
 
 func (e *Engines) get(ctx context.Context, app, path string, query url.Values) ([]byte, error) {
@@ -218,7 +294,14 @@ func (e *Engines) get(ctx context.Context, app, path string, query url.Values) (
 	if err != nil {
 		return nil, err
 	}
-	return e.do(req)
+	r, err := e.do(req)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status != http.StatusOK {
+		return nil, r.connectError()
+	}
+	return r.Body, nil
 }
 
 func (e *Engines) model(ctx context.Context, app string) (engineModel, []byte, error) {
@@ -240,52 +323,43 @@ func (e *Engines) read(ctx context.Context, app string, r engineRead) (engineCub
 	return cube, err
 }
 
-// write sends the operations as one transaction. A new client_op_id lets the router resend it safely.
-func (e *Engines) write(ctx context.Context, app, reason string, ops []op) error {
-	if len(ops) == 0 {
-		return nil
-	}
-	body, err := json.Marshal(map[string]any{"client_op_id": newID(), "reason": reason, "ops": ops})
+// write sends the operations as one transaction. The client_op_id of the request (opID) lets the api resend it
+// safely: the engine does not commit the same opID two times, and it returns the same refusal again.
+// The error is only for a transport failure: the result is then not known.
+func (e *Engines) write(ctx context.Context, app, reason, opID string, ops []op) (engineReply, error) {
+	b, err := json.Marshal(map[string]any{"client_op_id": opID, "reason": reason, "ops": ops})
 	if err != nil {
-		return err
+		return engineReply{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", e.Router+"/models/"+app+"/writes", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", e.Router+"/models/"+app+"/writes", bytes.NewReader(b))
 	if err != nil {
-		return err
+		return engineReply{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	_, err = e.do(req)
-	return err
+	return e.do(req)
 }
 
-// do sends a request. An engine error with a message for the user becomes a Connect error with that message.
-func (e *Engines) do(req *http.Request) ([]byte, error) {
+// do sends a request and gives the reply. A transport failure is an Unavailable error.
+func (e *Engines) do(req *http.Request) (engineReply, error) {
 	res, err := e.HTTP.Do(req)
 	if err != nil {
 		log.Printf("engine %s: %v", req.URL.Path, err)
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンに接続できない"))
+		return engineReply{}, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンに接続できない"))
 	}
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンの応答を読めない"))
+		return engineReply{}, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンの応答を読めない"))
 	}
-	if res.StatusCode == http.StatusOK {
-		return body, nil
-	}
+	r := engineReply{Status: res.StatusCode, Body: body}
 	var fail struct {
+		Error   string `json:"error"`
 		Message string `json:"message"`
 	}
 	json.Unmarshal(body, &fail)
-	code := map[int]connect.Code{
-		http.StatusBadRequest:            connect.CodeInvalidArgument,
-		http.StatusNotFound:              connect.CodeNotFound,
-		http.StatusConflict:              connect.CodeAborted,
-		http.StatusRequestEntityTooLarge: connect.CodeResourceExhausted,
-	}[res.StatusCode]
-	if code == 0 || fail.Message == "" {
-		log.Printf("engine %s: %d %s", req.URL.Path, res.StatusCode, body)
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンが応答しない"))
+	r.Code, r.Message = fail.Error, fail.Message
+	if r.Status != http.StatusOK {
+		log.Printf("engine %s: %d %s", req.URL.Path, r.Status, body)
 	}
-	return nil, connect.NewError(code, errors.New(fail.Message))
+	return r, nil
 }

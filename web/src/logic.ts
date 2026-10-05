@@ -13,10 +13,15 @@ import {
 // METRIC is the pseudo-dimension that puts the Metrics on an axis.
 export const METRIC = "#metric";
 
-export const dimLabel = (d: string) => (d === METRIC ? "メトリック" : d);
+// Names gives the name of a list, a member or a Metric by id. The grid and the keys hold ids.
+export type Names = Record<string, string>;
 
+// label gives the name of an id for the screen. An id without a name (a removed object) shows as it is.
+export const label = (names: Names, id: string) => names[id] ?? id;
+
+// Filters is list id to member ids.
 export type Filters = Record<string, string[]>;
-// The member order of each list, and the Metric names for METRIC.
+// The member order (ids) of each list, and the Metric ids for METRIC.
 export type Order = Record<string, string[]>;
 
 export type Grid = {
@@ -112,14 +117,15 @@ export function buildGrid(
   };
 }
 
-export function formatValue(v: Value | undefined): string {
+// formatValue gives the text of a value. A member value is an id: the text is its name.
+export function formatValue(v: Value | undefined, names: Names): string {
   switch (v?.value.case) {
     case "number":
       return String(Math.round(v.value.value * 1e6) / 1e6);
     case "boolean":
       return v.value.value ? "TRUE" : "FALSE";
     case "member":
-      return v.value.value;
+      return label(names, v.value.value);
     default:
       return "";
   }
@@ -172,15 +178,22 @@ export function editable(
   return def.dimensions.every((d) => onAxis(d) || (filters[d]?.length ?? 0) <= 1);
 }
 
-export const keyLabel = (k: string[]) => k.map((m) => m || "(なし)").join(" / ");
+export const keyLabel = (k: string[], names: Names) =>
+  k.map((m) => (m ? label(names, m) : "(なし)")).join(" / ");
 
 function csvField(s: string): string {
   return /[",\n\r]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 
-export function gridToCsv(g: Grid): string {
-  const header = [...g.rowDims.map(dimLabel), ...g.colKeys.map((c) => keyLabel(c) || "値")];
-  const lines = g.rowKeys.map((r) => [...r, ...g.colKeys.map((c) => formatValue(g.value(r, c)))]);
+export function gridToCsv(g: Grid, names: Names): string {
+  const header = [
+    ...g.rowDims.map((d) => label(names, d)),
+    ...g.colKeys.map((c) => keyLabel(c, names) || "値"),
+  ];
+  const lines = g.rowKeys.map((r) => [
+    ...r.map((m) => label(names, m)),
+    ...g.colKeys.map((c) => formatValue(g.value(r, c), names)),
+  ]);
   return [header, ...lines].map((l) => l.map(csvField).join(",")).join("\n") + "\n";
 }
 
@@ -220,10 +233,13 @@ export function mergeFilters(view: Filters, page: Record<string, string>): Filte
 }
 
 // chartRows gives one object per row key with one number per column key, for recharts.
-export function chartRows(g: Grid): { series: string[]; data: Record<string, string | number>[] } {
-  const series = g.colKeys.map((c) => keyLabel(c) || "値");
+export function chartRows(
+  g: Grid,
+  names: Names,
+): { series: string[]; data: Record<string, string | number>[] } {
+  const series = g.colKeys.map((c) => keyLabel(c, names) || "値");
   const data = g.rowKeys.map((r) => {
-    const o: Record<string, string | number> = { name: keyLabel(r) || "合計" };
+    const o: Record<string, string | number> = { name: keyLabel(r, names) || "合計" };
     g.colKeys.forEach((c, i) => {
       const v = g.value(r, c);
       if (v?.value.case === "number") o[series[i]] = v.value.value;
@@ -262,15 +278,15 @@ export type Spec = {
 };
 
 export const toFilters = (f: { [k: string]: Members }): Filters =>
-  Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.names]));
+  Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.ids]));
 export const toProtoFilters = (f: Filters) =>
   Object.fromEntries(
     Object.entries(f)
       .filter(([, v]) => v.length)
-      .map(([k, v]) => [k, { names: v }]),
+      .map(([k, v]) => [k, { ids: v }]),
   );
 
-// defaultSpec puts the Metrics (if more than one) and the first dimension on rows, and the second on columns.
+// defaultSpec puts the Metrics (if more than one) and the first list on rows, and the second on columns. All ids.
 export function defaultSpec(metrics: string[], dims: string[]): Spec {
   const many = metrics.length > 1;
   return {
@@ -282,3 +298,30 @@ export function defaultSpec(metrics: string[], dims: string[]): Spec {
     display: Display.GRID,
   };
 }
+
+// uuidv7 makes a UUIDv7 (RFC 9562) from a Unix time in milliseconds and 16 random bytes.
+// The time fills the first 48 bits, so an id from a later millisecond sorts after an id from an earlier one.
+export function uuidv7(ms: number, random: Uint8Array): string {
+  const b = random.slice(0, 16);
+  for (let i = 0; i < 6; i++) b[i] = Math.floor(ms / 2 ** (8 * (5 - i))) % 256;
+  b[6] = (b[6] & 0x0f) | 0x70; // version 7
+  b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+// followOpId gives the client_op_id of the second write of one user action. It adds 1 to the last 48 bits of
+// id, so a retry of the action gives the same value again, and the value is not id.
+export const followOpId = (id: string) =>
+  id.slice(0, 24) + ((parseInt(id.slice(24), 16) + 1) % 2 ** 48).toString(16).padStart(12, "0");
+
+// dropsInputCells tells if saving next over the input Metric old deletes its cells: the engine makes the Metric again.
+export const dropsInputCells = (
+  old: Pick<MetricDef, "formula" | "kind" | "memberList" | "dimensions">,
+  next: Pick<MetricDef, "formula" | "kind" | "memberList" | "dimensions">,
+) =>
+  old.formula === "" &&
+  (next.formula !== "" ||
+    next.kind !== old.kind ||
+    next.memberList !== old.memberList ||
+    next.dimensions.join("\n") !== old.dimensions.join("\n"));

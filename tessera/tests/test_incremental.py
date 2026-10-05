@@ -138,7 +138,7 @@ class RecomputesOnlyTheSlice(unittest.TestCase):
         self.assertEqual(set(self.regions()), {"Picked", "Missing"})
 
     def test_formula_change_recomputes_only_that_metric(self):
-        self.m.add_formula("Plus1", ["Product"], "Price + 2")  # Plus1 を参照する Metric はない
+        self.m.add_formula("Plus1", ["Product"], "Price + 2", id=self.m.metric_id("Plus1"))  # no Metric refers to Plus1
         self.m.recalc()
         self.assertEqual(list(self.m.slice_log), [("Plus1", {})])
         self.assertEqual(self.m.get("Plus1", Product="A"), 12)

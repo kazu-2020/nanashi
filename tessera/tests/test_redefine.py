@@ -40,7 +40,7 @@ class Redefine(unittest.TestCase):
 
     def test_changed_formula_reaches_only_changed_cells(self):
         # Cost を 2 倍で引くと、Cost のあるセル（A の Jan、B の Mar、D の Feb）だけが変わる
-        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2")
+        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2", id=self.m.metric_id("Margin"))
         self.m.recalc()
         regions = {n: r for n, r in self.m.slice_log}
         self.assertEqual(regions["Margin"], {})
@@ -49,12 +49,12 @@ class Redefine(unittest.TestCase):
         check_full(self, self.m)
 
     def test_same_values_stop_propagation(self):
-        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 1")
+        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 1", id=self.m.metric_id("Margin"))
         self.m.recalc()
         self.assertEqual(list(self.m.eval_log), ["Margin"])
 
     def test_delta_aggregate_keeps_working(self):
-        self.m.add_formula("DeptSalary", ["Department"], "Salary[BY SUM: Employee.Department] * 1")
+        self.m.add_formula("DeptSalary", ["Department"], "Salary[BY SUM: Employee.Department] * 1", id=self.m.metric_id("DeptSalary"))
         self.m.add_formula("Headcount", ["Department"], "Salary[BY COUNT: Employee.Department]")
         self.m.recalc()
         self.m.delta_log.clear()
@@ -65,10 +65,10 @@ class Redefine(unittest.TestCase):
         check_full(self, self.m)
 
     def test_formula_that_becomes_a_scan(self):
-        self.m.add_formula("Margin", ["Product", "Month"], "PREVIOUS(Month) * 0.5 + Revenue[REMOVE SUM: Region] - Cost")
+        self.m.add_formula("Margin", ["Product", "Month"], "PREVIOUS(Month) * 0.5 + Revenue[REMOVE SUM: Region] - Cost", id=self.m.metric_id("Margin"))
         self.m.recalc()
         check_full(self, self.m)
-        self.m.add_formula("Stock", ["Product", "Month"], "Margin - Outflow")  # 循環がなくなる
+        self.m.add_formula("Stock", ["Product", "Month"], "Margin - Outflow", id=self.m.metric_id("Stock"))  # the cycle goes away
         self.m.recalc()
         check_full(self, self.m)
 
@@ -76,17 +76,17 @@ class Redefine(unittest.TestCase):
         self.m.add_formula("Bad", ["Product"], "Missing2 + 1")
         with self.assertRaisesRegex(FormulaError, "Missing2"):
             self.m.recalc()
-        self.m.add_formula("Bad", ["Product"], "Price * 3")
+        self.m.add_formula("Bad", ["Product"], "Price * 3", id=self.m.metric_id("Bad"))
         self.assertEqual(self.m.get("Bad", Product="B"), 60)
         check_full(self, self.m)
 
     def test_cycle_is_an_error(self):
-        self.m.add_formula("Revenue", ["Product", "Region", "Month"], "Volume * Price + Margin[EXPAND: Region]")
+        self.m.add_formula("Revenue", ["Product", "Region", "Month"], "Volume * Price + Margin[EXPAND: Region]", id=self.m.metric_id("Revenue"))
         with self.assertRaisesRegex(FormulaError, "循環"):
             self.m.recalc()
 
     def test_type_change_rechecks_dependents(self):
-        self.m.add_formula("Margin", ["Product", "Month", "Region"], "Revenue - Cost")
+        self.m.add_formula("Margin", ["Product", "Month", "Region"], "Revenue - Cost", id=self.m.metric_id("Margin"))
         with self.assertRaises(FormulaError):  # 下流の式の軸が合わなくなる
             self.m.recalc()
 
@@ -102,10 +102,10 @@ class Redefine(unittest.TestCase):
     def test_input_axes_change_rechecks_unchanged_formula(self):
         # Y の式は変えていない（同じ式オブジェクトのまま検査し直す）。検査の結果を使い回さない
         m = self.small()
-        m.add_input("X", ["P", "M"], {("a", "x"): 1.0})
+        m.add_input("X", ["P", "M"], {("a", "x"): 1.0}, id=m.metric_id("X"))
         with self.assertRaisesRegex(FormulaError, r"^Y: 式の軸 \('P', 'M'\) が宣言した軸 \('P',\) と一致しない$"):
             m.recalc()
-        m.add_input("X", ["P"], {("a",): 3.0})  # 元の軸に戻せば計算できる
+        m.add_input("X", ["P"], {("a",): 3.0}, id=m.metric_id("X"))  # with the original dimensions, it can calculate
         m.recalc()
         self.assertEqual(m.get("Y", P="a"), 6.0)
 
@@ -113,7 +113,7 @@ class Redefine(unittest.TestCase):
         m = self.small()
         m.add_formula("Z", ["P"], "X")
         m.recalc()
-        m.add_input("X", ["P"], {("a",): True}, kind="boolean")
+        m.add_input("X", ["P"], {("a",): True}, kind="boolean", id=m.metric_id("X"))
         with self.assertRaisesRegex(FormulaError, "^'\\*' の左辺 には number が必要だが boolean が渡された$"):
             m.recalc()
         m.remove_metric("Y")
@@ -121,7 +121,7 @@ class Redefine(unittest.TestCase):
             m.recalc()
 
     def test_replaced_input_uses_delta(self):
-        self.m.add_input("Salary", ["Employee"], {("e1",): 100, ("e2",): 200, ("e3",): 300})
+        self.m.add_input("Salary", ["Employee"], {("e1",): 100, ("e2",): 200, ("e3",): 300}, id=self.m.metric_id("Salary"))
         self.m.recalc()
         self.assertEqual(self.m.get("DeptSalary", Department="Sales"), 300)
         self.assertIn("DeptSalary", self.m.delta_log)
@@ -129,13 +129,13 @@ class Redefine(unittest.TestCase):
 
     def test_replaced_input_after_pending_edit(self):
         self.m.set_cell("Salary", 999, Employee="e4")
-        self.m.add_input("Salary", ["Employee"], {("e1",): 1})
+        self.m.add_input("Salary", ["Employee"], {("e1",): 1}, id=self.m.metric_id("Salary"))
         self.assertEqual(self.m.get("DeptSalary", Department="Eng"), None)
         check_full(self, self.m)
 
     def test_replaced_input_after_pending_edit_keeps_old_value(self):
         self.m.set_cell("Salary", 999, Employee="e4")  # 再計算する前に置き換える
-        self.m.add_input("Salary", ["Employee"], {("e1",): 100, ("e3",): 300, ("e4",): 50})
+        self.m.add_input("Salary", ["Employee"], {("e1",): 100, ("e3",): 300, ("e4",): 50}, id=self.m.metric_id("Salary"))
         self.assertEqual(self.m.get("DeptSalary", Department="Eng"), 350)
         check_full(self, self.m)
 
@@ -144,26 +144,26 @@ class Redefine(unittest.TestCase):
         self.m.add_formula("RevTotal", ["Product", "Month"], "Revenue[REMOVE SUM: Region]")
         self.m.recalc()
         self.m.add_formula("Revenue", ["Product", "Region", "Month"],
-                           "Volume * Price + RevTotal[SELECT: Month - 1][EXPAND: Region] * 0")
+                           "Volume * Price + RevTotal[SELECT: Month - 1][EXPAND: Region] * 0", id=self.m.metric_id("Revenue"))
         self.m.recalc()
         self.m.set_cell("Volume", 5, Product="A", Region="S", Month="Jan")  # scan の中で集計元が増える
         self.m.recalc()
-        self.m.add_formula("Revenue", ["Product", "Region", "Month"], "Volume * Price")  # scan から出る
+        self.m.add_formula("Revenue", ["Product", "Region", "Month"], "Volume * Price", id=self.m.metric_id("Revenue"))  # the formula leaves the scan
         self.m.recalc()
         self.m.set_cell("Volume", None, Product="A", Region="N", Month="Jan")  # 件数が正しくないと空になる
         self.assertEqual(self.m.get("RevTotal", Product="A", Month="Jan"), 50)
         check_full(self, self.m)
 
     def test_formula_to_input_and_back(self):
-        self.m.add_input("Margin", ["Product", "Month"], {("A", "Jan"): 100.0})
+        self.m.add_input("Margin", ["Product", "Month"], {("A", "Jan"): 100.0}, id=self.m.metric_id("Margin"))
         self.assertEqual(self.m.get("Picked", Product="A", Month="Jan"), 100)
         check_full(self, self.m)
-        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost")
+        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost", id=self.m.metric_id("Margin"))
         self.assertEqual(self.m.get("Picked", Product="A", Month="Jan"), 23)
         check_full(self, self.m)
 
     def test_replaced_property(self):
-        self.m.add_property("Product", "Category", "Category", {"A": "Y", "B": "X", "C": "X", "D": "Y"})
+        self.m.add_property("Product", "Category", "Category", {"A": "Y", "B": "X", "C": "X", "D": "Y"}, id=self.m.property_id("Product", "Category"))
         self.m.recalc()
         regions = {n: r for n, r in self.m.slice_log}
         self.assertIn("RevByCat", regions)
@@ -178,7 +178,7 @@ class Redefine(unittest.TestCase):
         m.add_input("Rate", ["Category"], {("X",): 1, ("Y",): 2})
         m.add_formula("Looked", ["Product"], "Rate[BY: Product.Category]")
         m.recalc()
-        m.add_property("Product", "Category", "Category", {"A": "Y", "B": "Y"})
+        m.add_property("Product", "Category", "Category", {"A": "Y", "B": "Y"}, id=m.property_id("Product", "Category"))
         self.assertEqual(dict(m.value("Looked").cells), {("A",): 2, ("B",): 2})
 
     def test_set_property_values_changes_only_given_members(self):
@@ -200,9 +200,9 @@ class Redefine(unittest.TestCase):
             m.set_property_values("Product", "Category", {"Missing": None})
 
     def test_overrides_survive_redefinition(self):
-        self.m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True)
+        self.m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=self.m.metric_id("Plus1"))
         self.m.set_cell("Plus1", 50, Product="A")
-        self.m.add_formula("Plus1", ["Product"], "Price + 2", overridable=True)
+        self.m.add_formula("Plus1", ["Product"], "Price + 2", overridable=True, id=self.m.metric_id("Plus1"))
         self.assertEqual(self.m.get("Plus1", Product="A"), 50)
         self.assertEqual(self.m.get("Plus1", Product="B"), 22)
         check_full(self, self.m)
@@ -210,7 +210,7 @@ class Redefine(unittest.TestCase):
     def test_fork_is_independent(self):
         before = snapshot(self.m)
         fork = self.m.fork()
-        fork.add_formula("Margin", ["Product", "Month"], "Cost * 3")
+        fork.add_formula("Margin", ["Product", "Month"], "Cost * 3", id=fork.metric_id("Margin"))
         fork.recalc()
         self.assertEqual(snapshot(self.m), before)
         check_full(self, fork)
@@ -281,7 +281,7 @@ def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> Non
         if formula is None:
             return
         for m in models:
-            m.add_formula(target, m.metrics[target].dims, formula)
+            m.add_formula(target, m.metrics[target].dims, formula, id=m.metric_id(target))
     elif kind < 0.7:  # 入力に置き換える（計算 Metric を入力にすることもある）
         target = rng.choice(numbers)
         dims = m0.metrics[target].dims
@@ -290,11 +290,11 @@ def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> Non
             key = tuple(rng.choice(m0.dimensions[d].members) for d in dims)
             cells[key] = float(rng.randint(-5, 60))
         for m in models:
-            m.add_input(target, dims, cells)
+            m.add_input(target, dims, cells, id=m.metric_id(target))
     elif kind < 0.8:  # プロパティを置き換える
         mapping = {p: rng.choice(m0.dimensions["Category"].members) for p in m0.dimensions["Product"].members}
         for m in models:
-            m.add_property("Product", "Category", "Category", mapping)
+            m.add_property("Product", "Category", "Category", mapping, id=m.property_id("Product", "Category"))
     elif kind < 0.9:  # Metric の名前を変える
         target = rng.choice([n for n in m0.metrics if not n.startswith("__")])
         counter[0] += 1

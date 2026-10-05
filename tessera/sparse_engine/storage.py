@@ -1,7 +1,9 @@
 """Model の保存と読み込み。
 
 ディレクトリに次の 2 種類を置く。
-- model.json: 軸（番号の順のメンバー、ID、並び順、順序、プロパティ）と Metric（ID、軸、値の種類、分割軸、式の文字列）
+- model.json: 軸（番号の順のメンバー、ID、並び順、順序、プロパティ）と Metric（ID、軸、値の種類、分割軸、式の文字列）。
+  Each dimension, member, property, and Metric also has its UUID ("uuid", "member_uuids"), and "tombstones" has
+  the UUIDs of removed objects
 - inputs.<Metric の ID>.parquet: 入力 Metric ごとに 1 つ。軸ごとのメンバー番号の列（d<軸の ID>）と、
   値の列 v（number は Float64、boolean は Boolean、メンバー型はメンバー番号の UInt32）
 
@@ -20,7 +22,7 @@ from typing import Callable
 from .engine import Store, default_engine
 from .parser import to_formula
 
-FORMAT_VERSION = 4
+FORMAT_VERSION = 5
 
 
 def save(model, path) -> None:
@@ -34,15 +36,19 @@ def dump(model) -> dict[str, bytes]:
     """save で置くファイルの名前 -> 中身（オブジェクトストレージなど、ディレクトリ以外に置くとき）。"""
     dims = []
     for d in model.dimensions.values():
-        props = {prop: {"target": target, "mapping": mapping} for prop, (target, mapping) in d.properties.items()}
-        dims.append({"name": d.name, "id": d.id, "members": d.members, "member_ids": d.ids,
+        props = {prop: {"target": target, "mapping": mapping, "id": d.property_ids[prop],
+                        "uuid": model.uuid_of(d.property_ids[prop])}
+                 for prop, (target, mapping) in d.properties.items()}
+        dims.append({"name": d.name, "id": d.id, "uuid": model.uuid_of(d.id), "members": d.members,
+                     "member_ids": d.ids, "member_uuids": [model.uuid_of(i) for i in d.ids],
                      "ordered": d.ordered, "properties": props})
         if d.rank_table() is not None:
             dims[-1]["member_order"] = d.order()
     metrics = []
     files: dict[str, bytes] = {}
     for m in model.metrics.values():
-        metrics.append({"name": m.name, "id": m.id, "dims": list(m.dims), "kind": m.kind, "partition": m.partition,
+        metrics.append({"name": m.name, "id": m.id, "uuid": model.uuid_of(m.id), "dims": list(m.dims), "kind": m.kind,
+                        "partition": m.partition,
                         "formula": None if m.written is None else to_formula(m.written),
                         "overridable": m.overridable})
         if m.formula is not None:
@@ -52,6 +58,7 @@ def dump(model) -> dict[str, bytes]:
             model._values[m.name], m.dims, m.kind, model,
             {"nanashi": json.dumps({"format": FORMAT_VERSION, "metric": m.id})})
     meta = {"format": FORMAT_VERSION, "next_id": model._next_id, "dimensions": dims, "metrics": metrics,
+            "tombstones": sorted(model.tombstones),
             "options": {"auto_layout": model.auto_layout, "delta_aggregation": model.delta_aggregation,
                         "max_cells": model.max_cells}}
     return {"model.json": json.dumps(meta, ensure_ascii=False, indent=1).encode(), **files}
@@ -97,5 +104,16 @@ def read(file: Callable[[str], bytes], engine: Store | None = None):
                           partition=spec["partition"], overridable=spec["overridable"])
     for spec in meta["metrics"]:  # Restore the saved IDs in place of the IDs that the load gave
         m.metrics[spec["name"]].id = spec["id"]
+    # Restore the UUIDs in place of the UUIDs that the load made (the handles above changed too)
+    m.ids, m._uuids, m.tombstones = {}, {}, set(meta["tombstones"])
+    for d in meta["dimensions"]:
+        m._bind(d["uuid"], d["id"])
+        for u, i in zip(d["member_uuids"], d["member_ids"]):
+            m._bind(u, i)
+        for prop, spec in d["properties"].items():
+            m.dimensions[d["name"]].property_ids[prop] = spec["id"]
+            m._bind(spec["uuid"], spec["id"])
+    for spec in meta["metrics"]:
+        m._bind(spec["uuid"], spec["id"])
     m._next_id = meta["next_id"]
     return m

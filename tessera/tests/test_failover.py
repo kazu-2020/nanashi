@@ -81,6 +81,6 @@ class Failover(unittest.TestCase):
             with serving(model_id, tmp, "a2", role="standby") as a2:  # 起動し直したプロセスは待機系になる
                 seq = post(b.url, Write("w-2", "i002", 8))
                 wait_for(lambda: Client(a2.url, None).get("/health")[1]["seq"] == seq)  # 書き手の確定に追従する
-                self.assertEqual(Client(a2.url, None).get("/metrics/Double/cell?Item=i002")[1]["value"], 16.0)
+                self.assertEqual(Client(a2.url, None).get("/metrics/metric-double/cell?dim-item=i002")[1]["value"], 16.0)
                 status, body = try_post(a2.url, Write("w-3", "i003", 9))
                 self.assertEqual((status, body["leader"]), (421, b.url))

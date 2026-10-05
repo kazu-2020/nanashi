@@ -42,6 +42,9 @@ def definitions(m: Model) -> dict:
 
 def check_same_state(test, a: Model, b: Model) -> None:
     test.assertEqual(definitions(a), definitions(b))
+    test.assertEqual((a.ids, a.tombstones), (b.ids, b.tombstones))
+    test.assertEqual({d.name: d.property_ids for d in a.dimensions.values()},
+                     {d.name: d.property_ids for d in b.dimensions.values()})
     sa, sb = snapshot(a), snapshot(b)
     for name in sa:
         test.assertTrue(same(sa[name], sb[name]), f"{name}\n{sa[name]}\n{sb[name]}")
@@ -160,11 +163,11 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.rename_metric("Margin", "Profit")
             self.m.remove_member("Month", "Feb")
             self.m.remove_member("Product", "B")
-            self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"})  # D は対応を外す
+            self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"}, id=self.m.property_id("Product", "Category"))  # D loses its mapping
             self.m.set_property_values("Product", "Category", {"A": "X", "C": None, "D": "Y"})
             self.m.remove_metric("CatShare")
-        self.m.add_input("Salary", ["Employee"], {("e2",): 250})  # 入力の置き換え
-        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1})  # 計算 Metric を入力に
+        self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric_id("Salary"))  # replace an input
+        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric_id("Stock"))  # a formula Metric becomes an input
         check_same_state(self, self.m, self.reopen())
 
     def test_rolled_back_transactions_are_not_recorded(self):
@@ -331,6 +334,29 @@ class Journal(JournalCase, unittest.TestCase):
                 self.m.set_cell("Price", i, Product="A")
         for j in (self.m.journal, self.journals.journal(op_window=2)):
             self.assertEqual((j.seq_of("a"), j.seq_of("b"), j.seq_of("c")), (None, 2, 3))
+
+    def test_rejections_survive_a_reopen(self):
+        body = {"error": "bad_request", "message": "bad"}
+        self.m.journal.record_rejection("rj-1", 400, body)
+        self.m.set_cell("Price", 12, Product="A")
+        self.assertEqual(self.journals.journal().outcomes_of_many(["rj-1", "x"]), ({}, {"rj-1": (400, body)}))
+
+    def test_rejections_are_remembered_within_the_window(self):
+        self.file_only()
+        j = self.journals.journal(op_window=2)
+        j.record_rejection("old", 400, {})
+        self.m.journal = j
+        for i in range(3):
+            self.m.set_cell("Price", i, Product="A")
+        j.record_rejection("new", 400, {})
+        self.assertEqual(self.journals.journal(op_window=2).outcomes_of_many(["old", "new"])[1], {"new": (400, {})})
+
+    def test_a_rejection_after_a_cut_rejection_line_is_read(self):
+        self.file_only()
+        (self.path / "rejections.jsonl").write_text('{"client_op_id":"cut","head')  # A crash cut the line
+        j = self.journals.journal()
+        j.record_rejection("rj-1", 400, {})
+        self.assertEqual(self.journals.journal().outcomes_of_many(["rj-1"])[1], {"rj-1": (400, {})})
 
     def test_corruption_in_the_middle_is_an_error(self):
         self.file_only()

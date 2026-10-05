@@ -84,7 +84,8 @@ var engineAggs = map[nanashiv1.Aggregation]string{
 	nanashiv1.Aggregation_AGGREGATION_COUNT:       "count",
 }
 
-// queryReads makes the engine reads for a QueryRequest. It leaves out a Metric that the filters make empty.
+// queryReads makes the engine reads for a QueryRequest. It leaves out a Metric that the model does not have
+// (a deleted Metric of a saved view) and a Metric that the filters make empty.
 func queryReads(req *nanashiv1.QueryRequest, em engineModel, l limits) ([]engineRead, error) {
 	agg, ok := engineAggs[req.Aggregation]
 	if !ok {
@@ -93,45 +94,41 @@ func queryReads(req *nanashiv1.QueryRequest, em engineModel, l limits) ([]engine
 	shown := slices.Concat(req.Rows, req.Columns)
 	var out []engineRead
 next:
-	for _, name := range req.Metrics {
-		m, err := em.metric(name)
-		if err != nil {
-			return nil, err
-		}
-		if l.hides(m) {
+	for _, id := range req.Metrics {
+		m, ok := em.metric(id)
+		if !ok || l.hides(m) {
 			continue
 		}
 		q := map[string][]string{}
 		for _, d := range m.Dims {
-			members := req.Filters[d].GetNames()
+			members := req.Filters[d].GetIds()
 			lim, limited := l[d]
 			if limited && len(members) == 0 {
 				members = slices.Sorted(maps.Keys(lim.read))
 			}
 			if limited || len(members) > 0 {
-				// A saved filter or a rule can name a member that was removed later. The engine refuses such a name.
+				// A saved filter can name a member that was removed later. The engine refuses such an id.
 				dim, _ := em.dim(d)
 				exists := map[string]bool{}
 				for _, x := range dim.Members {
-					exists[x] = true
+					exists[x.ID] = true
 				}
 				members = slices.DeleteFunc(slices.Clone(members), func(x string) bool { return !exists[x] || limited && !lim.read[x] })
 				if len(members) == 0 {
 					continue next
 				}
 				// All members is the same as no filter, and a big transaction list does not fit in the URL.
-				// ponytail: a limit that hides some members still sends all readable names in the URL. Past about
+				// ponytail: a limit that hides some members still sends all readable ids in the URL. Past about
 				// 64 KiB the engine refuses the request (414). Upgrade: let the engine take the filter in a POST body.
 				if len(members) == len(dim.Members) {
 					members = nil
 				}
 			}
 			if len(members) > 0 {
-				// ponytail: the engine splits members at commas, so a member name with a comma cannot be a filter.
 				q[d] = []string{strings.Join(members, ",")}
 			}
 		}
-		read := engineRead{Metric: name, Path: "slice", Query: q}
+		read := engineRead{Metric: id, Path: "slice", Query: q}
 		if m.Kind == "number" {
 			keep := slices.DeleteFunc(slices.Clone(shown), func(d string) bool { return !slices.Contains(m.Dims, d) })
 			q["keep"] = []string{strings.Join(keep, ",")}
@@ -170,7 +167,7 @@ func queryCells(m engineMetric, dims []string, cube engineCube, l limits) []*nan
 			continue
 		}
 		seen[key] = true
-		out = append(out, &nanashiv1.QueryCell{Metric: m.Name, Coords: coords, Value: v})
+		out = append(out, &nanashiv1.QueryCell{Metric: m.ID, Coords: coords, Value: v})
 	}
 	return out
 }
@@ -179,38 +176,72 @@ func queryCells(m engineMetric, dims []string, cube engineCube, l limits) []*nan
 func writeOps(writes []*nanashiv1.CellWrite, em engineModel, l limits) ([]op, error) {
 	var ops []op
 	for _, w := range writes {
-		m, err := em.metric(w.Metric)
-		if err != nil {
-			return nil, err
+		m, ok := em.metric(w.Metric)
+		if !ok {
+			return nil, fmt.Errorf("Metric %s がない", w.Metric)
 		}
 		coords := map[string]any{}
 		for d, member := range w.Coords {
 			if !slices.Contains(m.Dims, d) {
-				return nil, fmt.Errorf("%s: 軸 %s がない", m.Name, d)
+				return nil, fmt.Errorf("%s: 軸 %s がない", m.Name, em.name(d))
 			}
 			coords[d] = member
 		}
-		if err := l.checkWrite(m.Name, m.Dims, w.Coords); err != nil {
+		if err := l.checkWrite(m.Name, m.Dims, w.Coords, em); err != nil {
 			return nil, err
 		}
 		if len(w.Coords) == len(m.Dims) {
-			ops = append(ops, newOp("set_cell", m.Name, valueOf(w.Value)).with(coords))
+			ops = append(ops, newOp("set_cell", map[string]any{"metric": m.ID, "value": valueOf(w.Value), "coords": coords}))
 			continue
 		}
 		total, ok := valueOf(w.Value).(float64)
 		if !ok {
 			return nil, fmt.Errorf("%s: 集計したセルに入れられるのは数値だけ", m.Name)
 		}
-		ops = append(ops, newOp("spread", m.Name, total).with(coords))
+		ops = append(ops, newOp("spread", map[string]any{"metric": m.ID, "total": total, "coords": coords}))
 	}
 	return ops, nil
 }
 
-// visibleComments removes the comments on a cell with a member that l hides.
-func visibleComments(comments []*nanashiv1.Comment, l limits) []*nanashiv1.Comment {
+// checkCommentCell refuses a cell that does not give one member for each dimension of the Metric.
+func checkCommentCell(metric string, cell map[string]string, em engineModel) error {
+	m, ok := em.metric(metric)
+	if !ok {
+		return fmt.Errorf("Metric %s がない", metric)
+	}
+	bad := fmt.Errorf("%s: コメントのセルには各軸のメンバーを 1 つずつ指定する", m.Name)
+	if len(cell) != len(m.Dims) {
+		return bad
+	}
+	for _, list := range m.Dims {
+		d, _ := em.dim(list)
+		if _, ok := d.member(cell[list]); !ok {
+			return bad
+		}
+	}
+	return nil
+}
+
+// visibleComments removes the comments that a query does not show to a reader with the limits l. It removes a
+// comment on a Metric that l hides, on a cell without a member of a limited list, or on a member that l hides.
+// For a reader with rules, a Metric or a cell that the model does not have is hidden too (fail-closed).
+func visibleComments(comments []*nanashiv1.Comment, l limits, em engineModel) []*nanashiv1.Comment {
 	return slices.DeleteFunc(comments, func(c *nanashiv1.Comment) bool {
+		m, ok := em.metric(c.Metric)
+		if !ok || l.hides(m) {
+			return true
+		}
+		for list := range l {
+			if _, set := c.Cell[list]; !set && slices.Contains(m.Dims, list) {
+				return true
+			}
+		}
 		for list, member := range c.Cell {
-			if !l.visible(list, member) {
+			d, ok := em.dim(list)
+			if !ok {
+				return true
+			}
+			if _, ok := d.member(member); !ok || !l.visible(list, member) {
 				return true
 			}
 		}
@@ -244,23 +275,37 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 	return connect.NewResponse(out), nil
 }
 
+// WriteCells changes only the engine. The engine does not commit the same client_op_id two times, so the api
+// keeps no outbox row for it.
 func (s *PlanServer) WriteCells(ctx context.Context, req *connect.Request[nanashiv1.WriteCellsRequest]) (*ack, error) {
-	c := callerOf(ctx)
-	return s.change(ctx, req.Msg.AppId, func(em engineModel, _ appMeta) (plan, error) {
-		ops, err := writeOps(req.Msg.Writes, em, c.limitsIn(em))
-		return plan{ops: ops}, err
-	})
+	app, c := req.Msg.AppId, callerOf(ctx)
+	em, _, err := s.Engines.model(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	ops, err := writeOps(req.Msg.Writes, em, c.limitsIn(em))
+	if err != nil {
+		return nil, connectError(err)
+	}
+	if len(ops) == 0 {
+		return ok()
+	}
+	reply, err := s.Engines.write(ctx, app, c.user, c.opID, ops)
+	if err != nil {
+		return nil, err
+	}
+	if reply.outcome() != done {
+		return nil, reply.connectError()
+	}
+	return ok()
 }
 
 func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nanashiv1.ListCommentsRequest]) (*connect.Response[nanashiv1.ListCommentsResponse], error) {
 	rows, _ := s.Pool.Query(ctx, `select id, metric, cell, user_name, body, (extract(epoch from created_at) * 1000)::bigint from app_comment
-		where app_id = $1 and ($2 = '' or metric = $2) order by id`, req.Msg.AppId, req.Msg.Metric)
+		where app_id = $1 and ($2 = '' or metric::text = $2) order by created_at, id`, req.Msg.AppId, req.Msg.Metric)
 	comments, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*nanashiv1.Comment, error) {
 		c := &nanashiv1.Comment{AppId: req.Msg.AppId}
-		var id int64
-		err := row.Scan(&id, &c.Metric, &c.Cell, &c.User, &c.Body, &c.CreatedAt)
-		c.Id = strconv.FormatInt(id, 10)
-		return c, err
+		return c, row.Scan(&c.Id, &c.Metric, &c.Cell, &c.User, &c.Body, &c.CreatedAt)
 	})
 	if err != nil {
 		return nil, dbError(err)
@@ -270,22 +315,37 @@ func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nana
 		if err != nil {
 			return nil, err
 		}
-		comments = visibleComments(comments, c.limitsIn(em))
+		comments = visibleComments(comments, c.limitsIn(em), em)
 	}
 	return connect.NewResponse(&nanashiv1.ListCommentsResponse{Comments: comments}), nil
 }
 
-func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanashiv1.Comment]) (*connect.Response[nanashiv1.Comment], error) {
-	c := req.Msg
-	if strings.TrimSpace(c.Body) == "" || c.Metric == "" {
-		return nil, invalid(errors.New("コメントのメトリックと本文が要る"))
+func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanashiv1.AddCommentRequest]) (*connect.Response[nanashiv1.Comment], error) {
+	c := req.Msg.Comment
+	if strings.TrimSpace(c.GetBody()) == "" || c.GetMetric() == "" || c.GetId() == "" {
+		return nil, invalid(errors.New("コメントの id、メトリックと本文が要る"))
 	}
-	c.User = callerOf(ctx).user
-	var id int64
-	if err := s.Pool.QueryRow(ctx, `insert into app_comment (app_id, metric, cell, user_name, body) values ($1, $2, $3, $4, $5)
-		returning id, (extract(epoch from created_at) * 1000)::bigint`, c.AppId, c.Metric, textJSON(c.Cell), c.User, c.Body).Scan(&id, &c.CreatedAt); err != nil {
-		return nil, dbError(err)
+	em, _, err := s.Engines.model(ctx, req.Msg.AppId)
+	if err != nil {
+		return nil, err
 	}
-	c.Id = strconv.FormatInt(id, 10)
+	if err := checkCommentCell(c.Metric, c.Cell, em); err != nil {
+		return nil, invalid(err)
+	}
+	c.AppId, c.User = req.Msg.AppId, callerOf(ctx).user
+	result, err := s.apiOnly(ctx, req.Msg.AppId, req.Msg, pgx.TxOptions{}, func(tx pgx.Tx) (any, error) {
+		var ms int64
+		err := tx.QueryRow(ctx, `insert into app_comment (app_id, id, metric, cell, user_name, body) values ($1, $2, $3, $4, $5, $6)
+			on conflict do nothing returning (extract(epoch from created_at) * 1000)::bigint`,
+			c.AppId, c.Id, c.Metric, textJSON(c.Cell), c.User, c.Body).Scan(&ms)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, tag(errExists, "同じ id のコメントがすでにある")
+		}
+		return map[string]int64{"created_at": ms}, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	c.CreatedAt = createdAt(result)
 	return connect.NewResponse(c), nil
 }
