@@ -39,7 +39,6 @@ func column(header map[string]int, name string) (int, error) {
 	return i, nil
 }
 
-// byName gives the member id of each name of a dimension.
 func byName(d engineDim) map[string]string {
 	out := map[string]string{}
 	for _, m := range d.Members {
@@ -117,13 +116,11 @@ func importListEdits(text string, li *nanashiv1.ListImport, em engineModel, dim 
 	return edits, len(rows), nil
 }
 
-// rowCount gives the number of rows of a CSV text.
 func rowCount(text string) (int, error) {
 	_, rows, err := parseCSV(text)
 	return len(rows), err
 }
 
-// largestRow gives the largest number among the member names of a list, or 0.
 func largestRow(dim engineDim) int {
 	largest := 0
 	for _, m := range dim.Members {

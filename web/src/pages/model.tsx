@@ -5,7 +5,7 @@ import { FileTrigger } from "react-aria-components";
 import { api, newId } from "../api";
 import { ListKind, type MemberEditSchema, PropertyType, Role } from "../gen/nanashi/v1/plan_pb";
 import { label, parseCsv } from "../logic";
-import { cls, listOptions, memberOptions, useApp, useMutate } from "../state";
+import { cls, listOptions, memberOptions, metricOptions, useApp, useMutate } from "../state";
 import { Check, Section, Sel } from "../ui";
 
 const KINDS: [string, string][] = [
@@ -401,7 +401,6 @@ const colSel = (header: string[], label: string, value: string, onChange: (v: st
   <Sel key={label} label={label} value={value} onChange={onChange} empty="" options={header} />
 );
 
-// mappedColumns keeps the chosen column of each field (an id) that the target has.
 const mappedColumns = (map: Record<string, string>, fields: [string, string][]) =>
   Object.fromEntries(Object.entries(map).filter(([k, v]) => v && fields.some(([id]) => id === k)));
 
@@ -476,7 +475,7 @@ function ImportMetricForm(props: { csv: string; header: string[] }) {
           value={target}
           onChange={setTarget}
           empty=""
-          options={model.metrics.map((m): [string, string] => [m.id, m.name])}
+          options={metricOptions(model)}
         />
       </div>
       <div className="flex flex-wrap gap-2">

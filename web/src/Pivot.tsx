@@ -90,14 +90,13 @@ export function PivotWidget(props: { spec: Spec; page: Record<string, string> })
 }
 
 export function PivotEditor(props: { initial: Spec; view?: { id: string; name: string } }) {
-  const { appId, can, names } = useApp();
+  const { appId, can, names, model } = useApp();
   const mutate = useMutate();
   const writeCells = useMutate("query");
   const [spec, setSpec] = useState(props.initial);
   const [cell, setCell] = useState<{ metric: string; coords: Record<string, string> }>();
   const view = props.view;
   const [viewName, setViewName] = useState(view?.name ?? "");
-  const { model } = useApp();
   const { grid, filters, defs, dims, order, isPlaceholderData } = usePivot(spec);
   const axisDims = spec.metrics.length > 1 ? [METRIC, ...dims] : dims;
 
@@ -131,9 +130,7 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
     });
   };
 
-  // The id of the next new view. A new id comes after each create.
   const [draftId, setDraftId] = useState(newId);
-  // saveView changes the view with the id, or makes a new view without an id.
   const saveView = (id?: string) =>
     mutate(async (clientOpId) => {
       const req = {
@@ -316,9 +313,8 @@ function Body(props: {
                 </th>
               ))}
               {g.colKeys.map((c) => {
-                const v = g.value(r, c);
                 // A member value is an id: show its name. An edit of a member cell takes a name.
-                const text = formatValue(v, names);
+                const text = formatValue(g.value(r, c), names);
                 return (
                   <td
                     key={JSON.stringify(c)}

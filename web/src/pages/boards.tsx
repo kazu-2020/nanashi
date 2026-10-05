@@ -13,7 +13,6 @@ export function BoardsPage() {
   const mutate = useMutate();
   const [sel, setSel] = useState(model.boards[0]?.id ?? "");
   const [name, setName] = useState("");
-  // The id of the next new board. A new id comes after each create.
   const [draftId, setDraftId] = useState(newId);
   const [page, setPage] = useState<Record<string, string>>({});
   const [text, setText] = useState("");

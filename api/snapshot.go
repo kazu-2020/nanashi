@@ -33,7 +33,7 @@ type snapshotData struct {
 	Kinds     map[string]nanashiv1.ListKind `json:"kinds"`
 	Props     []propRow                     `json:"props"`
 	Items     []itemRow                     `json:"items"`
-	Metrics   map[string]metricRow          `json:"metrics,omitempty"` // The Metric catalog, by Metric id.
+	Metrics   map[string]metricRow          `json:"metrics,omitempty"`
 }
 
 // replayOps makes the operations that build the engine model of a snapshot in an empty model, with the same ids.
@@ -80,7 +80,6 @@ func replayOps(em engineModel, inputs, overrides map[string]engineCube) []op {
 	return ops
 }
 
-// restoreStmts gives the statements that copy the api rows of a snapshot into the application app.
 func restoreStmts(app string, snap snapshotData) []stmt {
 	var out []stmt
 	for list, kind := range snap.Kinds {
@@ -238,20 +237,15 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 		if err != nil {
 			return nil, err
 		}
-		var stored struct {
-			CreatedAt int64 `json:"created_at"`
-		}
-		json.Unmarshal(result, &stored)
-		snap.CreatedAt = stored.CreatedAt
+		snap.CreatedAt = createdAt(result)
 		return connect.NewResponse(snap), nil
 	}
 }
 
-// versionAndPending reads the version of the api rows and the count of the pending operations in one query.
 const versionAndPending = `select a.version, (select count(*) from app_operation o where o.app_id = a.id and o.status = 'pending')
 	from app_application a where a.id = $1`
 
-// errChanged passes dbError as a Connect error. CreateSnapshot reads again.
+// errChanged is a Connect error, so dbError passes it through. CreateSnapshot then reads again.
 var errChanged = connect.NewError(connect.CodeAborted, errors.New("changed"))
 
 // readEngine reads the model and the cells of one version of the engine.

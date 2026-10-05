@@ -88,7 +88,6 @@ type callerKey struct{}
 
 func callerOf(ctx context.Context) caller { return ctx.Value(callerKey{}).(caller) }
 
-// constraintMessages gives the message of a unique violation by the constraint name.
 var constraintMessages = map[string]string{
 	"app_application_pkey": "同じ id のアプリケーションがすでにある",
 	"app_list_pkey":        "同じ id のリストがすでにある",
@@ -141,7 +140,6 @@ func parseID(field, s string) (string, error) {
 	return u.String(), nil
 }
 
-// newID makes a UUIDv7 for an object that the api makes for the user.
 func newID() string { return uuid.Must(uuid.NewV7()).String() }
 
 // Request fields that hold ids: every string field with one of these names, the keys of these map fields, and
@@ -245,7 +243,6 @@ func requestHash(m proto.Message) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// detailOf gives the request as JSON for the audit trail.
 func detailOf(m proto.Message) string {
 	b, _ := protojson.Marshal(m)
 	return string(b)
@@ -313,7 +310,6 @@ type plan struct {
 	result any   // The stored result of the operation. nil gives {}.
 }
 
-// opRow is a row of app_operation.
 type opRow struct {
 	opID, user, method, hash, status string
 	ops                              []op
@@ -328,14 +324,12 @@ type storedError struct {
 	Message string       `json:"message"`
 }
 
-// error gives the stored error of a failed row.
 func (r opRow) error() error {
 	var e storedError
 	json.Unmarshal(r.err, &e)
 	return connect.NewError(e.Code, errors.New(e.Message))
 }
 
-// same tells if a resend has the same user, method and content as the row.
 func (r opRow) same(c caller, hash string) error {
 	if r.user != c.user || r.method != c.method || r.hash != hash {
 		return invalid(errors.New("同じ client_op_id の別の要求がすでにある"))
@@ -396,7 +390,6 @@ func tag(t error, format string, a ...any) error { return tagged{fmt.Errorf(form
 
 // The actions follow.
 
-// execStmt runs st in tx. If st.zero is not nil and st changes no row, it gives st.zero.
 func execStmt(ctx context.Context, tx pgx.Tx, st stmt) error {
 	tag, err := tx.Exec(ctx, st.sql, st.args...)
 	if err == nil && st.zero != nil && tag.RowsAffected() == 0 {
@@ -481,7 +474,6 @@ func (s *PlanServer) ListApplications(ctx context.Context, _ *connect.Request[na
 	return connect.NewResponse(&nanashiv1.ListApplicationsResponse{Applications: apps}), nil
 }
 
-// lookupOp reads the row of a client_op_id.
 func (s *PlanServer) lookupOp(ctx context.Context, app, opID string) (opRow, bool, error) {
 	r := opRow{opID: opID}
 	err := s.Pool.QueryRow(ctx, `select user_name, method, request_hash, status, coalesce(ops, '[]'), coalesce(seq, 0),
@@ -510,7 +502,7 @@ func (s *PlanServer) change(ctx context.Context, app string, req proto.Message, 
 		if err != nil {
 			return plan{}, err
 		}
-		meta, err := s.meta(ctx, app)
+		meta, err := metaIn(ctx, s.Pool, app)
 		if err != nil {
 			return plan{}, err
 		}
@@ -527,7 +519,6 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 	c := callerOf(ctx)
 	hash := requestHash(req)
 	conflicts := 0
-	// again tells if errConflict lets the plan run again.
 	again := func(err error) bool {
 		conflicts++
 		return errors.Is(err, errConflict) && conflicts <= 3
@@ -563,17 +554,16 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 		if err != nil {
 			return nil, err
 		}
-		seq := p.seq
 		result, err := json.Marshal(p.result)
 		if err != nil || p.result == nil {
 			result = []byte("{}")
 		}
-		row = opRow{opID: c.opID, user: c.user, method: c.method, hash: hash, status: "pending", ops: p.ops, seq: seq, made: p.made, result: result}
+		row = opRow{opID: c.opID, user: c.user, method: c.method, hash: hash, status: "pending", ops: p.ops, seq: p.seq, made: p.made, result: result}
 		inserted := false
 		err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 			tag, err := tx.Exec(ctx, `insert into app_operation (app_id, client_op_id, user_name, method, request_hash, ops, seq, made, result, detail, status)
 				values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') on conflict do nothing`,
-				app, c.opID, c.user, c.method, hash, p.ops, seq, p.made, string(result), detailOf(req))
+				app, c.opID, c.user, c.method, hash, p.ops, p.seq, p.made, string(result), detailOf(req))
 			if err != nil || tag.RowsAffected() == 0 {
 				return err
 			}
@@ -628,7 +618,7 @@ func (s *PlanServer) settlePending(ctx context.Context, app string) error {
 	return nil
 }
 
-// settle sends a pending row to the engine (step 5 of change) and flips the row (step 6). It gives the stored
+// settle sends a pending row to the engine and flips the row (step 5 of change). It gives the stored
 // result, or the stored error of a refusal. If the engine result is not known, the row stays pending and the
 // error is Unavailable: the client sends the request again with the same client_op_id. The flip to done writes
 // the audit row, so an operation has one audit row, also when another request settles it.
@@ -650,7 +640,8 @@ func (s *PlanServer) settle(ctx context.Context, app string, r opRow) (json.RawM
 	switch out {
 	case done:
 	case failed:
-		stored = &storedError{connect.CodeOf(reply.connectError()), reply.connectError().(*connect.Error).Message()}
+		ce := reply.connectError().(*connect.Error)
+		stored = &storedError{ce.Code(), ce.Message()}
 	default:
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンの結果が分からない。もう一度試す"))
 	}
@@ -739,10 +730,17 @@ func (s *PlanServer) apiOnly(ctx context.Context, app string, req proto.Message,
 
 var errResent = errors.New("resent")
 
-// ackOf changes the result of change or apiOnly into an Ack response.
 func ackOf(_ json.RawMessage, err error) (*ack, error) {
 	if err != nil {
 		return nil, err
 	}
 	return ok()
+}
+
+func createdAt(result json.RawMessage) int64 {
+	var r struct {
+		CreatedAt int64 `json:"created_at"`
+	}
+	json.Unmarshal(result, &r)
+	return r.CreatedAt
 }

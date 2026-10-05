@@ -41,7 +41,6 @@ type appMeta struct {
 	Metrics map[string]metricRow // The catalog, by Metric id. It can have rows of deleted Metrics.
 }
 
-// listOfKind gives the id of the first list of the kind.
 func (m appMeta) listOfKind(kind nanashiv1.ListKind) (string, bool) {
 	for id, k := range m.Kinds {
 		if k == kind {
@@ -70,26 +69,23 @@ var propKind = map[nanashiv1.PropertyType]string{
 // propMetric is the name of the input Metric that holds a NUMBER or BOOLEAN property.
 func propMetric(list, prop string) string { return list + "." + prop }
 
-// coords makes the coordinates of a cell: list id to member id.
-func coords(list, member string) map[string]any { return map[string]any{list: member} }
-
 // editOps changes member edits into the plan: engine operations, the statements for the TEXT values, and the
 // old and new TEXT values for the compensation. The engine keeps the DIMENSION property values and the member
 // names. Every reference is an id, so a rename changes no api row.
 func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*nanashiv1.MemberEdit) (plan, error) {
-	members := map[string]string{} // Id to name.
+	members := map[string]string{}
 	names := map[string]bool{}
 	for _, m := range dim.Members {
 		members[m.ID] = m.Name
 		names[m.Name] = true
 	}
-	adds := map[string]bool{} // The ids that the edits add.
+	adds := map[string]bool{}
 	for _, e := range edits {
 		if a := e.GetAdd(); a != nil {
 			adds[a.Id] = true
 		}
 	}
-	props := map[string]propRow{} // By property id.
+	props := map[string]propRow{}
 	for _, p := range meta.Props {
 		if p.ListID == dim.ID {
 			props[p.ID] = p
@@ -124,10 +120,9 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 			} else {
 				old := map[string]*string{}
 				for k := range touched {
+					old[k] = nil
 					if v, ok := props[prop].Text[k]; ok {
 						old[k] = &v
-					} else {
-						old[k] = nil
 					}
 				}
 				p.stmts = append(p.stmts, textValues(app, dim.ID, prop, touched))
@@ -167,7 +162,7 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 				if err != nil {
 					return fmt.Errorf("%s.%s: %w", dim.Name, pr.Name, err)
 				}
-				p.ops = append(p.ops, newOp("set_cell", map[string]any{"metric": pr.MetricID, "value": val, "coords": coords(dim.ID, member)}))
+				p.ops = append(p.ops, newOp("set_cell", map[string]any{"metric": pr.MetricID, "value": val, "coords": map[string]any{dim.ID: member}}))
 			default:
 				return fmt.Errorf("%s にプロパティ %s がない", dim.Name, prop)
 			}
@@ -291,7 +286,6 @@ func calendarOps(start, years int) (calendar, error) {
 	return out, nil
 }
 
-// calendarStmts gives the rows of the calendar lists and their properties.
 func calendarStmts(app string, cal calendar) ([]stmt, []madeRow) {
 	stmts, made := listKinds(app, nanashiv1.ListKind_LIST_KIND_CALENDAR, cal.lists...)
 	for _, o := range cal.ops {
@@ -303,7 +297,6 @@ func calendarStmts(app string, cal calendar) ([]stmt, []madeRow) {
 	return stmts, made
 }
 
-// listKinds gives the statements that record the kind of each new list in app_list.
 func listKinds(app string, kind nanashiv1.ListKind, lists ...string) ([]stmt, []madeRow) {
 	var stmts []stmt
 	var made []madeRow
@@ -315,7 +308,6 @@ func listKinds(app string, kind nanashiv1.ListKind, lists ...string) ([]stmt, []
 	return stmts, made
 }
 
-// propertyStmt gives the statement that makes the row of a property.
 func propertyStmt(app, list, id, name string, typ nanashiv1.PropertyType, metricID string) (stmt, madeRow) {
 	var metric *string
 	if metricID != "" {
@@ -444,13 +436,8 @@ func pruneItems(out *nanashiv1.ModelDef, em engineModel) {
 
 // The actions follow.
 
-// querier is a pool or a transaction.
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-func (s *PlanServer) meta(ctx context.Context, app string) (appMeta, error) {
-	return metaIn(ctx, s.Pool, app)
 }
 
 func metaIn(ctx context.Context, q querier, app string) (appMeta, error) {
@@ -490,7 +477,7 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 	if err != nil {
 		return nil, err
 	}
-	meta, err := s.meta(ctx, app)
+	meta, err := metaIn(ctx, s.Pool, app)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +491,7 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 	}
 	out := &nanashiv1.ModelDef{Role: c.role}
 	out.Lists, out.Metrics = modelDef(em, meta, propCells, c.limitsIn(em))
-	items, err := s.items(ctx, app)
+	items, err := itemsIn(ctx, s.Pool, app)
 	if err != nil {
 		return nil, err
 	}

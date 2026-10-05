@@ -10,14 +10,12 @@ export const Report = createContext<(e: unknown) => void>(() => {});
 export type AppState = {
   appId: string;
   model: ModelDef;
-  // The name of each list, member and Metric, by id.
   names: Names;
   can: (r: Role) => boolean;
 };
 export const AppCtx = createContext<AppState | null>(null);
 export const useApp = () => useContext(AppCtx)!;
 
-// modelNames gives the name of each list, member and Metric of the model, by id.
 export function modelNames(model: ModelDef): Names {
   const out: Record<string, string> = { [METRIC]: "メトリック" };
   for (const l of model.lists) {
@@ -103,7 +101,9 @@ export async function createOrUpdate<R extends { clientOpId: string }>(
 export const listOptions = (model: ModelDef) =>
   model.lists.map((l): [string, string] => [l.id, l.name]);
 
-// memberOptions gives the members of the list, as [id, name].
+export const metricOptions = (model: ModelDef) =>
+  model.metrics.map((m): [string, string] => [m.id, m.name]);
+
 export const memberOptions = (model: ModelDef, list: string) =>
   model.lists.find((l) => l.id === list)?.members.map((m): [string, string] => [m.id, m.name]) ??
   [];

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -347,10 +346,6 @@ func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanash
 	if err != nil {
 		return nil, err
 	}
-	var stored struct {
-		CreatedAt int64 `json:"created_at"`
-	}
-	json.Unmarshal(result, &stored)
-	c.CreatedAt = stored.CreatedAt
+	c.CreatedAt = createdAt(result)
 	return connect.NewResponse(c), nil
 }

@@ -169,6 +169,9 @@ func errorKind(t *testing.T, body string) string {
 	return v.Error
 }
 
+// testModel is a model ID in the canonical form.
+const testModel = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
+
 const write = `{"client_op_id": "c-1",  "ops": [{"op": "set_cell", "args": ["Value", 1.50], "kwargs": {"Item": "日本"}}]}`
 
 func TestRedirectsToLeaderNamedBy421(t *testing.T) {
@@ -177,14 +180,14 @@ func TestRedirectsToLeaderNamedBy421(t *testing.T) {
 	res := &resolver{answers: []string{standby.URL}}
 	rt := &Router{Resolve: res}
 
-	got := do(t, rt, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+	got := do(t, rt, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 	if got.status != 200 || got.body != `{"seq": 7}` {
 		t.Fatalf("got %d %s", got.status, got.body)
 	}
 	if n := len(leader.requests()); n != 1 {
 		t.Errorf("leader got %d requests, want 1", n)
 	}
-	do(t, rt, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+	do(t, rt, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 	if n := len(standby.requests()); n != 1 {
 		t.Errorf("standby got %d requests, want 1 (the 421 leader should be cached)", n)
 	}
@@ -196,7 +199,7 @@ func TestRedirectsToLeaderNamedBy421(t *testing.T) {
 func TestConnectionRefusedReresolves(t *testing.T) {
 	leader := newEngine(t, reply{200, `{"seq": 1}`, nil})
 	res := &resolver{answers: []string{deadURL(t), leader.URL}}
-	got := do(t, &Router{Resolve: res}, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+	got := do(t, &Router{Resolve: res}, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 	if got.status != 200 {
 		t.Fatalf("got %d %s", got.status, got.body)
 	}
@@ -207,7 +210,7 @@ func TestConnectionRefusedReresolves(t *testing.T) {
 
 func TestStaleThenSuccess(t *testing.T) {
 	e := newEngine(t, reply{503, `{"error": "stale", "message": "x"}`, nil}, reply{200, `{"seq": 2}`, nil})
-	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 	if got.status != 200 || len(e.requests()) != 2 {
 		t.Fatalf("got %d %s after %d requests", got.status, got.body, len(e.requests()))
 	}
@@ -215,7 +218,7 @@ func TestStaleThenSuccess(t *testing.T) {
 
 func TestTimeoutResendsSameBody(t *testing.T) {
 	e := newEngine(t, reply{504, `{"error": "timeout", "message": "x"}`, nil}, reply{200, `{"seq": 3}`, nil})
-	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 	reqs := e.requests()
 	if got.status != 200 || len(reqs) != 2 {
 		t.Fatalf("got %d %s after %d requests", got.status, got.body, len(reqs))
@@ -230,7 +233,7 @@ func TestFinalStatusDeliveredUnchanged(t *testing.T) {
 		body := `{"error": "conflict", "message": "x", "seq": 4, "user": "bob"}`
 		e := newEngine(t, reply{status, body, map[string]string{"X-Engine": "e1"}})
 		rt := &Router{Resolve: &resolver{answers: []string{e.URL}}, Deadline: 2 * time.Second}
-		got := do(t, rt, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+		got := do(t, rt, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 		if got.status != status || got.body != body || got.header.Get("X-Engine") != "e1" {
 			t.Errorf("%d: got %d %s %v", status, got.status, got.body, got.header)
 		}
@@ -246,7 +249,7 @@ func TestBodyReplayedByteForByte(t *testing.T) {
 		reply{503, `{"error": "busy", "message": "x"}`, nil},
 		reply{429, `{"error": "overloaded", "message": "x"}`, nil},
 		reply{200, `{"seq": 9}`, nil})
-	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write),
+	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/"+testModel+"/writes", []byte(write),
 		map[string]string{"Content-Type": "application/json"})
 	reqs := e.requests()
 	if got.status != 200 || len(reqs) != 4 {
@@ -274,14 +277,14 @@ func TestUserHeaderComesFromAuth(t *testing.T) {
 		},
 	}
 	hdr := map[string]string{"Authorization": "Bearer t1", "X-Forwarded-User": "mallory", "Content-Type": "application/json"}
-	if got := do(t, rt, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), hdr); got.status != 200 {
+	if got := do(t, rt, "POST", "/models/"+testModel+"/writes", []byte(write), hdr); got.status != 200 {
 		t.Fatalf("got %d %s", got.status, got.body)
 	}
 	h := e.requests()[0].header
 	if v := h.Values("X-Forwarded-User"); len(v) != 1 || v[0] != "alice" {
 		t.Errorf("engine saw X-Forwarded-User %q, want [alice]", v)
 	}
-	if v := h.Get("X-Nanashi-Model"); v != "0192f3a4-5b6c-7d8e-9f01-23456789abcd" {
+	if v := h.Get("X-Nanashi-Model"); v != testModel {
 		t.Errorf("engine saw X-Nanashi-Model %q, want the model id", v)
 	}
 	if h.Get("Authorization") != "" {
@@ -289,7 +292,7 @@ func TestUserHeaderComesFromAuth(t *testing.T) {
 	}
 
 	hdr["Authorization"] = "Bearer wrong"
-	if got := do(t, rt, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), hdr); got.status != 401 || errorKind(t, got.body) != "unauthorized" {
+	if got := do(t, rt, "POST", "/models/"+testModel+"/writes", []byte(write), hdr); got.status != 401 || errorKind(t, got.body) != "unauthorized" {
 		t.Errorf("wrong token: got %d %s", got.status, got.body)
 	}
 	if n := len(e.requests()); n != 1 {
@@ -300,7 +303,7 @@ func TestUserHeaderComesFromAuth(t *testing.T) {
 func TestNoAuthStripsClientUserHeader(t *testing.T) {
 	e := newEngine(t, reply{200, `{}`, nil})
 	rt := &Router{Resolve: &resolver{answers: []string{e.URL}}, UserHeader: "X-User"}
-	do(t, rt, "GET", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/", nil, map[string]string{"X-User": "mallory"})
+	do(t, rt, "GET", "/models/"+testModel+"/", nil, map[string]string{"X-User": "mallory"})
 	if v := e.requests()[0].header.Values("X-User"); len(v) != 0 {
 		t.Errorf("engine saw X-User %q, want none", v)
 	}
@@ -332,7 +335,7 @@ func TestProxyUserThroughRouter(t *testing.T) {
 		"Content-Type": "application/json"}
 	for _, proxy := range []string{"10.0.0.7:41000", "[::ffff:10.0.0.7]:41000", "[fd00::5]:41000"} {
 		before := len(e.requests())
-		if got := fromAddr(rt, proxy, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), hdr); got.status != 200 {
+		if got := fromAddr(rt, proxy, "POST", "/models/"+testModel+"/writes", []byte(write), hdr); got.status != 200 {
 			t.Fatalf("from %s: got %d %s", proxy, got.status, got.body)
 		}
 		h := e.requests()[before].header
@@ -347,13 +350,13 @@ func TestProxyUserThroughRouter(t *testing.T) {
 	// A sender outside the trusted CIDRs can set any user, so the router does not use or send its header.
 	sent := len(e.requests())
 	for _, sender := range []string{"10.0.1.7:41000", "127.0.0.1:41000", "[::1]:41000", "[fe80::1%eth0]:41000", "bad"} {
-		got := fromAddr(rt, sender, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), hdr)
+		got := fromAddr(rt, sender, "POST", "/models/"+testModel+"/writes", []byte(write), hdr)
 		if got.status != 401 || errorKind(t, got.body) != "unauthorized" {
 			t.Errorf("from %s: got %d %s, want 401", sender, got.status, got.body)
 		}
 	}
 	// The trusted proxy must send the header.
-	if got := fromAddr(rt, "10.0.0.7:41000", "GET", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/", nil, nil); got.status != 401 {
+	if got := fromAddr(rt, "10.0.0.7:41000", "GET", "/models/"+testModel+"/", nil, nil); got.status != 401 {
 		t.Errorf("no header: got %d %s, want 401", got.status, got.body)
 	}
 	if n := len(e.requests()); n != sent {
@@ -387,10 +390,10 @@ func TestPrefixStrippedKeepingEscapes(t *testing.T) {
 	e := newEngine(t, reply{200, `{}`, nil})
 	rt := &Router{Resolve: &resolver{answers: []string{e.URL}}}
 	for target, want := range map[string]string{
-		"/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/metrics/a%2Fb/cell?Item=x%2Fy&Month=%E6%97%A5": "/metrics/a%2Fb/cell?Item=x%2Fy&Month=%E6%97%A5",
-		"/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd":                                               "/",
-		"/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd?x=1":                                           "/?x=1",
-		"/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/health":                                        "/health",
+		"/models/" + testModel + "/metrics/a%2Fb/cell?Item=x%2Fy&Month=%E6%97%A5": "/metrics/a%2Fb/cell?Item=x%2Fy&Month=%E6%97%A5",
+		"/models/" + testModel:             "/",
+		"/models/" + testModel + "?x=1":    "/?x=1",
+		"/models/" + testModel + "/health": "/health",
 	} {
 		before := len(e.requests())
 		if got := do(t, rt, "GET", target, nil, nil); got.status != 200 {
@@ -405,7 +408,7 @@ func TestPrefixStrippedKeepingEscapes(t *testing.T) {
 func TestNoLeaderUntilDeadline(t *testing.T) {
 	rt := &Router{Resolve: &resolver{answers: []string{""}}, Deadline: 300 * time.Millisecond}
 	start := time.Now()
-	got := do(t, rt, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+	got := do(t, rt, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 	if got.status != 503 || errorKind(t, got.body) != "no_leader" {
 		t.Fatalf("got %d %s", got.status, got.body)
 	}
@@ -417,7 +420,7 @@ func TestNoLeaderUntilDeadline(t *testing.T) {
 func TestDeadlineDeliversLastResponse(t *testing.T) {
 	e := newEngine(t, reply{504, `{"error": "timeout", "message": "x"}`, nil})
 	rt := &Router{Resolve: &resolver{answers: []string{e.URL}}, Deadline: 300 * time.Millisecond}
-	got := do(t, rt, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", []byte(write), nil)
+	got := do(t, rt, "POST", "/models/"+testModel+"/writes", []byte(write), nil)
 	if got.status != 504 || got.body != `{"error": "timeout", "message": "x"}` {
 		t.Fatalf("got %d %s", got.status, got.body)
 	}
@@ -442,7 +445,7 @@ func TestRouterOwnPaths(t *testing.T) {
 		"/models/plan/writes": 400,
 		"/models/0192F3A4-5B6C-7D8E-9F01-23456789ABCD/writes": 400,
 		"/models/0192f3a45b6c7d8e9f0123456789abcd/writes":     400,
-		"/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd%2Fx":    400,
+		"/models/" + testModel + "%2Fx":                       400,
 	} {
 		if got := do(t, rt, "GET", target, nil, nil); got.status != want {
 			t.Errorf("%s: got %d %s, want %d", target, got.status, got.body, want)
@@ -455,7 +458,7 @@ func TestRouterOwnPaths(t *testing.T) {
 
 func TestBodyTooLarge(t *testing.T) {
 	e := newEngine(t, reply{200, `{}`, nil})
-	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/writes", make([]byte, maxBody+1), nil)
+	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/"+testModel+"/writes", make([]byte, maxBody+1), nil)
 	if got.status != 413 || len(e.requests()) != 0 {
 		t.Fatalf("got %d %s, engine got %d", got.status, got.body, len(e.requests()))
 	}
@@ -467,16 +470,16 @@ func TestPutCreatesModel(t *testing.T) {
 		created = append(created, model)
 		return nil
 	}}
-	for _, target := range []string{"/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd?x=1"} {
+	for _, target := range []string{"/models/" + testModel, "/models/" + testModel + "/", "/models/" + testModel + "?x=1"} {
 		if got := do(t, rt, "PUT", target, nil, nil); got.status != 200 || got.body != "{\"ok\":true}\n" {
 			t.Errorf("%s: got %d %s", target, got.status, got.body)
 		}
 	}
-	if len(created) != 3 || created[0] != "0192f3a4-5b6c-7d8e-9f01-23456789abcd" {
-		t.Errorf("Create got %v, want [plan plan plan]", created)
+	if len(created) != 3 || created[0] != testModel {
+		t.Errorf("Create got %v, want the model id 3 times", created)
 	}
 	rt.Create = nil
-	if got := do(t, rt, "PUT", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd", nil, nil); got.status != 405 {
+	if got := do(t, rt, "PUT", "/models/"+testModel, nil, nil); got.status != 405 {
 		t.Errorf("nil Create: got %d %s, want 405", got.status, got.body)
 	}
 }
@@ -485,7 +488,7 @@ func TestEngineFailingAtOnce(t *testing.T) {
 	res := &resolver{err: fmt.Errorf("%w: exit status 1", ErrEngineFailing)}
 	rt := &Router{Resolve: res, Deadline: 5 * time.Second}
 	start := time.Now()
-	got := do(t, rt, "GET", "/models/0192f3a4-5b6c-7d8e-9f01-23456789abcd/", nil, nil)
+	got := do(t, rt, "GET", "/models/"+testModel+"/", nil, nil)
 	if got.status != 503 || errorKind(t, got.body) != "engine_failing" || !strings.Contains(got.body, "exit status 1") {
 		t.Fatalf("got %d %s", got.status, got.body)
 	}

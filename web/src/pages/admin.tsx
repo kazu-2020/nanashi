@@ -81,7 +81,6 @@ export function SnapshotsPage() {
   const { appId, can } = useApp();
   const mutate = useMutate("snapshots");
   const [name, setName] = useState("");
-  // The id of the next snapshot. A new id comes after each create.
   const [id, setId] = useState(newId);
   const { data: r } = useQuery({
     queryKey: ["app", appId, "snapshots"],
@@ -138,7 +137,6 @@ export function AccessPage() {
     members: [] as string[],
     write: false,
   });
-  // The id of the next access rule. A new id comes after each create.
   const [ruleId, setRuleId] = useState(newId);
   return (
     <div>

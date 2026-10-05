@@ -13,7 +13,6 @@ import (
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
 
-// engineKind gives the engine kind of m: "number", "boolean" or "member:<list id>".
 func engineKind(em engineModel, m *nanashiv1.MetricDef) (string, error) {
 	if m.Kind == nanashiv1.ValueKind_VALUE_KIND_MEMBER {
 		if _, ok := em.dim(m.MemberList); !ok {

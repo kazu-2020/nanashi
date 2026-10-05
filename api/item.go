@@ -19,17 +19,12 @@ type itemRow struct {
 	Def  json.RawMessage    `json:"def"`
 }
 
-// itemDef is the definition of a table, a view or a board.
 type itemDef interface {
 	proto.Message
 	GetId() string
 }
 
 // The actions follow.
-
-func (s *PlanServer) items(ctx context.Context, app string) ([]itemRow, error) {
-	return itemsIn(ctx, s.Pool, app)
-}
 
 func itemsIn(ctx context.Context, q querier, app string) ([]itemRow, error) {
 	rows, _ := q.Query(ctx, "select type, id, def from app_item where app_id = $1 order by ord", app)

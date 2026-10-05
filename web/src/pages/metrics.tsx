@@ -4,7 +4,7 @@ import { api, newId } from "../api";
 import { ItemType, type MetricDef, Role, ValueKind } from "../gen/nanashi/v1/plan_pb";
 import { defaultSpec, dropsInputCells, toFilters } from "../logic";
 import { PivotEditor } from "../Pivot";
-import { cls, createOrUpdate, listOptions, useApp, useMutate } from "../state";
+import { cls, createOrUpdate, listOptions, metricOptions, useApp, useMutate } from "../state";
 import { Check, Checks, Sel } from "../ui";
 
 const FORMULA_HELP: [string, string][] = [
@@ -26,7 +26,6 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void })
   const { appId, model } = useApp();
   const mutate = useMutate();
   const d = props.def;
-  // The id of a new Metric: the form makes it when it becomes a new Metric.
   const [f, setF] = useState({
     id: d?.id ?? newId(),
     name: d?.name ?? "",
@@ -243,7 +242,6 @@ export function TablesPage() {
   const { appId, model, can } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.tables[0]?.id ?? "");
-  // The id of the next new table. It changes each time the form becomes a new table.
   const [draftId, setDraftId] = useState(newId);
   const t = model.tables.find((x) => x.id === sel);
   const [f, setF] = useState({ name: t?.name ?? "", metrics: t?.metrics ?? [] });
@@ -277,7 +275,7 @@ export function TablesPage() {
           />
           <Checks
             label="メトリック"
-            options={model.metrics.map((m): [string, string] => [m.id, m.name])}
+            options={metricOptions(model)}
             value={f.metrics}
             onChange={(metrics) => setF({ ...f, metrics })}
           />

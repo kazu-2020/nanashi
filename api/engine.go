@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -29,9 +30,7 @@ type op map[string]any
 
 func newOp(name string, args map[string]any) op {
 	o := op{"op": name}
-	for k, v := range args {
-		o[k] = v
-	}
+	maps.Copy(o, args)
 	return o
 }
 
@@ -97,7 +96,6 @@ func (m engineModel) metric(id string) (engineMetric, bool) {
 	return m.Metrics[i], true
 }
 
-// names gives the names of the lists and the Metrics, by id, for error messages.
 func (m engineModel) name(id string) string {
 	if d, ok := m.dim(id); ok {
 		return d.Name
@@ -256,7 +254,6 @@ func (r engineReply) outcome() outcome {
 	return unknown
 }
 
-// connectError changes an engine error reply into a Connect error with the message of the engine.
 func (r engineReply) connectError() error {
 	code := map[int]connect.Code{
 		http.StatusBadRequest:            connect.CodeInvalidArgument,

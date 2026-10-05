@@ -22,7 +22,6 @@ export const api = createClient(
   createConnectTransport({ baseUrl: "/", interceptors: [withUser] }),
 );
 
-// newId makes a UUIDv7 for a new object or for the client_op_id of a write.
 export const newId = () => uuidv7(Date.now(), crypto.getRandomValues(new Uint8Array(16)));
 
 // errorText gives the message for the user. The api sends Japanese messages.
