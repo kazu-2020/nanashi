@@ -101,7 +101,7 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
 If you give the ID from the sender to `transaction(client_op_id=...)`, and a transaction with the same ID is already committed, the engine raises `AlreadyCommitted`. It does not do the operations in the transaction.
 Thus, if a user does not receive the response and sends again, the engine does not commit twice.
 
-The HTTP server also records a rejected write with its `client_op_id` (`record_rejection`: the HTTP status and body).
+The writer also records a rejected write with its `client_op_id` (`record_rejection`: the HTTP status and body). It records the rejection before it takes the next write, so a resend cannot apply the write.
 `FileJournal` keeps these in memory for the last `op_window` rejections. After a restart, the same write gets the same rejection again, because the model refuses it again.
 `PgJournal` keeps them in the table `nanashi_rejection`, so a restarted server gives the same answer.
 

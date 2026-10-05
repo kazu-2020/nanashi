@@ -438,9 +438,9 @@ class Journal:
         objects                    The object storage for the snapshots and the large cell changes
         append_many(records)       Append the records, commit them in one write, and return their seqs
         seq_of(client_op_id)       The seq of the record with this ID (None if there is no record)
-        seq_of_many(client_op_ids) The committed client_op_id -> seq, in one lookup
         record_rejection(client_op_id, status, body)  Keep a rejected write (the HTTP status and body) for op_window
-        rejections_of_many(client_op_ids)              The rejected client_op_id -> (status, body), in one lookup
+        outcomes_of_many(client_op_ids)  The committed client_op_id -> seq and the rejected
+                                   client_op_id -> (status, body), in one lookup
         records(after)             The records with a seq after "after" (oldest first)
         save_snapshot(model)       Put a snapshot of model (at seq model.seq)
         snapshots()                The (seq, place) of the snapshots, newest first
@@ -824,16 +824,14 @@ class FileJournal(Journal):
     def seq_of(self, client_op_id: str) -> int | None:
         return self._by_client_op.get(client_op_id)
 
-    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
-        return {i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op}
-
     def record_rejection(self, client_op_id: str, status: int, body: dict) -> None:
         self._rejected[client_op_id] = (status, body)
         while len(self._rejected) > self.op_window:
             self._rejected.popitem(last=False)
 
-    def rejections_of_many(self, client_op_ids: list[str]) -> dict[str, tuple[int, dict]]:
-        return {i: self._rejected[i] for i in client_op_ids if i in self._rejected}
+    def outcomes_of_many(self, client_op_ids: list[str]) -> tuple[dict[str, int], dict[str, tuple[int, dict]]]:
+        return ({i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op},
+                {i: self._rejected[i] for i in client_op_ids if i in self._rejected})
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()

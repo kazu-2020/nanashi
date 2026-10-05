@@ -92,7 +92,9 @@ class Server:
 def seed() -> Model:
     m = Model(engine=RustEngine())
     # The UUIDs are fixed strings, so the writes can name the objects without a read of GET /
-    m.add_dimension("Item", ITEMS, id="dim-item", member_ids=ITEMS)
+    m.add_dimension("Item", [], id="dim-item")
+    for i in ITEMS:
+        m.add_member("Item", i, id=i)
     m.add_input("Value", ["Item"], {(i,): 0 for i in ITEMS}, id="metric-value")
     m.add_formula("Double", ["Item"], "Value * 2", id="metric-double")
     return m

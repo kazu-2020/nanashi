@@ -229,6 +229,27 @@ class Api:
         self.assertEqual(self.c.get("/operations/c-2")[0], 404)
         self.assertEqual(self.c.post("/writes", {**late, "expect": seq + 1})[0], 200)
 
+    def test_rejection_after_timeout_is_remembered(self):
+        # The handler returns 504 before the writer rejects the write. The writer must still record the rejection
+        ws, started, gate = self.ws, threading.Event(), threading.Event()
+
+        def slow_bad(m, ops):
+            started.set()
+            gate.wait()
+            raise ValueError("bad")
+        self.server.write_timeout = 0.5
+        op = write(ws, "Stock", 1, Product="p0", Month="Jan")
+        with mock.patch("sparse_engine.server.apply_ops", slow_bad):
+            status, _ = self.c.post("/writes", {"client_op_id": "late-1", "ops": [op]})
+            self.assertTrue(started.is_set())
+            self.assertEqual(status, 504)
+            gate.set()
+            ws.write(lambda m: None)  # wait until the writer finishes the slow write
+        body = {"error": "bad_request", "message": "bad"}
+        self.assertEqual(self.c.get("/operations/late-1"), (200, {"state": "rejected", "status": 400, "body": body}))
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "late-1", "ops": [op]}), (400, body))
+        self.assertEqual(ws.seq, 0)
+
     def test_duplicate_ids(self):
         ws = self.ws
         product, p0 = did(ws, "Product"), xid(ws, "Product", "p0")

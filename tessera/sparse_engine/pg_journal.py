@@ -438,29 +438,24 @@ class PgJournal(Journal):
                                     (self.model_id, client_op_id)).fetchone()
         return None if row is None else row[0]
 
-    def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
-        if not client_op_ids:
-            return {}
-        with self._lock:
-            rows = self.conn.execute("select client_op_id, seq from nanashi_operation"
-                                     " where model_id = %s and client_op_id = any(%s)",
-                                     (self.model_id, list(client_op_ids))).fetchall()
-        return dict(rows)
-
     def record_rejection(self, client_op_id: str, status: int, body: dict) -> None:
         with self._lock:
             self.conn.execute("insert into nanashi_rejection (model_id, client_op_id, head_seq, status, body)"
                               " values (%s, %s, %s, %s, %s) on conflict do nothing",
                               (self.model_id, client_op_id, self.head, status, Jsonb(body)))
 
-    def rejections_of_many(self, client_op_ids: list[str]) -> dict[str, tuple[int, dict]]:
+    def outcomes_of_many(self, client_op_ids: list[str]) -> tuple[dict[str, int], dict[str, tuple[int, dict]]]:
         if not client_op_ids:
-            return {}
+            return {}, {}
+        ids = list(client_op_ids)
         with self._lock:
-            rows = self.conn.execute("select client_op_id, status, body from nanashi_rejection"
+            rows = self.conn.execute("select client_op_id, seq, null::integer, null::jsonb from nanashi_operation"
+                                     " where model_id = %s and client_op_id = any(%s)"
+                                     " union all select client_op_id, null, status, body from nanashi_rejection"
                                      " where model_id = %s and client_op_id = any(%s)",
-                                     (self.model_id, list(client_op_ids))).fetchall()
-        return {i: (s, b) for i, s, b in rows}
+                                     (self.model_id, ids, self.model_id, ids)).fetchall()
+        return ({i: seq for i, seq, _, _ in rows if seq is not None},
+                {i: (status, body) for i, seq, status, body in rows if seq is None})
 
     def records(self, after: int = 0) -> Iterator[dict]:
         with self._lock, self.conn.transaction():

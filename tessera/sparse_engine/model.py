@@ -473,9 +473,8 @@ class Model:
     # ------------------------------------------------ 定義
 
     @_operation
-    def add_dimension(self, name: str, members, *, ordered: bool = False, id: str | None = None,
-                      member_ids=None) -> Dimension:
-        """Add the dimension. id is its UUID and member_ids are the UUIDs of the members (made if None).
+    def add_dimension(self, name: str, members, *, ordered: bool = False, id: str | None = None) -> Dimension:
+        """Add the dimension. id is its UUID (made if None). The members get new UUIDs (add_member sets one).
         If id is the UUID of a dimension with the same name, nothing changes (the dimension is defined again)."""
         by_id = self.dimensions_by_id()
         id, handle = self._resolve(id, lambda h: h in by_id)
@@ -489,16 +488,11 @@ class Model:
         if name in self.metrics:
             raise ValueError(f"{name}: 同じ名前の Metric がある（式の中で軸と区別できなくなる）")
         members = list(members)
-        member_ids = [uuid7() for _ in members] if member_ids is None else list(member_ids)
-        if len(member_ids) != len(members):
-            raise ValueError(f"{name}: member_ids はメンバーと同じ数")
-        for u in member_ids:
-            self._resolve(u, lambda h: False)
         d = Dimension(name, members, ordered=ordered, id=self._new_id(), ids=[self._new_id() for _ in members])
         self.dimensions[name] = d
         self._bind(id, d.id)
-        for u, h in zip(member_ids, d.ids):
-            self._bind(u, h)
+        for h in d.ids:
+            self._bind(uuid7(), h)
         return d
 
     # ------------------------------------------------ UUIDs

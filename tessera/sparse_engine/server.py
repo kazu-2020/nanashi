@@ -85,7 +85,7 @@ from .core import Dimension
 from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
 from .model import DuplicateId, Metric
-from .workspace import Conflict, NotLeader, Overloaded, Rejected, Replica, Role, Workspace
+from .workspace import Conflict, NotLeader, Overloaded, Rejected, Replica, Role, Workspace, rejection_of
 
 log = logging.getLogger(__name__)
 
@@ -169,10 +169,10 @@ class Names:
     # ------------------------------------------------ names -> UUIDs
 
     def dim_id(self, name: str) -> str:
-        return self.m.uuid_of(self.m.dimension(name).id)
+        return self.m.dimension_id(name)
 
     def member_id(self, d: Dimension, name: str) -> str:
-        return self.m.uuid_of(d.ids[d._index[name]])
+        return self.m.member_id(d.name, name)
 
     def kind_out(self, kind: str) -> str:
         return "member:" + self.dim_id(kind.removeprefix("member:")) if kind.startswith("member:") else kind
@@ -391,8 +391,8 @@ class Handler(BaseHTTPRequestHandler):
             status, body = fn()
         except ApiError as e:
             self._fail(e)
-        except (DuplicateId, FormulaError, ValueError) as e:  # 引数の誤り（Model は利用者の誤りを ValueError にする）
-            self._fail(_rejection(e))
+        except (DuplicateId, FormulaError, ValueError) as e:  # A bad request (Model raises ValueError for a user error)
+            self._json(*rejection_of(e))
         except Exception:  # それ以外は内部の誤り。中身は応答に出さず、ログで引けるように ID を付ける
             error_id = uuid.uuid4().hex[:12]
             log.exception("要求の処理に失敗した（error_id=%s）", error_id)
@@ -481,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, {"seq": v.seq, "value": n.value_out(m, v.get(name, **coords))}
             limit = self.server.max_cells
             if what == "slice":
-                count = v.summarize(name, agg="count", **coords).cells.get((), 0)  # 丸ごと読む前に数える
+                count = v.summarize(name, agg="count", **coords).cells.get((), 0)  # Count the cells before the full read
                 if count > limit:
                     raise ApiError(413, "too_large", f"範囲のセルが {count:,} 件あり、上限 {limit:,} を超える（rows でページングする）")
                 return 200, {"seq": v.seq, **n.cube_out(m, v.slice(name, **coords))}
@@ -551,11 +551,7 @@ class Handler(BaseHTTPRequestHandler):
                 client_op_id=client_op_id, expect=body.get("expect"), timeout=self.server.write_timeout)
         except Rejected as e:  # the same client_op_id was rejected before: the same answer
             return e.status, e.body
-        except (DuplicateId, FormulaError, ValueError) as e:
-            # A terminal rejection: the same client_op_id gets the same answer again (GET /operations/<id> too)
-            err = _rejection(e)
-            self.server.workspace.reject(client_op_id, err.status, err.body)
-            raise err from None
+        # _run answers a terminal rejection (DuplicateId, FormulaError, ValueError). The writer recorded it already
         except Conflict as e:
             raise ApiError(409, "conflict", str(e), seq=e.seq, user=e.user) from None
         except NotLeader as e:
@@ -571,15 +567,6 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             raise ApiError(503, "closed", str(e)) from None
         return 200, {"seq": seq}
-
-
-def _rejection(e: Exception) -> ApiError:
-    """The HTTP error of a write that the model refused."""
-    if isinstance(e, DuplicateId):
-        return ApiError(409, "duplicate_id", str(e))
-    if isinstance(e, FormulaError):
-        return ApiError(400, "formula", str(e), code=e.code)
-    return ApiError(400, "bad_request", str(e))
 
 
 def _dimensions_out(n: Names) -> dict:
