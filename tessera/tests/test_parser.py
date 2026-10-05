@@ -1,12 +1,12 @@
 import unittest
 
-from sparse_engine import FormulaError, Model, ParseError, if_, parse, ref, to_formula
+from sparse_engine import FormulaError, Model, Named, ParseError, if_, parse, ref, to_formula
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr"]
 
 
 def model() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B", "C"])
     m.add_dimension("Month", MONTHS, ordered=True)
     m.add_dimension("Employee", ["e1", "e2", "e3"])
@@ -103,7 +103,7 @@ class Names(unittest.TestCase):
         self.assertEqual(to_formula(e), "'Owner''s Equity'")
 
     def test_japanese_names(self):
-        m = Model()
+        m = Named(Model())
         m.add_dimension("商品", ["りんご", "みかん"])
         m.add_input("売上", ["商品"], {("りんご",): 100, ("みかん",): 80})
         m.add_input("原価", ["商品"], {("りんご",): 60})

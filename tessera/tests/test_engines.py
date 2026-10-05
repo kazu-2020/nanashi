@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import Model, to_formula
+from sparse_engine import Model, Named, to_formula
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import model as build, same
@@ -15,12 +15,12 @@ except ImportError:  # nanashi_core をビルドしていない環境
 
 def build_with(engine) -> Model:
     m = build()
-    fresh = Model(engine=engine)
+    fresh = Named(Model(engine=engine))
     fresh.dimensions, fresh._dim_ids = m.dimensions, m._dim_ids
     formulas = [x for x in m.metrics.values() if x.formula is not None]
     for x in m.metrics.values():
         if x.formula is None:
-            fresh.add_input(x.name, x.dims, m.value(x.id).cells, kind=x.kind)
+            fresh.add_input(x.name, x.dims, m.model.value(x.id).cells, kind=x.kind)  # ids in, ids out
     for x in formulas:  # an empty input first: the formulas can refer to each other (a scan)
         fresh.add_input(x.name, x.dims, kind=x.kind)
     for x in formulas:
@@ -73,7 +73,7 @@ class WriteMany(unittest.TestCase):
         cells = {tuple(f"{d.lower()}{rng.randrange(n)}" for d, n in sizes.items()): 1.0 for _ in range(300)}
         models = []
         for engine in (ReferenceEngine(), RustEngine()):
-            m = Model(engine=engine)
+            m = Named(Model(engine=engine))
             for d, n in sizes.items():
                 m.add_dimension(d, [f"{d.lower()}{i}" for i in range(n)])
             m.add_input("X", list(sizes), cells)
@@ -96,7 +96,7 @@ class WriteMany(unittest.TestCase):
                 self.assertTrue(read[0])
 
     def test_rejects_bad_columns(self):
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         m.add_dimension("A", ["a0", "a1"])
         m.add_input("X", ["A"], {})
         with self.assertRaisesRegex(ValueError, "メンバー番号 2"):

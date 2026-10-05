@@ -2,7 +2,7 @@
 
     python bench_http.py
 """
-import json, sys, threading, time, urllib.parse, urllib.request
+import json, sys, threading, time, urllib.request
 from bench import median_ms
 from examples.fpa import SIZES, build
 from sparse_engine.rust_engine import RustEngine
@@ -12,8 +12,13 @@ from sparse_engine.workspace import Workspace
 sys.setswitchinterval(0.0005)
 m = build(RustEngine(), *SIZES["large"]); m.recalc()
 emp = m.dimension("Employee").members[1]
-server = Server(Workspace(m), "127.0.0.1", 0).start()
+server = Server(Workspace(m.model), "127.0.0.1", 0).start()
 url = server.url
+# The HTTP API takes UUIDs (docs/ids.md)
+mid, did, xid = (lambda n: m.metric(n).id), m.dimension_id, m.member_id
+q = lambda **coords: "&".join(f"{did(d)}={xid(d, x)}" for d, x in coords.items())
+write = lambda value: {"op": "set_cell", "metric": mid("Salary"), "value": value,
+                       "coords": {did("Employee"): xid("Employee", emp), did("Version"): xid("Version", "予算")}}
 
 def get(path):
     with urllib.request.urlopen(url + path, timeout=10) as r:
@@ -25,11 +30,11 @@ def post(body):
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
-cell = f"/metrics/PayrollByEmployee/cell?Employee={emp}&Version={urllib.parse.quote("予算")}&Month=m01"
+cell = f"/metrics/{mid('PayrollByEmployee')}/cell?" + q(Employee=emp, Version="予算", Month="m01")
 print(f"GET cell（単独）: {median_ms(lambda: get(cell), 20):.2f} ms")
-summary = "/metrics/Revenue/summary?keep=Month&Version=" + urllib.parse.quote("予算")
+summary = f"/metrics/{mid('Revenue')}/summary?keep={did('Month')}&" + q(Version="予算")
 print(f"GET summary 月別合計: {median_ms(lambda: get(summary), 20):.2f} ms")
-print(f"POST write（単独）: {median_ms(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [{'op': 'set_cell', 'args': ['Salary', 500.0], 'kwargs': {'Employee': emp, 'Version': '予算'}}]}), 20):.2f} ms")
+print(f"POST write（単独）: {median_ms(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [write(500.0)]}), 20):.2f} ms")
 
 stop = threading.Event(); reads = [0]
 def reader():
@@ -38,7 +43,7 @@ def reader():
 threads = [threading.Thread(target=reader, daemon=True) for _ in range(8)]
 t0 = time.perf_counter()
 for t in threads: t.start()
-w = median_ms(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [{'op': 'set_cell', 'args': ['Salary', 501.0], 'kwargs': {'Employee': emp, 'Version': '予算'}}]}), 20)
+w = median_ms(lambda: post({'client_op_id': str(time.perf_counter_ns()), 'ops': [write(501.0)]}), 20)
 stop.set()
 for t in threads: t.join()
 dt = time.perf_counter() - t0

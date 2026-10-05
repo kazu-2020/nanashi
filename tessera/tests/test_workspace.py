@@ -3,7 +3,7 @@ import random
 import threading
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.workspace import Conflict, Workspace
 
@@ -28,7 +28,7 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr"]
 def model(engine) -> Model:
     """在庫を商品と月で持ち、合計を集計するモデル。書き込みは商品の間で在庫を移すだけにして、
     合計が変わらないようにする。"""
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     m.add_dimension("Product", PRODUCTS)
     m.add_dimension("Month", MONTHS, ordered=True)
     m.add_input("Stock", ["Product", "Month"], {(p, t): 100.0 for p in PRODUCTS for t in MONTHS})
@@ -43,10 +43,10 @@ def workspace(test, m: Model, **kwargs) -> Workspace:
     その記録先に記録する（記録先の設定は test.journal_options）。"""
     journals = getattr(test, "journals", None)
     if journals is None:
-        return Workspace(m, **kwargs)
+        return Workspace(m.model, **kwargs)
     options = getattr(test, "journal_options", {})
-    journals.journal(**options).start(m)
-    return Workspace(m, journals.journal(**options), **kwargs)
+    journals.journal(**options).start(m.model)
+    return Workspace(m.model, journals.journal(**options), **kwargs)
 
 
 def reopen(test, ws: Workspace, engine) -> None:
@@ -59,7 +59,7 @@ def reopen(test, ws: Workspace, engine) -> None:
     try:
         check_same_state(test, ws.version, reopened.version)
         test.assertEqual(reopened.seq, ws.seq)
-        seq = reopened.write(lambda m: m.add_dimension("Reopened", ["x"]))
+        seq = reopened.write(lambda m: Named(m).add_dimension("Reopened", ["x"]))
         test.assertEqual(seq, ws.seq + 1)
     finally:
         reopened.close()
@@ -84,6 +84,7 @@ def hold(ws: Workspace):
 
 def move(src: str, dst: str, month: str, amount: float):
     def fn(m):
+        m = Named(m)
         m.set_cell("Stock", m.get("Stock", Product=src, Month=month) - amount, Product=src, Month=month)
         m.set_cell("Stock", m.get("Stock", Product=dst, Month=month) + amount, Product=dst, Month=month)
     return fn
@@ -100,11 +101,11 @@ class Basics(unittest.TestCase):
         reopen(self, self.ws, self.engine())
 
     def test_write_publishes_a_new_version(self):
-        v0 = self.ws.version
+        v0 = Named(self.ws.version)
         seq = self.ws.write(move("p0", "p1", "Jan", 5), user="alice")
         self.assertEqual(seq, 1)
         self.assertIsNot(self.ws.version, v0)
-        self.assertEqual(self.ws.version.get("Stock", Product="p1", Month="Jan"), 105)
+        self.assertEqual(Named(self.ws.version).get("Stock", Product="p1", Month="Jan"), 105)
         self.assertEqual(v0.get("Stock", Product="p1", Month="Jan"), 100)  # 古い版は変わらない
 
     def test_published_versions_cannot_be_changed(self):
@@ -118,27 +119,28 @@ class Basics(unittest.TestCase):
             model.refresh()
 
     def test_failed_write_changes_nothing(self):
-        v = self.ws.version
+        v = Named(self.ws.version)
 
         def bad(m):
+            m = Named(m)
             m.set_cell("Stock", 0, Product="p0", Month="Jan")
             raise KeyError("oops")
         with self.assertRaises(KeyError):
             self.ws.write(bad)
-        self.assertIs(self.ws.version, v)
+        self.assertIs(self.ws.version, v.model)
         self.assertEqual(self.ws.write(move("p0", "p1", "Jan", 1)), 1)
 
     def test_one_failure_does_not_fail_the_batch(self):
         release = hold(self.ws)  # 後ろの書き込みを 1 つのまとまりに溜める
         good = self.ws.submit(move("p0", "p1", "Jan", 1))
-        bad = self.ws.submit(lambda m: m.add_formula("Bad", ["Product"], "Nope + 1"))
+        bad = self.ws.submit(lambda m: Named(m).add_formula("Bad", ["Product"], "Nope + 1"))
         good2 = self.ws.submit(move("p2", "p3", "Jan", 1))
         release()
         self.assertEqual((good.result(), good2.result()), (1, 2))
         with self.assertRaises(Exception):
             bad.result()
         self.assertNotIn("Bad", self.ws.version._metric_ids)
-        self.assertEqual(self.ws.version.get("Stock", Product="p3", Month="Jan"), 101)
+        self.assertEqual(Named(self.ws.version).get("Stock", Product="p3", Month="Jan"), 101)
 
     def test_conflict_on_the_same_cells(self):
         read = self.ws.seq
@@ -153,10 +155,10 @@ class Basics(unittest.TestCase):
         first = self.ws.write(move("p0", "p1", "Jan", 1), client_op_id="req-1")
         again = self.ws.write(move("p0", "p1", "Jan", 1), client_op_id="req-1")
         self.assertEqual(first, again)
-        self.assertEqual(self.ws.version.get("Stock", Product="p1", Month="Jan"), 101)
+        self.assertEqual(Named(self.ws.version).get("Stock", Product="p1", Month="Jan"), 101)
 
     def test_remembered_client_op_ids_are_bounded(self):
-        ws = Workspace(model(self.engine()), keep_recent=3)
+        ws = Workspace(model(self.engine()).model, keep_recent=3)
         try:
             for i in range(10):
                 ws.write(move("p0", "p1", "Jan", 1), client_op_id=f"op-{i}")
@@ -189,7 +191,7 @@ class Concurrency(unittest.TestCase):
 
         def reader():
             while not stop.is_set():
-                v = ws.version
+                v = Named(ws.version)
                 total = v.get("Total")
                 by_month = sum(v.value("ByMonth").cells.values())
                 cells = sum(v.value("Stock").cells.values())
@@ -217,7 +219,7 @@ class Concurrency(unittest.TestCase):
         self.assertGreater(reads[0], 10)
         self.assertEqual(ws.seq, 120)
         full = model(self.engine())  # 同じ書き込みを全体の計算で求め直しても合う
-        v = ws.version
+        v = Named(ws.version)
         incremental = snapshot(v)
         v2 = v.fork()
         v2._invalidate()
@@ -272,14 +274,14 @@ class WithJournal(JournalCase, unittest.TestCase):
 
     def test_journal_failure_discards_the_batch(self):
         ws = workspace(self, model(self.engine()))
-        v = ws.version
+        v = Named(ws.version)
 
         def broken(records):
             raise OSError("disk full")
         original, ws.journal.append_many = ws.journal.append_many, broken
         with self.assertRaises(OSError):
             ws.write(move("p0", "p1", "Jan", 1))
-        self.assertIs(ws.version, v)
+        self.assertIs(ws.version, v.model)
         ws.journal.append_many = original
         self.assertEqual(ws.write(move("p0", "p1", "Jan", 1)), 1)  # 捨てたまとまりの後も続けて書ける
         ws.close()
@@ -290,6 +292,7 @@ class WithJournal(JournalCase, unittest.TestCase):
         ws = workspace(self, model(self.engine()))
 
         def take_all(m):  # Refused only after move("p0", "p1", "Jan", 100) of the same batch
+            m = Named(m)
             if m.get("Stock", Product="p0", Month="Jan") == 0:
                 raise ValueError("在庫がない")
             m.set_cell("Stock", 0, Product="p0", Month="Jan")
@@ -341,24 +344,24 @@ class LargeWriteConflicts(unittest.TestCase):
 
     def test_small_write_after_large_write(self):
         read = self.ws.seq
-        self.ws.write(lambda m: m.spread("V", 3000.0, how="even"), user="etl")
+        self.ws.write(lambda m: Named(m).spread("V", 3000.0, how="even"), user="etl")
         with self.assertRaises(Conflict) as e:
-            self.ws.write(lambda m: m.set_cell("V", 9.0, K="k7", T="t0"), user="bob", expect=read)
+            self.ws.write(lambda m: Named(m).set_cell("V", 9.0, K="k7", T="t0"), user="bob", expect=read)
         self.assertEqual(e.exception.user, "etl")
-        self.ws.write(lambda m: m.set_cell("V", 9.0, K="k7", T="t1"), user="bob", expect=read)  # 違うセル
+        self.ws.write(lambda m: Named(m).set_cell("V", 9.0, K="k7", T="t1"), user="bob", expect=read)  # 違うセル
 
     def test_large_write_after_small_write(self):
         read = self.ws.seq
-        self.ws.write(lambda m: m.set_cell("V", 9.0, K="k7", T="t0"), user="bob")
+        self.ws.write(lambda m: Named(m).set_cell("V", 9.0, K="k7", T="t0"), user="bob")
         with self.assertRaises(Conflict):
-            self.ws.write(lambda m: m.spread("V", 3000.0, how="even"), user="etl", expect=read)
+            self.ws.write(lambda m: Named(m).spread("V", 3000.0, how="even"), user="etl", expect=read)
 
     def test_large_writes_on_both_sides(self):
         read = self.ws.seq
-        self.ws.write(lambda m: m.spread("V", 3000.0, how="even"), user="etl")
-        self.ws.write(lambda m: m.spread("W", 1500.0, how="even"), user="etl2", expect=read)  # 違う Metric
+        self.ws.write(lambda m: Named(m).spread("V", 3000.0, how="even"), user="etl")
+        self.ws.write(lambda m: Named(m).spread("W", 1500.0, how="even"), user="etl2", expect=read)  # 違う Metric
         with self.assertRaises(Conflict):
-            self.ws.write(lambda m: m.spread("V", 4500.0, how="even"), user="etl3", expect=read)
+            self.ws.write(lambda m: Named(m).spread("V", 4500.0, how="even"), user="etl3", expect=read)
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -376,7 +379,7 @@ class Policies(unittest.TestCase):
 
     def test_full_queue_raises_overloaded(self):
         from sparse_engine.workspace import Overloaded
-        ws = Workspace(model(ReferenceEngine()), max_queue=2)
+        ws = Workspace(model(ReferenceEngine()).model, max_queue=2)
         try:
             release = hold(ws)  # ライターを止めておく
             ws.submit(move("p0", "p1", "Jan", 1))
@@ -388,19 +391,19 @@ class Policies(unittest.TestCase):
             ws.close()
 
     def test_write_timeout_cancels_a_queued_write(self):
-        ws = Workspace(model(ReferenceEngine()))
+        ws = Workspace(model(ReferenceEngine()).model)
         try:
             release = hold(ws)
             with self.assertRaises(TimeoutError):
                 ws.write(move("p0", "p1", "Jan", 1), timeout=0.05)  # 列で待っているうちに諦める
             release()
-            self.assertEqual(ws.version.get("Stock", Product="p1", Month="Jan"), 100)  # 取り消されている
+            self.assertEqual(Named(ws.version).get("Stock", Product="p1", Month="Jan"), 100)  # 取り消されている
         finally:
             ws.close()
 
     def test_snapshot_policy_needs_a_journal(self):
         with self.assertRaisesRegex(ValueError, "記録先"):
-            Workspace(model(ReferenceEngine()), checkpoint_every=5)
+            Workspace(model(ReferenceEngine()).model, checkpoint_every=5)
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")

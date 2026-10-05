@@ -17,6 +17,7 @@ import uuid
 
 from examples.fpa import SIZES, build
 from sparse_engine.journal import LOG_VERSION, FileJournal, now
+from sparse_engine.named import Named
 from sparse_engine.rust_engine import RustEngine
 from sparse_engine.workspace import Workspace
 
@@ -63,7 +64,7 @@ def model():
 def bench_commit(kind: str, m) -> None:
     """損益計画の給与の変更を、1 件ずつトランザクションで確定する。"""
     t = Target(kind)
-    t.make().start(m)
+    t.make().start(m.model)
     emps = m.dimension("Employee").members
     times = []
     for i in range(200):
@@ -78,9 +79,9 @@ def bench_commit(kind: str, m) -> None:
 def bench_workspace(kind: str, m) -> None:
     """8 人が 50 件ずつ給与を書き込む。"""
     t = Target(kind)
-    t.make().start(m)
+    t.make().start(m.model)
     m.journal = None
-    ws = Workspace(m.fork(), t.make())  # 渡したモデルは公開済みの版になるので、複製を渡す
+    ws = Workspace(m.fork().model, t.make())  # 渡したモデルは公開済みの版になるので、複製を渡す
     emps = m.dimension("Employee").members
     latency: list[float] = []
     lock = threading.Lock()
@@ -89,7 +90,7 @@ def bench_workspace(kind: str, m) -> None:
         for j in range(50):
             e = emps[2000 + k * 50 + j]
             s = time.perf_counter()
-            ws.write(lambda mm, e=e: mm.set_cell("Salary", 700.0, Employee=e, Version="予算"), user=f"c{k}")
+            ws.write(lambda mm, e=e: Named(mm).set_cell("Salary", 700.0, Employee=e, Version="予算"), user=f"c{k}")
             with lock:
                 latency.append(time.perf_counter() - s)
 
@@ -127,19 +128,19 @@ def bench_bulk(kind: str) -> None:
 def bench_open_and_history(kind: str, m) -> None:
     """1000 件の記録を積んでから、開き直す時間と、セルの履歴を引く時間を測る。"""
     t = Target(kind)
-    t.make().start(m)
+    t.make().start(m.model)
     emps = m.dimension("Employee").members
     for i in range(1000):
         m.set_cell("Salary", float(500 + i), Employee=emps[i % 50], Version="予算")
     m.journal = None
     s = time.perf_counter()
-    opened = t.make().open(RustEngine())
+    opened = Named(t.make().open(RustEngine()))
     opened.recalc()
     print(f"  {kind:4s} スナップショット＋1000 件の再生で開く: {time.perf_counter() - s:.2f} 秒")
     j = t.make()
     s = time.perf_counter()
     for _ in range(20):
-        h = j.cell_history(opened, "Salary", Employee=emps[3], Version="予算")
+        h = opened.cell_history(j, "Salary", Employee=emps[3], Version="予算")
     print(f"  {kind:4s} セルの履歴を引く（{len(h)} 件）: {1e3 * (time.perf_counter() - s) / 20:.1f} ms")
     t.close()
 

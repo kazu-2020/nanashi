@@ -5,17 +5,18 @@ If many users read and write at the same time, give the model to a `Workspace`.
 It applies the writes in sequence on one thread (the writer).
 
 ```python
+from sparse_engine import Named
 from sparse_engine.workspace import Conflict, Workspace
 
 ws = Workspace.open("plan/", RustEngine(), checkpoint_every=1000)  # holds the model that it recovered from the journal
 
-seq = ws.write(lambda m: m.set_cell("Price", 12, Product="A"), user="alice", reason="値上げ")
-v = ws.version                                   # the published version (a read-only view)
+seq = ws.write(lambda m: Named(m).set_cell("Price", 12, Product="A"), user="alice", reason="値上げ")
+v = Named(ws.version)                            # the published version (a read-only view). Model takes ids; Named takes names
 v.get("Revenue", Product="A", Month="Jan")       # get, slice, rows, summarize and value are available
 what_if = v.fork()                               # a copy for local trials (a usual Model)
 
 try:  # rejects the write if a different user changed the same cell after the version that you read
-    ws.write(lambda m: m.set_cell("Price", 13, Product="A"), user="bob", expect=v.seq)
+    ws.write(lambda m: Named(m).set_cell("Price", 13, Product="A"), user="bob", expect=v.seq)
 except Conflict as e:
     print(e.user, e.seq)                         # which user changed it, and in which write
 ```
@@ -51,7 +52,7 @@ As with `Workspace`, use `version` to read.
 from sparse_engine.workspace import Replica
 
 replica = Replica(PgJournal(dsn, "plan-2027", "s3://nanashi/plans", heartbeat=False), RustEngine())
-replica.version.get("Revenue", Product="A", Month="Jan")
+Named(replica.version).get("Revenue", Product="A", Month="Jan")
 ```
 
 A different thread monitors the journal.
@@ -74,7 +75,7 @@ ws = Workspace.open(PgJournal(dsn, "plan-2027", "s3://nanashi/plans", endpoint="
                     RustEngine(), standby=True)
 ws.role                                          # Role.STANDBY if a writer is available
 try:
-    ws.write(lambda m: m.set_cell("Price", 12, Product="A"))
+    ws.write(lambda m: Named(m).set_cell("Price", 12, Product="A"))
 except NotLeader as e:
     print(e.leader)                              # the address of the writer (http://plan-a:8080). Send the write there
 ```

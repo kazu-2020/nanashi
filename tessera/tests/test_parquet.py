@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 try:
@@ -16,7 +16,7 @@ def model(engine, like: Model | None = None) -> Model:
     """A model with 4 input Metrics. With like, the dimensions get the ids of that model (a Parquet file names
     its columns by dimension id, so a reader must have the same ids)."""
     rng = random.Random(3)
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     dim_id = lambda name: None if like is None else like.dimension_id(name)
     m.add_dimension("Employee", [f"e{i}" for i in range(40)], id=dim_id("Employee"))
     m.add_dimension("Department", ["営業", "開発", "管理"], id=dim_id("Department"))
@@ -160,7 +160,7 @@ class ApplyBlock(unittest.TestCase):
     """記録の再生で、変更の塊をまとめて書き込む（Rust）。1 セルずつ書いた結果と同じになる。"""
 
     def model(self):
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         m.add_dimension("K", [f"k{i}" for i in range(300)])
         m.add_dimension("T", [f"t{i}" for i in range(12)], ordered=True)
         m.add_dimension("D", ["a", "b", "c"])

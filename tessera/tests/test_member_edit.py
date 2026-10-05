@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from examples.fpa import build
-from sparse_engine import Model, ref, to_formula
+from sparse_engine import Model, Named, ref, to_formula
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import cells, check_full, mapping, same, snapshot
@@ -23,7 +23,7 @@ except ImportError:
 
 
 def model(engine=None) -> Model:
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     m.add_dimension("Product", ["A", "B", "C"])
     m.add_dimension("Category", ["ハード", "ソフト"])
     m.add_dimension("Month", ["Jan", "Feb", "Mar", "Apr"], ordered=True)
@@ -206,7 +206,7 @@ class Remove(unittest.TestCase):
         self.m.remove_member("Category", "ソフト")
         with tempfile.TemporaryDirectory() as tmp:
             self.m.save(tmp)
-            loaded = Model.load(tmp, self.engine())
+            loaded = Named.load(tmp, self.engine())
         a, b = snapshot(self.m), snapshot(loaded)
         for name in a:
             self.assertTrue(same(a[name], b[name]), name)

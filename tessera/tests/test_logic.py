@@ -1,12 +1,12 @@
 import unittest
 
-from sparse_engine import FormulaError, Model, if_, ref
+from sparse_engine import FormulaError, Model, Named, if_, ref
 
 X, Y = ref("X"), ref("Y")
 
 
 def model() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B", "C", "D"])
     m.add_dimension("Month", ["Jan", "Feb", "Mar", "Apr"], ordered=True)
     m.add_input("X", ["Product"], {("A",): 1, ("B",): 5})
@@ -173,7 +173,7 @@ class KindChecking(unittest.TestCase):
 class IfInsideScan(unittest.TestCase):
     def test_reorder_policy(self):
         """在庫が 5 を下回ったら翌月 10 発注する。"""
-        m = Model()
+        m = Named(Model())
         m.add_dimension("Month", ["Jan", "Feb", "Mar", "Apr"], ordered=True)
         m.add_input("In", ["Month"], {("Jan",): 10})
         m.add_input("Demand", ["Month"], {(t,): 4 for t in ["Jan", "Feb", "Mar", "Apr"]})

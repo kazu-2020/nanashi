@@ -1,12 +1,12 @@
 import unittest
 
-from sparse_engine import FormulaError, Model, ref
+from sparse_engine import FormulaError, Model, Named, ref
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr"]
 
 
 def base_model() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B", "C"])
     m.add_dimension("Month", MONTHS, ordered=True)
     m.add_dimension("Employee", ["e1", "e2", "e3"])

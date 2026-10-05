@@ -4,7 +4,7 @@ import random
 import tempfile
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import same, snapshot
@@ -23,7 +23,7 @@ MONTHS = ["Jan", "Feb", "Mar"]
 
 
 def model(engine=None) -> Model:
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     m.add_dimension("Employee", ["e1", "e2", "e3"])
     m.add_dimension("Department", ["営業", "開発"])
     m.add_dimension("Month", MONTHS, ordered=True)
@@ -82,7 +82,7 @@ class Overrides(unittest.TestCase):
         m.set_cell("Bonus", 50, Employee="e1", Month="Jan")
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
-            loaded = Model.load(tmp, ReferenceEngine())
+            loaded = Named.load(tmp, ReferenceEngine())
         self.assertEqual(loaded.get("Bonus", Employee="e1", Month="Jan"), 50)
         self.assertTrue(loaded.metric("Bonus").overridable)
 

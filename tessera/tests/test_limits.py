@@ -2,7 +2,7 @@
 import tempfile
 import unittest
 
-from sparse_engine import FormulaError, Model
+from sparse_engine import FormulaError, Model, Named
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import LOG_MAX
 
@@ -13,7 +13,7 @@ except ImportError:  # nanashi_core をビルドしていない環境
 
 
 def wide(engine) -> Model:
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     for i in range(5):
         m.add_dimension(f"D{i}", [f"m{j}" for j in range(1 << 13)])  # 13 ビット × 5 = 65 ビット
     return m
@@ -45,7 +45,7 @@ class KeyWidth(unittest.TestCase):
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_member_that_would_widen_past_64_bits_is_refused(self):
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         for i in range(4):
             m.add_dimension(f"D{i}", [f"m{j}" for j in range(1 << 13)])  # 13 ビット × 4
         m.add_dimension("E", [f"e{j}" for j in range(1 << 12)])          # 12 ビット（合わせて 64 ビット）
@@ -63,7 +63,7 @@ class KeyWidth(unittest.TestCase):
     def by_metric(ebits: int) -> Model:
         """Salary[E, D1, D2, D3] を所属（DeptOf[E] -> Dept）で部署別に集計するモデル。結果の軸は
         D1、D2、D3、Dept の 52 ビットだが、途中で社員と部署の両方を持つ（E が 13 ビットなら 65 ビット）。"""
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         m.add_dimension("E", [f"e{j}" for j in range(1 << ebits)])
         m.add_dimension("Dept", [f"g{j}" for j in range(1 << 13)])
         for i in range(1, 4):
@@ -116,7 +116,7 @@ ENGINES = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
 def big(engine) -> Model:
     """顧客 200 × 商品 100（全組み合わせで 2 万）のモデル。値は少しだけ入れ、上限を 1 万にする。
     上限の検査が壊れていても、テストが大量のメモリを使わない大きさにしてある。"""
-    m = Model(engine=engine, max_cells=10_000)
+    m = Named(Model(engine=engine, max_cells=10_000))
     m.add_dimension("Customer", [f"c{i}" for i in range(200)])
     m.add_dimension("SKU", [f"s{i}" for i in range(100)])
     m.add_dimension("Week", [f"w{i}" for i in range(52)], ordered=True)
@@ -126,7 +126,7 @@ def big(engine) -> Model:
 
 class CellEstimates(unittest.TestCase):
     def test_default_limit(self):
-        self.assertEqual(Model(engine=ReferenceEngine()).max_cells, 1_000_000_000)
+        self.assertEqual(Named(Model(engine=ReferenceEngine())).max_cells, 1_000_000_000)
 
     def test_rejects_formulas_that_densify_beyond_the_limit(self):
         for engine in ENGINES:
@@ -166,7 +166,7 @@ class CellEstimates(unittest.TestCase):
         for engine in ENGINES:
             for limit in (8, None):
                 with self.subTest(engine=engine.__name__, limit=limit):
-                    m = Model(engine=engine(), max_cells=limit)
+                    m = Named(Model(engine=engine(), max_cells=limit))
                     m.add_dimension("P", ["a", "b", "c"])
                     m.add_dimension("M", ["x", "y", "z"])
                     m.add_input("V", ["P", "M"], {("a", "x"): 1.0})
@@ -218,10 +218,10 @@ class CellEstimates(unittest.TestCase):
     def test_limit_is_saved(self):
         for engine in ENGINES:
             with self.subTest(engine=engine.__name__), tempfile.TemporaryDirectory() as d:
-                m = Model(engine=engine(), max_cells=123)
+                m = Named(Model(engine=engine(), max_cells=123))
                 m.add_dimension("P", ["a"])
                 m.save(d)
-                self.assertEqual(Model.load(d, engine()).max_cells, 123)
+                self.assertEqual(Named.load(d, engine()).max_cells, 123)
 
 
 class Memory(unittest.TestCase):
@@ -236,7 +236,7 @@ class Memory(unittest.TestCase):
         nanashi_core.track_heap(True)
         self.addCleanup(nanashi_core.track_heap, False)
         before = nanashi_core.heap()[0]
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         m.add_dimension("P", [f"p{i}" for i in range(2000)])
         m.add_dimension("M", [f"m{i}" for i in range(12)])
         m.add_input("V", ["P", "M"], {(f"p{i}", f"m{j}"): float(i) for i in range(2000) for j in range(12)})
@@ -262,7 +262,7 @@ class Memory(unittest.TestCase):
         self.assertEqual(nanashi_core.heap()[0], now)
 
     def test_reference_reports_rows_only(self):
-        m = Model(engine=ReferenceEngine())
+        m = Named(Model(engine=ReferenceEngine()))
         m.add_dimension("P", ["a", "b"])
         m.add_input("V", ["P"], {("a",): 1.0})
         self.assertEqual(m.memory(), {"V": {"rows": 1}})
@@ -270,7 +270,7 @@ class Memory(unittest.TestCase):
 
 class Logs(unittest.TestCase):
     def test_observation_logs_do_not_grow_without_bound(self):
-        m = Model(engine=ReferenceEngine())
+        m = Named(Model(engine=ReferenceEngine()))
         m.add_dimension("P", ["a", "b"])
         m.add_input("X", ["P"], {("a",): 1})
         m.add_formula("Y", ["P"], "X * 2")

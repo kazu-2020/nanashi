@@ -152,6 +152,7 @@ The role changes of the standby (promotion, demotion, writes that entered the qu
 | Location | Function |
 |---|---|
 | `sparse_engine/model.py` | Model. Definitions, operations, reads, transactions, selection of the partition dimension. It collects pending changes in `Pending`, and gives planning and recalculation to the Planner |
+| `sparse_engine/named.py` | `Named`, the name facade on a Model. It changes names to ids before each call and ids to names in the results. Tests, examples and benchmarks use it. The server does not |
 | `sparse_engine/planner.py` | The interface for the plan and the recalculation schedule (`Planner`), and the Python reference implementation (`PyPlanner`: calculation plan, affected range, incremental aggregation, scan) |
 | `sparse_engine/evaluate.py` | The type check, the affected range, the evaluator of the reference implementation |
 | `sparse_engine/parser.py` | Parse of formula text, and conversion from the syntax tree to text |

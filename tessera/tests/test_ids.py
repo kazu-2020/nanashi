@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 from examples.fpa import build as build_fpa
-from sparse_engine import FormulaError, Model, to_formula
+from sparse_engine import FormulaError, Model, Named, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import _UNSET, DuplicateId, uuid7
 
@@ -105,13 +105,10 @@ class Ids(unittest.TestCase):
             self.assertEqual(uuid.UUID(key).version, 7)
         margin = m.metric("Margin")
         self.assertIs(m.metric(margin.id), margin)
-        self.assertIs(m.metric(margin.id), margin)  # a string argument is an id first, then a name
+        self.assertIs(m.metric(margin.id), margin)  # the facade takes a name first, then an id
         with self.assertRaisesRegex(ValueError, "がない"):
             m.metric("Nope")
-        with self.assertRaisesRegex(ValueError, "UUID"):  # a name in the UUID form cannot collide with an id
-            m.add_input(str(uuid.uuid4()), ["Product"])
-        with self.assertRaisesRegex(ValueError, "UUID"):
-            m.rename_metric("Margin", uuid7())
+        # a name in the UUID form is allowed: the Model API takes ids only, so it cannot collide (IdApi)
 
 
 class Uuids(unittest.TestCase):
@@ -488,13 +485,9 @@ class DimensionRenames(unittest.TestCase):
             m.rename_dimension("Product", "Month")
         with self.assertRaisesRegex(ValueError, "同じ名前の Metric"):
             m.rename_dimension("Product", "Price")
-        with self.assertRaisesRegex(ValueError, "UUID"):
-            m.rename_dimension("Product", str(uuid.uuid4()))
         m.add_property("Product", "Other", "Category", {})
         with self.assertRaisesRegex(ValueError, "同じ名前のプロパティ"):
             m.rename_property("Product", "Category", "Other")
-        with self.assertRaisesRegex(ValueError, "UUID"):
-            m.rename_property("Product", "Category", str(uuid.uuid4()))
         with self.assertRaisesRegex(ValueError, "プロパティ Nope がない"):
             m.rename_property("Product", "Nope", "X")
 
@@ -605,7 +598,7 @@ class Storage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
             meta = json.loads((Path(tmp) / "model.json").read_text())
-            loaded = Model.load(tmp, self.engine())
+            loaded = Named.load(tmp, self.engine())
         self.assertNotIn("next_id", meta)
         spec = next(x for x in meta["changes"]["metrics"] if x["name"] == "RevByCat")
         self.assertEqual(spec["formula"]["node"], "By")  # the formula is the id AST, not text
@@ -629,7 +622,7 @@ class Storage(unittest.TestCase):
         m.rename_member("Product", "A", "Alpha")
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
-            loaded = Model.load(tmp, self.engine())
+            loaded = Named.load(tmp, self.engine())
         self.assertEqual(all_ids(loaded), all_ids(m))
         self.assertEqual(loaded.dimension("Month").members, m.dimension("Month").members)
         self.assertEqual(to_formula(loaded.metric("JanCost").written, loaded), 'Cost[SELECT: Month."January"]')
@@ -666,3 +659,104 @@ class RustStorage(Storage):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdApi(unittest.TestCase):
+    """The Model API takes ids only. Named is the name facade on it."""
+
+    def setUp(self):
+        self.m = build_with(ReferenceEngine())
+        self.model = self.m.model
+        self.product, self.a = self.m.dimension_id("Product"), self.m.member_id("Product", "A")
+        self.price = self.m.metric("Price").id
+
+    def test_model_rejects_a_name_where_an_id_is_required(self):
+        model = self.model
+        with self.assertRaisesRegex(ValueError, "Metric Price がない"):
+            model.get("Price", {self.product: self.a})
+        with self.assertRaisesRegex(ValueError, "軸 Product がない"):
+            model.get(self.price, {"Product": self.a})
+        self.assertIsNone(model.get(self.price, {self.product: "A"}))  # a name is not a member id: blank
+        with self.assertRaisesRegex(ValueError, "Price: Product に 'A' がない"):
+            model.set_cell(self.price, 1, {self.product: "A"})
+        with self.assertRaisesRegex(ValueError, "Product にメンバー 'A' がない"):
+            model.slice(self.price, {self.product: "A"})
+        with self.assertRaises(FormulaError):
+            model.dimension("Product")
+        with self.assertRaisesRegex(ValueError, "Metric Price がない"):
+            model.rename_metric("Price", "Cost2")
+        with self.assertRaisesRegex(ValueError, "number、boolean、member:<軸の ID>"):
+            model.add_input("Pick", [self.product], kind="member:Product")
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
+            model.get(self.price, Product=self.a)  # the keyword form is gone
+
+    def test_reads_return_ids(self):
+        model, month = self.model, self.m.dimension_id("Month")
+        cube = model.value(self.price)
+        self.assertEqual(cube.dims, (self.product,))
+        self.assertEqual(cube.cells[(self.a,)], 10.0)
+        self.assertEqual(model.get(self.price, {self.product: self.a}), 10.0)
+        self.assertEqual(model.slice(self.price, {self.product: [self.a]}).cells, {(self.a,): 10.0})
+        rows, total = model.rows(self.price, limit=1)
+        self.assertEqual((rows, total), ([((self.a,), 10.0)], 3))
+        total = model.summarize(self.price)
+        self.assertEqual((total.dims, total.cells), ((), {(): 35.0}))
+        margin = self.m.metric("Margin").id
+        by_month = model.summarize(margin, {self.product: self.a}, keep=[month])
+        self.assertEqual(by_month.dims, (month,))
+        self.assertTrue(all(k[0] in self.m.dimension("Month").ids for k in by_month.cells))
+        # a member-type value is a member id, in and out
+        dept = self.m.dimension_id("Department")
+        best = model.add_input("Best", [self.product], kind=f"member:{dept}")
+        sales = self.m.member_id("Department", "Sales")
+        model.set_cell(best, sales, {self.product: self.a})
+        self.assertEqual(model.get(best, {self.product: self.a}), sales)
+        self.assertEqual(model.value(best).cells, {(self.a,): sales})
+        self.assertEqual(self.m.get("Best", Product="A"), "Sales")
+        self.assertEqual(model.memory().keys(), model.metrics.keys())
+        self.assertEqual(list(model.eval_log)[:1], [list(self.m.eval_log)[0] and self.m.metric(self.m.eval_log[0]).id])
+
+    def test_definitions_return_the_id(self):
+        m, model = self.m, self.model
+        self.assertEqual(m.add_input("New", ["Product"]), m.metric("New").id)
+        self.assertEqual(m.add_formula("New2", ["Product"], "New + 1"), m.metric("New2").id)
+        self.assertEqual(m.add_member("Product", "Z"), m.member_id("Product", "Z"))
+        self.assertEqual(m.add_property("Product", "Group", "Category", {"A": "X"}), m.property_id("Product", "Group"))
+        self.assertEqual(model.add_input("Given", [self.product], id="given-1"), "given-1")
+
+    def test_a_metric_named_like_a_uuid_does_not_collide(self):
+        m, model = self.m, self.model
+        looks_like_id = str(uuid.uuid4())
+        by_name = m.add_input(looks_like_id, ["Product"], {("A",): 1})
+        by_id = model.add_input("Other", [self.product], {(self.a,): 2}, id=looks_like_id)
+        self.assertNotEqual(by_name, by_id)
+        self.assertEqual(m.metric(looks_like_id).id, by_name)          # the facade looks up the name
+        self.assertIs(model.metric(looks_like_id), m.metrics[by_id])  # the Model looks up the id
+        self.assertEqual((m.get(looks_like_id, Product="A"), m.get("Other", Product="A")), (1.0, 2.0))
+        m.add_dimension(str(uuid.uuid4()), ["x"])  # a dimension and a property can have such a name too
+        m.add_property("Product", looks_like_id, "Category", {})
+
+    def test_named_round_trips_names(self):
+        m, model = self.m, self.model
+        m.set_cell("Price", 11, Product="A")
+        self.assertEqual(model.get(self.price, {self.product: self.a}), 11.0)
+        self.assertEqual(m.get("Price", Product="A"), 11.0)
+        self.assertEqual(m.value("Price").dims, ("Product",))
+        self.assertEqual(m.slice("Price", Product=["A"]).cells, {("A",): 11.0})
+        self.assertEqual(m.rows("Price", limit=1)[0], [(("A",), 11.0)])
+        self.assertEqual(m.summarize("Margin", keep=["Month"], Product="A").dims, ("Month",))
+        self.assertIn("Margin", m.eval_log)
+        self.assertEqual({n for n, _ in m.slice_log}, set(m.eval_log))
+        self.assertTrue(all(d in m._dim_ids for _, r in m.slice_log for d in r))  # dimension names
+        self.assertIn("Price", m.memory())
+        self.assertEqual(m.fork().get("Price", Product="A"), 11.0)
+        m.rename_member("Product", "A", "Alpha")
+        self.assertEqual(m.get("Price", Product="Alpha"), 11.0)
+        self.assertEqual(model.get(self.price, {self.product: self.a}), 11.0)  # the id did not change
+        with self.assertRaisesRegex(ValueError, "Metric Nope がない"):
+            m.get("Nope")
+        with self.assertRaisesRegex(ValueError, "Price: 軸 Nope がない"):
+            m.get("Price", Nope="A")
+        self.assertIsNone(m.get("Price", Product="Nope"))  # an unknown member is blank, as in the Model
+        with self.assertRaisesRegex(ValueError, "Price: Product に 'Nope' がない"):
+            m.set_cell("Price", 1, Product="Nope")

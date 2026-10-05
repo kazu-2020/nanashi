@@ -42,7 +42,7 @@ import socket
 import threading
 import time
 import uuid
-from typing import Iterator
+from typing import Iterator, Mapping
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -485,8 +485,9 @@ class PgJournal(Journal):
                 rec["changes"]["cells"] = [{"metric": m, "rows": rows} for m, rows in by_seq[seq].items()]
             yield rec
 
-    def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
-        """The change history of one cell, from the cell index (not from a scan of the records)."""
+    def cell_history(self, model, metric: str, coords: Mapping[str, str]) -> list[dict]:
+        """The change history of one cell, from the cell index (not from a scan of the records). metric is a
+        Metric id and coords is dimension id -> member id."""
         self.index_pending()  # 確定の後に回した分を先に反映する
         m = model.metric(metric)
         key = _key_ids(model, m, coords)

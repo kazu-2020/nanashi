@@ -16,7 +16,7 @@ import random
 import statistics
 import time
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import engine_for
 
 VERSIONS = ["予算", "実績", "見込み"]
@@ -61,7 +61,7 @@ FORMULAS = [
 
 def build(engine=None, employees: int = 60, products: int = 30, months: int = 24, seed: int = 0) -> Model:
     rng = random.Random(seed)
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     month_names = [f"m{i:02d}" for i in range(1, months + 1)]
     emps = [f"e{i:05d}" for i in range(employees)]
     prods = [f"p{i:04d}" for i in range(products)]

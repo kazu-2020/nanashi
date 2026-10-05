@@ -2,13 +2,13 @@ import math
 import random
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May"]
 
 
 def model() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B", "C", "D"])
     m.add_dimension("Category", ["X", "Y"])
     m.add_dimension("Region", ["N", "S"])
@@ -50,11 +50,12 @@ def model() -> Model:
 
 
 def cells(m: Model, name: str) -> dict:
-    return dict(m.value(name).cells)
+    return dict(Named(m).value(name).cells)
 
 
 def mapping(m: Model, dim: str, prop: str) -> dict[str, str]:
     """The map of the property with the member names (the Model holds member ids)."""
+    m = Named(m)
     d = m.dimension(dim)
     target, by_id = d.properties[m.property_id(dim, prop)]
     t = m.dimension(target)

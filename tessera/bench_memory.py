@@ -45,12 +45,12 @@ def save(path: str, scale: int) -> None:
 
 def child(path: str, per_formula: bool) -> dict:
     import nanashi_core
-    from sparse_engine import Model, to_formula
+    from sparse_engine import Named, to_formula
     from sparse_engine.rust_engine import RustEngine
 
     nanashi_core.track_heap(True)  # モデルを作る前に数え始める
     out: dict = {"rss_start": rss()}
-    m = Model.load(path, RustEngine())
+    m = Named.load(path, RustEngine())
     out["heap_loaded"], out["rss_loaded"] = nanashi_core.heap()[0], rss()
     nanashi_core.reset_heap_peak()
     t = time.perf_counter()

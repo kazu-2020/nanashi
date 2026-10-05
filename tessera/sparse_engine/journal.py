@@ -32,7 +32,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Iterator, NamedTuple
+from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 from .core import Dimension
 from .engine import native, parquet_value
@@ -465,9 +465,9 @@ class Journal:
     def load_snapshot(self, place: Snapshot, engine):
         return read_snapshot(self.objects, place, engine)
 
-    def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
-        """The change history of one cell (oldest first). coords is dimension -> member name. A member-type value
-        shows the current name (a removed member stays an id)."""
+    def cell_history(self, model, metric: str, coords: Mapping[str, str]) -> list[dict]:
+        """The change history of one cell (oldest first). metric is a Metric id and coords is dimension id ->
+        member id. A member-type value is a member id."""
         m = model.metric(metric)
         key = _key_ids(model, m, coords)
         out = []
@@ -514,23 +514,20 @@ class Journal:
 
 
 def _key_ids(model, m, coords) -> list[str]:
-    """The member ids of one cell of m. coords is dimension -> member name (or id). ValueError for an unknown
-    member."""
-    return [model.dimensions[d].member_id(x) for d, x in zip(m.dims, model._key(m, coords))]
+    """The member ids of one cell of m. coords is dimension id -> member id. ValueError for an unknown member."""
+    key = model._key(m, coords)
+    for d, x in zip(m.dims, key):
+        model._member(model.dimensions[d], x)
+    return list(key)
 
 
 def _shown(model, m, history: list[dict]) -> list[dict]:
-    """The values of a history for a reader (a member type shows the current name, a boolean becomes bool)."""
-    vdim = _value_dim(model, m)
-    for h in history:
-        for k in ("old", "new"):
-            v = h[k]
-            if v is None:
-                continue
-            if vdim is not None:
-                h[k] = vdim.member_of(v) if v in vdim._by_id else v
-            elif m.kind == "boolean":
-                h[k] = bool(v)
+    """The values of a history for a reader (a boolean becomes bool; a member-type value stays a member id)."""
+    if m.kind == "boolean":
+        for h in history:
+            for k in ("old", "new"):
+                if h[k] is not None:
+                    h[k] = bool(h[k])
     return history
 
 

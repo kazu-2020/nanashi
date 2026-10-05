@@ -71,25 +71,17 @@ class Dimension:
             raise ValueError(f"{self.name}: メンバー {member!r} がない")
         return self.ids[self._index[member]]
 
+    def prop_of(self, prop: str) -> str:
+        """The id of the property with this name. ValueError if there is none."""
+        if prop not in self._props:
+            raise ValueError(f"{self.name} にプロパティ {prop} がない")
+        return self._props[prop]
+
     def member_of(self, id: str) -> str:
         """The current name of the member with this id. ValueError for the id of a removed member."""
         if id not in self._by_id:
             raise ValueError(f"{self.name}: ID {id} のメンバーがない")
         return self.members[self._by_id[id]]
-
-    def find_member(self, member: str) -> str | None:
-        """The id of the member with this id, or else with this name. None if there is none."""
-        if member in self._by_id:
-            return member
-        pos = self._index.get(member)
-        return None if pos is None else self.ids[pos]
-
-    def member_id(self, member: str) -> str:
-        """The id of the member with this id, or else with this name. ValueError if there is none."""
-        id = self.find_member(member)
-        if id is None:
-            raise ValueError(f"{self.name}: メンバー {member!r} がない")
-        return id
 
     def copy(self) -> Dimension:
         """同じメンバーとプロパティを持つ別の Dimension。対応表の dict は共有する
@@ -106,17 +98,6 @@ class Dimension:
     def __contains__(self, member: str) -> bool:
         """Tell if a member has this name."""
         return member in self._index
-
-    def find_prop(self, prop: str) -> str | None:
-        """The id of the property with this id, or else with this name. None if there is none."""
-        return prop if prop in self.properties else self._props.get(prop)
-
-    def prop_id(self, prop: str) -> str:
-        """The id of the property with this id, or else with this name. ValueError if there is none."""
-        id = self.find_prop(prop)
-        if id is None:
-            raise ValueError(f"{self.name} にプロパティ {prop} がない")
-        return id
 
     def add_property(self, id: str, name: str, target: Dimension, mapping: Mapping[str, str]) -> None:
         """Add the property, or replace its mapping ({member id: member id of target}). The name of a property

@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
@@ -15,7 +15,7 @@ except ImportError:  # nanashi_core をビルドしていない環境
 
 
 def small() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B"])
     m.add_dimension("Category", ["X", "Y"])
     m.add_dimension("Month", ["Jan", "Feb"], ordered=True)

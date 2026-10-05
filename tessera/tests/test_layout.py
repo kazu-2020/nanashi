@@ -1,7 +1,7 @@
 """Metric ごとの分割軸の指定と自動選択。"""
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
@@ -51,7 +51,7 @@ class AutoLayout(unittest.TestCase):
             self.m.add_formula("Bad", ["Product"], "Price * 2", partition="Month")
 
     def test_disabled_auto_layout_uses_largest_dim(self):
-        m = Model(engine=PartitionedStub(), auto_layout=False)
+        m = Named(Model(engine=PartitionedStub(), auto_layout=False))
         m.dimensions, m._dim_ids = self.m.dimensions, self.m._dim_ids
         m.add_input("V", ["Category", "Region", "Month"])
         m.recalc()

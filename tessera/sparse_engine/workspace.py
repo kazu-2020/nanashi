@@ -10,8 +10,8 @@ An operation on a version causes a ValueError. To try changes, make a copy with 
 書き出しでまとめて確定する（グループコミット）。確定したら、複製を新しい版として公開する。
 
     ws = Workspace(model, FileJournal("plan/"), checkpoint_every=1000)
-    seq = ws.write(lambda m: m.set_cell("Price", 12, Product="A"), user="alice")
-    ws.version.get("Price", Product="A")
+    seq = ws.write(lambda m: m.set_cell(price, 12, {product: a}), user="alice")  # ids (docs/ids.md)
+    ws.version.get(price, {product: a})
 
 1 件の書き込みが失敗したら、その 1 件だけを取り消して、同じまとまりのほかの書き込みは確定する。
 記録の書き出しに失敗したら、まとまり全体を捨て、公開中の版は変えない。記録先が「手元の版が古い」
@@ -650,7 +650,7 @@ class Replica:
     """記録先に追従する読み出し専用の版。書き込むプロセス（Workspace）とは別のプロセスで、読み手を増やすのに使う。
 
         replica = Replica(PgJournal(dsn, "plan", "s3://nanashi/plans", heartbeat=False), RustEngine())
-        replica.version.get("Price", Product="A")
+        replica.version.get(price, {product: a})  # ids (docs/ids.md)
 
     別のスレッドで記録先を見張り（PgJournal は確定の通知、FileJournal はファイルの長さ）、ほかのプロセスが
     確定した記録を、公開中の版の複製に入力の変更として書き込んで影響範囲だけを計算し直し、新しい版として

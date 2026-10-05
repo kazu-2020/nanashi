@@ -8,6 +8,7 @@
     python bench_versions.py --model fpa  # 片方だけ
 """
 from __future__ import annotations
+from sparse_engine.named import Named
 
 import argparse
 import statistics
@@ -29,7 +30,7 @@ def models(which: str):
 
 
 def m_edit(name, coords, i):
-    return lambda model: model.set_cell(name, float(100 + i % 7), **coords)
+    return lambda model: Named(model).set_cell(name, float(100 + i % 7), **coords)
 
 
 def measure(model, edit, repeats: int) -> dict:

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from examples.fpa import EDITS, build
-from sparse_engine import Model, to_formula
+from sparse_engine import Model, Named, to_formula
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import same, snapshot
@@ -39,7 +39,7 @@ class RoundTrip(unittest.TestCase):
         original = small(saving_engine)
         with tempfile.TemporaryDirectory() as tmp:
             original.save(tmp)
-            loaded = Model.load(tmp, loading_engine)
+            loaded = Named.load(tmp, loading_engine)
         self.assertEqual(loaded.dimension("Employee").members, original.dimension("Employee").members)
         a, b = snapshot(original), snapshot(loaded)
         for name in original._metric_ids:
@@ -94,7 +94,7 @@ class RoundTrip(unittest.TestCase):
             meta["format"] = 999
             (Path(tmp) / "model.json").write_text(json.dumps(meta))
             with self.assertRaisesRegex(ValueError, "保存形式"):
-                Model.load(tmp)
+                Named.load(tmp)
 
 
 if __name__ == "__main__":

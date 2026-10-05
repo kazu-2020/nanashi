@@ -6,7 +6,7 @@
 """
 import unittest
 
-from sparse_engine import FormulaError, Model, parse, to_formula
+from sparse_engine import FormulaError, Model, Named, parse, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.evaluate import affected, collect_refs, estimate, infer
 from sparse_engine.expr import Expr, _children
@@ -25,7 +25,7 @@ MONTHS = ["Jan", "Feb", "Mar"]
 
 
 def model(engine=None) -> Model:
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     m.add_dimension("Product", ["A", "B", "C"])
     m.add_dimension("Category", ["X", "Y"])
     m.add_dimension("Month", MONTHS, ordered=True)

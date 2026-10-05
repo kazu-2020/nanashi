@@ -367,7 +367,11 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
         return cat._metric_ids.get(name)
 
     def dim(name: str) -> str:
-        return cat.dimension(name).id
+        if name in cat.dimensions:
+            return name
+        if name in cat._dim_ids:
+            return cat._dim_ids[name]
+        raise FormulaError("unknown_dim", name=name)
 
     def go(e: Expr) -> Expr:
         if isinstance(e, Ref):
@@ -388,7 +392,9 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
             if (d := dim(e.dim)) != e.dim:
                 changes["dim"] = d
             if isinstance(e, (Member, Select)):
-                member = cat.dimensions[d].find_member(e.member)
+                members = cat.dimensions[d]
+                member = e.member if e.member in members._by_id else members.ids[members._index[e.member]] \
+                    if e.member in members._index else None
                 if member is None:
                     code = "unknown_member" if isinstance(e, Member) else "select_member"
                     raise FormulaError(code, dim=e.dim, member=e.member)
@@ -396,7 +402,7 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
                     changes["member"] = member
             if isinstance(e, By):
                 props = cat.dimensions[d]
-                prop = props.find_prop(e.prop)
+                prop = e.prop if e.prop in props.properties else props._props.get(e.prop)
                 if prop is None and e.prop not in cat.metrics:
                     prop = id_of(e.prop)
                     if prop is None:

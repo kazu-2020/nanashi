@@ -1,7 +1,7 @@
 """The read API that reads only as necessary (get, slice, rows, summarize), and the published version."""
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine, aggregate_cube
 from sparse_engine.workspace import Workspace
 
@@ -117,9 +117,9 @@ class RustReads(Reads, unittest.TestCase):
 
 class VersionView(unittest.TestCase):
     def test_version_reads_and_rejects_writes(self):
-        ws = Workspace(build())
+        ws = Workspace(build().model)
         try:
-            v = ws.version
+            v = Named(ws.version)
             self.assertEqual(v.get("Price", Product="A"), 10)
             self.assertEqual(v.slice("Price", Product="A").cells, {("A",): 10})
             self.assertEqual(v.rows("Price", limit=1)[1], 3)

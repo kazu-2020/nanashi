@@ -17,6 +17,7 @@ import time
 from bench import median_ms
 from examples.fpa import SIZES, build
 from sparse_engine.rust_engine import RustEngine
+from sparse_engine.named import Named
 from sparse_engine.workspace import Workspace
 
 
@@ -48,8 +49,8 @@ def main() -> None:
     # 読み手が Python の処理を休みなく回していると、ライターが GIL を取り直すたびに切り替えの間隔
     # （既定 5 ms）を待つ。切り替えの間隔を短くすると、その待ちが減る
     print("  8 人が休みなく読み続ける中での書き込み（給与を 1 人変更）:")
-    read_whole = lambda v: v.value("PayrollByEmployee").get(Employee=emp, Version="予算", Month="m01")
-    read_one = lambda v: v.get("PayrollByEmployee", Employee=emp, Version="予算", Month="m01")
+    read_whole = lambda v: Named(v).value("PayrollByEmployee").get(Employee=emp, Version="予算", Month="m01")
+    read_one = lambda v: Named(v).get("PayrollByEmployee", Employee=emp, Version="予算", Month="m01")
     for label, read, interval, writes in [("読み手が value で丸ごと読む（以前の経路）", read_whole, None, 5),
                                           ("読み手が get で 1 セル読む", read_one, None, 20),
                                           ("同上、切り替えの間隔 0.5 ms", read_one, 0.0005, 20)]:
@@ -58,7 +59,7 @@ def main() -> None:
 
 def contended_write(m, read, interval, writes: int, emp: str) -> float:
     import sys
-    ws = Workspace(m.fork())
+    ws = Workspace(m.fork().model)
     stop = threading.Event()
 
     def reader():
@@ -74,7 +75,7 @@ def contended_write(m, read, interval, writes: int, emp: str) -> float:
     try:
         for i in range(writes):
             t0 = time.perf_counter()
-            ws.write(lambda x, i=i: x.set_cell("Salary", 400.0 + i, Employee=emp, Version="予算"))
+            ws.write(lambda x, i=i: Named(x).set_cell("Salary", 400.0 + i, Employee=emp, Version="予算"))
             xs.append(time.perf_counter() - t0)
     finally:
         stop.set()

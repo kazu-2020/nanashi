@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from sparse_engine import FormulaError, Model, to_formula
+from sparse_engine import FormulaError, Model, Named, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine import journal as journal_module
 from sparse_engine.journal import AlreadyCommitted, Fenced, FileJournal
@@ -116,7 +116,7 @@ class Transactions(unittest.TestCase):
         fork.add_input("Y", ["Product"], {("F",): 2})
         m.add_member("Product", "E")
         m.add_input("X", ["Product"], {("E",): 1})
-        apply(m, {"changes": changes(base, fork)})
+        apply(m.model, {"changes": changes(base.model, fork.model)})
         self.assertEqual(m.dimension("Product").members, ["A", "B", "C", "D", "E", "F"])
         self.assertEqual((m.get("X", Product="E"), m.get("Y", Product="F")), (1, 2))
         self.assertEqual(len(set(all_ids(m))), len(all_ids(m)))
@@ -131,10 +131,10 @@ class Journal(JournalCase, unittest.TestCase):
         super().setUp()
         self.path = Path(self.journals.path)
         self.m = build_with(self.engine())
-        self.journals.journal().start(self.m)
+        self.journals.journal().start(self.m.model)
 
     def reopen(self, engine=None) -> Model:
-        return self.journals.journal().open(engine or self.engine())
+        return Named(self.journals.journal().open(engine or self.engine()))
 
     def file_only(self) -> None:
         if self.store is not FileStore:
@@ -410,7 +410,7 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.set_cell("Price", 12, Product="A")
         with self.m.transaction(user="bob"):
             self.m.spread("Price", 30, Product="A")
-        history = self.m.journal.cell_history(self.m, "Price", Product="A")
+        history = self.m.cell_history(self.m.journal, "Price", Product="A")
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history],
                          [("alice", 10.0, 12.0), ("bob", 12.0, 30.0)])
 
@@ -422,7 +422,7 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual(c["rows"], [[[m.member_id("Product", "A")], m.member_id("Employee", "e1"),
                                       m.member_id("Employee", "e2")]])  # a member-type value is a member id
         m.rename_member("Employee", "e2", "Eve")
-        history = self.journals.journal().cell_history(m, "Lead", Product="A")
+        history = m.cell_history(self.journals.journal(), "Lead", Product="A")
         self.assertEqual([(h["old"], h["new"]) for h in history], [(None, "e1"), ("e1", "Eve")])
 
     def test_renames_and_a_formula_in_one_transaction_replay(self):
@@ -504,7 +504,7 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) 
     make = make or (lambda tmp: FileJournal(tmp, fsync=False))
     with tempfile.TemporaryDirectory() as tmp:
         m = build_with(engine())
-        make(tmp).start(m)
+        make(tmp).start(m.model)
         counters = [[0], [0], [0]]
         for round_ in range(rounds):
             if rng.random() < 0.3:  # いくつかの操作を 1 つのトランザクションにまとめる（ときどき取り消す）
@@ -525,7 +525,7 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) 
             if rng.random() < 0.25:
                 for e in reopen_engines:
                     with test.subTest(round=round_, engine=e.__name__):
-                        check_same_state(test, m, make(tmp).open(e()))
+                        check_same_state(test, m, Named(make(tmp).open(e())))
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
@@ -540,7 +540,7 @@ class RandomReplay(unittest.TestCase):
 
 
 def many_cells(engine, n: int = 1500) -> Model:
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     m.add_dimension("K", [f"k{i}" for i in range(n)])
     m.add_dimension("T", ["t0", "t1"], ordered=True)
     m.add_input("V", ["K", "T"], {(f"k{i}", "t0"): float(i) for i in range(n)})
@@ -556,7 +556,7 @@ class Blocks(unittest.TestCase):
     def test_large_changes_are_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = many_cells(RustEngine())
-            FileJournal(tmp, fsync=False).start(m)
+            FileJournal(tmp, fsync=False).start(m.model)
             with m.transaction(user="etl") as txn:
                 m.spread("V", 3000.0, how="even")  # 1500 セルすべてを 2 に
             (c,) = txn.record["changes"]["cells"]
@@ -568,8 +568,8 @@ class Blocks(unittest.TestCase):
             self.assertIn([[k.ids[0], t.ids[0]], 0.0, 2.0], rows)
             self.assertIn([[k.ids[1], t.ids[0]], 1.0, 2.0], rows)
             for e in (ReferenceEngine, RustEngine):  # ファイルには行として書く
-                check_same_state(self, m, FileJournal(tmp).open(e()))
-            history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")
+                check_same_state(self, m, Named(FileJournal(tmp).open(e())))
+            history = m.cell_history(FileJournal(tmp), "V", K="k5", T="t0")
             self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
 
     def test_random_replay_through_blocks(self):
@@ -600,7 +600,7 @@ class CellFiles(unittest.TestCase):
     def test_large_write_goes_to_parquet(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = many_cells(RustEngine(), n=12_000)
-            FileJournal(tmp).start(m)
+            FileJournal(tmp).start(m.model)
             with m.transaction(user="etl"):
                 m.spread("V", 24_000.0, how="even")
             m.set_cell("V", 1.0, K="k7", T="t1")  # 少ないセルは、これまでどおり行に書く
@@ -610,30 +610,30 @@ class CellFiles(unittest.TestCase):
             self.assertLess(len(lines[0]), 1000)  # 記録の行には、ファイルの名前とハッシュだけ
             self.assertIn('"cells":[', lines[1])
             for e in (ReferenceEngine, RustEngine):
-                check_same_state(self, m, FileJournal(tmp).open(e()))
-            history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")  # 変更の塊を Rust で探す
+                check_same_state(self, m, Named(FileJournal(tmp).open(e())))
+            history = m.cell_history(FileJournal(tmp), "V", K="k5", T="t0")  # 変更の塊を Rust で探す
             self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
-            history = FileJournal(tmp).cell_history(m, "V", K="k7", T="t1")
+            history = m.cell_history(FileJournal(tmp), "V", K="k7", T="t1")
             self.assertEqual([(h["old"], h["new"]) for h in history], [(None, 1.0)])
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_corrupted_cell_file_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = many_cells(RustEngine())
-            FileJournal(tmp, bulk_cells=1000).start(m)
+            FileJournal(tmp, bulk_cells=1000).start(m.model)
             m.spread("V", 3000.0, how="even")
             (f,) = (Path(tmp) / "cells").glob("*.parquet")
             f.write_bytes(f.read_bytes()[:-10])
             with self.assertRaisesRegex(ValueError, "壊れている"):
-                FileJournal(tmp).open(RustEngine())
+                Named(FileJournal(tmp).open(RustEngine()))
 
     def test_moved_directory_still_opens(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = build_with(ReferenceEngine())
-            FileJournal(Path(tmp) / "a", bulk_cells=3).start(m)
+            FileJournal(Path(tmp) / "a", bulk_cells=3).start(m.model)
             m.spread("Cost", 100, Product="C")
             (Path(tmp) / "a").rename(Path(tmp) / "b")  # ファイルの名前は記録先のディレクトリからの相対
-            check_same_state(self, m, FileJournal(Path(tmp) / "b").open(ReferenceEngine()))
+            check_same_state(self, m, Named(FileJournal(Path(tmp) / "b").open(ReferenceEngine())))
 
 
 if __name__ == "__main__":

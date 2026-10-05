@@ -17,6 +17,7 @@ import urllib.request
 from unittest import mock
 
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.named import Named
 from sparse_engine.server import Server, idle_for, main
 from sparse_engine.workspace import Workspace
 
@@ -57,17 +58,17 @@ class Client:
 
 def mid(ws, name: str) -> str:
     """The UUID of the Metric (a name that the model does not have is taken as a UUID)."""
-    v = ws.version
+    v = Named(ws.version)
     return v.metric(name).id if name in v._metric_ids else name
 
 
 def did(ws, name: str) -> str:
-    v = ws.version
+    v = Named(ws.version)
     return v.dimension_id(name) if name in v._dim_ids else name
 
 
 def xid(ws, dim: str, member: str) -> str:
-    v = ws.version
+    v = Named(ws.version)
     return v.member_id(dim, member) if dim in v._dim_ids and member in v.dimension(dim) else member
 
 
@@ -113,7 +114,7 @@ class Api:
         return self.named(body["dims"], body.get("cells", body.get("rows")))
 
     def named(self, dims: list, rows: list) -> list:
-        v = self.ws.version
+        v = Named(self.ws.version)
         ds = [v.dimensions[d] for d in dims]
         return sorted([*(d.member_of(x) for d, x in zip(ds, k[:-1])), k[-1]] for k in rows)
 
@@ -121,7 +122,7 @@ class Api:
         status, body = self.c.get("/")
         self.assertEqual(status, 200)
         self.assertEqual(body["seq"], 0)
-        v = self.ws.version
+        v = Named(self.ws.version)
         month = body["dimensions"][v.dimension_id("Month")]
         self.assertEqual([m["name"] for m in month["members"]], ["Jan", "Feb", "Mar", "Apr"])
         self.assertEqual(month["members"][0]["id"], v.member_id("Month", "Jan"))
@@ -154,7 +155,7 @@ class Api:
         self.assertEqual(self.c.get(path(ws, "Stock", "cell", Color="p1", Month="Jan"))[0], 400)
 
     def test_member_values_are_uuids(self):
-        v = self.ws.version
+        v = Named(self.ws.version)
         ops = [{"op": "add_input", "id": "m-pick", "name": "Pick", "dims": [did(self.ws, "Product")],
                 "kind": "member:" + did(self.ws, "Month"), "cells": [[[xid(self.ws, "Product", "p1")], xid(self.ws, "Month", "Feb")]]},
                {"op": "set_cell", "metric": "m-pick", "value": xid(self.ws, "Month", "Mar"), "coords": coords(self.ws, Product="p2")}]
@@ -163,7 +164,7 @@ class Api:
         self.assertEqual(self.c.get("/")[1]["metrics"]["m-pick"]["kind"], "member:" + did(self.ws, "Month"))
         self.assertEqual(self.c.get(path(self.ws, "Pick", "cell", Product="p1"))[1]["value"], feb)
         self.assertEqual([c[1] for c in self.c.get(path(self.ws, "Pick", "slice"))[1]["cells"]].count(mar), 1)
-        self.assertEqual(self.ws.version.get("Pick", Product="p2"), "Mar")
+        self.assertEqual(Named(self.ws.version).get("Pick", Product="p2"), "Mar")
 
     def test_overrides(self):
         ws = self.ws
@@ -172,7 +173,7 @@ class Api:
              "formula": "Stock * 2", "overridable": True},
             write(ws, "m-plan", 7, Product="p1", Month="Jan")]}
         self.assertEqual(self.c.post("/writes", body)[0], 200)
-        self.assertEqual(ws.version.metric("Plan").id, "m-plan")
+        self.assertEqual(Named(ws.version).metric("Plan").id, "m-plan")
         self.assertEqual(self.cells("Plan", "overrides"), [["p1", "Jan", 7.0]])
         self.assertEqual(self.cells("Plan", "overrides", Product="p2"), [])
         self.assertEqual(self.c.get(path(ws, "Double", "overrides"))[0], 400)
@@ -398,7 +399,7 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "o", "ops": ops})[0], 200)
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][:4], ["p2", "p0", "p_new", "p1"])
         rows = self.c.get(path(ws, "Stock", "rows", Month="Jan", params="limit=3"))[1]["rows"]
-        self.assertEqual([ws.version.dimension("Product").member_of(r[0]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
+        self.assertEqual([Named(ws.version).dimension("Product").member_of(r[0]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
         status, err = self.c.post("/writes", {"client_op_id": "o2", "ops": [
             {"op": "move_member", "dim": did(ws, "Month"), "id": xid(ws, "Month", "Mar"), "at": 0}]})
         self.assertEqual((status, err["error"]), (400, "bad_request"))
@@ -429,7 +430,7 @@ class PgRustApi(JournalCase, RustApi):
 
 class Limits(unittest.TestCase):
     def setUp(self):
-        self.ws = Workspace(model(ReferenceEngine()))
+        self.ws = Workspace(model(ReferenceEngine()).model)
 
     def test_proxy_header_names_the_user(self):
         server = Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User", trusted_proxies=["127.0.0.1"]).start()
@@ -523,7 +524,7 @@ class ProxyHeader(JournalCase, unittest.TestCase):
 
     def history(self) -> list[str]:
         """The users in the journal records of the cell that the tests write."""
-        h = self.journals.journal().cell_history(self.ws.version, "Stock", Product="p0", Month="Jan")
+        h = Named(self.ws.version).cell_history(self.journals.journal(), "Stock", Product="p0", Month="Jan")
         return [r["user"] for r in h]
 
     def test_user_from_a_trusted_proxy_reaches_the_journal(self):

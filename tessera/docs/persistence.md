@@ -49,8 +49,8 @@ FileJournal("plan/").start(m)           # Make the current state the first snaps
 m.set_cell("Price", 12, Product="A")    # This becomes 1 journal entry
 m.checkpoint()                          # Make a snapshot (open then reads fewer journal entries)
 
-m2 = FileJournal("plan/").open(RustEngine())  # Restore from the latest snapshot and the journal entries after it
-m2.journal.cell_history(m2, "Price", Product="A")  # The change history of the cell (who, when, from which value to which value)
+m2 = Named(FileJournal("plan/").open(RustEngine()))  # Restore from the latest snapshot and the journal entries after it
+m2.cell_history(m2.journal, "Price", Product="A")  # The change history of the cell (who, when, from which value to which value)
 ```
 
 A journal entry has these 2 parts:

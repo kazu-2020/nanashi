@@ -3,7 +3,7 @@ import random
 import unittest
 from unittest import mock
 
-from sparse_engine import FormulaError, Model
+from sparse_engine import FormulaError, Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
@@ -90,7 +90,7 @@ class Redefine(unittest.TestCase):
             self.m.recalc()
 
     def small(self) -> Model:
-        m = Model(engine=self.engine())
+        m = Named(Model(engine=self.engine()))
         m.add_dimension("P", ["a", "b"])
         m.add_dimension("M", ["x", "y"])
         m.add_input("X", ["P"], {("a",): 1.0})
@@ -170,7 +170,7 @@ class Redefine(unittest.TestCase):
         check_full(self, self.m)
 
     def test_replaced_property_used_only_by_lookup(self):
-        m = Model(engine=self.engine())
+        m = Named(Model(engine=self.engine()))
         m.add_dimension("Product", ["A", "B"])
         m.add_dimension("Category", ["X", "Y"])
         m.add_property("Product", "Category", "Category", {"A": "X", "B": "Y"})
@@ -181,7 +181,7 @@ class Redefine(unittest.TestCase):
         self.assertEqual(dict(m.value("Looked").cells), {("A",): 2, ("B",): 2})
 
     def test_set_property_values_changes_only_given_members(self):
-        m = Model(engine=self.engine())
+        m = Named(Model(engine=self.engine()))
         m.add_dimension("Product", ["A", "B", "C"])
         m.add_dimension("Category", ["X", "Y"])
         m.add_property("Product", "Category", "Category", {"A": "X", "B": "Y", "C": "Y"})

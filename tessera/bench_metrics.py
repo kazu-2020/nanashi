@@ -19,6 +19,7 @@ import numpy as np
 
 from bench import run_plan, time_edits
 from sparse_engine.engine import engine_for
+from sparse_engine.named import Named
 
 N_PRODUCT, N_CATEGORY, N_REGION = 2_000, 20, 10
 MONTHS = [f"m{i:02d}" for i in range(1, 37)]
@@ -75,7 +76,7 @@ def build(engine_name: str, n: int):
     from sparse_engine import Model
 
     engine = engine_for(engine_name)
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     products = [f"p{i:04d}" for i in range(N_PRODUCT)]
     m.add_dimension("Product", products)
     m.add_dimension("Category", [f"c{i:02d}" for i in range(N_CATEGORY)])

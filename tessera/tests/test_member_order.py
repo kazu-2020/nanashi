@@ -2,7 +2,7 @@
 セルも変えない。順序付きの軸（時系列）は並び順を変えられない。"""
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.storage import dump, read
 
@@ -18,7 +18,7 @@ except ImportError:
 
 
 def build(engine) -> Model:
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     m.add_dimension("Account", ["売上", "原価", "販管費"])
     m.add_dimension("Month", ["Jan", "Feb", "Mar"], ordered=True)
     m.add_input("Plan", ["Account", "Month"], {
@@ -131,8 +131,8 @@ class MemberOrder(unittest.TestCase):
         m.add_member("Account", "粗利", at=2)
         m.set_cell("Plan", 40.0, Account="粗利", Month="Jan")
         m.move_member("Account", "販管費", 0)
-        files = dump(m)
-        back = read(files.__getitem__, self.engine())
+        files = dump(m.model)
+        back = Named(read(files.__getitem__, self.engine()))
         self.assertEqual(back.dimension("Account").in_order(), ["販管費", "売上", "原価", "粗利"])
         self.assertEqual(back.dimension("Account").members, m.dimension("Account").members)
         self.assertEqual(back.rows("Plan")[0], m.rows("Plan")[0])

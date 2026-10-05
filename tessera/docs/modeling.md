@@ -1,5 +1,10 @@
 # Model operations
 
+The examples use `Named` (`m = Named(Model())`), which takes names. `Model` takes the same operations with ids:
+a Metric, dimension, member or property argument is an id, and coordinates are a mapping `{dimension id: member id}`
+(for example `model.get(revenue, {product: p0001, month: m01})`). The reads of `Model` give ids. See "Minimal
+example" in the [README](../README.md).
+
 ## Read values
 
 There are four interfaces that read only the necessary cells, and `value`, which reads all cells.

@@ -1,7 +1,7 @@
 """計算や入力の途中で失敗しても、モデルが壊れた状態で残らない。"""
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
@@ -126,7 +126,7 @@ class RustBoundary(unittest.TestCase):
 @unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class MemoryBudget(unittest.TestCase):
     def test_dense_formula_beyond_the_budget_is_an_error_not_an_oom(self):
-        m = Model(engine=RustEngine(max_bytes=64 << 20), max_cells=None)  # セル数の見積もりの検査は外す
+        m = Named(Model(engine=RustEngine(max_bytes=64 << 20), max_cells=None))  # セル数の見積もりの検査は外す
         m.add_dimension("Customer", [f"c{i}" for i in range(100_000)])
         m.add_dimension("Sku", [f"s{i}" for i in range(20_000)])
         m.add_input("Sales", ["Customer", "Sku"], {("c1", "s1"): 5.0})

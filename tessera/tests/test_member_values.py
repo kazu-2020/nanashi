@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import FormulaError, Model, dim, member, parse, to_formula
+from sparse_engine import FormulaError, Model, Named, dim, member, parse, to_formula
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import cells, same, snapshot
@@ -16,7 +16,7 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr"]
 
 
 def model(engine=None) -> Model:
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     m.add_dimension("Version", ["予算", "実績", "見込み"])
     m.add_dimension("Product", ["A", "B"])
     m.add_dimension("Month", MONTHS, ordered=True)
