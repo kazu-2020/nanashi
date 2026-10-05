@@ -17,6 +17,7 @@ import urllib.request
 from unittest import mock
 
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.named import Named
 from sparse_engine.server import Server, idle_for, main
 from sparse_engine.workspace import Workspace
 
@@ -57,18 +58,18 @@ class Client:
 
 def mid(ws, name: str) -> str:
     """The UUID of the Metric (a name that the model does not have is taken as a UUID)."""
-    v = ws.version
-    return v.metric_id(name) if name in v.metrics else name
+    v = Named(ws.version)
+    return v.metric(name).id if name in v._metric_ids else name
 
 
 def did(ws, name: str) -> str:
-    v = ws.version
-    return v.dimension_id(name) if name in v.dimensions else name
+    v = Named(ws.version)
+    return v.dimension_id(name) if name in v._dim_ids else name
 
 
 def xid(ws, dim: str, member: str) -> str:
-    v = ws.version
-    return v.member_id(dim, member) if dim in v.dimensions and member in v.dimensions[dim] else member
+    v = Named(ws.version)
+    return v.member_id(dim, member) if dim in v._dim_ids and member in v.dimension(dim) else member
 
 
 def coords(ws, **kw) -> dict:
@@ -113,23 +114,23 @@ class Api:
         return self.named(body["dims"], body.get("cells", body.get("rows")))
 
     def named(self, dims: list, rows: list) -> list:
-        v = self.ws.version
-        ds = [v.dimensions_by_id()[v.ids[d]] for d in dims]
-        return sorted([*(d.member_of(v.ids[x]) for d, x in zip(ds, k[:-1])), k[-1]] for k in rows)
+        v = Named(self.ws.version)
+        ds = [v.dimensions[d] for d in dims]
+        return sorted([*(d.member_of(x) for d, x in zip(ds, k[:-1])), k[-1]] for k in rows)
 
     def test_definition_and_health(self):
         status, body = self.c.get("/")
         self.assertEqual(status, 200)
         self.assertEqual(body["seq"], 0)
-        v = self.ws.version
+        v = Named(self.ws.version)
         month = body["dimensions"][v.dimension_id("Month")]
         self.assertEqual([m["name"] for m in month["members"]], ["Jan", "Feb", "Mar", "Apr"])
         self.assertEqual(month["members"][0]["id"], v.member_id("Month", "Jan"))
         self.assertEqual((month["name"], month["ordered"]), ("Month", True))
-        total = body["metrics"][v.metric_id("Total")]
+        total = body["metrics"][v.metric("Total").id]
         self.assertEqual(total, {"name": "Total", "dims": [], "kind": "number", "overridable": False,
                                  "formula": "ByMonth[REMOVE SUM: Month]"})
-        self.assertEqual(body["metrics"][v.metric_id("Stock")]["dims"], [v.dimension_id("Product"), v.dimension_id("Month")])
+        self.assertEqual(body["metrics"][v.metric("Stock").id]["dims"], [v.dimension_id("Product"), v.dimension_id("Month")])
         self.assertNotIn("Stock", body["metrics"])  # the keys are UUIDs, not names
         self.assertEqual(self.c.get("/health"), (200, {"seq": 0, "role": "leader"}))
         self.assertEqual(self.c.get("/nothing")[0], 404)
@@ -154,7 +155,7 @@ class Api:
         self.assertEqual(self.c.get(path(ws, "Stock", "cell", Color="p1", Month="Jan"))[0], 400)
 
     def test_member_values_are_uuids(self):
-        v = self.ws.version
+        v = Named(self.ws.version)
         ops = [{"op": "add_input", "id": "m-pick", "name": "Pick", "dims": [did(self.ws, "Product")],
                 "kind": "member:" + did(self.ws, "Month"), "cells": [[[xid(self.ws, "Product", "p1")], xid(self.ws, "Month", "Feb")]]},
                {"op": "set_cell", "metric": "m-pick", "value": xid(self.ws, "Month", "Mar"), "coords": coords(self.ws, Product="p2")}]
@@ -163,7 +164,7 @@ class Api:
         self.assertEqual(self.c.get("/")[1]["metrics"]["m-pick"]["kind"], "member:" + did(self.ws, "Month"))
         self.assertEqual(self.c.get(path(self.ws, "Pick", "cell", Product="p1"))[1]["value"], feb)
         self.assertEqual([c[1] for c in self.c.get(path(self.ws, "Pick", "slice"))[1]["cells"]].count(mar), 1)
-        self.assertEqual(self.ws.version.get("Pick", Product="p2"), "Mar")
+        self.assertEqual(Named(self.ws.version).get("Pick", Product="p2"), "Mar")
 
     def test_overrides(self):
         ws = self.ws
@@ -172,7 +173,7 @@ class Api:
              "formula": "Stock * 2", "overridable": True},
             write(ws, "m-plan", 7, Product="p1", Month="Jan")]}
         self.assertEqual(self.c.post("/writes", body)[0], 200)
-        self.assertEqual(ws.version.metric_id("Plan"), "m-plan")
+        self.assertEqual(Named(ws.version).metric("Plan").id, "m-plan")
         self.assertEqual(self.cells("Plan", "overrides"), [["p1", "Jan", 7.0]])
         self.assertEqual(self.cells("Plan", "overrides", Product="p2"), [])
         self.assertEqual(self.c.get(path(ws, "Double", "overrides"))[0], 400)
@@ -265,7 +266,7 @@ class Api:
                              "formula": "Stock * 3"})
         self.assertEqual(status, 200, body)
         self.assertEqual(self.c.get("/")[1]["metrics"]["m-1"]["name"], "Thrice")
-        self.assertNotIn("Triple", ws.version.metrics)
+        self.assertNotIn("Triple", ws.version._metric_ids)
         # The same name with a different UUID is a bad request (400)
         status, body = post("d-3", {"op": "add_formula", "id": "m-2", "name": "Thrice", "dims": [product], "formula": "Stock * 3"})
         self.assertEqual((status, body["error"]), (400, "bad_request"))
@@ -390,6 +391,68 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "d3", "ops": other})[0], 400)
         self.assertEqual(names(ws, self.c.get("/")[1])["Region"]["members"], ["N", "S", "W"])
 
+    def test_dimension_and_property_renames(self):
+        post = lambda op_id, *ops: self.c.post("/writes", {"client_op_id": op_id, "ops": list(ops)})
+        status, body = post(
+            "r-1", {"op": "add_dimension", "id": "d-grp", "name": "Grp"},
+            {"op": "add_member", "dim": "d-grp", "id": "g-1", "name": "G1"},
+            {"op": "add_dimension", "id": "d-region", "name": "Region"},
+            {"op": "add_member", "dim": "d-region", "id": "r-n", "name": "N"},
+            {"op": "add_member", "dim": "d-region", "id": "r-s", "name": "S"},
+            {"op": "add_property", "dim": "d-region", "id": "p-grp", "name": "Group", "target": "d-grp"},
+            {"op": "set_property_values", "dim": "d-region", "prop": "p-grp", "values": {"r-n": "g-1", "r-s": "g-1"}},
+            {"op": "add_input", "id": "m-budget", "name": "Budget", "dims": ["d-grp"], "cells": [[["g-1"], 10.0]]},
+            {"op": "add_input", "id": "m-weight", "name": "Weight", "dims": ["d-region"],
+             "cells": [[["r-n"], 1.0], [["r-s"], 3.0]]},
+            {"op": "add_formula", "id": "m-share", "name": "Share", "dims": ["d-region"],
+             "formula": "Weight / Weight[REMOVE SUM: Region] * Budget[BY: Region.Group]"})
+        self.assertEqual(status, 200, body)
+        cell = lambda: self.c.get("/metrics/m-share/cell?d-region=r-s")[1]["value"]
+        formula = lambda: self.c.get("/")[1]["metrics"]["m-share"]["formula"]
+        self.assertEqual(cell(), 7.5)
+        before = formula()
+        self.assertIn("Region.Group", before)
+        rename = {"op": "rename_dimension", "id": "d-region", "name": "Area"}
+        seq = post("r-2", rename)
+        self.assertEqual(seq[0], 200, seq[1])
+        self.assertEqual(post("r-2", rename), seq)  # the resend does not commit two times
+        status, body = post("r-3", {"op": "rename_property", "dim": "d-region", "id": "p-grp", "name": "Team"})
+        self.assertEqual(status, 200, body)
+        model = self.c.get("/")[1]
+        region = model["dimensions"]["d-region"]
+        self.assertEqual((region["name"], region["properties"]), ("Area", {"p-grp": {"name": "Team", "target": "d-grp"}}))
+        self.assertEqual(formula(), before.replace("Region", "Area").replace("Group", "Team"))
+        self.assertEqual(cell(), 7.5)  # the values do not change
+        # A rename to a name that another object has is 400, and the resend gets the same rejection
+        clash = post("r-4", {"op": "rename_dimension", "id": "d-region", "name": "Grp"})
+        self.assertEqual((clash[0], clash[1]["error"]), (400, "bad_request"))
+        self.assertEqual(post("r-4", {"op": "rename_dimension", "id": "d-region", "name": "Zone"}), clash)
+        status, body = post("r-5", {"op": "add_property", "dim": "d-region", "id": "p-two", "name": "Team2", "target": "d-grp"},
+                            {"op": "rename_property", "dim": "d-region", "id": "p-two", "name": "Team"})
+        self.assertEqual((status, body["error"]), (400, "bad_request"))
+        # An unknown id is 400
+        for op_id, op in [("r-6", {"op": "rename_dimension", "id": "d-none", "name": "X"}),
+                          ("r-7", {"op": "rename_property", "dim": "d-region", "id": "p-none", "name": "X"}),
+                          ("r-8", {"op": "rename_property", "dim": "d-none", "id": "p-grp", "name": "X"})]:
+            status, body = post(op_id, op)
+            self.assertEqual((status, body["error"]), (400, "bad_request"), op)
+        # A definition again by UUID with a new name renames the dimension or the property
+        status, body = post("r-9", {"op": "add_dimension", "id": "d-region", "name": "Zone"},
+                            {"op": "add_property", "dim": "d-region", "id": "p-grp", "name": "Crew", "target": "d-grp"},
+                            {"op": "set_property_values", "dim": "d-region", "prop": "p-grp", "values": {"r-n": "g-1", "r-s": "g-1"}})
+        self.assertEqual(status, 200, body)
+        region = self.c.get("/")[1]["dimensions"]["d-region"]
+        self.assertEqual((region["name"], region["properties"]["p-grp"]["name"]), ("Zone", "Crew"))
+        self.assertEqual(formula(), before.replace("Region", "Zone").replace("Group", "Crew"))
+        self.assertEqual(cell(), 7.5)
+        # The Metric and member renames also show in the formula text
+        status, body = post("r-10", {"op": "rename_metric", "id": "m-weight", "name": "Mass"},
+                            {"op": "rename_member", "dim": "d-region", "id": "r-n", "name": "North"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(formula(), before.replace("Region", "Zone").replace("Group", "Crew").replace("Weight", "Mass"))
+        self.assertEqual(self.c.get("/")[1]["dimensions"]["d-region"]["members"][0], {"id": "r-n", "name": "North"})
+        self.assertEqual(cell(), 7.5)
+
     def test_member_order_through_the_api(self):
         ws = self.ws
         product = did(ws, "Product")
@@ -398,7 +461,7 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "o", "ops": ops})[0], 200)
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][:4], ["p2", "p0", "p_new", "p1"])
         rows = self.c.get(path(ws, "Stock", "rows", Month="Jan", params="limit=3"))[1]["rows"]
-        self.assertEqual([ws.version.dimensions["Product"].member_of(ws.version.ids[r[0]]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
+        self.assertEqual([Named(ws.version).dimension("Product").member_of(r[0]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
         status, err = self.c.post("/writes", {"client_op_id": "o2", "ops": [
             {"op": "move_member", "dim": did(ws, "Month"), "id": xid(ws, "Month", "Mar"), "at": 0}]})
         self.assertEqual((status, err["error"]), (400, "bad_request"))
@@ -429,7 +492,7 @@ class PgRustApi(JournalCase, RustApi):
 
 class Limits(unittest.TestCase):
     def setUp(self):
-        self.ws = Workspace(model(ReferenceEngine()))
+        self.ws = Workspace(model(ReferenceEngine()).model)
 
     def test_proxy_header_names_the_user(self):
         server = Server(self.ws, "127.0.0.1", 0, user_header="X-Forwarded-User", trusted_proxies=["127.0.0.1"]).start()
@@ -523,7 +586,7 @@ class ProxyHeader(JournalCase, unittest.TestCase):
 
     def history(self) -> list[str]:
         """The users in the journal records of the cell that the tests write."""
-        h = self.journals.journal().cell_history(self.ws.version, "Stock", Product="p0", Month="Jan")
+        h = Named(self.ws.version).cell_history(self.journals.journal(), "Stock", Product="p0", Month="Jan")
         return [r["user"] for r in h]
 
     def test_user_from_a_trusted_proxy_reaches_the_journal(self):

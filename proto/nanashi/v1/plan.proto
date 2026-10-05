@@ -28,7 +28,13 @@ service PlanService {
   // Modeling.
   rpc GetModel(GetModelRequest) returns (ModelDef) {}
   rpc CreateList(CreateListRequest) returns (Ack) {}
+  // RenameList changes the name of a list. It also renames the Metric "<list>.<property>" of each NUMBER or
+  // BOOLEAN property.
+  rpc RenameList(RenameListRequest) returns (Ack) {}
   rpc AddProperty(AddPropertyRequest) returns (Ack) {}
+  // RenameProperty changes the name of a property. The name of a NUMBER or BOOLEAN property is also in the name
+  // of its Metric "<list>.<property>".
+  rpc RenameProperty(RenamePropertyRequest) returns (Ack) {}
   rpc EditMembers(EditMembersRequest) returns (Ack) {}
   rpc CreateCalendar(CreateCalendarRequest) returns (Ack) {}
   // CreateScenario adds a member to the scenario list (it makes the list on the first call) and copies the
@@ -208,6 +214,13 @@ message CreateListRequest {
   string client_op_id = 5;
 }
 
+message RenameListRequest {
+  string app_id = 1;
+  string id = 2;
+  string name = 3;
+  string client_op_id = 4;
+}
+
 message AddPropertyRequest {
   string app_id = 1;
   // The id of the list.
@@ -215,6 +228,16 @@ message AddPropertyRequest {
   // property.id is required. The api makes the id of the Metric of a NUMBER or BOOLEAN property.
   PropertyDef property = 3;
   string client_op_id = 4;
+}
+
+message RenamePropertyRequest {
+  string app_id = 1;
+  // The id of the list.
+  string list = 2;
+  // The id of the property.
+  string id = 3;
+  string name = 4;
+  string client_op_id = 5;
 }
 
 message EditMembersRequest {

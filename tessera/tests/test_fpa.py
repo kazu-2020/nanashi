@@ -24,7 +24,7 @@ class Identities(unittest.TestCase):
     def setUp(self):
         self.m = small()
         self.m.recalc()
-        self.months = self.m.dimensions["Month"].members
+        self.months = self.m.dimension("Month").members
         self.cutoff = self.m.get("Cutoff")
 
     def oi(self, version, month):
@@ -55,10 +55,10 @@ class Identities(unittest.TestCase):
         employed = self.m.value("Employed").cells
         dept = self.m.value("DeptOf").cells
         for t in self.months:
-            expected = sum(1 for e in self.m.dimensions["Employee"].members
+            expected = sum(1 for e in self.m.dimension("Employee").members
                            if employed.get((e, t)) and (e, t) in dept)
             got = sum(self.m.get("Headcount", Department=d, Version="予算", Month=t) or 0
-                      for d in self.m.dimensions["Department"].members)
+                      for d in self.m.dimension("Department").members)
             with self.subTest(month=t):
                 self.assertEqual(got, expected)
 
@@ -85,7 +85,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]), name)
 
@@ -98,7 +98,7 @@ class RustMatchesReference(unittest.TestCase):
         for round_ in range(60):
             for _ in range(rng.randint(1, 2)):
                 apply_random(rng, [ref_m, rs])
-            for name in ref_m.metrics:
+            for name in ref_m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(ref_m.value(name).cells, rs.value(name).cells), name)
 

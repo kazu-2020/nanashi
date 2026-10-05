@@ -15,6 +15,7 @@ from typing import Any, Callable, Protocol
 from .delta import DeltaPlan, plan_for, rename
 from .evaluate import (Catalog, Edge, FormulaError, Restrict, Type, affected, collect_refs, estimate, infer,
                        resolve, union_region)
+from .messages import Msg
 from .expr import BinOp, Const, Expr, Filter, Ref
 
 
@@ -65,8 +66,8 @@ class Planner(Protocol):
 
     def removal_regions(self, plan: CompiledPlan, stores: dict[str, Any], cat: Catalog, dim: str,
                         member: str) -> dict[str, Restrict]:
-        """入力を空にしたあと、軸 dim のメンバー member を消すと値が変わる範囲
-        （計算 Metric -> 消すメンバーを除いた範囲）。"""
+        """The ranges that change when the member (an id) of the dimension dim goes, after its inputs became
+        blank (formula Metric -> the range without the removed member)."""
 
     def recalc(self, plan: CompiledPlan, stores: dict[str, Any], counts: dict[str, Any], cat: Catalog,
                changed: dict[str, Restrict], added: dict[str, frozenset[str]], olds: dict[str, Any],
@@ -115,7 +116,7 @@ class PyPlanner:
 
     def check(self, written: Expr, cat: Catalog) -> tuple[Expr, Type, list[str]]:
         formula = resolve(written, cat)  # 軸の名前、Metric を使った BY を評価できる形に
-        warnings: list[str] = []
+        warnings: list[Msg] = []
         return formula, infer(formula, cat, warnings), warnings
 
     def plan(self, formulas, dims, cat):
@@ -140,7 +141,7 @@ class PyPlanner:
             if step.scan_dim is None:
                 m = cat.metrics[step.names[0]]
                 if m.formula is not None and (r := affected(m.formula, cat, regions, added)) is not None:
-                    regions[m.name] = r
+                    regions[m.id] = r
                 continue
             regions.update(_scan_regions(cat, step, regions, added))
         return regions
@@ -176,7 +177,7 @@ class PyPlanner:
             if step.scan_dim is None:
                 m = cat.metrics[step.names[0]]
                 if m.formula is not None:
-                    settle(m.name, affected(m.formula, cat, changes, added, removed))
+                    settle(m.id, affected(m.formula, cat, changes, added, removed))
                 continue
             for n in step.names:  # scan の中の前月参照は、消えるセルからも伝わる
                 if has_cells(n):
@@ -229,14 +230,14 @@ class _Run:
         for level in self.plan.levels:
             batch = [cat.metrics[s.names[0]] for s in level
                      if s.scan_dim is None and cat.metrics[s.names[0]].formula is not None]
-            fused = [m for m in batch if m.name in self.plan.delta and self.plan.delta[m.name].count is not None]
+            fused = [m for m in batch if m.id in self.plan.delta and self.plan.delta[m.id].count is not None]
             plain = [m for m in batch if m not in fused]
             for m, result in zip(plain, eng.evaluate_many([(m.formula, {}) for m in plain], cat)):
                 self._replace(m, {}, result)
             for m in fused:
-                value, count = eng.evaluate_with_count(m.formula, self.plan.delta[m.name].count, cat, {})
+                value, count = eng.evaluate_with_count(m.formula, self.plan.delta[m.id].count, cat, {})
                 self._replace(m, {}, value)
-                self.counts[m.name] = eng.replace(self.counts[m.name], {}, eng.reorder(count, m.dims), cat)
+                self.counts[m.id] = eng.replace(self.counts[m.id], {}, eng.reorder(count, m.dims), cat)
             for step in level:
                 if step.scan_dim is not None:
                     self._scan(step, {n: {} for n in step.names}, True)
@@ -261,27 +262,27 @@ class _Run:
             m = cat.metrics[step.names[0]]
             if m.formula is None:
                 continue
-            region = union_region(affected(m.formula, cat, regions, added), forced.get(m.name))
+            region = union_region(affected(m.formula, cat, regions, added), forced.get(m.id))
             if region is None:
                 continue
-            if m.name in sources:
-                olds[m.name] = eng.filter(self.stores[m.name], region or None, cat)
-            dp = self.plan.delta.get(m.name)
-            if dp is not None and m.name not in forced and self._delta_applicable(dp, regions, olds):
+            if m.id in sources:
+                olds[m.id] = eng.filter(self.stores[m.id], region or None, cat)
+            dp = self.plan.delta.get(m.id)
+            if dp is not None and m.id not in forced and self._delta_applicable(dp, regions, olds):
                 changed = self._apply_delta(m, dp, region, regions, olds)
             else:
                 changed = self._recompute(m, region)
             if changed is not None:
-                regions[m.name] = changed
+                regions[m.id] = changed
 
     def _recompute(self, m, region: Restrict) -> Restrict | None:
         """m の region を式から計算し直す。差分集計する SUM は、各グループの件数も求め直す。"""
         eng, cat = self.eng, self.cat
-        dp = self.plan.delta.get(m.name)
+        dp = self.plan.delta.get(m.id)
         if dp is not None and dp.count is not None:
             value, counts = eng.evaluate_with_count(m.formula, dp.count, cat, region)
             changed = self._replace(m, region, value, diff=True)
-            self.counts[m.name] = eng.replace(self.counts[m.name], region, eng.reorder(counts, m.dims), cat)
+            self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(counts, m.dims), cat)
             return changed
         return self._replace(m, region, eng.evaluate(m.formula, cat, region), diff=True)
 
@@ -308,7 +309,7 @@ class _Run:
         """
         eng, cat = self.eng, self.cat
         r = self._delta_range(dp, regions)
-        d_count_f, d_value_f = self.planner.delta_exprs(m.name, m.formula, dp)
+        d_count_f, d_value_f = self.planner.delta_exprs(m.id, m.formula, dp)
         work, types = {}, {}
         for i, n in enumerate((dp.source, *dp.aux)):
             new = eng.filter(self.stores[n], r, cat)
@@ -321,8 +322,8 @@ class _Run:
             work[f"__new{i}"], work[f"__old{i}"] = new, old
             types[f"__new{i}"] = types[f"__old{i}"] = cat.metric_type(n)
 
-        old_value = eng.filter(self.stores[m.name], region or None, cat)
-        old_count = eng.filter(self.counts[m.name], region or None, cat) if dp.count is not None else old_value
+        old_value = eng.filter(self.stores[m.id], region or None, cat)
+        old_count = eng.filter(self.counts[m.id], region or None, cat) if dp.count is not None else old_value
         own = Type(m.dims, "number")
         types |= {"__old_value": own, "__old_count": own, "__d_value": own, "__d_count": own, "__new_count": own}
         view = _Overlay(cat, eng, work, types)
@@ -334,12 +335,12 @@ class _Run:
         new_value = eng.evaluate(_NEW_VALUE, view, None)  # 件数が 0 になったグループは空にする
         kept_count = eng.evaluate(_KEPT_COUNT, view, None)
 
-        self.stores[m.name], changed = eng.replace_diff(self.stores[m.name], region,
+        self.stores[m.id], changed = eng.replace_diff(self.stores[m.id], region,
                                                         eng.reorder(new_value, m.dims), cat)
         if dp.count is not None:
-            self.counts[m.name] = eng.replace(self.counts[m.name], region, eng.reorder(kept_count, m.dims), cat)
-        self.done.append((m.name, True))
-        self.named.append((m.name, region))
+            self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(kept_count, m.dims), cat)
+        self.done.append((m.id, True))
+        self.named.append((m.id, region))
         return self._widened(changed)
 
     def _widened(self, changed: Restrict | None) -> Restrict | None:
@@ -357,12 +358,12 @@ class _Run:
         new = eng.reorder(new, m.dims)
         changed = None
         if diff:
-            self.stores[m.name], changed = eng.replace_diff(self.stores[m.name], region, new, cat)
+            self.stores[m.id], changed = eng.replace_diff(self.stores[m.id], region, new, cat)
             changed = self._widened(changed)
         else:
-            self.stores[m.name] = eng.replace(self.stores[m.name], region, new, cat)
-        self.done.append((m.name, False))
-        self.named.append((m.name, region))
+            self.stores[m.id] = eng.replace(self.stores[m.id], region, new, cat)
+        self.done.append((m.id, False))
+        self.named.append((m.id, region))
         return changed
 
     def _scan(self, step: Step, active: dict[str, Restrict], full: bool) -> None:
@@ -375,7 +376,7 @@ class _Run:
 
         # 格納データにその場で 1 時点ずつ書き込む。次の時点の PREVIOUS は、書き込んだばかりの
         # 前の時点（範囲の外なら元のまま）を読む
-        for t in cat.dimension(dim).members:
+        for t in cat.dimension(dim).ids:
             for n, r in active.items():
                 if dim in r and t not in r[dim]:
                     continue

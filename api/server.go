@@ -64,7 +64,8 @@ var rpcRules = map[string]rpcRule{
 	// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
 	// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
 	"WriteCells": {contributor, true}, "Import": {min: contributor}, "CreateSnapshot": {min: contributor},
-	"CreateList": {min: modeler}, "AddProperty": {min: modeler}, "EditMembers": {min: modeler},
+	"CreateList": {min: modeler}, "RenameList": {min: modeler}, "AddProperty": {min: modeler},
+	"RenameProperty": {min: modeler}, "EditMembers": {min: modeler},
 	"CreateCalendar": {min: modeler}, "CreateScenario": {min: modeler}, "CreateMetric": {min: modeler},
 	"UpdateMetric": {min: modeler}, "RenameMetric": {min: modeler}, "DeleteMetric": {min: modeler},
 	"CreateTable": {min: modeler}, "UpdateTable": {min: modeler}, "CreateView": {min: modeler},
@@ -258,6 +259,9 @@ type madeRow struct {
 	// app_property_text only: the TEXT values of the property ID, by member. nil: the member has no value.
 	OldText map[string]*string `json:"old_text,omitempty"`
 	NewText map[string]*string `json:"new_text,omitempty"`
+	// app_property_name only: the name of the property ID before and after the change.
+	OldName string `json:"old_name,omitempty"`
+	NewName string `json:"new_name,omitempty"`
 }
 
 // plan is one change to an application: the engine operations, the statements for the api tables, the rows
@@ -316,6 +320,9 @@ func compensation(app string, made []madeRow) []stmt {
 			} else {
 				out = append(out, stmt{sql: "update app_metric set description = $5, folder = $6 " + key, args: append(args, m.Old.Description, m.Old.Folder)})
 			}
+		case "app_property_name":
+			out = append(out, stmt{sql: "update app_property set name = $5 where app_id = $1 and list_id = $2 and id = $3 and name = $4",
+				args: []any{app, m.ListID, m.ID, m.NewName, m.OldName}})
 		case "app_property_text":
 			// Each member whose value is still the new value ('null': no value) gets the old value back.
 			out = append(out, stmt{sql: `update app_property set text_values = jsonb_strip_nulls(text_values || (

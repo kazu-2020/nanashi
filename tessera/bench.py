@@ -5,6 +5,7 @@
     python bench.py --report                     # 保存済みの結果を Markdown の表にするだけ
 """
 from __future__ import annotations
+from sparse_engine.named import Named
 
 import argparse
 import json
@@ -114,7 +115,7 @@ def build(engine_name: str, size: str):
     n_cat, n_reg = 50, 10
 
     engine = engine_for(engine_name)
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     m.add_dimension("Product", products)
     m.add_dimension("Category", [f"c{i:02d}" for i in range(n_cat)])
     m.add_dimension("Store", stores)
@@ -142,7 +143,7 @@ def build(engine_name: str, size: str):
             storage = engine.from_arrays(tuple(dims), kind, cols, m)
             m.add_input(name, dims, kind=kind, storage=storage)
         else:
-            members = [m.dimensions[d].members for d in dims]
+            members = [m.dimension(d).members for d in dims]
             codes = [cols[d].tolist() for d in dims]
             values = cols["__v"].tolist()
             cells = {tuple(members[j][codes[j][i]] for j in range(len(dims))): values[i]

@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.named import Named
 from sparse_engine.workspace import Workspace
 
 from .journals import DSN, PG_AVAILABLE
@@ -105,13 +106,13 @@ class PgJournalTests(unittest.TestCase):
         from .test_journal import many_cells
         m = many_cells(RustEngine(), n=12_000)
         j = self.journal()
-        j.start(m)
+        j.start(m.model)
         with m.transaction(user="etl"):
             m.spread("V", 24_000.0, how="even")
         (rec,) = j.conn.execute("select record from nanashi_operation where model_id = %s and cells_uri is not null",
                                 (self.model_id,)).fetchone()
         (f,) = rec["cells_blob"]["files"]
-        v = m.metrics["V"]
+        v = m.metric("V")
         self.assertTrue(f["uri"].startswith(f"{self.model_id}/cells/"))  # 置き場所の中の相対的なキー
         self.assertTrue(f["uri"].endswith(f"-{v.id}.parquet"))
         data = self.objects.get(f["uri"])
@@ -120,14 +121,14 @@ class PgJournalTests(unittest.TestCase):
         block = nanashi_core.CellBlock.from_parquet(data)
         self.assertEqual(len(block), 11_999)
         for e in (ReferenceEngine, RustEngine):
-            check_same_state(self, m, self.journal().open(e()))
-        history = self.journal().cell_history(m, "V", K="k5", T="t0")  # COPY の行を Rust で作って反映する
+            check_same_state(self, m, Named(self.journal().open(e())))
+        history = m.cell_history(self.journal(), "V", K="k5", T="t0")  # COPY の行を Rust で作って反映する
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
 
     def test_concurrent_indexing_does_not_duplicate_history(self):
         m = build_with(ReferenceEngine())
         j = self.journal(bulk_cells=3)
-        j.start(m)
+        j.start(m.model)
         with m.transaction(user="etl"):
             m.spread("Cost", 100, Product="C")  # 5 セル。確定の後で反映する
         others = [self.journal() for _ in range(4)]  # 別々のプロセスが、同時に反映しようとする
@@ -144,27 +145,27 @@ class PgJournalTests(unittest.TestCase):
         rows = j.conn.execute("select count(*) from nanashi_cell_change where model_id = %s",
                               (self.model_id,)).fetchone()[0]
         self.assertEqual(rows, 5)
-        history = j.cell_history(m, "Cost", Product="C", Month="Feb")
+        history = m.cell_history(j, "Cost", Product="C", Month="Feb")
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
 
     def test_bulk_history_is_indexed_later(self):
         m = build_with(ReferenceEngine())
         j = self.journal(bulk_cells=3)
-        j.start(m)
+        j.start(m.model)
         with m.transaction(user="etl", reason="取り込み"):
             m.spread("Cost", 100, Product="C")  # C には値がないので、全月（5 セル）に均等に配る
         pending = j.conn.execute("select count(*) from nanashi_operation where model_id = %s and not indexed",
                                  (self.model_id,)).fetchone()[0]
         self.assertEqual(pending, 1)  # 確定の時点では、セルの履歴の表にはまだない
-        history = j.cell_history(m, "Cost", Product="C", Month="Feb")  # 引くときに反映する
+        history = m.cell_history(j, "Cost", Product="C", Month="Feb")  # 引くときに反映する
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
         self.assertEqual(j.index_pending(), 0)
-        check_same_state(self, m, self.journal().open(ReferenceEngine()))
+        check_same_state(self, m, Named(self.journal().open(ReferenceEngine())))
 
     def test_workspace_group_commit_and_reopen(self):
         m = stock_model(ReferenceEngine())
-        self.journal().start(m)
-        ws = Workspace(m, self.journal())
+        self.journal().start(m.model)
+        ws = Workspace(m.model, self.journal())
         futures = [ws.submit(move(f"p{i}", f"p{i + 1}", "Jan", 1), user="u", client_op_id=f"r{i}")
                    for i in range(10)]
         self.assertEqual(sorted(f.result() for f in futures), list(range(1, 11)))
@@ -174,28 +175,28 @@ class PgJournalTests(unittest.TestCase):
         ws.close()
         reopened = Workspace.open(self.journal(), ReferenceEngine())
         check_same_state(self, ws.version, reopened.version)
-        history = reopened.journal.cell_history(reopened.version, "Stock", Product="p6", Month="Feb")
+        history = Named(reopened.version).cell_history(reopened.journal, "Stock", Product="p6", Month="Feb")
         self.assertEqual([(h["seq"], h["old"], h["new"]) for h in history], [(11, 100.0, 102.0)])
         reopened.close()
 
     def test_only_one_writer(self):
         m = build_with(ReferenceEngine())
         first = self.journal(lease_ttl=1.0, heartbeat=False)  # 落ちたプロセスのように、リースを延長しない
-        first.start(m)
+        first.start(m.model)
         m.set_cell("Price", 12, Product="A")  # first がリースを取る
         second = self.journal(lease_ttl=1.0, acquire_wait=0)
-        other = second.open(ReferenceEngine())
+        other = Named(second.open(ReferenceEngine()))
         with self.assertRaises(Fenced):  # 期限内は取れない（待たない設定）
             other.set_cell("Price", 13, Product="A")
         time.sleep(1.2)
         other.set_cell("Price", 14, Product="A")  # 期限が切れたら取れる（世代番号が進む）
         with self.assertRaises(Fenced):  # 古いプロセスの確定は締め出される
             m.set_cell("Price", 15, Product="A")
-        self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 14)
+        self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
 
     def test_lost_lease_fences_before_the_new_writer_writes(self):
         m = build_with(ReferenceEngine())
-        self.journal(lease_ttl=0.5, heartbeat=False).start(m)
+        self.journal(lease_ttl=0.5, heartbeat=False).start(m.model)
         m.set_cell("Price", 12, Product="A")  # m がリースを取る
         time.sleep(0.7)
         self.journal(lease_ttl=0.5).acquire()  # 別のプロセスがリースを取っただけで、まだ書いていない
@@ -207,7 +208,7 @@ class PgJournalTests(unittest.TestCase):
         # so acquire() would succeed. The commit must not take the lease again without notice
         m = build_with(ReferenceEngine())
         j = self.journal(heartbeat=False)
-        j.start(m)
+        j.start(m.model)
         m.set_cell("Price", 12, Product="A")  # m takes the lease
         # Another process takes the lease, and the lease expires at once
         self.journal().conn.execute("update nanashi_model set writer_epoch = writer_epoch + 1,"
@@ -218,12 +219,12 @@ class PgJournalTests(unittest.TestCase):
         with self.assertRaises(Fenced):
             m.set_cell("Price", 13, Product="A")
         m.set_cell("Price", 14, Product="A")  # after the caller knows of the loss, a new commit takes the lease
-        self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 14)
+        self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
 
     def test_prune_removes_old_snapshots_and_bulk_files(self):
         m = build_with(ReferenceEngine())
         j = self.journal(bulk_cells=3)
-        j.start(m)
+        j.start(m.model)
         with m.transaction(user="etl", client_op_id="bulk"):
             m.spread("Cost", 100, Product="C")  # 大量の変更のファイル
         m.checkpoint()
@@ -237,28 +238,28 @@ class PgJournalTests(unittest.TestCase):
         self.assertEqual(len([k for k in after if k.endswith("/manifest.json")]), 1)
         self.assertFalse(any("/cells/" in k for k in after))
         self.assertLess(len(after), len(before))
-        check_same_state(self, m, self.journal().open(ReferenceEngine()))
+        check_same_state(self, m, Named(self.journal().open(ReferenceEngine())))
         # 消したファイルの記録も、セルの履歴の表から再生できる
         self.assertEqual([r["seq"] for r in self.journal().records()], [1, 2])
-        history = self.journal().cell_history(m, "Cost", Product="C", Month="Feb")
+        history = m.cell_history(self.journal(), "Cost", Product="C", Month="Feb")
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", None, 20.0)])
         self.assertIsNone(self.journal().seq_of("bulk"))  # 覚えておく範囲の外
 
     def test_heartbeat_keeps_the_lease_while_idle(self):
         m = build_with(ReferenceEngine())
         first = self.journal(lease_ttl=0.6)  # 書き込みがなくても延長する
-        first.start(m)
+        first.start(m.model)
         m.set_cell("Price", 12, Product="A")
         time.sleep(1.0)  # 期限より長く何もしない
-        other = self.journal(lease_ttl=0.6, acquire_wait=0).open(ReferenceEngine())
+        other = Named(self.journal(lease_ttl=0.6, acquire_wait=0).open(ReferenceEngine()))
         with self.assertRaises(Fenced):  # まだ持っている
             other.set_cell("Price", 13, Product="A")
         m.set_cell("Price", 14, Product="A")  # 自分は書ける
-        self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 14)
+        self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
 
     def test_take_does_not_wait_and_records_the_endpoint(self):
         m = build_with(ReferenceEngine())
-        self.journal(heartbeat=False).start(m)
+        self.journal(heartbeat=False).start(m.model)
         a = self.journal(lease_ttl=0.6, heartbeat=False, endpoint="http://a:1")
         b = self.journal(lease_ttl=0.6, heartbeat=False, endpoint="http://b:2")
         self.assertIsNone(b.leader())  # まだ誰も持っていない
@@ -280,7 +281,7 @@ class PgJournalTests(unittest.TestCase):
 
     def test_release_wakes_a_waiting_follower(self):
         m = build_with(ReferenceEngine())
-        self.journal(heartbeat=False).start(m)
+        self.journal(heartbeat=False).start(m.model)
         a, b = self.journal(heartbeat=False), self.journal(heartbeat=False)
         a.acquire()
         b.wait(0.0)  # 通知を待つ接続をつないでおく
@@ -292,18 +293,18 @@ class PgJournalTests(unittest.TestCase):
     def test_acquire_waits_for_a_dead_writers_lease(self):
         m = build_with(ReferenceEngine())
         dead = self.journal(lease_ttl=0.6, heartbeat=False)  # 落ちたプロセス（延長しない）
-        dead.start(m)
+        dead.start(m.model)
         m.set_cell("Price", 12, Product="A")
-        other = self.journal(lease_ttl=0.6, acquire_wait=3.0).open(ReferenceEngine())
+        other = Named(self.journal(lease_ttl=0.6, acquire_wait=3.0).open(ReferenceEngine()))
         t = time.perf_counter()
         other.set_cell("Price", 13, Product="A")  # 期限が切れるのを待ってから取る（失敗しない）
         self.assertLess(time.perf_counter() - t, 3.0)
-        self.assertEqual(self.journal().open(ReferenceEngine()).get("Price", Product="A"), 13)
+        self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 13)
 
     def test_workspace_reloads_when_another_process_wrote(self):
         m = stock_model(ReferenceEngine())
-        self.journal().start(m)
-        ws = Workspace(m, self.journal(lease_ttl=0.5, heartbeat=False))
+        self.journal().start(m.model)
+        ws = Workspace(m.model, self.journal(lease_ttl=0.5, heartbeat=False))
         ws.write(move("p0", "p1", "Jan", 1))
         time.sleep(0.7)
         other = Workspace.open(self.journal(lease_ttl=0.5), ReferenceEngine())  # 別のプロセスが書く
@@ -311,14 +312,14 @@ class PgJournalTests(unittest.TestCase):
         other.close()
         with self.assertRaises(Fenced):  # 手元は締め出され、
             ws.write(move("p4", "p5", "Jan", 2))
-        self.assertEqual(ws.version.get("Stock", Product="p3", Month="Jan"), 105)  # 最新の版を開き直している
+        self.assertEqual(Named(ws.version).get("Stock", Product="p3", Month="Jan"), 105)  # 最新の版を開き直している
         ws.close()
 
     def test_stale_reader_cannot_write(self):
         m = build_with(ReferenceEngine())
         first = self.journal(lease_ttl=0.5)
-        first.start(m)
-        stale = self.journal(lease_ttl=0.5).open(ReferenceEngine())  # 先に読み込んでおく
+        first.start(m.model)
+        stale = Named(self.journal(lease_ttl=0.5).open(ReferenceEngine()))  # 先に読み込んでおく
         m.set_cell("Price", 12, Product="A")
         time.sleep(0.7)
         with self.assertRaisesRegex(Fenced, "開き直す"):  # 読み込んだあとに書き込まれているので書けない
@@ -327,14 +328,14 @@ class PgJournalTests(unittest.TestCase):
     def test_corrupted_snapshot_falls_back(self):
         m = build_with(ReferenceEngine())
         j = self.journal()
-        j.start(m)
+        j.start(m.model)
         m.set_cell("Price", 12, Product="A")
         m.checkpoint()
         m.set_cell("Price", 13, Product="A")
         snap = dict(j.snapshots())[1]
         j.objects.put(f"{snap.uri}/{next(n for n in snap.files if n.startswith('inputs.'))}", b"broken")
         with self.assertLogs("sparse_engine.journal", "WARNING") as logs:  # 1 つ前（0）から開く
-            check_same_state(self, m, self.journal().open(ReferenceEngine()))
+            check_same_state(self, m, Named(self.journal().open(ReferenceEngine())))
         self.assertIn("スナップショット 1 が壊れている", logs.output[0])
 
 
@@ -360,7 +361,7 @@ class PgJournalS3Tests(PgJournalTests):
 
     def test_files_go_to_object_storage(self):
         m = build_with(ReferenceEngine())
-        self.journal(bulk_cells=3).start(m)
+        self.journal(bulk_cells=3).start(m.model)
         with m.transaction(user="etl"):
             m.spread("Cost", 100, Product="C")  # 大量の変更のファイル
         m.checkpoint()
@@ -370,13 +371,13 @@ class PgJournalS3Tests(PgJournalTests):
         self.assertTrue(all(uri.startswith(f"{self.model_id}/snapshots/") for _, (uri, _) in self.journal().snapshots()))
         self.assertEqual(sum(k.endswith("/manifest.json") for k in keys), 2)
         self.assertEqual(list(Path(self.tmp.name).iterdir()), [])  # ローカルには何も置かない
-        check_same_state(self, m, self.journal().open(ReferenceEngine()))
+        check_same_state(self, m, Named(self.journal().open(ReferenceEngine())))
 
     def local_journal(self, m):
         """ローカルのディレクトリにファイルを置く記録先に、大量の変更とスナップショットを残す。"""
         local = PgJournal(DSN, self.model_id, LocalObjects(self.tmp.name), bulk_cells=3)
         self.journals.append(local)
-        local.start(m)
+        local.start(m.model)
         with m.transaction(user="etl"):
             m.spread("Cost", 100, Product="C")
         m.checkpoint()
@@ -391,7 +392,7 @@ class PgJournalS3Tests(PgJournalTests):
         for key in local.objects.list(f"{self.model_id}/"):
             self.objects.put(key, local.objects.get(key))
         self.tmp.cleanup()
-        check_same_state(self, m, self.journal().open(ReferenceEngine()))
+        check_same_state(self, m, Named(self.journal().open(ReferenceEngine())))
 
 
 if __name__ == "__main__":
@@ -419,13 +420,13 @@ class Schema(unittest.TestCase):
         from sparse_engine.pg_journal import SchemaError, migrate
         with self.assertRaisesRegex(SchemaError, "migrate"):
             PgJournal(self.dsn, "new", tempfile.mkdtemp())
-        self.assertEqual(migrate(self.dsn), (0, 2))
-        self.assertEqual(migrate(self.dsn), (2, 2))  # Migrate can run again
+        self.assertEqual(migrate(self.dsn), (0, 3))
+        self.assertEqual(migrate(self.dsn), (3, 3))  # Migrate can run again
         j = PgJournal(self.dsn, "new", tempfile.mkdtemp(), heartbeat=False)
         m = build_with(ReferenceEngine())
-        j.start(m)
+        j.start(m.model)
         with m.transaction(user="alice"):
             m.set_cell("Price", 12, Product="A")
-        (h,) = j.cell_history(m, "Price", Product="A")
+        (h,) = m.cell_history(j, "Price", Product="A")
         self.assertEqual(h["at"], m.last_record["at"])  # 時刻は記録の JSON と同じ形の文字列で返す
         j.close()

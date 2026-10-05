@@ -2,7 +2,7 @@
 import unittest
 
 from examples.fpa import build
-from sparse_engine import Model
+from sparse_engine import Model, Named
 
 
 def regions(m: Model) -> dict:
@@ -11,7 +11,7 @@ def regions(m: Model) -> dict:
 
 class Pruning(unittest.TestCase):
     def test_unchanged_value_stops_propagation(self):
-        m = Model()
+        m = Named(Model())
         m.add_dimension("Product", ["A", "B"])
         m.add_input("X", ["Product"], {("A",): 20, ("B",): 5})
         m.add_formula("Big", ["Product"], "IF(X > 10, 1, 0)")
@@ -31,7 +31,7 @@ class Pruning(unittest.TestCase):
     def test_moving_cutoff_recomputes_only_the_crossed_month(self):
         m = build(None, employees=12, products=6, months=12, seed=1)
         m.recalc()
-        months = m.dimensions["Month"].members
+        months = m.dimension("Month").members
         cutoff = m.get("Cutoff")
         nxt = months[months.index(cutoff) + 1]
         m.slice_log.clear()

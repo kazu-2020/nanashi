@@ -8,11 +8,12 @@ m2 = Model.load("plan/", RustEngine())
 ```
 
 The engine does not save the values of formula Metrics. It calculates them again in the first recalculation after the load.
-The engine saves each formula as the original text that the user wrote.
-It also saves the IDs of dimensions, members, properties, and Metrics, their UUIDs (`uuid`, `member_uuids`), and the tombstones (`tombstones`, the UUIDs of removed objects).
+`model.json` has the options of the model and `changes`: the structure of the model in the format of a journal entry from an empty model (the next section).
+It names each dimension, member, property and Metric by its ID (the UUID), and it keeps each formula as the ID AST (a JSON tree, not text).
+`tombstones` has the IDs of removed objects. A load replays `changes` as one journal entry.
 [ids.md](../../docs/ids.md) gives the rules for the UUIDs.
 
-The engine writes the input values of each input Metric to `inputs.<Metric ID>.parquet` (save format version 5).
+The engine writes the input values of each input Metric to `inputs.<Metric ID>.parquet` (save format version 8).
 The columns are the member numbers of each dimension (`d<dimension ID>`, UInt32) and the value column `v`.
 The type of `v` is Float64 for number, Boolean for boolean, and UInt32 (the member number) for a member type. The engine compresses the file with zstd.
 The column names use the dimension IDs, which do not change when you rename a dimension. Thus other tools, for example DuckDB, can also read the files (the member names are in `model.json`).
@@ -48,18 +49,21 @@ FileJournal("plan/").start(m)           # Make the current state the first snaps
 m.set_cell("Price", 12, Product="A")    # This becomes 1 journal entry
 m.checkpoint()                          # Make a snapshot (open then reads fewer journal entries)
 
-m2 = FileJournal("plan/").open(RustEngine())  # Restore from the latest snapshot and the journal entries after it
-m2.journal.cell_history(m2, "Price", Product="A")  # The change history of the cell (who, when, from which value to which value)
+m2 = Named(FileJournal("plan/").open(RustEngine()))  # Restore from the latest snapshot and the journal entries after it
+m2.cell_history(m2.journal, "Price", Product="A")  # The change history of the cell (who, when, from which value to which value)
 ```
 
 A journal entry has these 2 parts:
 
 - **Intent**: the called operation and its arguments (the total of a spread, the text of a formula, and so on). The engine keeps it for audits.
-- **Result**: the difference of the model before and after the transaction. It uses IDs that do not change to show these items: added, deleted, and renamed dimensions and members, the member order, properties, Metric definitions, and the values of input cells before and after the change.
-  `uuids` has the UUID of each new handle, and `tombstones` the UUIDs that the transaction made tombstones. Thus a replay binds the same UUIDs to the same handles.
+- **Result**: the difference of the model before and after the transaction. It names each dimension, member, property and Metric by its ID (the UUID), which does not change. It shows these items: added, deleted, and renamed dimensions and members, the member order, properties (with their names), Metric definitions, and the values of input cells before and after the change.
+  A Metric definition keeps the formula as the ID AST: a JSON tree with `node` (the node type) and one key for each field, where a reference holds an ID. Thus a replay does not parse or bind a formula, and the order of the renames in an entry is not important.
+  A member-type value in a cell change is the member ID. `tombstones` has the IDs that the transaction made tombstones.
+  `renamed` has `[ID, new name]` for each dimension, member, property and Metric that got a new name. The IDs are unique across all kinds, so the ID finds the object.
+  If only the name of an object changes, the object is only in `renamed`. A hidden override input is a Metric, so its new name is also in `renamed`.
   The member order (`member_order`) is a list of member IDs in the member order.
   The engine records it only for dimensions where the order changes in a different way than "remove the deleted members and put the added members at the end".
-  A journal entry that changes only the order is not a structural change. Thus `Replica` and other followers do not recalculate when they catch up.
+  A journal entry that changes only names (`renamed`) or the order is not a structural change. Thus `Replica` and other followers do not recalculate when they catch up.
 
 The restore replays only the results, and then does 1 full recalculation at the end.
 If the engine replays the operations, values such as the floating-point values of a spread can be different between engine versions.
@@ -138,7 +142,8 @@ It also forgets the `client_op_id` of journal entries older than the last 100 th
 
 - **Operation** (`nanashi_operation`): 1 row for each transaction. It keeps the intent and the results other than cells as JSONB.
 - **Rejection** (`nanashi_rejection`): 1 row for each rejected write (`client_op_id`, the HTTP status and body, and the head sequence number at that time). A resent write gets the same answer.
-- **Cell change** (`nanashi_cell_change`): 1 row for each changed input cell. It keeps the Metric ID and an array of member IDs, and an index finds the history of 1 cell.
+- **Cell change** (`nanashi_cell_change`): 1 row for each changed input cell. It keeps the Metric ID (`text`) and the member IDs of the coordinates (`text[]`), and an index finds the history of 1 cell.
+  The IDs are `text`, because the engine accepts any string as an ID (a UUID is the default). A number or boolean value is in `old_value` and `new_value`, and a member-type value (a member ID) is in `old_member` and `new_member`.
   A process (`index_pending`) adds large changes to this table after the commit.
   If many processes call it at the same time, an advisory lock for each model and a mark on each journal entry prevent duplicate writes of the same entry.
 - **Snapshot**: The engine puts the files in `<model ID>/snapshots/<sequence number>-<random number>/` in the object storage.
@@ -174,7 +179,8 @@ Unlike `acquire`, it does not check the local sequence number. Thus the process 
 For a change of more than 10 thousand cells, the engine writes the values before and after to 1 Parquet file for each Metric.
 It puts these files in the object storage (`<model ID>/cells/`) and then commits.
 The write to the cell change table occurs after the commit (`index_pending`).
-The Parquet columns are the member IDs of the coordinates (`d<dimension ID>`, Int64), the value before (`old`), and the value after (`new`). A blank value is null.
+The Parquet columns are the member IDs of the coordinates (`d<dimension ID>`, Utf8), the value before (`old`), and the value after (`new`). A blank value is null. A member-type value is a member ID (Utf8).
+In memory, a change block keeps each column as indexes into a table of the IDs that it uses. Thus a block of 1 million cells does not keep 1 million strings.
 The engine selects Parquet columns by name when it reads, also in the save format. The column order is not important, and it does not read unknown columns.
 Thus an earlier version can read files after a later version adds columns.
 The reason for the delay is that it is expensive to insert rows into the table 1 at a time. If this were in the commit path, commits of large writes would become more than 10 times slower.

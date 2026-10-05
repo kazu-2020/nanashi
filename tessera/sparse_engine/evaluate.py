@@ -33,7 +33,7 @@ from .expr import (AGGREGATIONS, AGGREGATORS, ARITH, COMPARE, LOGIC, AsAxis, Bin
                    Shift)
 from .messages import Msg, msg, render
 
-Restrict = dict[str, frozenset[str]]
+Restrict = dict[str, frozenset[str]]  # dimension id -> member ids
 # "number" / "boolean"、または軸のメンバー "member:<軸名>"（式の途中だけで使い、Metric には格納しない）
 Kind = str
 
@@ -97,7 +97,7 @@ def _agg_kind(agg: str, t: Type, what: Msg) -> Kind:
     return t.kind if a.kind is None else a.kind
 
 
-def _check_expand(warnings: list[str], what: Msg, dims: tuple[str, ...],
+def _check_expand(warnings: list[Msg], what: Msg, dims: tuple[str, ...],
                   covered: tuple[str, ...], own: tuple[str, ...]) -> None:
     """結果の軸 dims のうち covered にない軸へ、この項の値が複製されるかを調べる。
 
@@ -109,11 +109,11 @@ def _check_expand(warnings: list[str], what: Msg, dims: tuple[str, ...],
         return
     if own:
         raise FormulaError("not_expanded", what=what, own=list(own), missing=missing)
-    warnings.append(render("densify", {"what": what, "missing": missing}))
+    warnings.append(msg("densify", what=what, missing=missing))
 
 
-def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
-    """式の出力の型（軸と値の種類）を返す。密になる演算は warnings に積む。"""
+def infer(expr: Expr, cat: Catalog, warnings: list[Msg]) -> Type:
+    """The type (dimensions and kind) of the result of expr. A dense operation adds a Msg to warnings."""
     match expr:
         case Ref(name):
             return cat.metric_type(name)
@@ -126,7 +126,7 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
             return Type((dim,), member_kind(dim))
 
         case Member(dim, member):
-            if member not in cat.dimension(dim):
+            if member not in cat.dimension(dim)._by_id:
                 raise FormulaError("unknown_member", dim=dim, member=member)
             return Type((), member_kind(dim))
 
@@ -213,7 +213,7 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
         case IsBlank(child):
             t = infer(child, cat, warnings)
             if t.dims:
-                warnings.append(render("isblank_dense", {"dims": list(t.dims)}))
+                warnings.append(msg("isblank_dense", dims=list(t.dims)))
             return Type(t.dims, "boolean")
 
         case By(child, dim, prop, agg):
@@ -256,7 +256,7 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
             t = infer(child, cat, warnings)
             if dim not in t.dims:
                 raise FormulaError("select_absent", dim=dim, member=member, dims=t.dims)
-            if member not in cat.dimension(dim):
+            if member not in cat.dimension(dim)._by_id:
                 raise FormulaError("select_member", dim=dim, member=member)
             return Type(tuple(d for d in t.dims if d != dim), t.kind)
 
@@ -266,7 +266,7 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
             if vkind != t.kind:
                 raise FormulaError("ifblank_kind", kind=t.kind)
             if t.dims:
-                warnings.append(render("ifblank_dense", {"dims": list(t.dims)}))
+                warnings.append(msg("ifblank_dense", dims=list(t.dims)))
             return t
     raise TypeError(expr)
 
@@ -351,6 +351,53 @@ def estimate(expr: Expr, cat: Catalog, cells: Mapping[str, float]) -> tuple[tupl
 
 
 # ---------------------------------------------------------------- 名前の解決
+
+def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
+    """Change the names of a parsed formula to ids: a Metric or dimension Ref, the dimension of Member, Select,
+    Expand, By, Remove, Shift and AsAxis, the member of Member and Select, and By.prop (a property id, or a
+    Metric id when it names a Metric).
+
+    names gives more name -> id pairs (the Metric that the formula defines). An unknown name raises
+    FormulaError (unknown_metric, unknown_dim, unknown_member, select_member, no_property_or_metric) with the
+    name that the user wrote.
+    """
+    def id_of(name: str) -> str | None:
+        if names and name in names:
+            return names[name]
+        return cat._metric_ids.get(name)
+
+    def dim(name: str) -> str:
+        if name in cat._dim_ids:
+            return cat._dim_ids[name]
+        raise FormulaError("unknown_dim", name=name)
+
+    def go(e: Expr) -> Expr:
+        if isinstance(e, Ref):
+            if (id := id_of(e.name)) is not None:
+                return Ref(id)
+            if e.name in cat._dim_ids:
+                return Ref(cat._dim_ids[e.name])
+            raise FormulaError("unknown_metric", name=e.name)
+        changes = {f.name: r for f in fields(e)
+                   if isinstance(v := getattr(e, f.name), Expr) and (r := go(v)) is not v}
+        if isinstance(e, Expand):
+            changes["dims"] = tuple(dim(d) for d in e.dims)
+        elif isinstance(e, (Member, Select, By, Remove, Shift, AsAxis)):
+            changes["dim"] = d = dim(e.dim)
+            if isinstance(e, (Member, Select)):
+                members = cat.dimensions[d]
+                if e.member not in members._index:
+                    code = "unknown_member" if isinstance(e, Member) else "select_member"
+                    raise FormulaError(code, dim=e.dim, member=e.member)
+                changes["member"] = members.ids[members._index[e.member]]
+            if isinstance(e, By):
+                prop = cat.dimensions[d]._props.get(e.prop) or id_of(e.prop)
+                if prop is None:
+                    raise FormulaError("no_property_or_metric", dim=e.dim, prop=e.prop)
+                changes["prop"] = prop
+        return replace(e, **changes) if changes else e
+    return go(expr)
+
 
 def resolve(expr: Expr, cat, by_metric: bool = True) -> Expr:
     """式を評価できる形に直す。変わらなければ同じオブジェクトを返す
@@ -538,11 +585,11 @@ def affected(expr: Expr, cat: Catalog, changed: dict[str, Restrict],
                 d = cat.dimension(dim)
                 r = _nonempty({**r, dim: frozenset(t for m in r[dim] if (t := d.offset(m, n)) is not None)})
             r = grow(r, [dim])  # 末尾に足した時点には、ずらした値が入りうる
-            if removed and dim in removed:  # 消すメンバーを読み飛ばすようになる時点
+            if removed and dim in removed:  # the periods that start to read across the removed member
                 d = cat.dimension(dim)
-                p = d._index[removed[dim]]
+                p = d._by_id[removed[dim]]
                 span = range(p + 1, p + n + 1) if n > 0 else range(p + n, p)
-                shifted = frozenset(d.members[q] for q in span if 0 <= q < len(d.members))
+                shifted = frozenset(d.ids[q] for q in span if 0 <= q < len(d.members))
                 if shifted:
                     r = union_region(r, {dim: shifted})
             return r
@@ -593,7 +640,8 @@ OPS = {
 
 
 def _members(cat: Catalog, dim: str, restrict: Restrict | None) -> list[str]:
-    members = cat.dimension(dim).members
+    """The member ids of dim in number order, only those in restrict."""
+    members = cat.dimension(dim).ids
     if restrict and dim in restrict:
         return [m for m in members if m in restrict[dim]]
     return members
@@ -668,11 +716,11 @@ def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube
             return Cube((), {(): value})
 
         case DimRef(dim):
-            index = cat.dimension(dim)._index
+            index = cat.dimension(dim)._by_id
             return Cube((dim,), {(m,): float(index[m]) for m in _members(cat, dim, restrict)})
 
         case Member(dim, member):
-            return Cube((), {(): float(cat.dimension(dim)._index[member])})
+            return Cube((), {(): float(cat.dimension(dim)._by_id[member])})
 
         case BinOp(op, left, right):
             l = evaluate(left, cat, restrict)
@@ -757,7 +805,7 @@ def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube
 
         case AsAxis(child, dim):
             c = evaluate(child, cat, _without(restrict, dim))
-            members = cat.dimension(dim).members
+            members = cat.dimension(dim).ids
             cells = {k + (members[int(v)],): 1.0 for k, v in c.cells.items()}
             return _filter(Cube(c.dims + (dim,), cells), restrict)
 

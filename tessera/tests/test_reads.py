@@ -1,7 +1,7 @@
 """The read API that reads only as necessary (get, slice, rows, summarize), and the published version."""
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine, aggregate_cube
 from sparse_engine.workspace import Workspace
 
@@ -46,13 +46,13 @@ class Reads:
 
     def test_slice_matches_filtering_the_whole_metric(self):
         m = self.m
-        for name in m.metrics:
-            dims = m.metrics[name].dims
+        for name in m._metric_ids:
+            dims = m.metric(name).dims
             if not dims:
                 continue
             whole = m.value(name).cells
             d = dims[0]
-            members = m.dimensions[d].members[:2]
+            members = m.dimension(d).members[:2]
             got = m.slice(name, **{d: members}).cells
             want = {k: v for k, v in whole.items() if k[dims.index(d)] in members}
             self.assertTrue(same(got, want), (name, got, want))
@@ -66,7 +66,7 @@ class Reads:
         whole = m.value("Volume").cells
         self.assertEqual(total, len(whole))
         self.assertEqual(dict(rows), whole)
-        order = [m.dimensions[d]._index for d in m.metrics["Volume"].dims]
+        order = [m.dimension(d)._index for d in m.metric("Volume").dims]
         keys = [k for k, _ in rows]
         self.assertEqual(keys, sorted(keys, key=lambda k: tuple(ix[x] for ix, x in zip(order, k))))
         page1, total1 = m.rows("Volume", offset=0, limit=3)
@@ -82,13 +82,13 @@ class Reads:
     def test_summarize_matches_reference_aggregation(self):
         m = self.m
         for name in ["Revenue", "Margin", "Volume", "RevByCat"]:
-            dims = m.metrics[name].dims
+            dims = m.metric(name).dims
             cube = m.value(name)
             for keep in [(), dims[:1], dims[1:], dims]:
                 for agg in ["sum", "avg", "min", "max", "count"]:
                     got = m.summarize(name, keep=keep, agg=agg)
-                    want = aggregate_cube(cube, keep, agg)
-                    self.assertEqual(got.dims, tuple(d for d in dims if d in keep))
+                    want = aggregate_cube(cube, tuple(m.dimension(d).name for d in keep), agg)
+                    self.assertEqual(got.dims, tuple(m.dimension(d).name for d in dims if d in keep))
                     self.assertTrue(same(got.cells, want.cells), (name, keep, agg, got.cells, want.cells))
         got = m.summarize("Volume", keep=["Month"], Product=["A", "C"])
         want = aggregate_cube(m.slice("Volume", Product=["A", "C"]), ["Month"], "sum")
@@ -117,14 +117,14 @@ class RustReads(Reads, unittest.TestCase):
 
 class VersionView(unittest.TestCase):
     def test_version_reads_and_rejects_writes(self):
-        ws = Workspace(build())
+        ws = Workspace(build().model)
         try:
-            v = ws.version
+            v = Named(ws.version)
             self.assertEqual(v.get("Price", Product="A"), 10)
             self.assertEqual(v.slice("Price", Product="A").cells, {("A",): 10})
             self.assertEqual(v.rows("Price", limit=1)[1], 3)
             self.assertEqual(v.summarize("Price").cells[()], 35)
-            self.assertEqual(set(v.metrics) , set(build().metrics))
+            self.assertEqual(set(v._metric_ids), set(build()._metric_ids))
             self.assertEqual(v.seq, 0)
             with self.assertRaisesRegex(ValueError, "公開済み"):
                 v.set_cell("Price", 99, Product="A")

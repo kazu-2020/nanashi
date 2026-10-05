@@ -8,7 +8,7 @@
 import random
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import same, snapshot
@@ -68,7 +68,7 @@ FORMULAS = [  # (名前, 軸, 式, 種類)
 
 
 def model(engine, rng: random.Random) -> Model:
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     m.add_dimension("Product", PRODUCTS)
     m.add_dimension("Category", ["c0", "c1", "c2"])
     m.add_dimension("Store", STORES)

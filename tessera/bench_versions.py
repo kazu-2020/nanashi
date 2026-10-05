@@ -8,6 +8,7 @@
     python bench_versions.py --model fpa  # 片方だけ
 """
 from __future__ import annotations
+from sparse_engine.named import Named
 
 import argparse
 import statistics
@@ -24,12 +25,12 @@ def models(which: str):
         from examples.fpa import SIZES, build
         from sparse_engine.rust_engine import RustEngine
         m = build(RustEngine(), *SIZES["large"])
-        emp = m.dimensions["Employee"].members[7]
+        emp = m.dimension("Employee").members[7]
         yield "損益計画（大）、給与を 1 人変更", m, lambda i: m_edit("Salary", {"Employee": emp, "Version": "予算"}, i)
 
 
 def m_edit(name, coords, i):
-    return lambda model: model.set_cell(name, float(100 + i % 7), **coords)
+    return lambda model: Named(model).set_cell(name, float(100 + i % 7), **coords)
 
 
 def measure(model, edit, repeats: int) -> dict:

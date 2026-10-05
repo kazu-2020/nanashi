@@ -16,7 +16,7 @@ import random
 import statistics
 import time
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import engine_for
 
 VERSIONS = ["予算", "実績", "見込み"]
@@ -61,7 +61,7 @@ FORMULAS = [
 
 def build(engine=None, employees: int = 60, products: int = 30, months: int = 24, seed: int = 0) -> Model:
     rng = random.Random(seed)
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     month_names = [f"m{i:02d}" for i in range(1, months + 1)]
     emps = [f"e{i:05d}" for i in range(employees)]
     prods = [f"p{i:04d}" for i in range(products)]
@@ -118,30 +118,30 @@ def build(engine=None, employees: int = 60, products: int = 30, months: int = 24
 
 EDITS = [  # (説明, 変更を加える関数)
     ("給与を 1 人変更", lambda m, r: m.set_cell("Salary", float(r.randint(300, 900)),
-                                          Employee=r.choice(m.dimensions["Employee"].members), Version="予算")),
+                                          Employee=r.choice(m.dimension("Employee").members), Version="予算")),
     ("1 人を異動", lambda m, r: m.set_cell("DeptOf", r.choice(DEPARTMENTS),
-                                       Employee=r.choice(m.dimensions["Employee"].members),
-                                       Month=r.choice(m.dimensions["Month"].members))),
+                                       Employee=r.choice(m.dimension("Employee").members),
+                                       Month=r.choice(m.dimension("Month").members))),
     ("販売数量を 1 か所入力", lambda m, r: m.set_cell("Units", float(r.randint(10, 200)),
-                                             Product=r.choice(m.dimensions["Product"].members), Version="予算",
-                                             Month=r.choice(m.dimensions["Month"].members))),
+                                             Product=r.choice(m.dimension("Product").members), Version="予算",
+                                             Month=r.choice(m.dimension("Month").members))),
     ("締め月を 1 か月進める", lambda m, r: _advance_cutoff(m)),
     ("社員を 1 人追加", lambda m, r: _hire(m, r)),
 ]
 
 
 def _advance_cutoff(m: Model) -> None:
-    months = m.dimensions["Month"].members
+    months = m.dimension("Month").members
     i = months.index(m.get("Cutoff"))
     m.set_cell("Cutoff", months[i + 1] if i + 1 < len(months) - 1 else months[0])  # 最後まで来たら最初に戻す
 
 
 def _hire(m: Model, r: random.Random) -> None:
-    name = f"new{len(m.dimensions['Employee'].members)}"
+    name = f"new{len(m.dimension('Employee').members)}"
     m.add_member("Employee", name)
     m.set_cell("Salary", float(r.randint(300, 800)), Employee=name, Version="予算")
-    m.set_cell("HireMonth", r.choice(m.dimensions["Month"].members), Employee=name)
-    for t in m.dimensions["Month"].members:
+    m.set_cell("HireMonth", r.choice(m.dimension("Month").members), Employee=name)
+    for t in m.dimension("Month").members:
         m.set_cell("DeptOf", "開発", Employee=name, Month=t)
 
 
@@ -178,7 +178,8 @@ def main() -> None:
     if args.show:
         m = build(None, *SIZES[args.size or "small"])
         for name in ["OperatingIncome", "Variance", "Cash", "Headcount"]:
-            print(f"--- {name}\n{m.value(name).format(m.dimensions)}\n")
+            order = {d.name: d for d in m.dimensions.values()}
+            print(f"--- {name}\n{m.value(name).format(order)}\n")
         return
     for size in [args.size] if args.size else list(SIZES):
         r = bench(size, args.engine, args.repeats)

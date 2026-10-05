@@ -20,7 +20,7 @@ from .planner import Step
 from .evaluate import Catalog, Edge, FormulaError, Type, member_kind, resolve
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
-from .messages import from_rust, render
+from .messages import from_rust
 
 
 def _formula_error(e: nanashi_core.Diagnostic) -> FormulaError:
@@ -37,20 +37,20 @@ class RustEngine:
     key_bits = 64  # 1 セルのキーは各軸のメンバー番号を詰めた 64 ビット整数
 
     def __init__(self, **config):
-        """config は Rust の速さのための調整値（nanashi_core.Core に渡す。結果は変えない）。"""
+        """config has the tuning values for the speed of Rust (nanashi_core.Core gets them; the results do not change)."""
         self.core = nanashi_core.Core(**config)
-        self._dims: dict[str, tuple[Any, int]] = {}  # 軸名 -> (Dimension, 番号)
-        self._names: dict[int, str] = {}
-        self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
-        self._exprs: dict[int, tuple] = {}
-        self._widths: dict[str, int] = {}  # 軸名 -> 型検査したときのビット幅  # id(式) -> (式, 変換結果, 読む名前, 型, 警告, 読む名前の型)
+        self._dims: dict[str, tuple[Any, int]] = {}  # dimension id -> (Dimension, Rust number)
+        self._names: dict[int, str] = {}  # Rust number -> dimension id
+        self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (dim id, prop id) -> (mapping, number)
+        self._exprs: dict[int, tuple] = {}  # id(expr) -> (expr, compiled, read ids, type, warnings, read types)
+        self._widths: dict[str, int] = {}  # dimension id -> the bit width at the type check
         self.planner = RustPlanner(self)
 
     def fork(self, cat: Catalog) -> RustEngine:
         """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
         other = RustEngine.__new__(RustEngine)
         other.core = self.core.fork()
-        other._dims = {name: (cat.dimension(name), i) for name, (_, i) in self._dims.items()}
+        other._dims = {d: (cat.dimension(d), i) for d, (_, i) in self._dims.items()}
         other._names = dict(self._names)
         other._maps = dict(self._maps)
         other._exprs = dict(self._exprs)
@@ -64,19 +64,21 @@ class RustEngine:
     # ------------------------------------------------ 名前 -> 番号
 
     def _dim(self, cat: Catalog, name: str) -> int:
+        """The Rust number of the dimension (an id). The Rust name of the dimension is its id, so a diagnostic
+        carries the id, and Model._shown_params shows the current name."""
         d = cat.dimension(name)
-        cached = self._dims.get(name)
+        cached = self._dims.get(d.id)
         if cached is not None and cached[0] is d:
             return cached[1]
-        i = self.core.add_dim(len(d.members), d.ordered, name)
-        self._dims[name] = (d, i)
-        self._widths[name] = max(1, (len(d.members) - 1).bit_length())
-        self._names[i] = name
+        i = self.core.add_dim(len(d.members), d.ordered, d.id)
+        self._dims[d.id] = (d, i)
+        self._widths[d.id] = max(1, (len(d.members) - 1).bit_length())
+        self._names[i] = d.id
         return i
 
     def _map(self, cat: Catalog, dim: str, prop: str) -> int:
-        """プロパティの対応表の番号。対応表が変わったら、同じ番号のまま中身を置き換える
-        （コンパイル済みの式が番号を持っているので、番号は変えない）。"""
+        """The Rust number of the mapping of the property (dim and prop are ids). A changed mapping keeps its
+        number and gets new contents, because the compiled formulas hold the number."""
         target, mapping = cat.dimension(dim).properties[prop]
         cached = self._maps.get((dim, prop))
         if cached is not None and cached[0] is mapping:
@@ -84,7 +86,7 @@ class RustEngine:
         src, dst = cat.dimension(dim), cat.dimension(target)
         fwd = [-1] * len(src.members)
         for s, t in mapping.items():
-            fwd[src._index[s]] = dst._index[t]
+            fwd[src._by_id[s]] = dst._by_id[t]
         if cached is None:
             i = self.core.add_mapping(len(dst.members), fwd)
         else:
@@ -94,18 +96,19 @@ class RustEngine:
         return i
 
     def _region(self, cat: Catalog, region) -> list[tuple[int, list[int]]]:
+        """A restrict (dimension id -> member ids) as (Rust dimension number, member numbers) pairs."""
         out = []
         for d, ms in (region or {}).items():
-            index = cat.dimension(d)._index
+            index = cat.dimension(d)._by_id
             out.append((self._dim(cat, d), [index[m] for m in ms]))
         return out
 
     def _region_lenient(self, cat: Catalog, region) -> list | None:
-        """_region と同じだが、記録したあとで名前を変えたり消したりしたメンバーは読み飛ばす
-        （分割軸の選択に使う影響範囲は、古い名前を含みうる）。どの軸も残らなければ None（影響なし）。"""
+        """The same as _region, but a member that was removed after the range was recorded is skipped (the
+        ranges that select the partition dimension can hold one). None if no dimension stays (no effect)."""
         out = []
         for d, ms in (region or {}).items():
-            index = cat.dimension(d)._index
+            index = cat.dimension(d)._by_id
             kept = [index[m] for m in ms if m in index]
             if not kept:
                 return None
@@ -140,7 +143,7 @@ class RustEngine:
             compiled, dims, kind, d, found = self.core.compile(tree, names, [self._type(cat, r) for r in reads])
         except nanashi_core.Diagnostic as e:
             raise _formula_error(e) from None
-        warnings = [render(*from_rust(code, params)) for code, params in found]
+        warnings = [from_rust(code, params) for code, params in found]
         t = Type(tuple(self._names[i] for i in dims), member_kind(self._names[d]) if kind == "member" else kind)
         if len(self._exprs) >= EXPRS_MAX:  # 定義を何度も変えても増え続けないように、溢れたら作り直させる
             self._exprs.clear()
@@ -169,9 +172,9 @@ class RustEngine:
                 return ("dimref", self._dim(cat, dim))
             case Member(dim, member):
                 d = cat.dimension(dim)
-                if member not in d:
+                if member not in d._by_id:
                     raise FormulaError("unknown_member", dim=dim, member=member)
-                return ("member", self._dim(cat, dim), d._index[member])
+                return ("member", self._dim(cat, dim), d._by_id[member])
             case BinOp(op, left, right):
                 return ("bin", op, t(left), t(right))
             case Not(child):
@@ -209,14 +212,14 @@ class RustEngine:
                 return ("asaxis", t(child), self._dim(cat, dim))
             case Select(child, dim, member):
                 d = cat.dimension(dim)
-                if member not in d:
+                if member not in d._by_id:
                     raise FormulaError("select_member", dim=dim, member=member)
-                return ("select", t(child), self._dim(cat, dim), d._index[member], member)
+                return ("select", t(child), self._dim(cat, dim), d._by_id[member], member)
         raise TypeError(e)
 
-    def _to_names(self, cat: Catalog, region) -> dict:
-        """Rust の範囲（軸の番号 -> メンバー番号の列）を、メンバー名の範囲にする。"""
-        return {self._names[d]: frozenset(cat.dimension(self._names[d]).members[j] for j in ms) for d, ms in region}
+    def _to_ids(self, cat: Catalog, region) -> dict:
+        """A Rust range (dimension number -> member numbers) as a restrict (dimension id -> member ids)."""
+        return {self._names[d]: frozenset(cat.dimension(self._names[d]).ids[j] for j in ms) for d, ms in region}
 
     # ------------------------------------------------ Store
 
@@ -225,7 +228,7 @@ class RustEngine:
         return self.core.empty(ids, self._index(cat, dims, partition), kind == "boolean")
 
     def from_cells(self, dims, kind, cells, cat, partition=None):
-        indexes = [cat.dimension(d)._index for d in dims]
+        indexes = [cat.dimension(d)._by_id for d in dims]
         cols = [[indexes[i][k[i]] for k in cells] for i in range(len(dims))]
         values = [float(v) for v in cells.values()]
         return self.core.from_rows([self._dim(cat, d) for d in dims], self._index(cat, dims, partition),
@@ -241,8 +244,9 @@ class RustEngine:
 
     def to_parquet(self, store, dims, kind, cat, meta) -> bytes:
         stored = [self._names[i] for i in self.core.metric_dims(store)]
-        if stored != list(dims):
-            raise ValueError(f"格納データの軸 {stored} が {list(dims)} と違う")
+        if stored != [cat.dimension(d).id for d in dims]:
+            name = lambda ds: [cat.dimension(d).name for d in ds]
+            raise ValueError(f"格納データの軸 {name(stored)} が {name(dims)} と違う")
         return self.core.store_to_parquet(store, parquet_columns(dims, cat), parquet_value(kind), list(meta.items()))
 
     def from_parquet(self, data, dims, kind, cat, partition=None):
@@ -257,7 +261,7 @@ class RustEngine:
         return self.core.repartition(store, None if partition is None else self._dim(cat, partition))
 
     def dimension_changed(self, cat, dim, renumbered=False):
-        """メンバー数と、dim が関わる対応表を Rust 側に反映する。"""
+        """Send the member count of dim (an id) and the mappings that use dim to Rust."""
         if renumbered:  # 変換済みの式はメンバーの番号（定数、SELECT）を持っているので作り直す
             self._exprs.clear()
             self.planner.forget()
@@ -276,9 +280,6 @@ class RustEngine:
                 self._maps[(src, prop)] = (None, i)  # 次の _map で中身を置き換えさせる
                 self._map(cat, src, prop)
 
-    def rename_member(self, store, dim, old, new, cat):
-        return store  # キーはメンバーの番号なので、名前が変わっても何もしなくてよい
-
     def remove_member(self, store, dim, index, member, values, cat):
         self.core.remove_member(store, self._dim(cat, dim), index, values)
         return store
@@ -289,7 +290,7 @@ class RustEngine:
 
     def write(self, store, key, value, cat):
         dims = [self._names[i] for i in self.core.metric_dims(store)]
-        codes = [cat.dimension(d)._index[m] for d, m in zip(dims, key)]
+        codes = [cat.dimension(d)._by_id[m] for d, m in zip(dims, key)]
         self.core.write(store, codes, None if value is None else float(value))
         return store
 
@@ -348,11 +349,11 @@ class RustEngine:
         return self._named(store, self.core.region_of_value(store, float(value)), cat)
 
     def _named(self, store, sets, cat):
-        """軸ごとのメンバー番号の集合を、メンバー名の範囲にする。"""
+        """The member number sets of each dimension of the store as a restrict (dimension id -> member ids)."""
         if sets is None:
             return None
         dims = [self._names[i] for i in self.core.metric_dims(store)]
-        return {d: frozenset(cat.dimension(d).members[j] for j in ms) for d, ms in zip(dims, sets)}
+        return {d: frozenset(cat.dimension(d).ids[j] for j in ms) for d, ms in zip(dims, sets)}
 
     def _dims_of(self, handle) -> list[int]:
         if isinstance(handle, nanashi_core.StoreHandle):
@@ -362,7 +363,7 @@ class RustEngine:
     def to_cube(self, store, cat):
         cols, values, is_bool = self.core.rows(store)
         dims = tuple(self._names[i] for i in self.core.metric_dims(store))
-        members = [cat.dimension(d).members for d in dims]
+        members = [cat.dimension(d).ids for d in dims]
         if is_bool:
             values = [v != 0.0 for v in values]
         return Cube(dims, {tuple(members[j][cols[j][i]] for j in range(len(dims))): values[i]
@@ -370,14 +371,14 @@ class RustEngine:
 
     def get(self, store, key, cat):
         dims = [self._names[i] for i in self.core.metric_dims(store)]
-        v = self.core.get(store, [cat.dimension(d)._index[m] for d, m in zip(dims, key)])
+        v = self.core.get(store, [cat.dimension(d)._by_id[m] for d, m in zip(dims, key)])
         return v if v is None or not self._is_bool(store) else v != 0.0
 
     def rows(self, store, restrict, cat, offset=0, limit=None):
         dims = [self._names[i] for i in self.core.metric_dims(store)]
         ranks = [cat.dimension(d).rank_table() for d in dims]
         cols, values, is_bool, total = self.core.rows_in(store, self._region(cat, restrict), ranks, offset, limit)
-        members = [cat.dimension(d).members for d in dims]
+        members = [cat.dimension(d).ids for d in dims]
         rows = [(tuple(members[j][cols[j][i]] for j in range(len(dims))), values[i] != 0.0 if is_bool else values[i])
                 for i in range(len(values))]
         return rows, total
@@ -492,7 +493,7 @@ class RustPlanner:
             [(index[n], region(r)) for n, r in forced.items()], full)
 
         def named(entries):
-            return [(names[i], self.e._to_names(cat, r)) for i, _, r in entries]
+            return [(names[i], self.e._to_ids(cat, r)) for i, _, r in entries]
         return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
 
     # ------------------------------------------------ 計算計画
@@ -524,7 +525,7 @@ class RustPlanner:
     # ------------------------------------------------ 影響範囲
 
     def _added(self, cat: Catalog, added) -> list:
-        return [(self.e._dim(cat, d), [cat.dimension(d)._index[x] for x in ms]) for d, ms in (added or {}).items()]
+        return [(self.e._dim(cat, d), [cat.dimension(d)._by_id[x] for x in ms]) for d, ms in (added or {}).items()]
 
     def propagate(self, plan, cat: Catalog, changed: dict, added=None) -> dict:
         """入力の変更範囲と追加したメンバーを計画の順に伝え、影響を受ける全 Metric の範囲（changed を含む）。"""
@@ -532,14 +533,14 @@ class RustPlanner:
         index = {n: i for i, n in enumerate(names)}
         out = self.e.core.propagate(rplan, [(index[n], self.e._region(cat, r)) for n, r in changed.items()],
                                   self._added(cat, added))
-        return {names[i]: self.e._to_names(cat, r) for i, r in out}
+        return {names[i]: self.e._to_ids(cat, r) for i, r in out}
 
     def removal_regions(self, plan, stores: dict, cat: Catalog, dim: str, member: str) -> dict:
-        """軸 dim のメンバー member を消すと値が変わる範囲（計算 Metric -> 消すメンバーを除いた範囲）。"""
+        """The ranges that change when the member (an id) of dim goes (formula Metric -> the range without it)."""
         rplan, names = self._plan_for(plan, cat, prop=True)
         out = self.e.core.removal_regions(rplan, [stores[n] for n in names], self.e._dim(cat, dim),
-                                        cat.dimension(dim)._index[member])
-        return {names[i]: self.e._to_names(cat, r) for i, r in out}
+                                        cat.dimension(dim)._by_id[member])
+        return {names[i]: self.e._to_ids(cat, r) for i, r in out}
 
     def affected(self, expr: Expr, cat: Catalog, regions: dict, added=None, removed=None):
         """1 つの式の影響範囲。regions は Metric 名 -> 変更範囲。"""
@@ -548,9 +549,9 @@ class RustPlanner:
         gone = None
         if removed:
             (d, m), = removed.items()
-            gone = (self.e._dim(cat, d), cat.dimension(d)._index[m])
+            gone = (self.e._dim(cat, d), cat.dimension(d)._by_id[m])
         r = self.e.core.affected(compiled, regs, self._added(cat, added), gone)
-        return None if r is None else self.e._to_names(cat, r)
+        return None if r is None else self.e._to_ids(cat, r)
 
     def _plan_for(self, plan, cat: Catalog, *, prop: bool = False) -> tuple[Any, list[str]]:
         """Make the Rust calculation plan from the Model plan (CompiledPlan). Use it again until the plan changes.

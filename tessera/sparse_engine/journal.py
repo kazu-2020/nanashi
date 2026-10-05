@@ -16,7 +16,7 @@ Metric の格納データは複製前と同じものを指しているので比�
 違う部分だけを比べる。
 
 書き換えた入力セルは、Metric ごとに {"metric": ID, "dims": 軸の ID の列, "rows": 行} で持つ。rows は
-[座標の ID の列, 変更前, 変更後] の列で、Rust のエンジンで BLOCK_MIN 件以上なら、同じ行を順に返す
+[座標のメンバーの ID の列, 変更前, 変更後] の列で（メンバー型の値はメンバーの ID）、Rust のエンジンで BLOCK_MIN 件以上なら、同じ行を順に返す
 変更の塊（nanashi_core.CellBlock）のまま持つ（Python のオブジェクトにしない）。JSON に書くときは行に直す。
 """
 from __future__ import annotations
@@ -32,17 +32,17 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Iterator, NamedTuple
+from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 from .core import Dimension
 from .engine import native, parquet_value
 
 BLOCK_MIN = 1000  # 書き換えたセルがこれ以上なら、行の列でなく変更の塊で持つ（Rust のエンジン）
-from .expr import Expr
+from .expr import Expr, from_json, to_json
 from .objects import LocalObjects
-from .parser import parse, to_formula
+from .parser import to_formula
 
-LOG_VERSION = 1  # The format version of a record ("v")
+LOG_VERSION = 3  # The format version of a record ("v")
 
 log = logging.getLogger(__name__)
 
@@ -103,115 +103,118 @@ def jsonable(x: Any) -> Any:
 
 # ---------------------------------------------------------------- 結果（前後の差）
 
-def _kind(model, kind: str) -> Any:
+def _kind(kind: str) -> Any:
     if kind.startswith("member:"):
-        return {"member": model.dimension(kind.removeprefix("member:")).id}
+        return {"member": kind.removeprefix("member:")}
     return kind
 
 
-def _definition(model, m) -> dict:
-    return {"id": m.id, "name": m.name, "dims": [model.dimension(d).id for d in m.dims],
-            "kind": _kind(model, m.kind), "formula": None if m.written is None else to_formula(m.written),
-            "partition": None if m.partition is None else model.dimension(m.partition).id,
-            "overridable": m.overridable}
+def _definition(m) -> dict:
+    """The definition of a Metric in a record. The Metric, its dimensions and the partition dimension are ids,
+    and the formula is the id AST as a JSON tree (expr.to_json)."""
+    return {"id": m.id, "name": m.name, "dims": list(m.dims), "kind": _kind(m.kind),
+            "formula": None if m.written is None else to_json(m.written),
+            "partition": m.partition, "overridable": m.overridable}
 
 
 def changes(before, after) -> dict:
-    """before（トランザクション前の複製）から after（確定するモデル）への変化。
+    """The changes from before (the copy from before the transaction) to after (the model to commit): the
+    structure (see structure) and the changed input cells ("cells")."""
+    out = structure(before, after)
+    cells = []
+    for m in after.metrics.values():
+        if m.formula is not None:
+            continue
+        o = before.metrics.get(m.id)
+        old_store = before._values.get(o.id) if o is not None and o.formula is None else None
+        rows = _cell_changes(before, o, old_store, after, m, after._values[m.id])
+        if len(rows):
+            cells.append({"metric": m.id, "dims": list(m.dims), "rows": rows})
+    if cells:
+        out["cells"] = cells
+    return out
 
-    "uuids" has the UUID of each new handle ({handle: UUID}) and "tombstones" the UUIDs that the transaction
-    made tombstones. A replay binds the same UUIDs to the same handles.
-    """
-    out: dict[str, Any] = {"next_id": after._next_id}
-    old_dims = {d.id: d for d in before.dimensions.values()}
-    new_handles: list[int] = []
 
-    added_dims, members, orders = [], [], []
+def structure(before, after) -> dict:
+    """The changes to the definitions from before to after: dimensions, members, the member order, properties and
+    Metrics. A record names each object by its id (the UUID), so a replay defines the objects directly and the
+    order of the renames does not matter. "renamed" has [id, new name] for each object that got a new name. The
+    ids are unique across all kinds, so the id finds the object. A change of only the name is not in the other
+    keys. "tombstones" has the ids that became tombstones. Model.save keeps a model as the structure from an
+    empty model."""
+    out: dict[str, Any] = {}
+
+    added_dims, renamed, members, orders = [], [], [], []
     for d in after.dimensions.values():
-        o = old_dims.get(d.id)
+        o = before.dimensions.get(d.id)
         if o is None:
             added_dims.append({"id": d.id, "name": d.name, "ordered": d.ordered,
-                               "members": [[i, n] for i, n in zip(d.ids, d.members)]})
-            new_handles += [d.id, *d.ids]
+                               "members": [list(x) for x in zip(d.ids, d.members)]})
             if d.rank_table() is not None:
                 orders.append({"dim": d.id, "order": _ids_in_order(d)})
             continue
+        if o.name != d.name:
+            renamed.append([d.id, d.name])
         if o.ids != d.ids or o.members != d.members:
             old_names = dict(zip(o.ids, o.members))
-            members.append({"dim": d.id,
-                            "removed": [i for i in o.ids if i not in d._by_id],
-                            "added": [[i, n] for i, n in zip(d.ids, d.members) if i not in old_names],
-                            "renamed": [[i, n] for i, n in zip(d.ids, d.members)
-                                        if i in old_names and old_names[i] != n]})
-            new_handles += [i for i, _ in members[-1]["added"]]
-        # 並び順は、消したメンバーを除き、足したメンバーを最後に並べただけなら記録しない（再生で同じになる）
-        expected = [i for i in _ids_in_order(o) if i in d._by_id] + [i for i in d.ids if i not in o._by_id]
+            renamed += [[u, n] for u, n in zip(d.ids, d.members) if u in old_names and old_names[u] != n]
+            if o.ids != d.ids:
+                members.append({"dim": d.id, "removed": [u for u in o.ids if u not in d._by_id],
+                                "added": [[u, n] for u, n in zip(d.ids, d.members) if u not in old_names]})
+        # The order is not recorded if it is the old order without the removed members, then the added members
+        # (a replay gives the same order)
+        expected = [u for u in _ids_in_order(o) if u in d._by_id] + [u for u in d.ids if u not in o._by_id]
         if _ids_in_order(d) != expected:
             orders.append({"dim": d.id, "order": _ids_in_order(d)})
 
     props = []
     for d in after.dimensions.values():
-        o = old_dims.get(d.id)
+        o = before.dimensions.get(d.id)
         for prop, (target, mapping) in d.properties.items():
             old = None if o is None else o.properties.get(prop)
+            name = d.property_names[prop]
+            if old is not None and o.property_names[prop] != name:
+                renamed.append([prop, name])
             if old is not None and old[1] is mapping and old[0] == target:
                 continue
-            t = after.dimension(target)
-            new_ids = {d.id_of(k): t.id_of(v) for k, v in mapping.items()}
-            old_ids = {} if old is None else {
-                o.id_of(k): before.dimension(old[0]).id_of(v) for k, v in old[1].items()}
-            set_ = [[k, v] for k, v in new_ids.items() if old_ids.get(k) != v]
-            unset = [k for k in old_ids if k not in new_ids]
-            if old is None or set_ or unset:
-                props.append({"dim": d.id, "prop": prop, "id": d.property_ids[prop], "target": t.id,
-                              "set": set_, "unset": unset})
-            if old is None:
-                new_handles.append(d.property_ids[prop])
+            old_map = {} if old is None else old[1]
+            set_ = [[k, v] for k, v in mapping.items() if old_map.get(k) != v]
+            unset = [k for k in old_map if k not in mapping]
+            if old is None or set_ or unset or old[0] != target:
+                props.append({"dim": d.id, "id": prop, "name": name, "target": target, "set": set_, "unset": unset})
 
-    old_metrics = {m.id: m for m in before.metrics.values()}
     defs = []
     for m in after.metrics.values():
-        o = old_metrics.get(m.id)
-        if o is None:
-            new_handles.append(m.id)
-        elif (o.name, o.dims, o.kind, o.partition, o.overridable) == \
-                (m.name, m.dims, m.kind, m.partition, m.overridable) and o.written is m.written:
+        o = before.metrics.get(m.id)
+        if o is not None and o.name != m.name:
+            renamed.append([m.id, m.name])
+        if o is not None and (o.dims, o.kind, o.partition, o.overridable) == \
+                (m.dims, m.kind, m.partition, m.overridable) and o.written is m.written:
             continue
-        d = _definition(after, m)
-        if o is None or d != _definition(before, o):
+        d = _definition(m)
+        if o is None or d != _definition(o) | {"name": m.name}:
             defs.append(d)
-    alive = {m.id for m in after.metrics.values()}
-    removed = [i for i in old_metrics if i not in alive]
-    uuids = {h: after._uuids[h] for h in new_handles if h in after._uuids}
+    removed = [i for i in before.metrics if i not in after.metrics]
     tombstones = sorted(after.tombstones - before.tombstones)
 
-    cells = []
-    for m in after.metrics.values():
-        if m.formula is not None:
-            continue
-        o = old_metrics.get(m.id)
-        old_store = before._values.get(o.name) if o is not None and o.formula is None else None
-        rows = _cell_changes(before, o, old_store, after, m, after._values[m.name])
-        if len(rows):
-            cells.append({"metric": m.id, "dims": [after.dimension(d).id for d in m.dims], "rows": rows})
-
-    for key, value in (("dimensions", added_dims), ("members", members), ("member_order", orders),
-                       ("properties", props), ("metrics", defs), ("metrics_removed", removed),
-                       ("uuids", uuids), ("tombstones", tombstones), ("cells", cells)):
+    for key, value in (("dimensions", added_dims), ("renamed", renamed), ("members", members),
+                       ("member_order", orders), ("properties", props), ("metrics", defs),
+                       ("metrics_removed", removed), ("tombstones", tombstones)):
         if value:
             out[key] = value
     return out
 
 
-def _ids_in_order(d) -> list[int]:
-    """軸 d のメンバーの ID を並び順に並べたもの。"""
+def _ids_in_order(d) -> list[str]:
+    """The member ids of the dimension d in the order."""
     return [d.ids[i] for i in d.order()]
 
 
-def _apply_orders(model, orders: list, dim_of) -> None:
-    """記録の並び順（並び順に並べた ID の列）を軸に書き込む。番号もセルも変えないので計算し直さない。"""
+def _apply_orders(model, orders: list) -> None:
+    """Write the order of a record (member ids in order) to the dimension. The numbers and the cells do not
+    change, so nothing is calculated again."""
     for e in orders:
-        d = dim_of(e["dim"])
+        d = model.dimensions[e["dim"]]
         d.set_order([d._by_id[i] for i in e["order"]])
 
 
@@ -220,8 +223,8 @@ def _value_dim(model, m):
 
 
 def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
-    """入力 Metric m の、書き換わったセルの [座標の ID の列, 変更前, 変更後] の列（多ければ変更の塊）。
-    メンバー型の値は ID で持つ。"""
+    """The changed cells of the input Metric m as [the member ids of the coordinates, the old value, the new
+    value] (a block of changes if there are many). A member-type value is a member id."""
     eng = after.engine
     if old_store is not None and eng.same(old_store, new_store):
         return []
@@ -235,7 +238,7 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
         to_value = lambda v: v
     comparable = False
     if old_store is not None and o.dims == m.dims and o.kind == m.kind:
-        # 位置が変わっていなければ（メンバーを足しただけなら）、エンジンに位置のまま比べてもらう
+        # If the positions did not change (members were only added), the engine compares by position
         olds = [before.dimension(d) for d in m.dims] + ([_value_dim(before, o)] if vdim is not None else [])
         news = dims + ([vdim] if vdim is not None else [])
         comparable = all(a.ids == b.ids[:len(a.ids)] for a, b in zip(olds, news))
@@ -244,189 +247,174 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
         if len(diff) >= BLOCK_MIN:
             return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
         return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
-    # 名前から ID に直して比べる（メンバーを消したときや、位置で比べられないエンジン）
+    # Compare by id (a member was removed, or the engine cannot compare by position)
     new = _by_id(after, m, new_store)
     old = {} if old_store is None else _by_id(before, o, old_store)
     return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
 
 
 def _by_id(model, m, store) -> dict:
+    """The cells of the store as {member ids in the order of m.dims: value (a member id for a member type)}."""
     cube = model.engine.to_cube(store, model)
-    dims = [model.dimension(d) for d in cube.dims]
-    order = [cube.dims.index(d) for d in m.dims]  # 格納データの軸の順を、Metric の宣言の順に直す
+    order = [cube.dims.index(d) for d in m.dims]  # the dimensions of the store in the order of the definition
     vdim = _value_dim(model, m)
-    out = {}
-    for k, v in cube.cells.items():
-        ids = [dims[i].id_of(k[i]) for i in range(len(k))]
-        out[tuple(ids[i] for i in order)] = vdim.ids[int(v)] if vdim is not None else v
-    return out
+    return {tuple(k[i] for i in order): vdim.ids[int(v)] if vdim is not None else v for k, v in cube.cells.items()}
 
 
 # ---------------------------------------------------------------- 再生
 
-STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # 並び順（member_order）は含まない
+STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # not renamed or member_order
 
 
-def _apply_uuids(model, ch: dict) -> None:
-    """Bind the UUIDs of the new handles, and add the tombstones."""
-    for h, u in ch.get("uuids", {}).items():
-        model._bind(u, int(h))  # JSON keys are strings
-    for u in ch.get("tombstones", []):
-        model.ids.pop(u, None)
-        model.tombstones.add(u)
+def _rename(model, renamed: list) -> None:
+    """Set the names of a record ([id, new name] for a dimension, a member, a property or a Metric). All names
+    are set first and the name indexes are made again after, so names can change places."""
+    names = dict(renamed)
+    if not names:
+        return
+    for i, m in model.metrics.items():
+        m.name = names.get(i, m.name)
+    model._metric_ids = {m.name: i for i, m in model.metrics.items()}
+    for d in model.dimensions.values():
+        d.name = names.get(d.id, d.name)
+        if names.keys() & d.property_names.keys():
+            d.property_names = {p: names.get(p, n) for p, n in d.property_names.items()}
+            d._props = {n: p for p, n in d.property_names.items()}
+        members = {i: n for i, n in names.items() if i in d._by_id}
+        if members:
+            d.rename_members(members)
+    model._dim_ids = {d.name: i for i, d in model.dimensions.items()}
 
 
 def apply(model, record: dict, *, incremental: bool = False) -> None:
-    """記録の結果を model に書き込む（計算し直さない）。
+    """Write the result of a record to model (nothing is calculated here).
 
-    incremental でなければ、再生のあとで全体を計算し直す（開くときに多くの記録を再生する）。incremental なら、
-    入力セルだけを変えた記録は入力の変更として書き込み、次の recalc は影響範囲だけを計算し直す（ほかの
-    プロセスの書き込みに追いつくとき）。軸、メンバー、プロパティ、Metric の定義を変えた記録は、どちらでも
-    全体を計算し直す。"""
+    Without incremental, everything is calculated again after the replay (an open replays many records). With
+    incremental, a record that changed only input cells is written as an input change, and the next recalc
+    calculates only the affected range (to catch up with the writes of another process). A rename does not
+    change a value. A record that added or removed a dimension, a member or a Metric, or changed a property
+    map or a Metric definition, causes a full recalculation in both modes."""
     ch = record["changes"]
-    dims_by_id = model.dimensions_by_id()  # 軸はこの記録で足すものもあるので、足したら入れる
-    dim_of = lambda i: dims_by_id[i] if i in dims_by_id else next(d for d in model.dimensions.values() if d.id == i)
+    model.tombstones.update(ch.get("tombstones", []))
     if incremental and model._plan is not None and not any(k in ch for k in STRUCTURAL):
-        _apply_orders(model, ch.get("member_order", []), dim_of)
+        _rename(model, ch.get("renamed", []))
+        _apply_orders(model, ch.get("member_order", []))
         _apply_cells(model, ch.get("cells", []))
-        _apply_uuids(model, ch)
-        model._next_id = ch["next_id"]
         return
-    metric_of = lambda i: model.metrics_by_id().get(i)
 
     for d in ch.get("dimensions", []):
-        model.dimensions[d["name"]] = dims_by_id[d["id"]] = Dimension(
-            d["name"], [n for _, n in d["members"]], ordered=d["ordered"], ids=[i for i, _ in d["members"]], id=d["id"])
+        model.dimensions[d["id"]] = Dimension(d["name"], [n for _, n in d["members"]], ordered=d["ordered"],
+                                              ids=[i for i, _ in d["members"]], id=d["id"])
+    # A rename can take the name of a removed object, and an added object can take an old name
     for e in ch.get("members", []):
-        d = dim_of(e["dim"])
         for i in e["removed"]:
-            model._uuids.pop(i, None)  # the tombstone comes from "tombstones"
-            model._drop_member(d.name, d.member_of(i))
-        # 名前を入れ替える変更もあるので、一度仮の名前にしてから付け直す
-        for i, _ in e["renamed"]:
-            model._rename_member_raw(d.name, d.member_of(i), f"\0{i}")
-        for i, n in e["renamed"]:
-            model._rename_member_raw(d.name, d.member_of(i), n)
+            model._drop_member(e["dim"], i)  # the tombstone comes from "tombstones"
+    for i in ch.get("metrics_removed", []):
+        del model.metrics[i]
+        model._state.pop(i, None)
+    _rename(model, ch.get("renamed", []))
+    model._dim_ids = {d.name: i for i, d in model.dimensions.items()}
+    for e in ch.get("members", []):
+        d = model.dimensions[e["dim"]]
         for i, n in e["added"]:
             d.add_member(n, i)
         if e["added"]:
-            model._member_added(d.name)
-    _apply_orders(model, ch.get("member_order", []), dim_of)
-
-    for i in ch.get("metrics_removed", []):
-        m = metric_of(i)
-        model._uuids.pop(i, None)
-        model.metrics.pop(m.name)
-        model._state.pop(m.name, None)
-    defs = ch.get("metrics", [])
-    for spec in defs:  # 名前を入れ替える変更もあるので、一度仮の名前にする
-        m = metric_of(spec["id"])
-        if m is not None and m.name != spec["name"]:
-            _rename_metric_raw(model, m.name, f"\0{spec['id']}")
-    for spec in defs:
-        _define(model, spec)
+            model._member_added(d.id)
+    _apply_orders(model, ch.get("member_order", []))
+    _define(model, ch.get("metrics", []))
 
     for p in ch.get("properties", []):
-        d, t = dim_of(p["dim"]), dim_of(p["target"])
-        mapping = dict(d.properties.get(p["prop"], (t.name, {}))[1])
+        d, pid = model.dimensions[p["dim"]], p["id"]
+        mapping = dict(d.properties.get(pid, (p["target"], {}))[1])
         for i in p["unset"]:
-            if i in d._by_id:
-                mapping.pop(d.member_of(i), None)
+            mapping.pop(i, None)
         for i, j in p["set"]:
-            mapping[d.member_of(i)] = t.member_of(j)
-        d.properties[p["prop"]] = (t.name, mapping)
-        d.property_ids[p["prop"]] = p["id"]
-        model.engine.dimension_changed(model, d.name)
+            mapping[i] = j
+        d.properties[pid] = (p["target"], mapping)
+        d.property_names[pid] = p["name"]
+        d._props = {n: i for i, n in d.property_names.items()}
+        model.engine.dimension_changed(model, d.id)
 
-    by_id = model.metrics_by_id()
     for c in ch.get("cells", []):
-        m = by_id[c["metric"]]
+        m = model.metrics[c["metric"]]
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
-        store = model._values[m.name]
-        if not isinstance(c["rows"], list):  # 変更の塊は、書けるエンジンならまとめて書く
+        store = model._values[m.id]
+        if not isinstance(c["rows"], list):  # an engine that can write a block of changes writes it at one time
             written = model.engine.apply_block(store, c["rows"], [d.ids for d in dims],
                                                None if vdim is None else vdim.ids)
             if written is not None:
-                model._values[m.name] = written
+                model._values[m.id] = written
                 continue
-        for ids, _, new in c["rows"]:
-            if len(ids) != len(dims) or not all(i in d._by_id for d, i in zip(dims, ids)):
-                continue  # このトランザクションで消したメンバーのセル（メンバーと一緒に消えている）
-            key = tuple(d.member_of(i) for d, i in zip(dims, ids))
+        for key, _, new in c["rows"]:
+            key = tuple(key)
+            if len(key) != len(dims) or not all(u in d._by_id for d, u in zip(dims, key)):
+                continue  # a cell of a member that this transaction removed (it went with the member)
             if new is not None and vdim is not None:
                 new = float(vdim._by_id[new])
             elif new is not None and m.kind == "boolean":
                 new = bool(new)
             store = model.engine.write(store, key, new, model)
-        model._values[m.name] = store
+        model._values[m.id] = store
 
-    _apply_uuids(model, ch)
-    model._next_id = ch["next_id"]
     model._invalidate()
 
 
 def _apply_cells(model, cells: list[dict]) -> None:
-    """記録のセルの変更を、入力の変更として書き込む（変更範囲を Model の Pending に積む）。"""
-    by_id = model.metrics_by_id()
+    """Write the cell changes of a record as input changes (the affected range goes to the Pending of the Model)."""
     for c in cells:
-        m = by_id[c["metric"]]
+        m = model.metrics[c["metric"]]
         dims = [model.dimension(d) for d in m.dims]
         vdim = _value_dim(model, m)
         rows = c["rows"]
         if not isinstance(rows, list):
-            if model._plan is not None and m.name in model._delta_sources():
-                model._keep_old(m.name)  # 差分集計には変更前の値が要る
-            written = model.engine.apply_block(model._values[m.name], rows, [d.ids for d in dims],
+            if model._plan is not None and m.id in model._delta_sources():
+                model._keep_old(m.id)  # 差分集計には変更前の値が要る
+            written = model.engine.apply_block(model._values[m.id], rows, [d.ids for d in dims],
                                                None if vdim is None else vdim.ids)
             if written is not None:
-                model._values[m.name] = written
-                model._pending.changed[m.name] = {}  # 変わったセルを数えずに、Metric 全体を変わったとする
+                model._values[m.id] = written
+                model._pending.changed[m.id] = {}  # the whole Metric changed (the changed cells are not counted)
                 continue
         cols: list[list[int]] = [[] for _ in dims]
         values = []
-        for ids, _, new in rows:
-            if len(ids) != len(dims) or not all(i in d._by_id for d, i in zip(dims, ids)):
+        for key, _, new in rows:
+            if len(key) != len(dims) or not all(u in d._by_id for d, u in zip(dims, key)):
                 continue
-            for col, d, i in zip(cols, dims, ids):
-                col.append(d._index[d.member_of(i)])
+            for col, d, u in zip(cols, dims, key):
+                col.append(d._by_id[u])
             if new is not None and vdim is not None:
-                new = float(vdim._index[vdim.member_of(int(new))])
+                new = float(vdim._by_id[new])
             elif new is not None and m.kind == "boolean":
                 new = bool(new)
             values.append(new)
         if values:
-            model._write_many(m.name, cols, values)
+            model._write_many(m.id, cols, values)
 
 
-def _rename_metric_raw(model, old: str, new: str) -> None:
-    m = model.metrics.pop(old)
-    m.name = new
-    model.metrics[new] = m
-    if old in model._state:
-        model._state[new] = model._state.pop(old)
-
-
-def _define(model, spec: dict) -> None:
-    """記録にある Metric の定義にする（新しい Metric なら作る）。"""
-    dims = tuple(next(d.name for d in model.dimensions.values() if d.id == i) for i in spec["dims"])
-    kind = spec["kind"]
-    if isinstance(kind, dict):
-        kind = "member:" + next(d.name for d in model.dimensions.values() if d.id == kind["member"])
-    partition = None if spec["partition"] is None else next(
-        d.name for d in model.dimensions.values() if d.id == spec["partition"])
-    name = spec["name"]
-    old = next((m for m in model.metrics.values() if m.id == spec["id"]), None)
-    if old is not None and old.name != name:
-        _rename_metric_raw(model, old.name, name)
-    formula = None if spec["formula"] is None else parse(spec["formula"], self_name=name)
+def _define(model, specs: list[dict]) -> None:
+    """Make the Metric definitions of a record (a new Metric is made). The names and shapes come first, then the
+    formulas (id ASTs, so no parse and no bind)."""
     from .model import Metric
-    model.metrics[name] = Metric(name, dims, kind, formula, partition, formula, spec["overridable"], id=spec["id"])
-    if formula is not None:
-        model._values.pop(name, None)  # 計算 Metric の値は再生のあとで計算し直す
-    elif (old is None or old.formula is not None or name not in model._values
-          or (old.dims, old.kind) != (dims, kind)):
-        model._values[name] = model.engine.from_cells(dims, kind, {}, model, partition)
+    olds = {}
+    for spec in specs:
+        kind = spec["kind"]
+        if isinstance(kind, dict):
+            kind = "member:" + kind["member"]
+        olds[spec["id"]] = model.metrics.get(spec["id"])
+        model.metrics[spec["id"]] = Metric(spec["name"], tuple(spec["dims"]), kind, partition=spec["partition"],
+                                           overridable=spec["overridable"], id=spec["id"])
+    model._metric_ids = {m.name: i for i, m in model.metrics.items()}
+    for spec in specs:
+        m = model.metrics[spec["id"]]
+        old = olds[m.id]
+        if spec["formula"] is not None:
+            m.written = m.formula = from_json(spec["formula"])
+            model._values.pop(m.id, None)  # the values of a formula Metric are calculated again after the replay
+        elif (old is None or old.formula is not None or m.id not in model._values
+              or (old.dims, old.kind) != (m.dims, m.kind)):
+            model._values[m.id] = model.engine.from_cells(m.dims, m.kind, {}, model, m.partition)
+        m.override = model._metric_ids.get(m.override_name)  # the link stays also while not overridable
 
 
 # ---------------------------------------------------------------- ファイルへの記録
@@ -501,10 +489,11 @@ class Journal:
     def load_snapshot(self, place: Snapshot, engine):
         return read_snapshot(self.objects, place, engine)
 
-    def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
-        """セルの変更の履歴（古い順）。メンバー型の値は今の名前に直す（消したメンバーは ID のまま）。"""
-        m = model.metrics[metric]
-        key = [model.dimension(d).id_of(coords[d]) for d in m.dims]
+    def cell_history(self, model, metric: str, coords: Mapping[str, str]) -> list[dict]:
+        """The change history of one cell (oldest first). metric is a Metric id and coords is dimension id ->
+        member id. A member-type value is a member id."""
+        m = model.metric(metric)
+        key = _key_ids(model, m, coords)
         out = []
         for rec in self.records():
             for c in rec["changes"].get("cells", []):
@@ -548,18 +537,21 @@ class Journal:
         model.journal = self
 
 
+def _key_ids(model, m, coords) -> list[str]:
+    """The member ids of one cell of m. coords is dimension id -> member id. ValueError for an unknown member."""
+    key = model._key(m, coords)
+    for d, x in zip(m.dims, key):
+        model._member(model.dimensions[d], x)
+    return list(key)
+
+
 def _shown(model, m, history: list[dict]) -> list[dict]:
-    """履歴の値を見せる形にする（メンバー型は今の名前、真偽値は bool）。"""
-    vdim = _value_dim(model, m)
-    for h in history:
-        for k in ("old", "new"):
-            v = h[k]
-            if v is None:
-                continue
-            if vdim is not None:
-                h[k] = vdim.member_of(int(v)) if int(v) in vdim._by_id else int(v)
-            elif m.kind == "boolean":
-                h[k] = bool(v)
+    """The values of a history for a reader (a boolean becomes bool; a member-type value stays a member id)."""
+    if m.kind == "boolean":
+        for h in history:
+            for k in ("old", "new"):
+                if h[k] is not None:
+                    h[k] = bool(h[k])
     return history
 
 

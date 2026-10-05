@@ -55,12 +55,11 @@ class Store(Protocol):
         """値が value のセルを囲む範囲。そういうセルがなければ None。"""
     def drop_value(self, storage: Any, value: float, cat: Catalog) -> Any:
         """値が value のセルを消した格納データ。"""
-    def rename_member(self, storage: Any, dim: str, old: str, new: str, cat: Catalog) -> Any:
-        """軸 dim のメンバー old を new と呼ぶようにした格納データ（番号は変わらない）。"""
     def remove_member(self, storage: Any, dim: str, index: int, member: str, values: bool,
                       cat: Catalog) -> Any:
-        """軸 dim のメンバー member（番号 index）のセルを消し、後ろのメンバーの番号を詰めた格納データ。
-        values なら値も dim のメンバー番号なので、member を指す値は空にし、後ろの番号を詰める。"""
+        """The stored data without the cells of the member (an id, number index) of dim. The numbers after it
+        close up. If values, the values are also member numbers of dim: a value that points to the member
+        becomes blank, and the numbers after it close up."""
     def evaluate(self, expr: Expr, cat: Catalog, restrict: Restrict) -> Any: ...
     def evaluate_many(self, items: list[tuple[Expr, Restrict]], cat: Catalog) -> list[Any]:
         """互いに独立な式をまとめて評価する。並列に実行できるエンジンはそうしてよい。"""
@@ -130,13 +129,6 @@ class ReferenceEngine:
     def dimension_changed(self, cat, dim, renumbered=False):
         pass  # Cube のキーはメンバー名なので、何もしなくてよい
 
-    def rename_member(self, storage: Cube, dim, old, new, cat):
-        if dim not in storage.dims:
-            return storage
-        i = storage.dims.index(dim)
-        return Cube(storage.dims, {(k[:i] + (new,) + k[i + 1:] if k[i] == old else k): v
-                                   for k, v in storage.cells.items()})
-
     def region_of_value(self, storage: Cube, value, cat):
         keys = [k for k, v in storage.cells.items() if v == value]
         if not keys:
@@ -172,7 +164,7 @@ class ReferenceEngine:
         return storage
 
     def write_many(self, storage: Cube, cols, values, cat):
-        members = [cat.dimension(d).members for d in storage.dims]
+        members = [cat.dimension(d).ids for d in storage.dims]
         cells = storage.cells
         for i, value in enumerate(values):
             key = tuple(ms[c[i]] for ms, c in zip(members, cols))
@@ -183,7 +175,7 @@ class ReferenceEngine:
         return storage
 
     def columns(self, storage: Cube, restrict, cat):
-        index = [cat.dimension(d)._index for d in storage.dims]
+        index = [cat.dimension(d)._by_id for d in storage.dims]
         cols: list[list[int]] = [[] for _ in storage.dims]
         values = []
         for key, value in _filter(storage, restrict).cells.items():
@@ -236,7 +228,7 @@ class ReferenceEngine:
 
     def rows(self, storage: Cube, restrict, cat, offset=0, limit=None):
         cube = _filter(storage, restrict or None)
-        order = [cat.dimension(d).ranks() for d in cube.dims]
+        order = [_rank_of(cat.dimension(d)) for d in cube.dims]
         keys = sorted(cube.cells, key=lambda k: tuple(ix[m] for ix, m in zip(order, k)))
         total = len(keys)
         page = keys[offset:] if limit is None else keys[offset:offset + limit]
@@ -247,8 +239,9 @@ class ReferenceEngine:
 
     def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
         nanashi_core = native()
+        dims = [cat.dimension(d).id for d in dims]
         order = [storage.dims.index(d) for d in dims]
-        index = [cat.dimension(d)._index for d in dims]
+        index = [cat.dimension(d)._by_id for d in dims]
         keys = list(storage.cells)
         cols = [[index[j][k[i]] for k in keys] for j, i in enumerate(order)]
         values = [float(v) for v in storage.cells.values()]
@@ -257,12 +250,13 @@ class ReferenceEngine:
 
     def from_parquet(self, data: bytes, dims, kind, cat, partition=None) -> Cube:
         nanashi_core = native()
-        members = [cat.dimension(d).members for d in dims]
+        dims = tuple(cat.dimension(d).id for d in dims)
+        members = [cat.dimension(d).ids for d in dims]
         cols, values = nanashi_core.read_parquet(data, parquet_columns(dims, cat), parquet_value(kind),
                                                  [len(ms) for ms in members])
         if kind == "boolean":
             values = [v != 0.0 for v in values]
-        return Cube(tuple(dims), {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]
+        return Cube(dims, {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]
                                   for r in range(len(values))})
 
     def size(self, storage: Cube) -> int:
@@ -277,10 +271,16 @@ class ReferenceEngine:
         return a is b
 
     def diff_block(self, old, new):
-        return None  # Cube はメンバー名で持つので、ID で比べてもらう
+        return None  # a Cube has member ids as keys, so the caller compares by id
 
     def apply_block(self, storage, block, dim_ids, value_ids):
         return None
+
+
+def _rank_of(d) -> dict[str, int]:
+    """Member id -> rank of the dimension d."""
+    table = d.rank_table()
+    return d._by_id if table is None else {i: table[p] for i, p in d._by_id.items()}
 
 
 def native():
@@ -293,7 +293,8 @@ def native():
 
 
 def parquet_columns(dims, cat) -> list[str]:
-    """Parquet の軸の列の名前。名前を変えても変わらない軸の ID で付ける。"""
+    """The names of the dimension columns of a Parquet file: d<dimension id>. The id does not change with a
+    rename. The prefix keeps a dimension column apart from the value columns (v, old, new)."""
     return [f"d{cat.dimension(d).id}" for d in dims]
 
 

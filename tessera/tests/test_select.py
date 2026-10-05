@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import FormulaError, Model, ParseError, parse, ref, to_formula
+from sparse_engine import FormulaError, Model, Named, ParseError, parse, ref, to_formula
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import same, snapshot
@@ -16,7 +16,7 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr"]
 
 
 def model(engine=None) -> Model:
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     m.add_dimension("Version", ["予算", "実績", "見込み"])
     m.add_dimension("Product", ["A", "B", "C"])
     m.add_dimension("Category", ["X", "Y"])
@@ -76,8 +76,8 @@ class Syntax(unittest.TestCase):
 class TypeChecking(unittest.TestCase):
     def reject(self, formula, dims, pattern):
         m = model()
-        m.add_formula("Bad", dims, formula)
-        with self.assertRaisesRegex(FormulaError, pattern):
+        with self.assertRaisesRegex(FormulaError, pattern):  # an unknown member fails at the definition (bind)
+            m.add_formula("Bad", dims, formula)
             m.recalc()
 
     def test_unknown_member(self):
@@ -139,8 +139,8 @@ class Incremental(unittest.TestCase):
         self.assertEqual(self.m.get("Variance", Product="A", Month="Jan"), 15)
 
     def test_aggregate_of_slice_uses_delta(self):
-        self.assertIn("ActualTotal", self.m._delta)
-        self.assertIn("CatActual", self.m._delta)
+        self.assertIn(self.m.metric("ActualTotal").id, self.m._delta)
+        self.assertIn(self.m.metric("CatActual").id, self.m._delta)
         self.m.set_cell("Sales", 85, Product="A", Version="実績", Month="Jan")
         self.m.recalc()
         self.assertIn("ActualTotal", self.m.delta_log)
@@ -157,7 +157,7 @@ def random_round(rng: random.Random, models: list[Model], counter: list[int]) ->
         for m in models:
             m.add_member(kind, name, **props)
         return
-    coords = {d: rng.choice(m0.dimensions[d].members) for d in ["Product", "Version", "Month"]}
+    coords = {d: rng.choice(m0.dimension(d).members) for d in ["Product", "Version", "Month"]}
     value = None if rng.random() < 0.3 else float(rng.randint(-5, 60))
     for m in models:
         m.set_cell("Sales", value, **coords)
@@ -174,7 +174,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
@@ -189,7 +189,7 @@ class RustMatchesReference(unittest.TestCase):
         for round_ in range(150):
             for _ in range(rng.randint(1, 3)):
                 random_round(rng, [ref_m, rs], counter)
-            for name in ref_m.metrics:
+            for name in ref_m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     a, b = ref_m.value(name).cells, rs.value(name).cells
                     self.assertTrue(same(a, b), f"{name}\n参照: {a}\nRust: {b}")

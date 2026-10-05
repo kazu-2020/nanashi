@@ -4,10 +4,10 @@ import tempfile
 import unittest
 
 from examples.fpa import build
-from sparse_engine import Model, ref, to_formula
+from sparse_engine import Model, Named, ref, to_formula
 from sparse_engine.engine import ReferenceEngine
 
-from .test_incremental import cells, check_full, same, snapshot
+from .test_incremental import cells, check_full, mapping, same, snapshot
 from .test_input_features import model as planning_model
 from .test_member_values import model as version_model
 
@@ -23,7 +23,7 @@ except ImportError:
 
 
 def model(engine=None) -> Model:
-    m = Model(engine=engine) if engine is not None else Model()
+    m = Named(Model(engine=engine)) if engine is not None else Named(Model())
     m.add_dimension("Product", ["A", "B", "C"])
     m.add_dimension("Category", ["ハード", "ソフト"])
     m.add_dimension("Month", ["Jan", "Feb", "Mar", "Apr"], ordered=True)
@@ -57,7 +57,7 @@ class Rename(unittest.TestCase):
 
     def test_values_follow_the_new_name(self):
         self.m.rename_member("Month", "Mar", "March")
-        self.assertEqual(self.m.dimensions["Month"].members, ["Jan", "Feb", "March", "Apr"])
+        self.assertEqual(self.m.dimension("Month").members, ["Jan", "Feb", "March", "Apr"])
         self.assertEqual(cells(self.m, "X")[("A", "March")], 4)
         self.assertEqual(self.m.get("Cutoff"), "March")
         self.assertEqual(self.m.get("Total", Month="March"), 4)
@@ -71,7 +71,7 @@ class Rename(unittest.TestCase):
 
     def test_formulas_use_the_new_name(self):
         self.m.rename_member("Month", "Jan", "January")
-        self.assertEqual(to_formula(self.m.metrics["Jan"].written), 'X[SELECT: Month."January"]')
+        self.assertEqual(to_formula(self.m.metric("Jan").written, self.m), 'X[SELECT: Month."January"]')
         self.assertEqual(self.m.get("Jan", Product="A"), 1)
         self.m.set_cell("X", 5, Product="A", Month="January")
         self.assertEqual(self.m.get("Jan", Product="A"), 5)
@@ -79,8 +79,7 @@ class Rename(unittest.TestCase):
     def test_properties_on_both_sides(self):
         self.m.rename_member("Category", "ハード", "HW")
         self.m.rename_member("Product", "C", "Cee")
-        props = self.m.dimensions["Product"].properties["Category"][1]
-        self.assertEqual(props, {"A": "HW", "B": "HW", "Cee": "ソフト"})
+        self.assertEqual(mapping(self.m, "Product", "Category"), {"A": "HW", "B": "HW", "Cee": "ソフト"})
         self.m.set_cell("Rate", 20, Category="HW")
         self.assertEqual(self.m.get("Priced", Product="A", Month="Jan"), 20)
         self.m.set_cell("X", 1, Product="Cee", Month="Jan")
@@ -105,8 +104,19 @@ class Rename(unittest.TestCase):
         fork = self.m.fork()
         fork.rename_member("Month", "Jan", "January")
         self.assertEqual(snapshot(self.m), self.before)
-        self.assertEqual(to_formula(self.m.metrics["Jan"].written), 'X[SELECT: Month."Jan"]')
+        self.assertEqual(to_formula(self.m.metric("Jan").written, self.m), 'X[SELECT: Month."Jan"]')
         self.assertEqual(fork.get("Jan", Product="A"), 1)
+
+    def test_rename_members_changes_nothing_on_an_error(self):
+        d = self.m.dimension("Month")
+        jan, feb = d.id_of("Jan"), d.id_of("Feb")
+        for names, error in (({jan: "Feb"}, "重複"), ({jan: "X", "nope": "Y"}, "メンバーがない")):
+            with self.assertRaisesRegex(ValueError, error):
+                d.rename_members(names)
+            self.assertEqual(d.members, ["Jan", "Feb", "Mar", "Apr"])
+            self.assertEqual(d.id_of("Jan"), jan)
+        d.rename_members({jan: "Feb", feb: "Jan"})
+        self.assertEqual((d.id_of("Feb"), d.id_of("Jan")), (jan, feb))
 
 
 class Remove(unittest.TestCase):
@@ -120,7 +130,7 @@ class Remove(unittest.TestCase):
 
     def test_middle_month(self):
         self.m.remove_member("Month", "Feb")
-        self.assertEqual(self.m.dimensions["Month"].members, ["Jan", "Mar", "Apr"])
+        self.assertEqual(self.m.dimension("Month").members, ["Jan", "Mar", "Apr"])
         self.assertEqual(cells(self.m, "X"), {("A", "Jan"): 1, ("A", "Mar"): 4, ("C", "Apr"): 16})
         # Mar の前月は Jan になる
         self.assertEqual(cells(self.m, "Prev"), {("A", "Mar"): 1, ("A", "Apr"): 4})
@@ -152,7 +162,7 @@ class Remove(unittest.TestCase):
 
     def test_property_target(self):
         self.m.remove_member("Category", "ハード")
-        self.assertEqual(self.m.dimensions["Product"].properties["Category"][1], {"C": "ソフト"})
+        self.assertEqual(mapping(self.m, "Product", "Category"), {"C": "ソフト"})
         self.assertEqual(cells(self.m, "Priced"), {("C", "Apr"): 1600})  # A と B は参照先がなくなった
         self.assertEqual(cells(self.m, "ByCategory"), {("ソフト", "Apr"): 16})
         self.check_full()
@@ -166,7 +176,7 @@ class Remove(unittest.TestCase):
     def test_referenced_in_formula(self):
         with self.assertRaisesRegex(ValueError, 'Jan の式が Month."Jan" を参照している'):
             self.m.remove_member("Month", "Jan")
-        self.assertIn("Jan", self.m.dimensions["Month"])
+        self.assertIn("Jan", self.m.dimension("Month"))
 
     def test_last_and_first_members(self):
         self.m.remove_member("Month", "Apr")
@@ -198,7 +208,7 @@ class Remove(unittest.TestCase):
         fork.remove_member("Month", "Feb")
         fork.set_cell("X", 100, Product="A", Month="Mar")
         self.assertEqual(snapshot(self.m), before)
-        self.assertEqual(self.m.dimensions["Month"].members, ["Jan", "Feb", "Mar", "Apr"])
+        self.assertEqual(self.m.dimension("Month").members, ["Jan", "Feb", "Mar", "Apr"])
         self.assertEqual(fork.get("Total", Month="Mar"), 100)
 
     @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
@@ -207,7 +217,7 @@ class Remove(unittest.TestCase):
         self.m.remove_member("Category", "ソフト")
         with tempfile.TemporaryDirectory() as tmp:
             self.m.save(tmp)
-            loaded = Model.load(tmp, self.engine())
+            loaded = Named.load(tmp, self.engine())
         a, b = snapshot(self.m), snapshot(loaded)
         for name in a:
             self.assertTrue(same(a[name], b[name]), name)
@@ -229,7 +239,7 @@ def structural(rng: random.Random, models: list[Model], dims: list[str], counter
     """メンバーの追加、名前の変更、削除のどれかを、全モデルに同じように加える。"""
     m0 = models[0]
     d = rng.choice(dims)
-    members = m0.dimensions[d].members
+    members = m0.dimension(d).members
     kind = rng.random()
     counter[0] += 1
     if kind < 0.3 or len(members) <= 1:
@@ -241,7 +251,7 @@ def structural(rng: random.Random, models: list[Model], dims: list[str], counter
             m.rename_member(d, old, f"{old}~{counter[0]}")
     else:
         victim = rng.choice(members)
-        if any(f'{d}."{victim}"' in to_formula(x.written) for x in m0.metrics.values() if x.written is not None):
+        if any(f'{d}."{victim}"' in to_formula(x.written, m0) for x in m0.metrics.values() if x.written is not None):
             return  # 式が参照しているメンバーは消せない
         for m in models:
             m.remove_member(d, victim)
@@ -280,23 +290,23 @@ def run_random(test, make, edit, dims, seed, rounds, engines=None):
 def edit_small(m: Model, r: random.Random) -> None:
     kind = r.random()
     if kind < 0.6:
-        coords = {d: r.choice(m.dimensions[d].members) for d in ("Product", "Month")}
+        coords = {d: r.choice(m.dimension(d).members) for d in ("Product", "Month")}
         m.set_cell("X", None if r.random() < 0.3 else float(r.randint(-5, 50)), **coords)
     elif kind < 0.8:
-        p = r.choice(m.dimensions["Product"].members)
-        m.set_cell("Launch", None if r.random() < 0.2 else r.choice(m.dimensions["Month"].members), Product=p)
+        p = r.choice(m.dimension("Product").members)
+        m.set_cell("Launch", None if r.random() < 0.2 else r.choice(m.dimension("Month").members), Product=p)
     else:
-        c = r.choice(m.dimensions["Category"].members)
+        c = r.choice(m.dimension("Category").members)
         m.set_cell("Rate", float(r.randint(1, 9)), Category=c)
 
 
 def edit_versions(m: Model, r: random.Random) -> None:
-    coords = {d: r.choice(m.dimensions[d].members) for d in ("Product", "Version", "Month")}
+    coords = {d: r.choice(m.dimension(d).members) for d in ("Product", "Version", "Month")}
     m.set_cell("Sales", None if r.random() < 0.3 else float(r.randint(-5, 60)), **coords)
 
 
 def edit_planning(m: Model, r: random.Random) -> None:
-    e, t = r.choice(m.dimensions["Employee"].members), r.choice(m.dimensions["Month"].members)
+    e, t = r.choice(m.dimension("Employee").members), r.choice(m.dimension("Month").members)
     kind = r.random()
     if kind < 0.4:
         m.set_cell("Salary", None if r.random() < 0.2 else float(r.randint(1, 500)), Employee=e, Month=t)
@@ -314,7 +324,7 @@ def small_fpa(engine):
 
 def edit_fpa(m: Model, r: random.Random) -> None:
     """給与、異動、販売数量のどれか（EDITS と同じだが、消したり名前を変えたりしたメンバーを選ばない）。"""
-    pick = lambda d: r.choice(m.dimensions[d].members)
+    pick = lambda d: r.choice(m.dimension(d).members)
     kind = r.random()
     if kind < 0.3:
         m.set_cell("Salary", float(r.randint(300, 900)), Employee=pick("Employee"), Version="予算")

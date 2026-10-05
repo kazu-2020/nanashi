@@ -29,8 +29,8 @@
     GET  /operations/<client_op_id>           The result of a write: committed (seq) or rejected (status, body)
     POST /writes                              {"client_op_id", "reason", "expect", "ops": [...]}
 
-Each reference in a path, a query, or an op is a UUID (docs/ids.md). The server changes it to the name of the
-object, and changes the names in a result to UUIDs. Each element of ops is {"op": <operation name>, <argument>:
+Each reference in a path, a query, or an op is a UUID (docs/ids.md). The Model API also takes and gives UUIDs,
+so the server checks the shape of a request and passes the ids through. Each element of ops is {"op": <operation name>, <argument>:
 <value>, ...}. _OPS gives the arguments of each operation. WRITE_OPS lists the permitted operations. Give the cells
 of add_input as [[coordinates, value], ...].
 
@@ -85,13 +85,14 @@ from .core import Dimension
 from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
 from .model import DuplicateId, Metric
+from .parser import to_formula
 from .workspace import Conflict, NotLeader, Overloaded, Rejected, Replica, Role, Workspace, rejection_of
 
 log = logging.getLogger(__name__)
 
 WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "move_member", "rename_member", "remove_member", "add_formula",
                        "add_input", "add_property", "set_property_values", "add_dimension", "remove_metric",
-                       "rename_metric"})
+                       "rename_metric", "rename_dimension", "rename_property"})
 READ_PARAMS = frozenset({"offset", "limit", "keep", "agg"})
 
 
@@ -106,45 +107,41 @@ class ApiError(Exception):
 
 
 class Names:
-    """Changes the UUIDs of a request to the names of the model, and the names of a result to UUIDs.
+    """Checks the UUIDs of a request against the model before they go to the Model API.
 
     Each method that takes a UUID raises ValueError (400) if the model does not have the object."""
 
     def __init__(self, model):
         self.m = model
 
-    def _handle(self, id) -> int | None:
-        return self.m.ids.get(id) if isinstance(id, str) else None
-
     def dim(self, id) -> Dimension:
-        d = self.m.dimensions_by_id().get(self._handle(id))
+        d = self.m.dimensions.get(id) if isinstance(id, str) else None
         if d is None:
             raise ValueError(f"軸 {id} がない")
         return d
 
     def metric(self, id) -> Metric:
-        m = self.m.metrics_by_id().get(self._handle(id))
+        m = self.m.metrics.get(id) if isinstance(id, str) else None
         if m is None or m.name.startswith("__"):
             raise ValueError(f"Metric {id} がない")
         return m
 
     def member(self, d: Dimension, id) -> str:
-        pos = d._by_id.get(self._handle(id))
-        if pos is None:
+        """The member id (checked)."""
+        if not isinstance(id, str) or id not in d._by_id:
             raise ValueError(f"{d.name} にメンバー {id} がない")
-        return d.members[pos]
+        return id
 
     def prop(self, d: Dimension, id) -> str:
-        h = self._handle(id)
-        for name, handle in d.property_ids.items():
-            if handle == h:
-                return name
-        raise ValueError(f"{d.name} にプロパティ {id} がない")
+        """The property id (the Model takes it in place of the name)."""
+        if not isinstance(id, str) or id not in d.properties:
+            raise ValueError(f"{d.name} にプロパティ {id} がない")
+        return id
 
     def kind(self, kind) -> str:
-        """"member:<dim uuid>" -> "member:<dim name>"."""
+        """The kind (checked: the dimension of "member:<dim uuid>" must exist)."""
         if isinstance(kind, str) and kind.startswith("member:"):
-            return "member:" + self.dim(kind.removeprefix("member:")).name
+            self.dim(kind.removeprefix("member:"))
         return kind
 
     def value_dim(self, m: Metric) -> Dimension | None:
@@ -152,42 +149,29 @@ class Names:
         return self.m.dimension(m.kind.removeprefix("member:")) if m.kind.startswith("member:") else None
 
     def value_in(self, m: Metric, value):
-        """A value of a write: a member UUID becomes the member name."""
+        """A value of a write (checked: a member-type value is a member UUID of the value dimension)."""
         d = self.value_dim(m)
         return value if d is None or value is None else self.member(d, value)
 
     def coords_in(self, coords) -> dict[str, Any]:
-        """{dim uuid: member uuid (or a list of them)} -> {dim name: member name (or names)}."""
+        """{dim uuid: member uuid (or a list of them)}, checked."""
         if not isinstance(coords, dict):
             raise ValueError("座標は {軸の ID: メンバーの ID} のオブジェクト")
         out = {}
         for k, v in coords.items():
             d = self.dim(k)
-            out[d.name] = [self.member(d, x) for x in v] if isinstance(v, list) else self.member(d, v)
+            out[d.id] = [self.member(d, x) for x in v] if isinstance(v, list) else self.member(d, v)
         return out
 
-    # ------------------------------------------------ names -> UUIDs
 
-    def dim_id(self, name: str) -> str:
-        return self.m.dimension_id(name)
+def _cube_out(cube) -> dict:
+    """A Cube of the Model (dimension ids, member ids) as the body of a read."""
+    return {"dims": list(cube.dims), "cells": _rows_out(cube.cells.items())}
 
-    def member_id(self, d: Dimension, name: str) -> str:
-        return self.m.member_id(d.name, name)
 
-    def kind_out(self, kind: str) -> str:
-        return "member:" + self.dim_id(kind.removeprefix("member:")) if kind.startswith("member:") else kind
-
-    def value_out(self, m: Metric, value):
-        d = self.value_dim(m)
-        return value if d is None or value is None else self.member_id(d, value)
-
-    def rows_out(self, m: Metric, dims: tuple[str, ...], rows) -> list:
-        """[(coordinates, value), ...] -> [[member uuid..., value], ...]."""
-        ds = [self.m.dimension(d) for d in dims]
-        return [[*(self.member_id(d, x) for d, x in zip(ds, k)), self.value_out(m, v)] for k, v in rows]
-
-    def cube_out(self, m: Metric, cube) -> dict:
-        return {"dims": [self.dim_id(d) for d in cube.dims], "cells": self.rows_out(m, cube.dims, cube.cells.items())}
+def _rows_out(rows) -> list:
+    """[(coordinates, value), ...] -> [[member uuid..., value], ...]."""
+    return [[*k, v] for k, v in rows]
 
 
 def _coords(query: dict[str, list[str]]) -> dict[str, Any]:
@@ -233,11 +217,11 @@ def apply_ops(model, ops: list) -> None:
 def _dims(n: Names, dims) -> list[str]:
     if not isinstance(dims, list):
         raise ValueError("dims は軸の ID の配列")
-    return [n.dim(d).name for d in dims]
+    return [n.dim(d).id for d in dims]
 
 
 def _cell_map(n: Names, m: Metric, cells) -> dict:
-    """[[[member uuid...], value], ...] -> {(member name, ...): value}."""
+    """[[[member uuid...], value], ...] -> {(member uuid, ...): value}, checked."""
     if not isinstance(cells, list) or not all(isinstance(c, list) and len(c) == 2 and isinstance(c[0], list)
                                               for c in cells):
         raise ValueError("add_input の cells は [[座標の列, 値], ...]")
@@ -255,26 +239,35 @@ def _op_add_dimension(m, n, id, name, ordered=False):
 
 
 def _op_add_member(m, n, dim, id, name, at=None):
-    m.add_member(n.dim(dim).name, name, at=at, id=id)
+    m.add_member(n.dim(dim).id, name, at=at, id=id)
 
 
 def _op_rename_member(m, n, dim, id, name):
     d = n.dim(dim)
-    m.rename_member(d.name, n.member(d, id), name)
+    m.rename_member(d.id, n.member(d, id), name)
 
 
 def _op_move_member(m, n, dim, id, at):
     d = n.dim(dim)
-    m.move_member(d.name, n.member(d, id), at)
+    m.move_member(d.id, n.member(d, id), at)
 
 
 def _op_remove_member(m, n, dim, id):
     d = n.dim(dim)
-    m.remove_member(d.name, n.member(d, id))
+    m.remove_member(d.id, n.member(d, id))
+
+
+def _op_rename_dimension(m, n, id, name):
+    m.rename_dimension(n.dim(id).id, name)
 
 
 def _op_add_property(m, n, dim, id, name, target):
-    m.add_property(n.dim(dim).name, name, n.dim(target).name, {}, id=id)
+    m.add_property(n.dim(dim).id, name, n.dim(target).id, {}, id=id)
+
+
+def _op_rename_property(m, n, dim, id, name):
+    d = n.dim(dim)
+    m.rename_property(d.id, n.prop(d, id), name)
 
 
 def _op_set_property_values(m, n, dim, prop, values):
@@ -283,29 +276,29 @@ def _op_set_property_values(m, n, dim, prop, values):
     t = m.dimension(d.properties[p][0])
     if not isinstance(values, dict):
         raise ValueError("values は {メンバーの ID: メンバーの ID か null}")
-    m.set_property_values(d.name, p, {n.member(d, k): None if v is None else n.member(t, v) for k, v in values.items()})
+    m.set_property_values(d.id, p, {n.member(d, k): None if v is None else n.member(t, v) for k, v in values.items()})
 
 
 def _op_add_input(m, n, id, name, dims, kind="number", cells=None, partition=None):
     dims, kind = _dims(n, dims), n.kind(kind)
     if partition is not None:
-        partition = n.dim(partition).name
+        partition = n.dim(partition).id
     cells = _cell_map(n, Metric(name, tuple(dims), kind), cells or [])
     m.add_input(name, dims, cells, kind=kind, partition=partition, id=id)
 
 
 def _op_add_formula(m, n, id, name, formula, dims, kind="number", overridable=False, partition=None):
     if partition is not None:
-        partition = n.dim(partition).name
+        partition = n.dim(partition).id
     m.add_formula(name, _dims(n, dims), formula, kind=n.kind(kind), overridable=overridable, partition=partition, id=id)
 
 
 def _op_rename_metric(m, n, id, name):
-    m.rename_metric(n.metric(id).name, name)
+    m.rename_metric(n.metric(id).id, name)
 
 
 def _op_remove_metric(m, n, id):
-    m.remove_metric(n.metric(id).name)
+    m.remove_metric(n.metric(id).id)
 
 
 def _target(m, n, metric, override: bool) -> Metric:
@@ -315,12 +308,12 @@ def _target(m, n, metric, override: bool) -> Metric:
         return mt
     if not mt.overridable:
         raise ValueError(f"{mt.name} は上書きできる計算 Metric ではない")
-    return m.metrics[mt.override_name]
+    return m.metrics[mt.override]
 
 
 def _op_set_cell(m, n, metric, value, coords=None, override=False):
     mt = _target(m, n, metric, override)
-    m.set_cell(mt.name, n.value_in(mt, value), **n.coords_in(coords or {}))
+    m.set_cell(mt.id, n.value_in(mt, value), n.coords_in(coords or {}))
 
 
 def _op_spread(m, n, metric, total, how="proportional", where=None, coords=None):
@@ -333,8 +326,8 @@ def _op_spread(m, n, metric, total, how="proportional", where=None, coords=None)
         for path, value in where.items():
             d = n.dim(path.partition(".")[0])
             p = n.prop(d, path.partition(".")[2])
-            named[f"{d.name}.{p}"] = n.member(m.dimension(d.properties[p][0]), value)
-    m.spread(mt.name, total, how=how, where=named, **n.coords_in(coords or {}))
+            named[f"{d.id}.{p}"] = n.member(m.dimension(d.properties[p][0]), value)
+    m.spread(mt.id, total, n.coords_in(coords or {}), how=how, where=named)
 
 
 _OPS = {name[4:]: fn for name, fn in list(globals().items()) if name.startswith("_op_")}
@@ -470,29 +463,27 @@ class Handler(BaseHTTPRequestHandler):
             if what == "overrides":  # Read the hidden "__override__" input through its formula Metric.
                 if not m.overridable:
                     raise ApiError(400, "bad_request", f"{m.name} は上書きできる計算 Metric ではない")
-                m, what = v.metrics[m.override_name], "slice"
-            name = m.name
+                m, what = v.metrics[m.override], "slice"
             coords = n.coords_in(_coords(query))
             if what == "cell":
                 bad = [k for k, x in coords.items() if not isinstance(x, str)]
                 if bad:
                     raise ApiError(400, "bad_request", f"cell では軸 {bad} に 1 つのメンバーを指定する")
-                return 200, {"seq": v.seq, "value": n.value_out(m, v.get(name, **coords))}
+                return 200, {"seq": v.seq, "value": v.get(m.id, coords)}
             limit = self.server.max_cells
             if what == "slice":
-                count = v.summarize(name, agg="count", **coords).cells.get((), 0)  # Count the cells before the full read
+                count = v.summarize(m.id, coords, agg="count").cells.get((), 0)  # Count the cells before the full read
                 if count > limit:
                     raise ApiError(413, "too_large", f"範囲のセルが {count:,} 件あり、上限 {limit:,} を超える（rows でページングする）")
-                return 200, {"seq": v.seq, **n.cube_out(m, v.slice(name, **coords))}
+                return 200, {"seq": v.seq, **_cube_out(v.slice(m.id, coords))}
             if what == "rows":
                 page = _int(query, "limit", limit)
                 if page > limit:
                     raise ApiError(400, "bad_request", f"limit は {limit:,} まで")
-                rows, total = v.rows(name, offset=_int(query, "offset", 0), limit=page, **coords)
-                return 200, {"seq": v.seq, "dims": [n.dim_id(d) for d in m.dims], "rows": n.rows_out(m, m.dims, rows),
-                             "total": total}
+                rows, total = v.rows(m.id, coords, offset=_int(query, "offset", 0), limit=page)
+                return 200, {"seq": v.seq, "dims": list(m.dims), "rows": _rows_out(rows), "total": total}
             if what == "summary":
-                keep = [n.dim(d).name for x in query.get("keep", []) for d in x.split(",") if d]
+                keep = [n.dim(d).id for x in query.get("keep", []) for d in x.split(",") if d]
                 groups = 1
                 for d in keep:
                     if d in m.dims:
@@ -500,10 +491,8 @@ class Handler(BaseHTTPRequestHandler):
                         groups *= len(v.dimension(d).members) if c is None else 1 if isinstance(c, str) else len(c)
                 if groups > limit:
                     raise ApiError(413, "too_large", f"集計の結果が最大 {groups:,} 件になり、上限 {limit:,} を超える")
-                cube = v.summarize(name, keep=keep, agg=query.get("agg", ["sum"])[0], **coords)
-                ds = [v.dimension(d) for d in cube.dims]
-                return 200, {"seq": v.seq, "dims": [n.dim_id(d) for d in cube.dims],
-                             "cells": [[*(n.member_id(d, x) for d, x in zip(ds, k)), val] for k, val in cube.cells.items()]}
+                cube = v.summarize(m.id, coords, keep=keep, agg=query.get("agg", ["sum"])[0])
+                return 200, {"seq": v.seq, **_cube_out(cube)}
         raise ApiError(404, "not_found", f"{url.path} はない")
 
     # ------------------------------------------------ 書き込み
@@ -572,23 +561,21 @@ def _dimensions_out(n: Names) -> dict:
     """The dimensions of GET /, keyed by UUID."""
     out = {}
     for d in n.m.dimensions.values():
-        uid = lambda name: n.member_id(d, name)
         props, values = {}, {}
-        for p, (t, mapping) in d.properties.items():
-            pid, td = n.m.uuid_of(d.property_ids[p]), n.m.dimension(t)
-            props[pid] = {"name": p, "target": n.dim_id(t)}
-            values[pid] = {uid(k): n.member_id(td, v) for k, v in mapping.items()}
-        out[n.dim_id(d.name)] = {"name": d.name, "ordered": d.ordered,
-                                 "members": [{"id": uid(x), "name": x} for x in d.in_order()],
-                                 "properties": props, "property_values": values}
+        for pid, (t, mapping) in d.properties.items():
+            props[pid] = {"name": d.property_names[pid], "target": t}
+            values[pid] = dict(mapping)  # the map holds member UUIDs
+        out[d.id] = {"name": d.name, "ordered": d.ordered,
+                     "members": [{"id": d.ids[i], "name": d.members[i]} for i in d.order()],
+                     "properties": props, "property_values": values}
     return out
 
 
 def _metrics_out(n: Names) -> dict:
     """The Metrics of GET /, keyed by UUID. Names starting with "__" stay hidden."""
-    return {n.m.uuid_of(m.id): {"name": m.name, "dims": [n.dim_id(d) for d in m.dims], "kind": n.kind_out(m.kind),
-                                "overridable": m.overridable,
-                                "formula": None if m.written is None else _formula(m.written)}
+    return {m.id: {"name": m.name, "dims": list(m.dims), "kind": m.kind,
+                   "overridable": m.overridable,
+                   "formula": None if m.written is None else to_formula(m.written, n.m)}
             for m in n.m.metrics.values() if not m.name.startswith("__")}
 
 
@@ -636,11 +623,6 @@ def stats_text(ws) -> str:
             continue
         out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}", f"{name} {value}"]
     return "\n".join(out) + "\n"
-
-
-def _formula(written) -> str:
-    from .parser import to_formula
-    return to_formula(written)
 
 
 class Server(ThreadingHTTPServer):

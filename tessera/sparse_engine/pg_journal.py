@@ -42,13 +42,13 @@ import socket
 import threading
 import time
 import uuid
-from typing import Iterator
+from typing import Iterator, Mapping
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from .engine import native
-from .journal import (Fenced, Journal, Snapshot, _shown, as_block, cell_count, put_snapshot, read_cell_files,
+from .journal import (Fenced, Journal, Snapshot, _key_ids, _shown, as_block, cell_count, put_snapshot, read_cell_files,
                       write_cell_files)
 from .objects import open_objects
 
@@ -109,6 +109,14 @@ create table nanashi_rejection (
     body         jsonb not null,
     primary key (model_id, client_op_id)
 );
+"""),
+    (3, """
+truncate nanashi_cell_change;
+alter table nanashi_cell_change
+    alter column metric_id type text,
+    alter column coords type text[] using coords::text[],
+    add column old_member text,
+    add column new_member text;
 """),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -370,8 +378,8 @@ class PgJournal(Journal):
                         copy.write_row((self.model_id, seq, rec["at"], rec["user"], rec["reason"],
                                         rec["client_op_id"], Jsonb(stored),
                                         None if blob is None else blob["prefix"], blob is None))
-                with cur.copy("copy nanashi_cell_change (model_id, seq, metric_id, coords, old_value, new_value)"
-                              " from stdin") as copy:
+                with cur.copy("copy nanashi_cell_change (model_id, seq, metric_id, coords, old_value, new_value,"
+                              " old_member, new_member) from stdin") as copy:
                     for rec, seq, blob in zip(records, seqs, blobs):
                         if blob is None:
                             _copy_cells(copy, self.model_id, seq, rec["changes"].get("cells", []))
@@ -421,7 +429,7 @@ class PgJournal(Journal):
                 if not claimed:
                     continue  # ほかのプロセスが先に反映した
                 with conn.cursor().copy("copy nanashi_cell_change (model_id, seq, metric_id, coords,"
-                                        " old_value, new_value) from stdin") as copy:
+                                        " old_value, new_value, old_member, new_member) from stdin") as copy:
                     for c in cells:  # COPY のテキストは Rust で作る（行ごとに Python を通さない）
                         copy.write(as_block(core, c["rows"]).copy_text(self.model_id, seq, c["metric"]))
             loaded += blob["cells"]
@@ -461,14 +469,16 @@ class PgJournal(Journal):
         with self._lock, self.conn.transaction():
             ops = self.conn.execute("select seq, record from nanashi_operation where model_id = %s and seq > %s"
                                     " order by seq", (self.model_id, after)).fetchall()
-            cells = self.conn.execute("select c.seq, c.metric_id, c.coords, c.old_value, c.new_value"
+            cells = self.conn.execute("select c.seq, c.metric_id, c.coords, c.old_value, c.new_value,"
+                                      " c.old_member, c.new_member"
                                       " from nanashi_cell_change c join nanashi_operation o"
                                       " on o.model_id = c.model_id and o.seq = c.seq"
                                       " where c.model_id = %s and c.seq > %s and o.cells_uri is null"
                                       " order by c.seq, c.metric_id", (self.model_id, after)).fetchall()
-        by_seq: dict[int, dict[int, list]] = {}
-        for seq, metric, coords, old, new in cells:
-            by_seq.setdefault(seq, {}).setdefault(metric, []).append([coords, old, new])
+        by_seq: dict[int, dict[str, list]] = {}
+        for seq, metric, coords, old, new, old_member, new_member in cells:
+            row = [coords, old if old_member is None else old_member, new if new_member is None else new_member]
+            by_seq.setdefault(seq, {}).setdefault(metric, []).append(row)
         for seq, rec in ops:
             if "cells_blob" in rec:  # 大量のセルはファイルから読む
                 rec["changes"]["cells"] = self._read_blob(rec.pop("cells_blob"))
@@ -476,19 +486,21 @@ class PgJournal(Journal):
                 rec["changes"]["cells"] = [{"metric": m, "rows": rows} for m, rows in by_seq[seq].items()]
             yield rec
 
-    def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
-        """セルの変更の履歴を、セルの索引で引く（記録を先頭から読まない）。"""
+    def cell_history(self, model, metric: str, coords: Mapping[str, str]) -> list[dict]:
+        """The change history of one cell, from the cell index (not from a scan of the records). metric is a
+        Metric id and coords is dimension id -> member id."""
         self.index_pending()  # 確定の後に回した分を先に反映する
-        m = model.metrics[metric]
-        key = [model.dimension(d).id_of(coords[d]) for d in m.dims]
+        m = model.metric(metric)
+        key = _key_ids(model, m, coords)
         with self._lock:
             rows = self.conn.execute(
-            "select c.seq, o.at, o.user_name, o.reason, c.old_value, c.new_value"
-            " from nanashi_cell_change c join nanashi_operation o on o.model_id = c.model_id and o.seq = c.seq"
-                " where c.model_id = %s and c.metric_id = %s and c.coords = %s::bigint[] order by c.seq",
+                "select c.seq, o.at, o.user_name, o.reason, c.old_value, c.new_value, c.old_member, c.new_member"
+                " from nanashi_cell_change c join nanashi_operation o on o.model_id = c.model_id and o.seq = c.seq"
+                " where c.model_id = %s and c.metric_id = %s and c.coords = %s::text[] order by c.seq",
                 (self.model_id, m.id, key)).fetchall()
-        return _shown(model, m, [{"seq": s, "at": _iso(a), "user": u, "reason": r, "old": o, "new": n}
-                                 for s, a, u, r, o, n in rows])
+        return _shown(model, m, [{"seq": s, "at": _iso(a), "user": u, "reason": r,
+                                  "old": o if om is None else om, "new": n if nm is None else nm}
+                                 for s, a, u, r, o, n, om, nm in rows])
 
     # ------------------------------------------------ スナップショット
 
@@ -556,14 +568,24 @@ class PgJournal(Journal):
 
 
 def _copy_cells(copy, model_id: str, seq: int, cells: list[dict]) -> None:
+    """Write the cell changes as rows of nanashi_cell_change. A member-type value (a member id) goes to
+    old_member / new_member, a number or boolean to old_value / new_value."""
     for c in cells:
         rows = c["rows"]
         if not isinstance(rows, list):
             copy.write(rows.copy_text(model_id, seq, c["metric"]))
             continue
         for ids, old, new in rows:
-            copy.write_row((model_id, seq, c["metric"], list(ids),
-                            None if old is None else float(old), None if new is None else float(new)))
+            copy.write_row((model_id, seq, c["metric"], list(ids), _number(old), _number(new),
+                            _member(old), _member(new)))
+
+
+def _number(v):
+    return float(v) if v is not None and not isinstance(v, str) else None
+
+
+def _member(v):
+    return v if isinstance(v, str) else None
 
 
 def _iso(at) -> str:

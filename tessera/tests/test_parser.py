@@ -1,12 +1,12 @@
 import unittest
 
-from sparse_engine import FormulaError, Model, ParseError, if_, parse, ref, to_formula
+from sparse_engine import FormulaError, Model, Named, ParseError, if_, parse, ref, to_formula
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr"]
 
 
 def model() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B", "C"])
     m.add_dimension("Month", MONTHS, ordered=True)
     m.add_dimension("Employee", ["e1", "e2", "e3"])
@@ -103,7 +103,7 @@ class Names(unittest.TestCase):
         self.assertEqual(to_formula(e), "'Owner''s Equity'")
 
     def test_japanese_names(self):
-        m = Model()
+        m = Named(Model())
         m.add_dimension("商品", ["りんご", "みかん"])
         m.add_input("売上", ["商品"], {("りんご",): 100, ("みかん",): 80})
         m.add_input("原価", ["商品"], {("りんご",): 60})
@@ -173,8 +173,9 @@ class ModelWithText(unittest.TestCase):
         m = model()
         m.add_input("In", ["Month"], {("Jan",): 10})
         m.add_input("Demand", ["Month"], {(t,): 4 for t in MONTHS})
+        m.add_input("Stock", ["Month"])  # Order and Stock refer to each other: an input first
         m.add_formula("Order", ["Month"], "IF(Stock[SELECT: Month - 1] < 5, 10, 0)")
-        m.add_formula("Stock", ["Month"], "PREVIOUS(Month) + In + Order - Demand")
+        m.add_formula("Stock", ["Month"], "PREVIOUS(Month) + In + Order - Demand", id=m.metric("Stock").id)
         self.assertEqual([m.get("Stock", Month=t) for t in MONTHS], [6, 2, 8, 4])
 
     def test_type_errors_still_come_from_checker(self):

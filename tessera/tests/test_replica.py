@@ -4,6 +4,7 @@ import time
 import unittest
 
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.named import Named
 from sparse_engine.server import Server
 from sparse_engine.workspace import Replica, Workspace
 
@@ -32,8 +33,8 @@ class Follow(JournalCase):
     def setUp(self):
         super().setUp()
         m = model(self.engine())
-        self.journals.journal().start(m)
-        self.ws = Workspace(m, self.journals.journal())
+        self.journals.journal().start(m.model)
+        self.ws = Workspace(m.model, self.journals.journal())
         self.addCleanup(self.ws.close)
         self.replica = Replica(self.journals.journal(heartbeat=False) if self.store is PgStore
                                else self.journals.journal(), self.engine(), interval=0.05)
@@ -42,7 +43,7 @@ class Follow(JournalCase):
     def test_replica_catches_up_incrementally(self):
         self.ws.write(move("p0", "p1", "Jan", 5))
         self.assertEqual(self.replica.refresh(), 1)
-        v = self.replica.version
+        v = Named(self.replica.version)
         self.assertEqual(v.get("Stock", Product="p1", Month="Jan"), 105.0)
         self.assertEqual(v.get("Total"), 8000.0)
         # 入力の変更として書き込むので、変わった範囲だけを計算し直す（全体を計算し直さない）
@@ -51,18 +52,18 @@ class Follow(JournalCase):
         check_same_state(self, self.ws.version, v)
 
     def test_structural_changes_are_followed(self):
-        self.ws.write(lambda m: m.add_member("Product", "p99"))
-        self.ws.write(lambda m: m.set_cell("Stock", 7, Product="p99", Month="Feb"))
-        self.ws.write(lambda m: m.add_formula("Triple", ["Product", "Month"], "Stock * 3"))
+        self.ws.write(lambda m: Named(m).add_member("Product", "p99"))
+        self.ws.write(lambda m: Named(m).set_cell("Stock", 7, Product="p99", Month="Feb"))
+        self.ws.write(lambda m: Named(m).add_formula("Triple", ["Product", "Month"], "Stock * 3"))
         self.replica.refresh()
-        self.assertEqual(self.replica.version.get("Triple", Product="p99", Month="Feb"), 21.0)
+        self.assertEqual(Named(self.replica.version).get("Triple", Product="p99", Month="Feb"), 21.0)
         check_same_state(self, self.ws.version, self.replica.version)
 
     def test_member_order_is_followed_without_recalculating(self):
-        self.ws.write(lambda m: m.move_member("Product", "p3", 0))
+        self.ws.write(lambda m: Named(m).move_member("Product", "p3", 0))
         self.replica.refresh()
-        v = self.replica.version
-        self.assertEqual(v.dimensions["Product"].in_order()[0], "p3")
+        v = Named(self.replica.version)
+        self.assertEqual(v.dimension("Product").in_order()[0], "p3")
         self.assertEqual(list(v.slice_log), [])  # 並び順だけなら何も計算し直さない
         check_same_state(self, self.ws.version, v)
 
@@ -78,7 +79,7 @@ class Follow(JournalCase):
 
         def reader():
             while not stop.is_set():
-                seen.append(self.replica.version.get("Total"))  # 移すだけなので合計はいつも同じ
+                seen.append(Named(self.replica.version).get("Total"))  # 移すだけなので合計はいつも同じ
         t = threading.Thread(target=reader)
         t.start()
         for i in range(20):
@@ -87,7 +88,7 @@ class Follow(JournalCase):
         stop.set()
         t.join()
         self.assertEqual(set(seen), {8000.0})
-        self.assertEqual(self.replica.version.get("Stock", Product="p1", Month="Apr"), 120.0)
+        self.assertEqual(Named(self.replica.version).get("Stock", Product="p1", Month="Apr"), 120.0)
 
     def test_follow_server_is_read_only(self):
         server = Server(self.replica, "127.0.0.1", 0).start()
@@ -126,17 +127,17 @@ class WriterCatchesUp(JournalCase, unittest.TestCase):
 
     def test_file_writer_catches_up_after_another_writer(self):
         m = model(ReferenceEngine())
-        self.journals.journal().start(m)
-        a = Workspace(m, self.journals.journal())
+        self.journals.journal().start(m.model)
+        a = Workspace(m.model, self.journals.journal())
         b = Workspace.open(self.journals.journal(), ReferenceEngine())
         a.write(move("p0", "p1", "Jan", 5))
         a.close()  # 書き込みの権利を手放す
         with self.assertRaisesRegex(Exception, "開き直す"):  # b の版は古い
             b.write(move("p2", "p3", "Jan", 1))
-        self.assertEqual(b.version.get("Stock", Product="p1", Month="Jan"), 105.0)  # 追いついた
+        self.assertEqual(Named(b.version).get("Stock", Product="p1", Month="Jan"), 105.0)  # 追いついた
         self.assertEqual(b.write(move("p2", "p3", "Jan", 1)), 2)
         b.close()
-        check_same_state(self, b.version, self.journals.journal().open(ReferenceEngine()))
+        check_same_state(self, b.version, Named(self.journals.journal().open(ReferenceEngine())))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from examples.fpa import EDITS, build
-from sparse_engine import Model, to_formula
+from sparse_engine import Model, Named, to_formula
 from sparse_engine.engine import ReferenceEngine
 
 from .test_incremental import same, snapshot
@@ -39,10 +39,10 @@ class RoundTrip(unittest.TestCase):
         original = small(saving_engine)
         with tempfile.TemporaryDirectory() as tmp:
             original.save(tmp)
-            loaded = Model.load(tmp, loading_engine)
-        self.assertEqual(loaded.dimensions["Employee"].members, original.dimensions["Employee"].members)
+            loaded = Named.load(tmp, loading_engine)
+        self.assertEqual(loaded.dimension("Employee").members, original.dimension("Employee").members)
         a, b = snapshot(original), snapshot(loaded)
-        for name in original.metrics:
+        for name in original._metric_ids:
             with self.subTest(metric=name):
                 self.assertTrue(same(a[name], b[name]), name)
         return original, loaded
@@ -71,8 +71,8 @@ class RoundTrip(unittest.TestCase):
         for name, m in original.metrics.items():
             if m.written is not None:
                 with self.subTest(metric=name):
-                    self.assertEqual(to_formula(loaded.metrics[name].written), to_formula(m.written))
-        self.assertIn("Employee.DeptOf", to_formula(loaded.metrics["Payroll"].written))
+                    self.assertEqual(to_formula(loaded.metric(name).written, loaded), to_formula(m.written, original))
+        self.assertIn("Employee.DeptOf", to_formula(loaded.metric("Payroll").written, loaded))
 
     def test_loaded_model_keeps_working(self):
         _, loaded = self.check(ReferenceEngine(), ReferenceEngine())
@@ -83,7 +83,7 @@ class RoundTrip(unittest.TestCase):
             incremental = snapshot(loaded)
             loaded._invalidate()
             full = snapshot(loaded)
-            for name in loaded.metrics:
+            for name in loaded._metric_ids:
                 with self.subTest(metric=name):
                     self.assertTrue(same(incremental[name], full[name]), name)
 
@@ -94,7 +94,7 @@ class RoundTrip(unittest.TestCase):
             meta["format"] = 999
             (Path(tmp) / "model.json").write_text(json.dumps(meta))
             with self.assertRaisesRegex(ValueError, "保存形式"):
-                Model.load(tmp)
+                Named.load(tmp)
 
 
 if __name__ == "__main__":

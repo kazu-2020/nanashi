@@ -26,7 +26,7 @@ class Planning(unittest.TestCase):
         m = model()
         for name in ["RevByCat", "DeptSalary", "Total", "VolCount", "CatMonth", "CountByCat"]:
             with self.subTest(name):
-                self.assertIn(name, m._delta)
+                self.assertIn(m.metric(name).id, m._delta)
 
     def test_other_formulas_are_not_delta(self):
         m = model()
@@ -34,7 +34,7 @@ class Planning(unittest.TestCase):
         # 件数の後に SUM 以外がくる式や、引き下ろしも対象外
         for name in ["AvgSalary", "MaxByCat", "Margin", "Revenue", "CatShare", "GroupCount"]:
             with self.subTest(name):
-                self.assertNotIn(name, m._delta)
+                self.assertNotIn(m.metric(name).id, m._delta)
 
 
 class Semantics(unittest.TestCase):
@@ -76,12 +76,12 @@ class MatchesFullRecalc(unittest.TestCase):
     def test_random_edits(self):
         rng = random.Random(42)
         m = model()
-        inputs = [n for n, x in m.metrics.items() if x.formula is None]
+        inputs = [x.name for x in m.metrics.values() if x.formula is None]
         for round_ in range(300):
             for _ in range(rng.randint(1, 4)):
                 name = rng.choice(inputs)
-                meta = m.metrics[name]
-                coords = {d: rng.choice(m.dimensions[d].members) for d in meta.dims}
+                meta = m.metric(name)
+                coords = {m.dimension(d).name: rng.choice(m.dimension(d).members) for d in meta.dims}
                 if rng.random() < 0.35:
                     value = None
                 elif meta.kind == "boolean":
@@ -94,7 +94,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")

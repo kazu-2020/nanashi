@@ -45,12 +45,12 @@ def save(path: str, scale: int) -> None:
 
 def child(path: str, per_formula: bool) -> dict:
     import nanashi_core
-    from sparse_engine import Model, to_formula
+    from sparse_engine import Named, to_formula
     from sparse_engine.rust_engine import RustEngine
 
     nanashi_core.track_heap(True)  # モデルを作る前に数え始める
     out: dict = {"rss_start": rss()}
-    m = Model.load(path, RustEngine())
+    m = Named.load(path, RustEngine())
     out["heap_loaded"], out["rss_loaded"] = nanashi_core.heap()[0], rss()
     nanashi_core.reset_heap_peak()
     t = time.perf_counter()
@@ -60,7 +60,7 @@ def child(path: str, per_formula: bool) -> dict:
     out["rss_now"], out["rss_max"] = rss(), max_rss()
 
     mem = m.memory()
-    formulas = {n for n, x in m.metrics.items() if x.formula is not None}
+    formulas = {x.name for x in m.metrics.values() if x.formula is not None}
 
     def part(key: str, names) -> int:
         return sum(mem[n].get(key, 0) for n in names)
@@ -74,19 +74,19 @@ def child(path: str, per_formula: bool) -> dict:
         "索引": part("index", mem),
         "差分集計の件数": part("counts", mem),
     }
-    out["estimate_ratio"] = sum(m.cell_estimates.values()) / max(1, sum(m.engine.size(m._values[n]) for n in formulas))
+    out["estimate_ratio"] = sum(m.cell_estimates.values()) / max(1, sum(m.engine.size(m._values[m.metric(n).id]) for n in formulas))
 
     if per_formula:  # Metric を 1 つずつ評価し、途中結果の大きさを結果の大きさと比べる
-        scans = {n for s in m._plan if s.scan_dim is not None for n in s.names}
+        scans = {m.metrics[n].name for s in m._plan if s.scan_dim is not None for n in s.names}
         rows = []
         for n in sorted(formulas - scans):
             before = nanashi_core.heap()[0]
             nanashi_core.reset_heap_peak()
-            cube = m.engine.evaluate(m.metrics[n].formula, m, {})
+            cube = m.engine.evaluate(m.metric(n).formula, m, {})
             peak = nanashi_core.heap()[1] - before
             cells = m.engine.core.cube_len(cube)
             del cube
-            rows.append((n, cells, peak, to_formula(m.metrics[n].written)))
+            rows.append((n, cells, peak, to_formula(m.metric(n).written, m)))
         out["per_formula"] = rows
     return out
 

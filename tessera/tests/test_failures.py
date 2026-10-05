@@ -1,7 +1,7 @@
 """計算や入力の途中で失敗しても、モデルが壊れた状態で残らない。"""
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
@@ -19,13 +19,14 @@ class FailedRecalc(unittest.TestCase):
     def failing(self, metric: str | None, panic: bool = False) -> None:
         """metric を書き戻すところで Rust の再計算を失敗させる（None なら戻す）。"""
         _, names = self.m.engine.planner._plan_for(self.m.compiled(), self.m)
-        self.m.engine.core.configure(fail_at=None if metric is None else (names.index(metric), panic))
+        self.m.engine.core.configure(fail_at=None if metric is None else (names.index(self.m.metric(metric).id), panic))
 
     def check(self, panic: bool) -> None:
         self.m = build_with(RustEngine())
         ref = build_with(ReferenceEngine())
         self.m.recalc()
-        inputs = {n: self.m.value(n).cells for n, x in self.m.metrics.items() if x.formula is None}
+        raw = lambda x: self.m.engine.to_cube(self.m._values[x.id], self.m).cells  # keys are member ids
+        inputs = {x.name: raw(x) for x in self.m.metrics.values() if x.formula is None}
         for m in (self.m, ref):
             m.set_cell("Volume", 50, Product="B", Region="S", Month="Feb")
             m.set_cell("Price", 7, Product="A")
@@ -37,7 +38,7 @@ class FailedRecalc(unittest.TestCase):
             self.m.get("Margin", Product="A", Month="Jan")
         for n, cells in inputs.items():  # 入力の格納データは失われない（計算し直さずに読む）
             if n not in ("Volume", "Price"):
-                self.assertEqual(self.m.engine.to_cube(self.m._values[n], self.m).cells, cells)
+                self.assertEqual(self.m.engine.to_cube(self.m._values[self.m.metric(n).id], self.m).cells, cells)
         self.failing(None)
         expected, actual = snapshot(ref), snapshot(self.m)
         for n in expected:
@@ -125,14 +126,14 @@ class RustBoundary(unittest.TestCase):
 @unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class MemoryBudget(unittest.TestCase):
     def test_dense_formula_beyond_the_budget_is_an_error_not_an_oom(self):
-        m = Model(engine=RustEngine(max_bytes=64 << 20), max_cells=None)  # セル数の見積もりの検査は外す
+        m = Named(Model(engine=RustEngine(max_bytes=64 << 20), max_cells=None))  # セル数の見積もりの検査は外す
         m.add_dimension("Customer", [f"c{i}" for i in range(100_000)])
         m.add_dimension("Sku", [f"s{i}" for i in range(20_000)])
         m.add_input("Sales", ["Customer", "Sku"], {("c1", "s1"): 5.0})
         m.add_formula("Filled", ["Customer", "Sku"], "IFBLANK(Sales, 0)")  # 20 億セル（32 GB）
         with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
             m.recalc()
-        m.add_formula("Filled", ["Customer", "Sku"], "Sales * 2", id=m.metric_id("Filled"))  # the corrected formula can calculate
+        m.add_formula("Filled", ["Customer", "Sku"], "Sales * 2", id=m.metric("Filled").id)  # the corrected formula can calculate
         self.assertEqual(m.get("Filled", Customer="c1", Sku="s1"), 10.0)
 
     def test_split_budget_gives_the_same_results(self):

@@ -25,35 +25,27 @@ import functools
 import itertools
 from collections import deque
 import math
-import secrets
-import time
-import uuid
 from dataclasses import dataclass, field
 from statistics import mean
 from collections.abc import MutableMapping
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
-from .core import Cube, Dimension, Key
+from .core import Cube, Dimension, Key, uuid7
 from .delta import DeltaPlan
 from .engine import Store, default_engine
-from .evaluate import Edge, FormulaError, Kind, Restrict, Type, combos, member_kind, union_region
+from .evaluate import Edge, FormulaError, Kind, Restrict, Type, bind, combos, member_kind, union_region
 from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_member, references_metric,
-                   rename_member, rename_metrics, uses_property)
+                   uses_property)
 from .journal import LOG_VERSION, AlreadyCommitted, Transaction, changes, jsonable, now
-from .messages import msg
+from .messages import Msg, msg, render
 from .parser import parse
 from .planner import CompiledPlan, Step
+
+Coords = Mapping[str, str | Iterable[str]]  # dimension id -> a member id, or a collection of member ids
 
 
 class DuplicateId(Exception):
     """The UUID belongs to an object of a different kind, or to a removed object (a tombstone)."""
-
-
-def uuid7() -> str:
-    """Make a UUIDv7 (RFC 9562): the Unix time in milliseconds, then random bits. Python 3.12 has no uuid.uuid7."""
-    ms = time.time_ns() // 1_000_000
-    rand_a, rand_b = secrets.randbits(12), secrets.randbits(62)
-    return str(uuid.UUID(int=(ms << 80) | (7 << 76) | (rand_a << 64) | (2 << 62) | rand_b))
 
 
 @dataclass
@@ -65,7 +57,8 @@ class Metric:
     partition: str | None = None  # 明示した分割軸。None なら自動で選ぶ
     written: Expr | None = None  # 利用者が書いた元の式（保存や表示に使う）
     overridable: bool = False  # True なら set_cell で式の結果を手入力で上書きできる
-    id: int = 0  # 変わらない ID（名前の変更や式の置き換えで変わらない。Model が振る）
+    id: str = ""  # The UUID. It does not change with a rename or a new definition. It is the key of Model.metrics
+    override: str | None = None  # The id of the hidden override input. It is used only while overridable
 
     @property
     def override_name(self) -> str:
@@ -74,16 +67,16 @@ class Metric:
 
 @dataclass
 class Pending:
-    """前回の再計算のあとにためている変更。recalc が消費して空にする。
+    """The changes that wait after the last recalculation. recalc consumes them and makes this empty.
 
-    Model の操作はここに変更を積むだけで、値の計算はしない。rename_member のように名前で持つ
-    記録を壊す操作は、先に recalc でここを空にしてから行う。
+    An operation of the Model only puts a change here. It does not calculate values. The ranges hold member ids,
+    so a rename does not touch them.
     """
     full: bool = True  # 次の recalc で全体を計算し直すか
     changed: dict[str, Restrict] = field(default_factory=dict)  # 入力 Metric の変更範囲
     old_cells: dict[str, dict[Key, Any]] = field(default_factory=dict)  # 入力の変更前の値（差分集計用）
     old_slices: dict[str, Any] = field(default_factory=dict)  # 範囲ごと空にした入力の、変更前の値
-    added: dict[str, set[str]] = field(default_factory=dict)  # 前回の再計算以降に追加したメンバー
+    added: dict[str, set[str]] = field(default_factory=dict)  # dimension id -> the member ids added since the last recalc
     dirty: set[str] = field(default_factory=set)  # 前回の計画のあとで定義を変えた Metric
     forced: dict[str, Restrict] = field(default_factory=dict)  # 次の再計算で必ず計算し直す計算 Metric の範囲
 
@@ -99,20 +92,17 @@ class Pending:
 
 
 LOG_MAX = 10_000  # 観察用の記録の上限（古いものから捨てる）
-
-
-def _log() -> deque:
-    """An observation log. If it has more than LOG_MAX items, it discards the oldest items."""
-    return deque(maxlen=LOG_MAX)
+DENSE = frozenset({"densify", "isblank_dense", "ifblank_dense"})  # the warning codes of a dense operation
 
 
 class SliceLog:
-    """再計算した (Metric, 範囲) の記録（観察用）。エンジンがメンバーの番号で返した範囲は、
-    読まれたときに名前へ直す（1 回の変更で何百もの範囲を直すと、それだけで時間がかかるため）。"""
+    """An observation log of the recalculated (Metric id, range) items. A range that the engine gave as member
+    numbers becomes member ids only when the log is read (to change hundreds of ranges after each change would
+    take time). The name facade (named.py) shows the current names."""
 
     def __init__(self):
         self._items: list[tuple[str, Restrict]] = []
-        self._later: list = []  # 名前に直した記録を返す関数
+        self._later: list = []  # functions that give the items with member ids
 
     def _flush(self) -> list[tuple[str, Restrict]]:
         for named in self._later:
@@ -221,7 +211,7 @@ class MetricState:
 
 
 class _Field(MutableMapping):
-    """Model._state の 1 つの状態を、Metric 名 -> 値の dict のように見せる。"""
+    """Show one state of Model._state as a dict of Metric id -> value."""
     __slots__ = ("_states", "_name")
 
     def __init__(self, states: dict[str, MetricState], name: str):
@@ -285,59 +275,88 @@ class Model:
     auto_layout: bool = True  # False なら分割軸はエンジンの既定（メンバー数が最も多い軸）
     delta_aggregation: bool = True  # False なら集計も普通に計算し直す
     max_cells: int | None = 1_000_000_000  # 計算 Metric 1 つのセル数の見積もりの上限。None なら検査しない
-    dimensions: dict[str, Dimension] = field(default_factory=dict)
-    metrics: dict[str, Metric] = field(default_factory=dict)
-    eval_log: deque = field(default_factory=_log)  # 再計算した Metric 名（観察用）
-    slice_log: SliceLog = field(default_factory=lambda: SliceLog())  # 再計算した範囲（観察用）
-    delta_log: deque = field(default_factory=_log)  # 差分集計で更新した Metric（観察用）
+    dimensions: dict[str, Dimension] = field(default_factory=dict)  # dimension id -> Dimension, in definition order
+    _dim_ids: dict[str, str] = field(default_factory=dict)  # dimension name -> id (the name index)
+    metrics: dict[str, Metric] = field(default_factory=dict)  # Metric id -> Metric, in definition order
+    _metric_ids: dict[str, str] = field(default_factory=dict)  # Metric name -> id (the name index)
+    # The recalculated Metrics (observation)
+    eval_log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_MAX))
+    slice_log: SliceLog = field(default_factory=SliceLog)  # The recalculated ranges (observation)
+    # The Metrics that incremental aggregation updated (observation)
+    delta_log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_MAX))
     _state: dict[str, MetricState] = field(default_factory=dict)  # Metric ごとの、定義以外の状態
     _plan: list[Step] | None = None
     _levels: list[list[Step]] = field(default_factory=list)  # 依存関係の段ごとの計画（全体の再計算用）
     _pending: Pending = field(default_factory=Pending)  # 前回の再計算のあとにためている変更
-    _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
-    # The external UUIDs. ids: UUID -> handle (the internal ID), _uuids: handle -> UUID. Each dimension,
-    # member, property, and Metric has one. tombstones: the UUIDs of removed objects. They are not used again
-    ids: dict[str, int] = field(default_factory=dict)
-    _uuids: dict[int, str] = field(default_factory=dict)
-    tombstones: set[str] = field(default_factory=set)
+    tombstones: set[str] = field(default_factory=set)  # The UUIDs of removed objects. They are not used again
     journal: Any = None  # 記録先（journal.FileJournal など）。None なら記録しない
     seq: int = 0  # 確定した最後のトランザクションの通し番号
     last_record: dict | None = None  # 最後に確定したトランザクションの記録
     _txn: Transaction | None = None  # 実行中のトランザクション
     _frozen: bool = False  # 公開済みの版（Workspace）。書き換えない
 
-    # Metric ごとの状態（_state）を、Metric 名 -> 値の dict のように見せる
+    # Show each per-Metric state (_state) as a dict of Metric id -> value
     _values = _per_metric("value", "格納データ（エンジンごとの形式）")
     _counts = _per_metric("count", "差分集計する SUM の各グループの件数")
     _delta = _per_metric("delta", "差分集計する Metric -> 計画")
     layout = _per_metric("partition", "Metric ごとの分割軸")
-    warnings = _per_metric("warnings", "Metric ごとの型検査の警告")
+    _warnings = _per_metric("warnings", "The type check warnings of each Metric (Msg, with ids in the values)")
     _edges = _per_metric("edges", "依存グラフ（Metric -> 参照先）")
     _samples = _per_metric("samples", "分割軸の選択に使った、入力ごとの影響範囲")
     cell_estimates = _per_metric("estimate", "計算 Metric のセル数の見積もり（上限）")
     _estimate_refs = _per_metric("estimate_refs", "見積もりが読んだ Metric")
     _estimate_users = _per_metric("estimate_users", "Metric -> それを読む見積もり")
 
+    @property
+    def warnings(self) -> dict[str, list[str]]:
+        """The type check warnings of each Metric (Metric id -> texts with the current names)."""
+        return {i: [render(w.code, self._shown_params(w.params)) for w in ws] for i, ws in self._warnings.items()}
+
     # ------------------------------------------------ Catalog
 
-    def dimension(self, name: str) -> Dimension:
-        if name not in self.dimensions:
-            raise FormulaError("unknown_dim", name=name)
-        return self.dimensions[name]
+    def dimension(self, id: str) -> Dimension:
+        """The dimension with this id. FormulaError unknown_dim if there is none."""
+        d = self.dimensions.get(id)
+        if d is None:
+            raise FormulaError("unknown_dim", name=id)
+        return d
 
-    def metric_type(self, name: str) -> Type:
-        if name not in self.metrics:
-            raise FormulaError("unknown_metric", name=name)
-        m = self.metrics[name]
+    def _name_of(self, id: str) -> str:
+        """The current name of a Metric, dimension, property or member id, or a kind "member:<dim id>" with the
+        name. Another string comes back as it is."""
+        if id.startswith("member:"):
+            return "member:" + self._name_of(id.removeprefix("member:"))
+        if id in self.metrics:
+            return self.metrics[id].name
+        if id in self.dimensions:
+            return self.dimensions[id].name
+        for d in self.dimensions.values():
+            if id in d.property_names:
+                return d.property_names[id]
+            if id in d._by_id:
+                return d.member_of(id)
+        return id
+
+    def metric(self, id: str) -> Metric:
+        """The Metric with this id. ValueError if there is none."""
+        m = self.metrics.get(id)
+        if m is None:
+            raise ValueError(f"Metric {id} がない")
+        return m
+
+    def metric_type(self, id: str) -> Type:
+        if id not in self.metrics:
+            raise FormulaError("unknown_metric", name=id)
+        m = self.metrics[id]
         return Type(m.dims, m.kind)
 
-    def source(self, name: str) -> Any:
-        """name の格納データ。自分で範囲を絞り込めるエンジン（Rust）は、read ではなくこれで読み出し元を受け取る。"""
-        return self._values[name]
+    def source(self, id: str) -> Any:
+        """The stored data of the Metric. An engine that restricts a range itself (Rust) gets the source here."""
+        return self._values[id]
 
-    def read(self, name: str, restrict: Restrict | None) -> Any:
-        """name を restrict の範囲に絞って返す（参照実装の評価器が使う）。"""
-        return self.engine.view(self.source(name), restrict or None, self)
+    def read(self, id: str, restrict: Restrict | None) -> Any:
+        """The stored data of the Metric in the range restrict (the reference evaluator uses this)."""
+        return self.engine.view(self.source(id), restrict or None, self)
 
     def compiled(self) -> CompiledPlan:
         """今の計算計画（Planner が段取りを組むのに使う）。"""
@@ -351,7 +370,8 @@ class Model:
         self.recalc()
 
     def memory(self) -> dict[str, dict[str, int]]:
-        """Metric ごとの格納データが確保しているメモリ（バイト）。計算の途中結果や計画は含まない。
+        """The memory (bytes) of the stored data of each Metric (Metric id -> row). Intermediate results and the
+        plan are not included.
 
         rows は本体の行数、base・delta・index は本体・差分・索引、counts は差分集計の件数の格納データ
         （本体と差分と索引の合計）。バイト数を測れないエンジン（参照実装）は rows だけを返す。
@@ -378,14 +398,15 @@ class Model:
         self.recalc()
         other = Model(engine=self.engine, auto_layout=self.auto_layout, delta_aggregation=self.delta_aggregation,
                       max_cells=self.max_cells)
-        other.dimensions = {n: d.copy() for n, d in self.dimensions.items()}
+        other.dimensions = {i: d.copy() for i, d in self.dimensions.items()}
+        other._dim_ids = dict(self._dim_ids)
         other.engine = self.engine.fork(other)
-        other.metrics = {n: dataclasses.replace(m) for n, m in self.metrics.items()}
-        other._state = {n: st.fork(self.engine.share) for n, st in self._state.items()}
+        other.metrics = {i: dataclasses.replace(m) for i, m in self.metrics.items()}
+        other._metric_ids = dict(self._metric_ids)
+        other._state = {i: st.fork(self.engine.share) for i, st in self._state.items()}
         # 計算計画は定義だけに依存するので、そのまま引き継ぐ
         other._plan, other._levels = self._plan, self._levels
-        other._next_id = self._next_id
-        other.ids, other._uuids, other.tombstones = dict(self.ids), dict(self._uuids), set(self.tombstones)
+        other.tombstones = set(self.tombstones)
         other.seq = self.seq
         other._pending = Pending(full=False)
         return other
@@ -441,8 +462,8 @@ class Model:
             self._txn = None
 
     def _restore(self, saved: Model) -> None:
-        """トランザクションの前の版 saved に戻す（観察用の記録と記録先はそのまま）。"""
-        self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、軸を戻す前に名前へ直す
+        """Go back to the version saved from before the transaction (the observation logs and the journal stay)."""
+        self.slice_log._flush()  # the log can hold member numbers: make them ids before the dimensions go back
         for f in dataclasses.fields(Model):
             if f.name not in _KEPT_ON_RESTORE:
                 setattr(self, f.name, getattr(saved, f.name))
@@ -475,208 +496,188 @@ class Model:
     @_operation
     def add_dimension(self, name: str, members, *, ordered: bool = False, id: str | None = None) -> Dimension:
         """Add the dimension. id is its UUID (made if None). The members get new UUIDs (add_member sets one).
-        If id is the UUID of a dimension with the same name, nothing changes (the dimension is defined again)."""
-        by_id = self.dimensions_by_id()
-        id, handle = self._resolve(id, lambda h: h in by_id)
-        if handle is not None:
-            if by_id[handle].name != name:
-                raise ValueError(f"{name}: 軸の名前は変えられない（ID {id} は {by_id[handle].name}）")
-            return by_id[handle]
-        # A replaced dimension would leave the Metrics on it with keys of the old members.
-        if name in self.dimensions:
-            raise ValueError(f"{name}: 同じ名前の軸がある")
-        if name in self.metrics:
-            raise ValueError(f"{name}: 同じ名前の Metric がある（式の中で軸と区別できなくなる）")
-        members = list(members)
-        d = Dimension(name, members, ordered=ordered, id=self._new_id(), ids=[self._new_id() for _ in members])
-        self.dimensions[name] = d
-        self._bind(id, d.id)
-        for h in d.ids:
-            self._bind(uuid7(), h)
+        If id is the UUID of a dimension, only its name changes (rename_dimension); the members stay."""
+        id, old = self._same_object("軸", name, id, self.dimensions, self._dim_ids)
+        if old is not None:
+            if old.name != name:
+                self.rename_dimension(id, name)
+            return old
+        self._check_dim_name(name)
+        d = Dimension(name, members, ordered=ordered, id=id)
+        self.dimensions[id] = d
+        self._dim_ids[name] = id
         return d
+
+    @_operation
+    def rename_dimension(self, dim: str, new: str) -> None:
+        """Rename the dimension. The formulas and all internal state hold the dimension id, so nothing is
+        calculated again and no formula changes: the display shows the new name. The id does not change."""
+        d = self.dimension(dim)
+        if new == d.name:
+            return
+        self._check_dim_name(new)
+        del self._dim_ids[d.name]
+        d.name = new
+        self._dim_ids[new] = d.id
+
+    def _check_dim_name(self, name: str) -> None:
+        # A replaced dimension would leave the Metrics on it with keys of the old members.
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"軸の名前は空でない文字列: {name!r}")
+        if name in self._dim_ids:
+            raise ValueError(f"{name}: 同じ名前の軸がある")
+        if name in self._metric_ids:
+            raise ValueError(f"{name}: 同じ名前の Metric がある（式の中で軸と区別できなくなる）")
 
     # ------------------------------------------------ UUIDs
 
-    def _resolve(self, id: str | None, exists) -> tuple[str, int | None]:
-        """Return (UUID, handle). The handle is None if the UUID is new (a None id makes a UUIDv7).
-        exists(handle) tells if the handle is an object of the kind that the caller defines. If the UUID is
-        a tombstone, or it belongs to an object of a different kind, raise DuplicateId."""
-        if id is None:
-            return uuid7(), None
-        if not isinstance(id, str) or not id:
-            raise ValueError(f"ID は空でない文字列: {id!r}")
-        if id in self.tombstones:
-            raise DuplicateId(f"ID {id} は消したオブジェクトのもの（再利用できない）")
-        handle = self.ids.get(id)
-        if handle is not None and not exists(handle):
-            raise DuplicateId(f"ID {id} は別の種類のオブジェクトのもの")
-        return id, handle
-
-    def _bind(self, id: str, handle: int) -> None:
-        self.ids[id] = handle
-        self._uuids[handle] = id
-
-    def _forget(self, handle: int) -> None:
-        """Make the UUID of a removed object a tombstone."""
-        id = self._uuids.pop(handle, None)
-        if id is not None:
-            del self.ids[id]
-            self.tombstones.add(id)
-
-    def uuid_of(self, handle: int) -> str:
-        """The UUID of a dimension, member, property, or Metric handle."""
-        return self._uuids[handle]
-
-    def metric_id(self, name: str) -> str:
-        return self.uuid_of(self._metric(name).id)
-
-    def dimension_id(self, name: str) -> str:
-        return self.uuid_of(self.dimension(name).id)
-
-    def member_id(self, dim: str, member: str) -> str:
-        return self.uuid_of(self.dimension(dim).id_of(member))
-
-    def property_id(self, dim: str, prop: str) -> str:
-        d = self.dimension(dim)
-        if prop not in d.property_ids:
-            raise ValueError(f"{dim} にプロパティ {prop} がない")
-        return self.uuid_of(d.property_ids[prop])
-
-    def _new_id(self) -> int:
-        """The handle of a dimension, member, property, or Metric: an integer that is unique in the model.
-
-        A copy (fork) continues from the same number, so objects added separately to the copy and to the
-        original can get the same handle (to merge the changes of a copy, give the handles again).
-        """
-        self._next_id += 1
-        return self._next_id - 1
-
-    def metric_name(self, id: int) -> str:
-        """ID の Metric の今の名前。"""
-        m = self.metrics_by_id().get(id)
-        if m is None:
-            raise ValueError(f"ID {id} の Metric がない")
-        return m.name
-
-    def metrics_by_id(self) -> dict[int, Metric]:
-        """ID -> Metric。記録の再生のように ID で何度も引くときは、これを 1 回作って使う。"""
-        return {m.id: m for m in self.metrics.values()}
-
-    def dimensions_by_id(self) -> dict[int, Dimension]:
-        return {d.id: d for d in self.dimensions.values()}
-
     @_operation
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str], *,
-                     id: str | None = None) -> None:
-        """Add the property prop (a member of dim -> a member of target) to the dimension dim. id is its UUID.
+                     id: str | None = None) -> str:
+        """Add the property prop (a member of dim -> a member of target) to the dimension dim (ids). id is its
+        UUID. The members in mapping are ids. Return the property id.
 
-        If id is the UUID of this property, the mapping replaces the old one (the name cannot change).
+        If id is the UUID of a property of dim, the mapping replaces the old one (a new name renames it).
         Then the Metrics that use the property in a formula (`[BY: dim.prop]`) are calculated again.
         If prop is the name of a property with a different UUID, raise ValueError.
         """
-        d = self.dimension(dim)
-        id, handle = self._resolve(id, lambda h: h in d.property_ids.values())
-        if handle is None:
-            if prop in d.properties:
-                raise ValueError(f"{dim}.{prop}: 同じ名前のプロパティが別の ID にある")
-        else:
-            old = next(p for p, h in d.property_ids.items() if h == handle)
-            if old != prop:
-                raise ValueError(f"{dim}.{prop}: プロパティの名前は変えられない（ID {id} は {old}）")
-        d.add_property(prop, self.dimension(target), mapping)
-        if handle is None:
-            d.property_ids[prop] = self._new_id()
-            self._bind(id, d.property_ids[prop])
-        self.engine.dimension_changed(self, dim)  # エンジンが持つ対応表を新しい中身にする
+        d, t = self.dimension(dim), self.dimension(target)
+        id, old = self._same_object("プロパティ", prop, id, d.properties, d._props, f"{d.name}.{prop}")
+        if old is not None and d.property_names[id] != prop:
+            self.rename_property(d.id, id, prop)
+        if old is None:
+            self._check_prop_name(d, prop)
+        d.add_property(id, prop, t, mapping)
+        self.engine.dimension_changed(self, d.id)  # the engine replaces the mapping that it holds
         for m in self.metrics.values():
-            if m.written is not None and uses_property(m.written, dim, prop):
-                self._redefine(m.name)
+            if m.written is not None and uses_property(m.written, d.id, id):
+                self._redefine(m.id)
+        return id
+
+    @_operation
+    def rename_property(self, dim: str, prop: str, new: str) -> None:
+        """Rename the property (ids). Nothing is calculated again and no formula changes. The id does not change."""
+        d = self.dimension(dim)
+        prop = self._prop(d, prop)
+        if new == d.property_names[prop]:
+            return
+        self._check_prop_name(d, new)
+        d.rename_property(prop, new)
+
+    @staticmethod
+    def _prop(d: Dimension, prop: str) -> str:
+        """Check the property id. ValueError if d does not have it."""
+        if prop not in d.properties:
+            raise ValueError(f"{d.name} にプロパティ {prop} がない")
+        return prop
+
+    @staticmethod
+    def _check_prop_name(d: Dimension, name: str) -> None:
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{d.name}: プロパティの名前は空でない文字列: {name!r}")
+        if name in d._props:
+            raise ValueError(f"{d.name}.{name}: 同じ名前のプロパティがある")
 
     @_operation
     def set_property_values(self, dim: str, prop: str, values: Mapping[str, str | None]) -> None:
-        """Set the values of the property prop for some members of dim. A None value removes the value of the member.
+        """Set the values of the property prop (ids) for some members of dim ({member id: member id}). A None
+        value removes the value of the member.
 
         The values of the other members do not change. Then it calculates again like add_property.
         """
         d = self.dimension(dim)
-        if prop not in d.properties:
-            raise ValueError(f"{dim} にプロパティ {prop} がない")
-        target, mapping = d.properties[prop]
+        id = self._prop(d, prop)
+        target, mapping = d.properties[id]
         mapping = dict(mapping)
         for member, value in values.items():
-            if member not in d:
-                raise ValueError(f"{dim}: メンバー {member!r} がない")
+            self._member(d, member)
             if value is None:
                 mapping.pop(member, None)
             else:
                 mapping[member] = value
-        self.add_property(dim, prop, target, mapping, id=self.uuid_of(d.property_ids[prop]))
+        self.add_property(d.id, d.property_names[id], target, mapping, id=id)
 
-    def _same_metric(self, name: str, id: str | None) -> tuple[str, Metric | None]:
-        """Return (UUID, the Metric that the UUID names, or None if it is new) for add_input and add_formula.
-
-        If the UUID names a Metric with a different name, rename it first. If name is the name of a Metric
-        with a different UUID, raise ValueError.
-        """
-        by_id = self.metrics_by_id()
-        id, handle = self._resolve(id, lambda h: h in by_id)
-        if handle is None:
-            if name in self.metrics:
-                raise ValueError(f"{name}: 同じ名前の Metric が別の ID にある")
-            return id, None
-        old = by_id[handle]
-        if old.name != name:
-            self.rename_metric(old.name, name)
+    def _same_object(self, what: str, name: str, id: str | None, objects: Mapping[str, Any],
+                     names: Mapping[str, str], shown: str | None = None) -> tuple[str, Any]:
+        """Return (id, the object of kind what that the id names, or None if it is new) for a definition.
+        objects is the id -> object table and names the name index of that kind. A None id makes a UUIDv7.
+        If name is the name of an object with a different id, raise ValueError. If the id is a tombstone,
+        or it belongs to an object of a different kind, raise DuplicateId."""
+        if id is None:
+            id = uuid7()
+        elif not isinstance(id, str) or not id:
+            raise ValueError(f"ID は空でない文字列: {id!r}")
+        elif id in self.tombstones:
+            raise DuplicateId(f"ID {id} は消したオブジェクトのもの（再利用できない）")
+        old = objects.get(id)
+        if old is None:
+            if (id in self.metrics or id in self.dimensions
+                    or any(id in d._by_id or id in d.properties for d in self.dimensions.values())):
+                raise DuplicateId(f"ID {id} は別の種類のオブジェクトのもの")
+            if name in names:
+                raise ValueError(f"{shown or name}: 同じ名前の{what}が別の ID にある")
         return id, old
 
+    def _register(self, m: Metric, old: Metric | None) -> None:
+        """Put the new definition m in the catalog. If the id names a Metric with a different name, rename it
+        first."""
+        if old is not None and old.name != m.name:
+            self.metrics[m.id] = old  # rename the old definition (the override input follows it)
+            self.rename_metric(old.id, m.name)
+        self.metrics[m.id] = m
+        if old is None:
+            self._metric_ids[m.name] = m.id
+
     @_operation
-    def add_input(self, name: str, dims, cells: Mapping[Key, float | bool] | None = None,
+    def add_input(self, name: str, dims: Iterable[str], cells: Mapping[Key, float | bool | str] | None = None,
                   *, kind: Kind = "number", storage: Any = None, partition: str | None = None,
-                  id: str | None = None) -> None:
-        """cells is {key: value}. You can also give a large data set in the storage format of the engine (storage).
+                  id: str | None = None) -> str:
+        """Add the input Metric and return its id. dims, partition and the dimension of kind ("member:<dim id>")
+        are dimension ids. cells is {(member id, ...): value} (a member-type value is a member id). You can also
+        give a large data set in the storage format of the engine (storage).
 
         id is the UUID of the Metric. If it is the UUID of a Metric, this definition replaces the old one
         (the name can change). If the dimensions and the kind are the same, the engine calculates the change
         of all cells incrementally (a formula Metric can become an input Metric).
         """
         self._check_name(name)
-        self._check_kind(name, kind)
-        dims = tuple(dims)
-        for d in dims:
-            self.dimension(d)
+        kind = self._check_kind(name, kind)
+        dims = tuple(self.dimension(d).id for d in dims)
         self._check_key_width(name, dims)
-        id, old = self._same_metric(name, id)
-        new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition),
-                     id=old.id if old is not None else self._new_id())
+        id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
+        new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition), id=id,
+                     override=None if old is None else old.override)  # rename and remove still follow the link
         if storage is None:
-            self.metrics[name] = new  # _check は登録した Metric の軸で検査する
+            self.metrics[id] = new  # _check uses the dimensions of the registered Metric
             try:
-                checked = {key: self._check(name, key, value) for key, value in (cells or {}).items()}
+                checked = {tuple(key): self._check(id, tuple(key), value) for key, value in (cells or {}).items()}
             except ValueError:
                 if old is None:
-                    del self.metrics[name]
+                    del self.metrics[id]
                 else:
-                    self.metrics[name] = old
+                    self.metrics[id] = old
                 raise
             storage = self.engine.from_cells(dims, kind, {k: v for k, v in checked.items() if v is not None},
                                              self, partition)
-        if old is not None and self._plan is not None and self._same_type(old, new) and name not in self._pending.forced:
-            # 差分集計には変更前の値が要る。まだ再計算していない変更があれば、その前の値に戻して取っておく
-            self._keep_old(name)
-            # 変更前後で値が違うセルだけを変更範囲にする
-            _, diff = self.engine.replace_diff(self.engine.share(self._pending.old_slices[name]), {}, storage, self)
+        if old is not None and self._plan is not None and self._same_type(old, new) and id not in self._pending.forced:
+            # Incremental aggregation needs the old values. If changes wait for a recalc, go back to the values before them
+            self._keep_old(id)
+            # Only the cells with a different value go in the change range
+            _, diff = self.engine.replace_diff(self.engine.share(self._pending.old_slices[id]), {}, storage, self)
             if diff is not None:
-                self._pending.changed[name] = union_region(self._pending.changed.get(name), diff)
-        self.metrics[name] = new
-        self._values[name] = storage
-        if old is None:
-            self._bind(id, new.id)
-        self._redefine(name, old)
+                self._pending.changed[id] = union_region(self._pending.changed.get(id), diff)
+        self._register(new, old)
+        self._values[id] = storage
+        self._redefine(id, old)
+        return id
 
     @_operation
-    def add_formula(self, name: str, dims, formula: Expr | str, *, kind: Kind = "number",
-                    partition: str | None = None, overridable: bool = False, id: str | None = None) -> None:
-        """formula is an AST or the text of a formula. A syntax error in the text raises ParseError here.
+    def add_formula(self, name: str, dims: Iterable[str], formula: Expr | str, *, kind: Kind = "number",
+                    partition: str | None = None, overridable: bool = False, id: str | None = None) -> str:
+        """Add the formula Metric and return its id. dims, partition and the dimension of kind are dimension ids.
+        formula is an AST or the text of a formula, written with names. A syntax error in the text raises
+        ParseError here, and a reference to an unknown Metric raises FormulaError (unknown_metric). The names in
+        the formula become ids here (bind), so a rename does not change the formula.
 
         If overridable, set_cell can replace the result of the formula with a manual value. The value has
         priority over the formula, and goes downstream as it is. set_cell with None gives the cell the result
@@ -687,138 +688,123 @@ class Model:
         again and sends only the changed cells downstream (an input Metric can become a formula Metric).
         """
         self._check_name(name)
-        self._check_kind(name, kind)
+        kind = self._check_kind(name, kind)
         if isinstance(formula, str):
             formula = parse(formula, self_name=name)
-        dims = tuple(dims)
-        for d in dims:
-            self.dimension(d)
+        dims = tuple(self.dimension(d).id for d in dims)
         self._check_key_width(name, dims)
-        id, old = self._same_metric(name, id)
+        id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
+        formula = bind(formula, self, {name: id})  # the formula can refer to the Metric that it defines
         m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable,
-                   id=old.id if old is not None else self._new_id())
-        if old is not None and old.formula is None and name in self._pending.changed:
-            self._invalidate()  # 未反映の入力の変更があった入力を式にするのは、全体で計算し直す
-        self.metrics[name] = m
-        if old is None:
-            self._bind(id, m.id)
-        if overridable and m.override_name not in self.metrics:  # 読み込みでは上書き値が先に入る
-            self.add_input(m.override_name, dims, kind=kind, partition=partition)
-        self._redefine(name, old)
+                   id=id, override=None if old is None else old.override)  # also kept while not overridable
+        if old is not None and old.formula is None and id in self._pending.changed:
+            self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
+        self._register(m, old)
+        if overridable and m.override is None:
+            if m.override_name not in self._metric_ids:  # a load reads the override values first
+                self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
+            m.override = self._metric_ids[m.override_name]
+        self._redefine(id, old)
+        return id
 
     # ------------------------------------------------ Metric の削除と名前の変更
 
     @_operation
-    def remove_metric(self, name: str) -> None:
-        """Remove the Metric. Only a Metric that no formula refers to can go (no other value changes).
-        The hidden override input of an overridable Metric goes with it. The handle is not used again, and
-        the UUID becomes a tombstone."""
-        m = self._own_metric(name)
+    def remove_metric(self, id: str) -> None:
+        """Remove the Metric (an id). Only a Metric that no formula refers to can go (no other value changes).
+        The hidden override input of an overridable Metric goes with it. The UUIDs become tombstones."""
+        m = self._own_metric(id)
         users = sorted(x.name for x in self.metrics.values()
-                       if x.written is not None and x.name != name and references_metric(x.written, name))
+                       if x.written is not None and x.id != m.id and references_metric(x.written, m.id))
         if users:
-            raise ValueError(f"{name} は {', '.join(users)} の式が参照しているので消せない")
-        gone = {name} | ({m.override_name} if m.overridable and m.override_name in self.metrics else set())
-        for n in gone:
-            self._forget(self.metrics[n].id)
-            self.metrics.pop(n, None)
-            self._state.pop(n, None)
+            raise ValueError(f"{m.name} は {', '.join(users)} の式が参照しているので消せない")
+        gone = {m.id} | ({m.override} if m.override is not None else set())
+        for i in gone:
+            self.tombstones.add(i)
+            del self._metric_ids[self.metrics[i].name]
+            del self.metrics[i]
+            self._state.pop(i, None)
             for regions in self._samples.values():
-                regions.pop(n, None)
+                regions.pop(i, None)
         self._pending.forget(gone)
-        if self._plan is not None:  # 誰も参照していないので、計画からその段階を外すだけで済む
+        if self._plan is not None:  # no formula refers to it, so only its step leaves the plan
             self._plan = [s for s in self._plan if s.names[0] not in gone]
             self._levels = [[s for s in level if s.names[0] not in gone] for level in self._levels]
 
     @_operation
-    def rename_metric(self, old: str, new: str) -> None:
-        """Metric の名前を変える。値は変わらないので計算し直さない。式の中の参照（Metric を使った
-        BY も）はすべて新しい名前になる。上書き用の隠し入力の名前も一緒に変わる。ID は変わらない。"""
-        m = self._own_metric(old)
+    def rename_metric(self, id: str, new: str) -> None:
+        """Rename the Metric (an id). The formulas and all internal state hold the Metric id, so nothing is
+        calculated again and no formula changes: the display of a formula shows the new name. The hidden
+        override input of an overridable Metric follows the owner. The id does not change."""
+        m = self._own_metric(id)
+        if new == m.name:
+            return
         if not isinstance(new, str) or not new or new.startswith("__"):
             raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {new!r}")
-        if new in self.metrics:
+        if new in self._metric_ids:
             raise ValueError(f"{new}: 同じ名前の Metric がある")
         self._check_name(new)
-        self.recalc()  # 変更範囲などは名前で持つので、ためている変更を先に片付ける
-        self.slice_log._flush()
-        names = {old: new}
-        if m.overridable and m.override_name in self.metrics:
-            names[m.override_name] = f"__override__{new}"
-        self.metrics = {names.get(k, k): v for k, v in self.metrics.items()}  # 並び順は保つ
-        self._state = {names.get(k, k): v for k, v in self._state.items()}
-        for o, n in names.items():
-            self.metrics[n].name = n
-        for store in ("_estimate_refs", "_estimate_users"):
-            setattr(self, store, {names.get(k, k): frozenset(names.get(x, x) for x in v)
-                                  for k, v in getattr(self, store).items()})
-        for regions in self._samples.values():
-            for o, n in names.items():
-                if o in regions:
-                    regions[n] = regions.pop(o)
-        for x in self.metrics.values():
-            if x.written is not None:
-                x.written = rename_metrics(x.written, names)
-            if x.formula is not None:
-                x.formula = rename_metrics(x.formula, names)
-        self._edges = {src: [dataclasses.replace(e, target=names.get(e.target, e.target)) for e in edges]
-                       for src, edges in self._edges.items()}
-        self._delta = {n: dataclasses.replace(dp, source=names.get(dp.source, dp.source),
-                                              aux=tuple(names.get(a, a) for a in dp.aux),
-                                              count=None if dp.count is None else rename_metrics(dp.count, names))
-                       for n, dp in self._delta.items()}
-        if self._plan is not None:
-            step = lambda s: Step(tuple(names.get(n, n) for n in s.names), s.scan_dim)
-            self._plan = [step(s) for s in self._plan]
-            self._levels = [[step(s) for s in level] for level in self._levels]
+        renamed = [(m, new)]
+        if m.override is not None:
+            renamed.append((self.metrics[m.override], f"__override__{new}"))
+        for x, n in renamed:
+            del self._metric_ids[x.name]
+            x.name = n
+            self._metric_ids[n] = x.id
 
-    def _own_metric(self, name: str) -> Metric:
-        """利用者が名前で扱える Metric（上書き用の隠し入力は、持ち主と一緒にしか扱えない）。"""
-        if name not in self.metrics:
-            raise ValueError(f"Metric {name} がない")
-        if name.startswith("__override__"):
-            raise ValueError(f"{name} は上書き用の隠し入力なので、持ち主の Metric を通して扱う")
-        return self.metrics[name]
+    def _own_metric(self, id: str) -> Metric:
+        """A Metric that the user can handle (the hidden override input goes only with its owner)."""
+        m = self.metric(id)
+        if m.name.startswith("__override__"):
+            raise ValueError(f"{m.name} は上書き用の隠し入力なので、持ち主の Metric を通して扱う")
+        return m
 
     @staticmethod
     def _same_type(old: Metric, new: Metric) -> bool:
         return old.dims == new.dims and old.kind == new.kind
 
-    def _redefine(self, name: str, old: Metric | None = None) -> None:
-        """name の定義を変えたことを記録する。次の再計算では、変えた Metric だけを検査して計算計画を
-        直し、その Metric を計算し直して、値が変わったセルだけを下流へ伝える。
+    def _redefine(self, id: str, old: Metric | None = None) -> None:
+        """Record that the definition of the Metric changed. The next recalculation checks only the changed
+        Metrics, repairs the plan, calculates them again and sends only the changed cells downstream.
 
-        軸か値の種類が変わると、それを参照する式の型検査からやり直しになるので、全体で計算し直す。
+        If the dimensions or the kind changed, the formulas that refer to it need the type check again,
+        so everything is calculated again.
         """
-        if self._plan is None or (old is not None and not self._same_type(old, self.metrics[name])):
+        if self._plan is None or (old is not None and not self._same_type(old, self.metrics[id])):
             self._invalidate()
             return
-        self._pending.dirty.add(name)
+        self._pending.dirty.add(id)
 
     def _check_name(self, name: str) -> None:
-        if name in self.dimensions:
+        if name in self._dim_ids:
             raise ValueError(f"{name}: 同じ名前の軸がある（式の中で軸と区別できなくなる）")
 
-    def _check_kind(self, name: str, kind: Kind) -> None:
+    def _check_kind(self, name: str, kind: Kind) -> Kind:
+        """Check the kind ("number", "boolean" or "member:<dim id>")."""
         if kind in ("number", "boolean"):
-            return
-        if kind.startswith("member:") and kind.removeprefix("member:") in self.dimensions:
-            return
-        raise ValueError(f"{name}: 値の種類は number、boolean、member:<軸名> のいずれか（{kind!r}）")
+            return kind
+        if isinstance(kind, str) and kind.startswith("member:") and kind.removeprefix("member:") in self.dimensions:
+            return kind
+        raise ValueError(f"{name}: 値の種類は number、boolean、member:<軸の ID> のいずれか（{kind!r}）")
 
-    @staticmethod
-    def _check_partition(name: str, dims: tuple[str, ...], partition: str | None) -> str | None:
-        if partition is not None and partition not in dims:
-            raise ValueError(f"{name}: 分割軸 {partition} が軸 {dims} にない")
+    def _check_partition(self, name: str, dims: tuple[str, ...], partition: str | None) -> str | None:
+        """Check the partition dimension (an id)."""
+        if partition is None:
+            return None
+        if partition not in dims:
+            raise ValueError(f"{name}: 分割軸 {partition} が軸 {self._dim_names(dims)} にない")
         return partition
 
+    def _dim_names(self, dims) -> tuple[str, ...]:
+        return tuple(self.dimensions[d].name for d in dims)
+
     def _check_key_width(self, name: str, dims: tuple[str, ...]) -> None:
-        """エンジンが 1 セルのキーを固定幅の整数で持つなら、軸の組み合わせがその幅に収まるか確かめる
-        。"""
+        """If the engine holds the key of a cell in a fixed-width integer, make sure that the dimensions fit
+        in that width."""
         width = self.engine.key_bits
         if width is None or not dims:
             return
-        bits = {d: _bits(len(self.dimension(d).members)) for d in dims}
+        bits = {self.dimension(d).name: _bits(len(self.dimension(d).members)) for d in dims}
         if sum(bits.values()) > width:
             detail = ", ".join(f"{d} {b} ビット" for d, b in bits.items())
             raise ValueError(f"{name}: 軸の組み合わせが {width} ビットのキーに収まらない（{detail}）。"
@@ -827,48 +813,48 @@ class Model:
     # ------------------------------------------------ 按分
 
     @_operation
-    def spread(self, name: str, total: float, *, how: str = "proportional",
-               where: Mapping[str, str] | None = None, **coords: str) -> int:
-        """入力 Metric の範囲に、合計が total になるよう値を配る。書き込んだセルの数を返す。
+    def spread(self, id: str, total: float, coords: Mapping[str, str] | None = None, *,
+               how: str = "proportional", where: Mapping[str, str] | None = None) -> int:
+        """Spread values over a range of an input Metric (an id) so that their sum is total. Return the number
+        of written cells.
 
-            m.spread("Budget", 12000, Version="予算", Month="m01", where={"Product.Category": "ハード"})
+            m.spread(budget, 12000, {version: plan, month: m01}, where={f"{product}.{category}": hardware})
 
-        範囲は、coords で指定した軸はそのメンバー、それ以外の軸は全メンバー（where の
-        「軸.プロパティ」が一致するものだけ）。how="proportional" なら、範囲に今ある値の比率で配る。
-        今の値の合計が 0 のときや how="even" のときは、今値のあるセルへ均等に配る。
-        値のあるセルが 1 つもなければ、範囲の全組み合わせへ均等に配る。
+        The range is the given member of each dimension in coords (dimension id -> member id), and all members
+        of the other dimensions (only the members whose "<dimension id>.<property id>" in where has the value,
+        a member id). With how="proportional", the values follow the ratio of the current values in the range.
+        If the current sum is 0, or how="even", each cell with a value gets the same share. If no cell has a
+        value, each combination in the range gets the same share.
         """
-        m = self._metric(name)
+        m = self.metric(id)
+        name = m.name
         if m.formula is not None or m.kind != "number":
             raise ValueError(f"{name}: 按分できるのは number の入力 Metric だけ")
         if isinstance(total, bool) or not isinstance(total, (int, float)):
             raise ValueError(f"{name}: 按分する合計は数値（{total!r}）")
         if how not in ("proportional", "even"):
             raise ValueError(f"how は proportional か even（{how!r}）")
-        region: dict[str, frozenset[str]] = {}
-        for d, member in coords.items():
-            if d not in m.dims:
-                raise ValueError(f"{name}: 軸 {d} がない")
-            if member not in self.dimension(d):
-                raise ValueError(f"{name}: {d} にメンバー {member!r} がない")
-            region[d] = frozenset([member])
+        region: Restrict = {}
+        for d, member in self._coords(m, coords or {}).items():
+            region[d] = frozenset([self._member(self.dimensions[d], member)])
         for path, value in (where or {}).items():
-            d, _, prop = path.partition(".")
-            if d not in m.dims or prop not in self.dimension(d).properties:
+            dim, _, prop = path.partition(".")
+            d = self.dimensions.get(dim)
+            if d is None or d.id not in m.dims or prop not in d.properties:
                 raise ValueError(f"{name}: where の {path!r} は「軸.プロパティ」ではない")
-            mapping = self.dimension(d).properties[prop][1]
-            chosen = frozenset(x for x in self.dimension(d).members if mapping.get(x) == value)
-            region[d] = region.get(d, chosen) & chosen
+            target, mapping = d.properties[prop]
+            chosen = frozenset(x for x in d.ids if mapping.get(x) == value)
+            region[d.id] = region.get(d.id, chosen) & chosen
         self.recalc()
-        # セルを名前の組にせず、軸ごとのメンバー番号の列のまま配って、まとめて書き込む
-        cols, values = self.engine.columns(self._values[name], region or None, self)
-        weight = math.fsum(values)  # 足す順（エンジンごとに違う）で結果が変わらないように
+        # Spread over the member number columns (one for each dimension) and write them at one time, not cell by cell
+        cols, values = self.engine.columns(self._values[m.id], region or None, self)
+        weight = math.fsum(values)  # the order of the sum (different for each engine) must not change the result
         if values and how == "proportional" and weight != 0:
             new = [float(total * v / weight) for v in values]
         else:
             n = len(values)
-            if not values:  # 値のあるセルがなければ、範囲の全組み合わせ
-                index = [self.dimension(d)._index for d in m.dims]
+            if not values:  # no cell has a value: all combinations in the range
+                index = [self.dimension(d)._by_id for d in m.dims]
                 picks = [sorted(ix[x] for x in region[d]) if d in region else range(len(ix))
                          for d, ix in zip(m.dims, index)]
                 combos = list(itertools.product(*picks))
@@ -876,23 +862,23 @@ class Model:
                     raise ValueError(f"{name}: 按分先のセルがない")
                 cols, n = [list(c) for c in zip(*combos)], len(combos)
             new = [float(total / n)] * n
-        self._write_many(name, cols, new)
+        self._write_many(m.id, cols, new)
         return len(new)
 
     # ------------------------------------------------ メンバーの追加
 
     @_operation
     def add_member(self, dim: str, member: str, *, at: int | None = None, id: str | None = None,
-                   **properties: str) -> None:
-        """Add the member to the dimension dim. id is its UUID. properties sets the property values.
+                   properties: Mapping[str, str] | None = None) -> str:
+        """Add the member to the dimension dim (an id) and return the member id. id is its UUID. properties sets
+        the property values ({property id: member id of the target}).
 
-            m.add_member("Product", "p2000", Category="c03")
-            m.add_member("Account", "粗利", at=2)  # put it at position 2 (from 0) of the order
+            m.add_member(product, "p2000", properties={category: c03})
+            m.add_member(account, "粗利", at=2)  # put it at position 2 (from 0) of the order
 
         Without at, the member goes to the end of the order. A dimension without order also accepts a position
         in the middle (the engine gives the number at the end and changes only the order, so the other cells
         do not change). An ordered dimension (a time series) accepts only the end.
-        You cannot set a property with the name at or id here (use add_property after the add).
 
         If id is the UUID of a member of dim, the member is defined again: it gets the name member, the position
         at (if given), and the property values. If member is the name of a different member, raise ValueError.
@@ -902,48 +888,50 @@ class Model:
         so the next recalculation calculates that range.
         """
         d = self.dimension(dim)
-        for prop, value in properties.items():
-            if prop not in d.properties:
-                raise ValueError(f"{dim} にプロパティ {prop} がない")
-            if value not in self.dimension(d.properties[prop][0]):
-                raise ValueError(f"{dim}.{prop}: {d.properties[prop][0]} に {value!r} がない")
-        id, handle = self._resolve(id, lambda h: h in d._by_id)
-        if handle is not None:
-            old = d.members[d._by_id[handle]]
-            if old != member:
-                self.rename_member(dim, old, member)
+        props = {}
+        for pid, value in (properties or {}).items():
+            self._prop(d, pid)
+            self._member(self.dimensions[d.properties[pid][0]], value)
+            props[pid] = value
+        if id is None and member in d._index:
+            raise ValueError(f"{d.name}: メンバー {member!r} はすでにある")
+        id, old = self._same_object("メンバー", member, id, d._by_id, d._index, f"{d.name}.{member}")
+        if old is not None:
+            if d.member_of(id) != member:
+                self.rename_member(d.id, id, member)
             if at is not None:
-                self.move_member(dim, member, at)
-            for prop, value in properties.items():
-                self.set_property_values(dim, prop, {member: value})
-            return
+                self.move_member(d.id, id, at)
+            for pid, value in props.items():
+                self.set_property_values(d.id, pid, {id: value})
+            return id
         bits = _bits(len(d.members))
-        handle = self._new_id()
-        d.add_member(member, handle, at)
+        d.add_member(member, id, at)
         if self.engine.key_bits is not None and _bits(len(d.members)) > bits:
-            try:  # 軸のビット幅が増えた。キーに収まらなくなる Metric や式があれば、足さずにエラーにする
-                self.engine.dimension_changed(self, dim)
-                self._check_widths(dim)
+            try:  # the bit width of the dimension grew: if a Metric or a formula no longer fits the key, fail
+                self.engine.dimension_changed(self, d.id)
+                self._check_widths(d.id)
             except Exception:
-                d.remove_member(member)
-                self.engine.dimension_changed(self, dim)
+                d.remove_member(id)
+                self.engine.dimension_changed(self, d.id)
                 raise
-        self._bind(id, handle)
-        for prop, value in properties.items():
-            d.set_property_value(prop, member, value, self.dimension(d.properties[prop][0]))
-        self._member_added(dim)
-        self._pending.added.setdefault(dim, set()).add(member)
+        for pid, value in props.items():
+            d.set_property_value(pid, id, value, self.dimensions[d.properties[pid][0]])
+        self._member_added(d.id)
+        self._pending.added.setdefault(d.id, set()).add(id)
+        return id
 
     @_operation
     def move_member(self, dim: str, member: str, at: int) -> None:
-        """軸 dim のメンバー member を、並び順の at 番目（0 から）に移す。
+        """Move the member of the dimension dim (ids) to position at (from 0) of the order.
 
-            m.move_member("Account", "粗利", 2)
+            m.move_member(account, gross_profit, 2)
 
-        並び順は rows() や一覧の表示の順で、エンジンの番号もセルも変えないので、何も計算し直さない。
-        順序付きの軸（時系列）は並び順が計算の意味を持つので、並び替えられない。
+        The order is the order of rows() and of a list display. The number and the cells of the engine do not
+        change, so nothing is calculated again. An ordered dimension (a time series) cannot change its order,
+        because the order has a meaning in the calculation.
         """
-        self.dimension(dim).move_member(member, at)
+        d = self.dimension(dim)
+        d.move_member(self._member(d, member), at)
 
     def _check_widths(self, dim: str) -> None:
         """軸 dim のビット幅が増えたあとも、dim を持つ Metric と、すべての式の途中の結果が、エンジンの
@@ -951,9 +939,10 @@ class Model:
         for m in self.metrics.values():
             if dim in m.dims:
                 self._check_key_width(m.name, m.dims)
-        for m in self.metrics.values():
-            if m.written is not None:
-                self.engine.planner.check(m.written, self)
+        with self._named_errors():
+            for m in self.metrics.values():
+                if m.written is not None:
+                    self.engine.planner.check(m.written, self)
 
     def _member_added(self, dim: str) -> None:
         """軸 dim にメンバーを足したことをエンジンと格納データに反映する。"""
@@ -966,60 +955,38 @@ class Model:
     # ------------------------------------------------ メンバーの名前の変更と削除
 
     @_operation
-    def rename_member(self, dim: str, old: str, new: str) -> None:
-        """軸 dim のメンバー old の名前を new にする。
+    def rename_member(self, dim: str, member: str, new: str) -> None:
+        """Rename the member of the dimension dim (ids) to new.
 
-        値も計算結果も変わらない（エンジンの中ではメンバーを番号で持つ）ので、計算し直さない。
-        プロパティの対応表、メンバー型の Metric、式の中の `dim."old"` もすべて新しい名前になる。
+        The formulas, the property maps, the stored data and the change ranges hold the member id, so nothing is
+        calculated again and nothing else changes: the display shows the new name. The id does not change.
         """
-        self.dimension(dim)  # 軸があることを確かめる
-        self.recalc()  # 変更範囲はメンバー名で持つので、ためている変更を先に片付ける
-        self.slice_log._flush()  # 記録を今の名前で直しておく
-        self._rename_member_raw(dim, old, new)
-        for name, m in self.metrics.items():
-            if m.written is not None:
-                m.written = rename_member(m.written, dim, old, new)
-                m.formula = rename_member(m.formula, dim, old, new)
-        for name, plan in self._delta.items():
-            if plan.count is not None:
-                self._delta[name] = dataclasses.replace(plan, count=rename_member(plan.count, dim, old, new))
-
-    def _rename_member_raw(self, dim: str, old: str, new: str) -> None:
-        """メンバーの名前の変更を、軸、プロパティの対応表、格納データに反映する（式は書き換えない）。"""
-        self.dimension(dim).rename_member(old, new)
-        for other in self.dimensions.values():
-            for prop, (target, mapping) in list(other.properties.items()):
-                if target == dim and old in mapping.values():
-                    other.properties[prop] = (target, {k: new if v == old else v for k, v in mapping.items()})
-        self.engine.dimension_changed(self, dim)
-        for name, m in self.metrics.items():
-            if dim in m.dims and name in self._values:  # 再生の途中では計算 Metric の格納データがない
-                self._values[name] = self.engine.rename_member(self._values[name], dim, old, new, self)
-                if name in self._counts:
-                    self._counts[name] = self.engine.rename_member(self._counts[name], dim, old, new, self)
+        d = self.dimension(dim)
+        member = self._member(d, member)
+        if new != d.members[d._by_id[member]]:
+            d.rename_member(member, new)
 
     @_operation
     def remove_member(self, dim: str, member: str) -> None:
-        """軸 dim からメンバーを消す。
+        """Remove the member from the dimension dim (ids).
 
-        そのメンバーのセルはすべての Metric から消え、プロパティの対応表からも外れる
-        （そのメンバーを参照先にしていたメンバーは、参照先なしになる）。メンバー型の Metric で
-        そのメンバーを指していた値は空になる。式が `dim."member"` を書いていれば消せない。
+        The cells of the member go from all Metrics, and the member goes from the property mappings (a member
+        that pointed to it has no target). A member-type value that pointed to it becomes blank. If a formula
+        writes `dim."member"`, the member cannot go.
 
-        2 段階で計算し直す。まず、入力のうちそのメンバーのセルと、そのメンバーを指す値を空にして、
-        普通の入力の変更として計算し直す（差分集計と、値の変化による絞り込みが効く）。
-        次にメンバーそのものを消し、それでも変わるところだけを計算し直す。空になったメンバーを
-        消して変わるのは、全メンバーへ値を広げる演算がそのメンバーに作っていたセル（を集計した値）と、
-        そのメンバーをまたぐ前月参照だけである。
+        The recalculation has 2 steps. First, the cells of the member and the values that point to it become
+        blank in the inputs, and the engine calculates again as for a normal input change (incremental
+        aggregation and the change-based restriction work). Then the member itself goes, and only the ranges
+        that still change are calculated again: the cells that an operation that expands to all members made
+        for the member (and their aggregates), and a previous-period reference across the member.
         """
         d = self.dimension(dim)
-        if member not in d:
-            raise ValueError(f"{dim}: メンバー {member!r} がない")
+        self._member(d, member)
         for m in self.metrics.values():
             if m.written is not None and mentions_member(m.written, dim, member):
-                raise ValueError(f'{m.name} の式が {dim}."{member}" を参照しているので消せない')
+                raise ValueError(f'{m.name} の式が {d.name}."{d.member_of(member)}" を参照しているので消せない')
         self.recalc()
-        index = d._index[member]
+        index = d._by_id[member]
         point = {dim: frozenset([member])}
         values_kind = member_kind(dim)
         eng = self.engine
@@ -1033,7 +1000,7 @@ class Model:
         def has_cells(name: str) -> bool:
             return dim in self.metrics[name].dims and eng.size(eng.filter(self._values[name], point, self)) > 0
 
-        # 1. 入力を空にして、普通の変更として計算し直す
+        # 1. Make the inputs blank and calculate again as for a normal change
         sources = self._delta_sources()
         for name, m in self.metrics.items():
             if m.formula is not None:
@@ -1052,20 +1019,20 @@ class Model:
             self._pending.changed[name] = r
         self.recalc()
 
-        # 2. メンバーを消して変わる範囲を、消す前の軸と対応表のもとで求める。下流に伝えるのは、
-        #    そのメンバーのセルが実際にある Metric の消えるセルと、計算し直す範囲だけにする
+        # 2. Find the ranges that change when the member goes, with the dimension and the maps from before the
+        #    removal. Send downstream only the cells of the Metrics that have the member, and the ranges to recalculate
         todo = self.engine.planner.removal_regions(self.compiled(), self._values, self, dim, member)
-        self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、詰める前に名前へ直す
-        self._forget(d.id_of(member))
+        self.slice_log._flush()  # the log can hold member numbers: make them ids before the numbers close up
+        self.tombstones.add(member)
         self._drop_member(dim, member)
-        self._pending.forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
+        self._pending.forced.update(todo)  # always calculate the ranges again (sent downstream as an input change)
         self.recalc()
 
     def _drop_member(self, dim: str, member: str) -> None:
-        """メンバーを消したことを、軸、プロパティの対応表、格納データ（位置を詰める）に反映する
-        （計算し直さない）。"""
-        d = self.dimension(dim)
-        index = d._index[member]
+        """Apply the removal of a member (an id) to the dimension (an id), the property mappings and the stored
+        data (the positions close up). Nothing is calculated again."""
+        d = self.dimensions[dim]
+        index = d._by_id[member]
         values_kind = member_kind(dim)
         d.remove_member(member)
         for other in self.dimensions.values():
@@ -1083,177 +1050,194 @@ class Model:
     # ------------------------------------------------ 入力
 
     @_operation
-    def set_cell(self, name: str, value: float | bool | None, **coords: str) -> None:
-        m = self._metric(name)
+    def set_cell(self, id: str, value: float | bool | str | None, coords: Mapping[str, str]) -> None:
+        """Set one cell of the input Metric (an id). coords is dimension id -> member id. A member-type value is a
+        member id. None makes the cell blank."""
+        m = self.metric(id)
         if m.formula is not None:
             if not m.overridable:
-                raise ValueError(f"{name} は計算 Metric なので直接入力できない"
+                raise ValueError(f"{m.name} は計算 Metric なので直接入力できない"
                                  "（上書きしたいなら add_formula で overridable=True にする）")
-            return self.set_cell(m.override_name, value, **coords)
-        for d in coords:
-            if d not in m.dims:
-                raise ValueError(f"{name}: 軸 {d} がない")
-        key = tuple(coords[d] if d in coords else self._missing(name, d) for d in m.dims)
-        value = self._check(name, key, value)
-        if self._plan is not None and name in self._delta_sources():
-            # 差分集計には変更前の値が要る。前回の再計算以降で最初に触れたときの値を覚えておく
-            old = self._pending.old_cells.setdefault(name, {})
+            return self.set_cell(m.override, value, coords)
+        key = self._key(m, coords)
+        value = self._check(m.id, key, value)
+        id = m.id  # the key holds member ids, as the change ranges do
+        if self._plan is not None and id in self._delta_sources():
+            # Incremental aggregation needs the old value: keep the value from the first touch after the last recalc
+            old = self._pending.old_cells.setdefault(id, {})
             if key not in old:
                 point = {d: frozenset([member]) for d, member in zip(m.dims, key)}
-                cube = self.engine.to_cube(self.engine.filter(self._values[name], point, self), self)
+                cube = self.engine.to_cube(self.engine.filter(self._values[id], point, self), self)
                 old[key] = cube.cells.get(key)
-        self._values[name] = self.engine.write(self._values[name], key, value, self)
+        self._values[id] = self.engine.write(self._values[id], key, value, self)
         point = {d: frozenset([member]) for d, member in zip(m.dims, key)}
-        self._pending.changed[name] = union_region(self._pending.changed.get(name), point)
+        self._pending.changed[id] = union_region(self._pending.changed.get(id), point)
 
-    def _write_many(self, name: str, cols: list[list[int]], values: list) -> None:
-        """入力 Metric name に、軸ごとのメンバー番号の列 cols と検査済みの値 values をまとめて書き込む。
-        set_cell を 1 セルずつ呼ぶのと同じ状態になるが、変更範囲は 1 回で広げる。"""
-        m = self.metrics[name]
-        if self._plan is not None and name in self._delta_sources():
-            self._keep_old(name)  # 1 セルずつ覚える代わりに、前回の再計算の時点の値を丸ごと取っておく
-        self._values[name] = self.engine.write_many(self._values[name], cols, values, self)
-        members = [self.dimension(d).members for d in m.dims]
+    def _write_many(self, id: str, cols: list[list[int]], values: list) -> None:
+        """Write the member number columns cols (one for each dimension) and the checked values to the input
+        Metric. The state is the same as after set_cell for each cell, but the change range grows one time."""
+        m = self.metrics[id]
+        if self._plan is not None and id in self._delta_sources():
+            self._keep_old(id)  # keep all values of the last recalculation, not one cell at a time
+        self._values[id] = self.engine.write_many(self._values[id], cols, values, self)
+        members = [self.dimension(d).ids for d in m.dims]
         box = {d: frozenset(ms[i] for i in set(col)) for d, ms, col in zip(m.dims, members, cols)}
-        self._pending.changed[name] = union_region(self._pending.changed.get(name), box)
+        self._pending.changed[id] = union_region(self._pending.changed.get(id), box)
 
-    def _keep_old(self, name: str) -> None:
-        """差分集計に使う、入力 name の前回の再計算の時点の値を丸ごと取っておく（まだなければ）。
-        ためている 1 セルずつの変更前の値は、取っておく値に戻して捨てる。"""
-        if name not in self._pending.old_slices:
-            before = self.engine.share(self._values[name])
-            for key, value in self._pending.old_cells.pop(name, {}).items():
+    def _keep_old(self, id: str) -> None:
+        """Keep the values of the input Metric from the last recalculation, for incremental aggregation (if not
+        kept yet). The single cells that wait go back into the kept values."""
+        if id not in self._pending.old_slices:
+            before = self.engine.share(self._values[id])
+            for key, value in self._pending.old_cells.pop(id, {}).items():
                 before = self.engine.write(before, key, value, self)
-            self._pending.old_slices[name] = before
+            self._pending.old_slices[id] = before
 
-    def _check(self, name: str, key: Key, value: float | bool | None) -> float | bool | None:
-        """キーと値を検査し、格納する値（None は空）を返す。"""
-        m = self.metrics[name]
+    def _check(self, id: str, key: Key, value: float | bool | None) -> float | bool | None:
+        """Check the key (member ids, from _key) and the value, and return the value to store (None is blank)."""
+        m = self.metrics[id]
         if len(key) != len(m.dims):
-            raise ValueError(f"{name}: キー {key} の長さが軸 {m.dims} と合わない")
+            raise ValueError(f"{m.name}: キー {key} の長さが軸 {self._dim_names(m.dims)} と合わない")
         for d, member in zip(m.dims, key):
-            if member not in self.dimension(d):
-                raise ValueError(f"{name}: {d} に {member!r} がない")
+            if member not in self.dimensions[d]._by_id:
+                raise ValueError(f"{m.name}: {self.dimensions[d].name} に {member!r} がない")
         if value is None:
             return None
         if m.kind.startswith("member:"):
             d = self.dimension(m.kind.removeprefix("member:"))
-            if not isinstance(value, str) or value not in d:
-                raise ValueError(f"{name} は {d.name} のメンバーを値に持つ Metric: {value!r}")
-            return float(d._index[value])  # エンジンにはメンバーの番号で持たせる
+            if not isinstance(value, str) or value not in d._by_id:
+                raise ValueError(f"{m.name} は {d.name} のメンバーを値に持つ Metric: {value!r}")
+            return float(d._by_id[value])  # the engine holds a member value as its number
         if m.kind == "boolean":
             if not isinstance(value, bool):
-                raise ValueError(f"{name} は boolean の Metric: {value!r}")
+                raise ValueError(f"{m.name} は boolean の Metric: {value!r}")
             return value
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"{name} は number の Metric: {value!r}")
+            raise ValueError(f"{m.name} は number の Metric: {value!r}")
         return float(value)
 
     # ------------------------------------------------ 参照
 
-    def value(self, name: str) -> Cube:
-        """Metric の全セル。大きな Metric では get、slice、rows、summarize で必要な分だけ読む方が速い。"""
+    def value(self, id: str) -> Cube:
+        """All cells of the Metric (an id). The Cube has dimension ids and member ids. For a large Metric, get,
+        slice, rows and summarize read only a part faster."""
         self.recalc()
-        return self._shown(name, self.engine.to_cube(self._values[name], self))
+        m = self.metric(id)
+        return self._shown(m, self.engine.to_cube(self._values[m.id], self))
 
-    def raw(self, name: str) -> Any:
-        """エンジンの格納形式のまま返す（大きな Metric を Cube に変換しないため）。"""
+    def raw(self, id: str) -> Any:
+        """The stored data in the format of the engine (a large Metric is not changed into a Cube)."""
         self.recalc()
-        return self._values[name]
+        return self._values[self.metric(id).id]
 
-    def get(self, name: str, **coords: str) -> float | bool | str | None:
-        """1 セルの値。空なら None。Metric 全体を読まず、そのセルだけを引く。"""
+    def get(self, id: str, coords: Mapping[str, str]) -> float | bool | str | None:
+        """The value of one cell (coords is dimension id -> member id). None if it is blank. Only that cell is
+        read, not the whole Metric. A member-type value is a member id."""
         self.recalc()
-        m = self._metric(name)
-        for d in coords:
-            if d not in m.dims:
-                raise ValueError(f"{name}: 軸 {d} がない")
-        key = tuple(coords[d] if d in coords else self._missing(name, d) for d in m.dims)
+        m = self.metric(id)
+        key = self._key(m, coords)
         for d, member in zip(m.dims, key):
-            if member not in self.dimension(d):
-                return None  # ないメンバーのセルは空（消した、名前を変えた直後の読み出しなど）
-        return self._decode(m, self.engine.get(self._state[name].value, key, self))
+            if member not in self.dimensions[d]._by_id:
+                return None  # the cell of a member that does not exist is blank (removed)
+        return self._decode(m, self.engine.get(self._values[m.id], key, self))
 
-    def slice(self, name: str, **coords) -> Cube:
-        """coords で絞った範囲のセル。各軸はメンバー名か、その集まり（list など）で指定する。
-        指定しない軸は全メンバー。
+    def slice(self, id: str, coords: Coords | None = None) -> Cube:
+        """The cells in the range coords (dimension id -> a member id or a collection of them). A dimension
+        that is not in coords keeps all members.
 
-            m.slice("Revenue", Product="p0001")                   # ある商品の全版・全月
-            m.slice("Revenue", Product=["p0001", "p0002"], Month="m01")
+            m.slice(revenue, {product: p0001})                      # one product, all versions and months
+            m.slice(revenue, {product: [p0001, p0002], month: m01})
         """
         self.recalc()
-        restrict = self._restrict(name, coords)
-        return self._shown(name, self.engine.to_cube(self.engine.filter(self._values[name], restrict, self), self))
+        m = self.metric(id)
+        restrict = self._restrict(m, coords or {})
+        return self._shown(m, self.engine.to_cube(self.engine.filter(self._values[m.id], restrict, self), self))
 
-    def rows(self, name: str, *, offset: int = 0, limit: int | None = None, **coords) -> tuple[list, int]:
-        """coords で絞った範囲の行を、宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す。
-        戻り値は ([(座標, 値), ...], 範囲の全行数)。表示やページングに使う。"""
+    def rows(self, id: str, coords: Coords | None = None, *, offset: int = 0,
+             limit: int | None = None) -> tuple[list, int]:
+        """The rows in the range coords, in the member order of the declared dimensions, from row offset and at
+        most limit rows. Return ([(key of member ids, value), ...], the number of rows in the range). For a
+        display or for paging."""
         self.recalc()
-        m = self._metric(name)
+        m = self.metric(id)
         if offset < 0 or (limit is not None and limit < 0):
             raise ValueError("offset と limit は 0 以上")
-        rows, total = self.engine.rows(self._values[name], self._restrict(name, coords), self, offset, limit)
+        rows, total = self.engine.rows(self._values[m.id], self._restrict(m, coords or {}), self, offset, limit)
         return [(k, self._decode(m, v)) for k, v in rows], total
 
-    def summarize(self, name: str, keep=(), agg: str = "sum", **coords) -> Cube:
-        """coords で絞った範囲を、keep の軸だけ残して集計する（SUM、AVG、MIN、MAX、COUNT）。
+    def summarize(self, id: str, coords: Coords | None = None, *, keep: Iterable[str] = (),
+                  agg: str = "sum") -> Cube:
+        """Aggregate the range in coords and keep only the dimensions in keep (ids; SUM, AVG, MIN, MAX, COUNT).
 
-            m.summarize("Revenue", keep=["Month"], Product=["p0001", "p0002"])  # 2 商品の月別合計
-            m.summarize("Revenue").cells[()]                                    # 総合計
+            m.summarize(revenue, {product: [p0001, p0002]}, keep=[month])  # the monthly sum of 2 products
+            m.summarize(revenue).cells[()]                                  # the grand total
         """
         self.recalc()
-        m = self._metric(name)
-        keep = tuple(keep)
+        m = self.metric(id)
         agg = agg.lower()
         if agg not in PUBLIC_AGGREGATIONS:
             raise ValueError(f"集計は {'、'.join(PUBLIC_AGGREGATIONS)} のいずれか（{agg!r}）")
         if AGGREGATIONS[agg].numeric and m.kind != "number":
             numeric = [a for a in PUBLIC_AGGREGATIONS if not AGGREGATIONS[a].numeric]
-            raise ValueError(f"{name} は {m.kind} なので {agg} で集計できない（{'、'.join(numeric)} は使える）")
-        for d in keep:
-            if d not in m.dims:
-                raise ValueError(f"{name}: 軸 {d} がない")
-        return self.engine.aggregate(self._values[name], m.dims, keep, agg, self._restrict(name, coords), self)
-
-    def _metric(self, name: str) -> Metric:
-        if name not in self.metrics:
-            raise ValueError(f"Metric {name} がない")
-        return self.metrics[name]
+            raise ValueError(f"{m.name} は {m.kind} なので {agg} で集計できない（{'、'.join(numeric)} は使える）")
+        keep = tuple(self._dim_in(m, d) for d in keep)
+        return self.engine.aggregate(self._values[m.id], m.dims, keep, agg, self._restrict(m, coords or {}), self)
 
     @staticmethod
     def _missing(name: str, dim: str):
         raise ValueError(f"{name}: 軸 {dim} のメンバーを指定していない")
 
-    def _restrict(self, name: str, coords: Mapping[str, Any]) -> Restrict:
-        """coords（軸 -> メンバー名か、その集まり）を検査して、絞り込みの形にする。"""
-        m = self._metric(name)
+    def _dim_in(self, m: Metric, dim: str) -> str:
+        """The dimension id dim of the Metric m. ValueError if m does not have it."""
+        if dim not in m.dims:
+            raise ValueError(f"{m.name}: 軸 {self._name_of(dim)} がない")
+        return dim
+
+    def _coords(self, m: Metric, coords: Mapping[str, Any]) -> dict[str, Any]:
+        """Check that each dimension id in coords is a dimension of m (ValueError if not)."""
+        if not isinstance(coords, Mapping):
+            raise ValueError(f"{m.name}: 座標は {{軸の ID: メンバーの ID}} の対応（{coords!r}）")
+        return {self._dim_in(m, d): v for d, v in coords.items()}
+
+    def _key(self, m: Metric, coords: Mapping[str, str]) -> Key:
+        """The member ids of one cell of m in the order of m.dims. coords is dimension id -> member id. An
+        unknown member stays as it is (the caller reports it)."""
+        by_id = self._coords(m, coords)
+        return tuple(by_id[d] if d in by_id else self._missing(m.name, self.dimensions[d].name) for d in m.dims)
+
+    def _restrict(self, m: Metric, coords: Coords) -> Restrict:
+        """Check coords (dimension id -> a member id or a collection of them) and make the restrict form
+        (dimension id -> member ids)."""
         out: Restrict = {}
-        for d, ms in coords.items():
-            if d not in m.dims:
-                raise ValueError(f"{name}: 軸 {d} がない")
-            members = frozenset([ms]) if isinstance(ms, str) else frozenset(ms)
-            for x in members:
-                if x not in self.dimension(d):
-                    raise ValueError(f"{name}: {d} に {x!r} がない")
-            out[d] = members
+        for d, ms in self._coords(m, coords).items():
+            dim = self.dimensions[d]
+            out[d] = frozenset(self._member(dim, x) for x in ([ms] if isinstance(ms, str) else ms))
         return out
 
+    @staticmethod
+    def _member(d: Dimension, member: str) -> str:
+        """Check the member id. ValueError if d does not have it."""
+        if member not in d._by_id:
+            raise ValueError(f"{d.name} にメンバー {member!r} がない")
+        return member
+
     def _decode(self, m: Metric, v):
-        """エンジンの値（float）を利用者に見せる値にする。"""
+        """The value of the engine (a float) as the caller sees it (a member-type value is a member id)."""
         if v is None:
             return None
         if m.kind.startswith("member:"):
-            return self.dimension(m.kind.removeprefix("member:")).members[int(v)]
+            return self.dimensions[m.kind.removeprefix("member:")].ids[int(v)]
         if m.kind == "boolean":
             return bool(v)
         return v
 
-    def _shown(self, name: str, cube: Cube) -> Cube:
-        kind = self.metrics[name].kind
-        if kind.startswith("member:"):  # メンバーの番号を名前に戻す
-            members = self.dimension(kind.removeprefix("member:")).members
-            return Cube(cube.dims, {k: members[int(v)] for k, v in cube.cells.items()})
-        return cube
+    def _shown(self, m: Metric, cube: Cube) -> Cube:
+        """The cube for a caller: the values of a member-type Metric become member ids. The caller does not get
+        the stored data itself (the reference engine stores a Cube)."""
+        if m.kind.startswith("member:"):
+            ids = self.dimensions[m.kind.removeprefix("member:")].ids
+            return Cube(cube.dims, {k: ids[int(v)] for k, v in cube.cells.items()})
+        return Cube(cube.dims, dict(cube.cells)) if cube is self._values.get(m.id) else cube
 
     # ------------------------------------------------ 計算計画
 
@@ -1273,15 +1257,16 @@ class Model:
             self._invalidate()  # 計画を直せなければ、次は最初から作り直す（同じエラーならまた出る）
             raise
 
-    def _checked(self, m: Metric) -> tuple[Expr, list[str]]:
-        """m の式を評価できる形に直して型を検査し、(評価に使う式, 警告) を返す。"""
+    def _checked(self, m: Metric) -> tuple[Expr, list[Msg]]:
+        """Make the formula of m ready for evaluation and check its type. Return (the formula to evaluate,
+        the warnings as Msg with ids)."""
         formula, t, w = self.engine.planner.check(m.written, self)
         if set(t.dims) != set(m.dims):
             raise FormulaError("formula_dims", metric=m.name, dims=t.dims, declared=m.dims)
         if t.kind != m.kind:
             raise FormulaError("formula_kind", metric=m.name, kind=t.kind, declared=m.kind)
         if m.overridable:  # 検査は利用者が書いた式で済ませてから包む
-            formula = Coalesce(Ref(m.override_name), formula)  # 上書きがあればそれを優先
+            formula = Coalesce(Ref(m.override), formula)  # 上書きがあればそれを優先
         return formula, w
 
     def _make_plan(self, formulas: dict[str, Expr | None]) -> tuple[list[Step], dict[str, list[Edge]], list[list[Step]]]:
@@ -1289,14 +1274,14 @@ class Model:
         return self.engine.planner.plan(formulas, {n: self.metrics[n].dims for n in formulas}, self)
 
     def _compile_all(self) -> None:
-        self.warnings = {}
+        self._warnings = {}
         for m in self.metrics.values():
             if m.formula is not None:
-                m.formula, self.warnings[m.name] = self._checked(m)
-        formulas = {n: m.formula for n, m in self.metrics.items()}
+                m.formula, self._warnings[m.id] = self._checked(m)
+        formulas = {i: m.formula for i, m in self.metrics.items()}
         self._plan, self._edges, self._levels = self._make_plan(formulas)
         self.cell_estimates, self._estimate_refs, self._estimate_users = self._estimate_cells(
-            formulas, self._plan, self.warnings)
+            formulas, self._plan, self._warnings)
         self._apply_layout()
         self._delta = {}
         if self.delta_aggregation:
@@ -1304,7 +1289,7 @@ class Model:
                 m = self.metrics[step.names[0]]
                 if step.scan_dim is None and m.formula is not None:
                     if (plan := self._delta_plan(m.formula)) is not None:
-                        self._delta[m.name] = plan
+                        self._delta[m.id] = plan
         self._counts = {n: self.engine.empty(self.metrics[n].dims, "number", self.layout[n], cat=self)
                         for n, plan in self._delta.items() if plan.count is not None}
         self._pending.dirty.clear()
@@ -1326,10 +1311,10 @@ class Model:
 
         self.cell_estimates, self._estimate_refs, self._estimate_users = estimates
         for n, (formula, w) in checked.items():
-            self.metrics[n].formula, self.warnings[n] = formula, w
+            self.metrics[n].formula, self._warnings[n] = formula, w
         for n in dirty:
             if n not in checked:
-                self.warnings.pop(n, None)
+                self._warnings.pop(n, None)
         scans = lambda steps: {n for s in steps if s.scan_dim is not None for n in s.names}
         moved = scans(self._plan) ^ scans(plan)  # scan に入った、または scan から出た Metric
         self._plan, self._edges, self._levels = plan, edges, levels
@@ -1415,7 +1400,7 @@ class Model:
                 if before[n] != out[n]:
                     changed.add(n)
                 if self.max_cells is not None and out[n] > self.max_cells:
-                    dense = [w for w in warnings.get(n, self.warnings.get(n, [])) if w.endswith("（密化）")]
+                    dense = [w for w in warnings.get(n, self._warnings.get(n, [])) if w.code in DENSE]
                     raise FormulaError("too_many_cells", metric=n, cells=out[n], limit=self.max_cells,
                                        dense=msg("dense_ops", ops=dense) if dense else "")
         return out, refs, users
@@ -1446,7 +1431,7 @@ class Model:
         """分割軸の選択に使う、入力 Metric の 1 セル（各軸の先頭メンバー）。"""
         m = self.metrics[name]
         if m.formula is None and m.dims and all(self.dimensions[d].members for d in m.dims):
-            return {d: frozenset([self.dimensions[d].members[0]]) for d in m.dims}
+            return {d: frozenset([self.dimensions[d].ids[0]]) for d in m.dims}
         return None
 
     def _choose_layout(self) -> dict[str, str | None]:
@@ -1482,8 +1467,8 @@ class Model:
             dim = self.dimensions[d]
             width = -(-len(dim.members) // partitions)
             total = -(-len(dim.members) // width)
-            # 記録したあとで名前を変えたり消したりしたメンバーは読み飛ばす（分割軸の選び方にしか使わない）
-            return len({dim._index[x] // width for x in region[d] if x in dim._index}) / total
+            # skip a member that was removed after the range was recorded (this only selects the partition dimension)
+            return len({dim._by_id[x] // width for x in region[d] if x in dim._by_id}) / total
 
         regions = samples.get(name)
         if not regions:
@@ -1531,14 +1516,43 @@ class Model:
     def recalc(self) -> None:
         """ためている変更を計算に反映する。途中で失敗したら（式のエラー、エンジンの内部エラー）、
         途中まで書き換えた計算 Metric が残るので、次の recalc で全体を計算し直す（入力は書き換えない）。"""
-        self._compile()
-        if self._pending.empty():
-            return
+        with self._named_errors():
+            self._compile()
+            if self._pending.empty():
+                return
+            try:
+                self._recalc_pending()
+            except BaseException:
+                self._pending.full = True
+                raise
+
+    @contextlib.contextmanager
+    def _named_errors(self):
+        """Show Metric names in a FormulaError that leaves the Model. The type check and the plan work with
+        Metric ids, so their error values can hold ids. This is the one point that changes them to names."""
         try:
-            self._recalc_pending()
-        except BaseException:
-            self._pending.full = True
+            yield
+        except FormulaError as e:
+            e.params = self._shown_params(e.params)
+            e.args = (render(e.code, e.params),)
             raise
+
+    def _shown_params(self, params: dict) -> dict:
+        """The params of a FormulaError or a warning with names in place of Metric, dimension and property ids.
+        UUIDs are unique in the model, so one lookup serves all kinds."""
+        def show(v):
+            if isinstance(v, str):
+                return self._name_of(v)
+            if isinstance(v, Msg):
+                return Msg(v.code, self._shown_params(v.params))
+            if isinstance(v, list):
+                if v and all(isinstance(x, str) and x in self.metrics for x in v):
+                    return sorted(show(x) for x in v)  # a list of Metrics (a cycle) in name order, not id order
+                return [show(x) for x in v]
+            if isinstance(v, tuple):
+                return tuple(show(x) for x in v)
+            return v
+        return {k: show(v) for k, v in params.items()}
 
     def _recalc_pending(self) -> None:
         full, self._pending.full = self._pending.full, False

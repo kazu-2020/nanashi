@@ -2,13 +2,13 @@ import math
 import random
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May"]
 
 
 def model() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B", "C", "D"])
     m.add_dimension("Category", ["X", "Y"])
     m.add_dimension("Region", ["N", "S"])
@@ -37,8 +37,9 @@ def model() -> Model:
     f("OnCost", ["Product", "Month"], "Price[ON: Cost] + Cost")
     f("Expanded", ["Product", "Month"], "Price[EXPAND: Month] + Margin[SELECT: Month - 1]")
     f("Missing", ["Product", "Month"], "ISBLANK(Cost) AND Flag[EXPAND: Month]", kind="boolean")
-    f("Outflow", ["Product", "Month"], "IF(Stock[SELECT: Month - 1] > 50, 10)")
+    m.add_input("Outflow", ["Product", "Month"])  # Outflow and Stock refer to each other: an input first
     f("Stock", ["Product", "Month"], "PREVIOUS(Month) + Margin - Outflow")
+    f("Outflow", ["Product", "Month"], "IF(Stock[SELECT: Month - 1] > 50, 10)", id=m.metric("Outflow").id)
     f("Total", [], "Stock[REMOVE SUM: Product, Month]")
     f("CatShare", ["Product", "Month"],
       "Margin / RevByCat[REMOVE SUM: Region][BY: Product.Category]")
@@ -49,11 +50,20 @@ def model() -> Model:
 
 
 def cells(m: Model, name: str) -> dict:
-    return dict(m.value(name).cells)
+    return dict(Named(m).value(name).cells)
+
+
+def mapping(m: Model, dim: str, prop: str) -> dict[str, str]:
+    """The map of the property with the member names (the Model holds member ids)."""
+    m = Named(m)
+    d = m.dimension(dim)
+    target, by_id = d.properties[m.property_id(dim, prop)]
+    t = m.dimension(target)
+    return {d.member_of(k): t.member_of(v) for k, v in by_id.items()}
 
 
 def snapshot(m: Model) -> dict:
-    return {n: cells(m, n) for n in m.metrics}
+    return {n: cells(m, n) for n in m._metric_ids}
 
 
 def same(a, b) -> bool:
@@ -68,7 +78,7 @@ def check_full(test, m: Model) -> None:
     incremental = snapshot(m)
     m._invalidate()
     full = snapshot(m)
-    for name in m.metrics:
+    for name in m._metric_ids:
         test.assertTrue(same(incremental[name], full[name]), f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
 
 
@@ -79,12 +89,12 @@ class MatchesFullRecalc(unittest.TestCase):
         rng = random.Random(20260930)
         m = model()
         m.recalc()
-        inputs = [n for n, x in m.metrics.items() if x.formula is None]
+        inputs = [x.name for x in m.metrics.values() if x.formula is None]
         for round_ in range(300):
             for _ in range(rng.randint(1, 3)):
                 name = rng.choice(inputs)
-                meta = m.metrics[name]
-                coords = {d: rng.choice(m.dimensions[d].members) for d in meta.dims}
+                meta = m.metric(name)
+                coords = {m.dimension(d).name: rng.choice(m.dimension(d).members) for d in meta.dims}
                 if rng.random() < 0.3:
                     value = None
                 elif meta.kind == "boolean":
@@ -97,7 +107,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
@@ -138,7 +148,7 @@ class RecomputesOnlyTheSlice(unittest.TestCase):
         self.assertEqual(set(self.regions()), {"Picked", "Missing"})
 
     def test_formula_change_recomputes_only_that_metric(self):
-        self.m.add_formula("Plus1", ["Product"], "Price + 2", id=self.m.metric_id("Plus1"))  # no Metric refers to Plus1
+        self.m.add_formula("Plus1", ["Product"], "Price + 2", id=self.m.metric("Plus1").id)  # no Metric refers to Plus1
         self.m.recalc()
         self.assertEqual(list(self.m.slice_log), [("Plus1", {})])
         self.assertEqual(self.m.get("Plus1", Product="A"), 12)

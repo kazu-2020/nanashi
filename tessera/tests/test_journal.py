@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from sparse_engine import FormulaError, Model, to_formula
+from sparse_engine import FormulaError, Model, Named, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine import journal as journal_module
 from sparse_engine.journal import AlreadyCommitted, Fenced, FileJournal
@@ -33,18 +33,16 @@ except ImportError:
 def definitions(m: Model) -> dict:
     """値以外の状態（軸、メンバー、ID、プロパティ、Metric の定義）。"""
     dims = {d.name: (d.id, d.ordered, list(zip(d.ids, d.members)), d.in_order(),
-                     {p: (t, dict(mp)) for p, (t, mp) in d.properties.items()})
+                     {p: (t, dict(mp), d.property_names[p]) for p, (t, mp) in d.properties.items()})
             for d in m.dimensions.values()}
-    metrics = {x.name: (x.id, x.dims, x.kind, None if x.written is None else to_formula(x.written),
+    metrics = {x.name: (x.id, x.dims, x.kind, None if x.written is None else to_formula(x.written, m),
                         x.partition, x.overridable) for x in m.metrics.values()}
-    return {"dims": dims, "metrics": metrics, "next_id": m._next_id}
+    return {"dims": dims, "metrics": metrics}
 
 
 def check_same_state(test, a: Model, b: Model) -> None:
     test.assertEqual(definitions(a), definitions(b))
-    test.assertEqual((a.ids, a.tombstones), (b.ids, b.tombstones))
-    test.assertEqual({d.name: d.property_ids for d in a.dimensions.values()},
-                     {d.name: d.property_ids for d in b.dimensions.values()})
+    test.assertEqual(a.tombstones, b.tombstones)
     sa, sb = snapshot(a), snapshot(b)
     for name in sa:
         test.assertTrue(same(sa[name], sb[name]), f"{name}\n{sa[name]}\n{sb[name]}")
@@ -82,7 +80,7 @@ class Transactions(unittest.TestCase):
             with self.m.transaction():
                 self.m.set_cell("Price", 99, Product="A")
                 self.m.add_formula("Bad", ["Product"], "Nope + 1")
-        self.assertNotIn("Bad", self.m.metrics)
+        self.assertNotIn("Bad", self.m._metric_ids)
         self.assertEqual(snapshot(self.m), before)
 
     def test_record(self):
@@ -92,11 +90,12 @@ class Transactions(unittest.TestCase):
         rec = txn.record
         self.assertEqual((rec["user"], rec["reason"]), ("alice", "値上げ"))
         self.assertEqual([op["op"] for op in rec["ops"]], ["set_cell", "spread"])  # 按分の中の set_cell は記録しない
-        cells = {c["metric"]: c["rows"] for c in rec["changes"]["cells"]}
-        product = self.m.dimensions["Product"]
-        self.assertEqual(cells[self.m.metrics["Price"].id], [[[product.id_of("A")], 10.0, 12.0]])
-        month = self.m.dimensions["Month"]
-        self.assertEqual(cells[self.m.metrics["Cost"].id], [[[product.id_of("B"), month.id_of("Mar")], 30.0, 60.0]])
+        cells = {c["metric"]: c["rows"] for c in rec["changes"]["cells"]}  # keyed by the Metric id
+        product = self.m.dimension("Product")
+        self.assertEqual(cells[self.m.metric("Price").id], [[[product.id_of("A")], 10.0, 12.0]])
+        month = self.m.dimension("Month")
+        self.assertEqual(cells[self.m.metric("Cost").id],
+                         [[[product.id_of("B"), month.id_of("Mar")], 30.0, 60.0]])
         self.assertNotIn("metrics", rec["changes"])
 
     def test_nested_transactions_join_the_outer_one(self):
@@ -106,6 +105,21 @@ class Transactions(unittest.TestCase):
             self.assertIs(inner, outer)
             self.m.set_cell("Price", 2, Product="B")
         self.assertEqual(len(outer.record["ops"]), 2)
+
+    def test_changes_of_a_fork_apply_to_the_original(self):
+        """Objects added to a fork and to the original do not collide: the record of the fork applies."""
+        from sparse_engine.journal import apply, changes
+        from .test_ids import all_ids
+        m = self.m
+        base, fork = m.fork(), m.fork()
+        fork.add_member("Product", "F")
+        fork.add_input("Y", ["Product"], {("F",): 2})
+        m.add_member("Product", "E")
+        m.add_input("X", ["Product"], {("E",): 1})
+        apply(m.model, {"changes": changes(base.model, fork.model)})
+        self.assertEqual(m.dimension("Product").members, ["A", "B", "C", "D", "E", "F"])
+        self.assertEqual((m.get("X", Product="E"), m.get("Y", Product="F")), (1, 2))
+        self.assertEqual(len(set(all_ids(m))), len(all_ids(m)))
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
@@ -117,10 +131,10 @@ class Journal(JournalCase, unittest.TestCase):
         super().setUp()
         self.path = Path(self.journals.path)
         self.m = build_with(self.engine())
-        self.journals.journal().start(self.m)
+        self.journals.journal().start(self.m.model)
 
     def reopen(self, engine=None) -> Model:
-        return self.journals.journal().open(engine or self.engine())
+        return Named(self.journals.journal().open(engine or self.engine()))
 
     def file_only(self) -> None:
         if self.store is not FileStore:
@@ -134,8 +148,38 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual(self.m.seq, 4)
         check_same_state(self, self.m, self.reopen())
 
+    def test_member_renames_replay(self):
+        """A rename of a member in a formula, of a property target, and renames that change places."""
+        m = self.m
+        m.add_formula("JanCost", ["Product"], 'Cost[SELECT: Month."Jan"]')
+        m.set_cell("Cost", 1, Product="A", Month="Jan")
+        m.rename_member("Month", "Jan", "January")
+        m.rename_member("Category", "X", "Hard")
+        with m.transaction() as txn:
+            m.rename_member("Product", "A", "tmp")
+            m.rename_member("Product", "B", "A")
+            m.rename_member("Product", "tmp", "B")
+        self.assertNotIn("metrics", txn.record["changes"])  # the formulas hold ids, so no definition changes
+        self.assertEqual(list(txn.record["changes"]), ["renamed"])  # a rename alone is not structural
+        self.assertEqual(sorted(txn.record["changes"]["renamed"]), sorted([[m.member_id("Product", x), x] for x in "AB"]))
+        reopened = self.reopen()
+        check_same_state(self, m, reopened)
+        self.assertEqual(to_formula(reopened.metric("JanCost").written, reopened), 'Cost[SELECT: Month."January"]')
+        self.assertEqual(reopened.get("JanCost", Product="B"), 1)
+        self.assertEqual(reopened.get("RevByCat", Category="Hard", Region="N", Month="January"),
+                         m.get("RevByCat", Category="Hard", Region="N", Month="January"))
+
+    def test_property_target_change_with_no_values_replays(self):
+        m = self.m
+        m.add_dimension("Shop", ["s1"])
+        m.add_dimension("Old", ["o"])
+        m.add_dimension("New", ["n"])
+        pid = m.add_property("Shop", "Link", "Old", {})
+        m.add_property("Shop", "Link", "New", {}, id=pid)
+        self.assertEqual(self.reopen().dimension("Shop").properties[pid][0], m.dimension_id("New"))
+
     def test_member_order_is_recorded(self):
-        product = self.m.dimensions["Product"]
+        product = self.m.dimension("Product")
         with self.m.transaction() as moved:
             self.m.move_member("Product", "D", 0)
         # 並び替えだけなら、メンバーの変更（構造の変更）でなく並び順として記録する
@@ -166,8 +210,11 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"}, id=self.m.property_id("Product", "Category"))  # D loses its mapping
             self.m.set_property_values("Product", "Category", {"A": "X", "C": None, "D": "Y"})
             self.m.remove_metric("CatShare")
-        self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric_id("Salary"))  # replace an input
-        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric_id("Stock"))  # a formula Metric becomes an input
+            self.m.rename_dimension("Region", "Area")
+            self.m.rename_property("Employee", "Department", "Dept")
+        self.m.rename_dimension("Area", "Zone")
+        self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric("Salary").id)  # replace an input
+        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric("Stock").id)  # a formula Metric becomes an input
         check_same_state(self, self.m, self.reopen())
 
     def test_rolled_back_transactions_are_not_recorded(self):
@@ -372,9 +419,88 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.set_cell("Price", 12, Product="A")
         with self.m.transaction(user="bob"):
             self.m.spread("Price", 30, Product="A")
-        history = self.m.journal.cell_history(self.m, "Price", Product="A")
+        history = self.m.cell_history(self.m.journal, "Price", Product="A")
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history],
                          [("alice", 10.0, 12.0), ("bob", 12.0, 30.0)])
+
+    def test_cell_history_of_a_member_type_metric_shows_names(self):
+        m = self.m
+        m.add_input("Lead", ["Product"], {("A",): "e1"}, kind="member:Employee")
+        m.set_cell("Lead", "e2", Product="A")
+        (c,) = m.last_record["changes"]["cells"]
+        self.assertEqual(c["rows"], [[[m.member_id("Product", "A")], m.member_id("Employee", "e1"),
+                                      m.member_id("Employee", "e2")]])  # a member-type value is a member id
+        m.rename_member("Employee", "e2", "Eve")
+        history = m.cell_history(self.journals.journal(), "Lead", Product="A")
+        self.assertEqual([(h["old"], h["new"]) for h in history], [(None, "e1"), ("e1", "Eve")])
+
+    def test_renames_are_followed_without_recalculating(self):
+        """A reader that catches up on a rename only changes the name. A new open gives the same names."""
+        m = self.m
+        m.add_formula("Bonus", ["Product"], "Price * 0.1", overridable=True)
+        bonus, hidden = m.metric("Bonus").id, m.metric("__override__Bonus").id
+        m.add_formula("Bonus", ["Product"], "Price * 0.1", id=bonus)  # the hidden input stays linked
+        reader = Named(self.journals.journal().open(self.engine()))
+        reader.recalc()
+        steps = [("dimension", lambda: m.rename_dimension("Product", "Item")),
+                 ("property", lambda: m.rename_property("Item", "Category", "Group")),
+                 ("metric", lambda: m.rename_metric("Plus1", "PlusOne")),
+                 ("overridable metric", lambda: m.rename_metric("Bonus", "Reward")),
+                 ("member", lambda: m.rename_member("Item", "A", "Alpha"))]
+
+        def swap():
+            with m.transaction():
+                m.rename_metric("Price", "tmp")
+                m.rename_metric("PlusOne", "Price")
+                m.rename_metric("tmp", "PlusOne")
+        for label, change in steps + [("swap", swap)]:
+            change()
+            reader.model.eval_log.clear()
+            self.assertTrue(self.journals.journal().catch_up(reader.model), label)
+            reader.recalc()
+            self.assertEqual(list(reader.model.eval_log), [], label)
+            self.assertEqual(definitions(reader), definitions(m), label)
+        self.assertEqual(reader.metric(hidden).name, "__override__Reward")
+        reopened = self.reopen()
+        check_same_state(self, m, reopened)
+        reopened.model.journal = None  # self.m keeps the write right
+        reopened.rename_metric("Reward", "Prize")
+        self.assertEqual(reopened.metric(hidden).name, "__override__Prize")
+
+    def test_renames_and_a_formula_in_one_transaction_replay(self):
+        """A replay defines the objects by id. The order of the renames in a record does not matter: two Metrics
+        change names with each other, and a formula uses the new names of a dimension, a property and a member."""
+        m = self.m
+        with m.transaction() as txn:
+            m.rename_metric("Price", "tmp")
+            m.rename_metric("Plus1", "Price")
+            m.rename_metric("tmp", "Plus1")
+            m.rename_dimension("Product", "Item")
+            m.rename_property("Item", "Category", "Group")
+            m.rename_member("Item", "A", "Alpha")
+            m.add_formula("Twice", ["Item"], "Price * 2")
+            m.add_formula("AlphaCost", ["Month"], 'Cost[SELECT: Item."Alpha"]')
+            m.add_formula("CatPrice", ["Category"], "Plus1[BY SUM: Item.Group]")
+        ch = txn.record["changes"]
+        item = m.dimension("Item")
+        self.assertEqual(sorted(ch["renamed"]), sorted(
+            [[item.id, "Item"], [item.id_of("Alpha"), "Alpha"], [m.property_id("Item", "Group"), "Group"]]
+            + [[m.metric(x).id, x] for x in ("Price", "Plus1")]))
+        self.assertNotIn("properties", ch)
+        self.assertNotIn("members", ch)
+        defs = {d["name"]: d for d in ch["metrics"]}
+        self.assertEqual(defs["Twice"]["formula"],  # the formula is the id AST as a JSON tree, not text
+                         {"node": "BinOp", "op": "*", "left": {"node": "Ref", "name": m.metric("Price").id},
+                          "right": {"node": "Const", "value": 2.0}})
+        self.assertEqual(defs["CatPrice"]["formula"]["dim"], item.id)
+        self.assertEqual(defs["CatPrice"]["formula"]["prop"], m.property_id("Item", "Group"))
+        self.assertEqual(defs["AlphaCost"]["formula"]["member"], item.id_of("Alpha"))
+        reopened = self.reopen()
+        check_same_state(self, m, reopened)
+        self.assertEqual(reopened.get("Twice", Item="Alpha"), 22)  # (10 + 1) * 2
+        self.assertEqual(reopened.get("AlphaCost", Month="Jan"), 7)
+        self.assertEqual(reopened.get("CatPrice", Category="X"), 30)
+        self.assertEqual(to_formula(reopened.metric("CatPrice").written, reopened), "Plus1[BY SUM: Item.Group]")
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -404,9 +530,9 @@ def random_operation(rng: random.Random, models: list[Model], counters: list[lis
         edit_or_add_member(rng, models, counters[0])
     elif kind < 0.55:
         m0 = models[0]
-        p = rng.choice(m0.dimensions["Product"].members)
+        p = rng.choice(m0.dimension("Product").members)
         total = float(rng.randint(10, 200))
-        if "Volume" in m0.metrics and m0.metrics["Volume"].formula is None:
+        if "Volume" in m0._metric_ids and m0.metric("Volume").formula is None:
             for m in models:
                 m.spread("Volume", total, Product=p)
     elif kind < 0.7:
@@ -421,7 +547,7 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) 
     make = make or (lambda tmp: FileJournal(tmp, fsync=False))
     with tempfile.TemporaryDirectory() as tmp:
         m = build_with(engine())
-        make(tmp).start(m)
+        make(tmp).start(m.model)
         counters = [[0], [0], [0]]
         for round_ in range(rounds):
             if rng.random() < 0.3:  # いくつかの操作を 1 つのトランザクションにまとめる（ときどき取り消す）
@@ -442,7 +568,7 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) 
             if rng.random() < 0.25:
                 for e in reopen_engines:
                     with test.subTest(round=round_, engine=e.__name__):
-                        check_same_state(test, m, make(tmp).open(e()))
+                        check_same_state(test, m, Named(make(tmp).open(e())))
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
@@ -457,7 +583,7 @@ class RandomReplay(unittest.TestCase):
 
 
 def many_cells(engine, n: int = 1500) -> Model:
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     m.add_dimension("K", [f"k{i}" for i in range(n)])
     m.add_dimension("T", ["t0", "t1"], ordered=True)
     m.add_input("V", ["K", "T"], {(f"k{i}", "t0"): float(i) for i in range(n)})
@@ -473,18 +599,20 @@ class Blocks(unittest.TestCase):
     def test_large_changes_are_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = many_cells(RustEngine())
-            FileJournal(tmp, fsync=False).start(m)
+            FileJournal(tmp, fsync=False).start(m.model)
             with m.transaction(user="etl") as txn:
                 m.spread("V", 3000.0, how="even")  # 1500 セルすべてを 2 に
             (c,) = txn.record["changes"]["cells"]
             self.assertNotIsInstance(c["rows"], list)
             self.assertEqual(len(c["rows"]), 1499)  # k2 はもともと 2
-            k, t = m.dimensions["K"], m.dimensions["T"]
-            self.assertEqual(c["dims"], [k.id, t.id])
-            self.assertEqual(sorted(c["rows"])[:2], [[[k.ids[0], t.ids[0]], 0.0, 2.0], [[k.ids[1], t.ids[0]], 1.0, 2.0]])
+            k, t = m.dimension("K"), m.dimension("T")
+            self.assertEqual(c["dims"], [k.id, t.id])  # the record names a dimension and a member by its id
+            rows = list(c["rows"])
+            self.assertIn([[k.ids[0], t.ids[0]], 0.0, 2.0], rows)
+            self.assertIn([[k.ids[1], t.ids[0]], 1.0, 2.0], rows)
             for e in (ReferenceEngine, RustEngine):  # ファイルには行として書く
-                check_same_state(self, m, FileJournal(tmp).open(e()))
-            history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")
+                check_same_state(self, m, Named(FileJournal(tmp).open(e())))
+            history = m.cell_history(FileJournal(tmp), "V", K="k5", T="t0")
             self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
 
     def test_random_replay_through_blocks(self):
@@ -515,40 +643,40 @@ class CellFiles(unittest.TestCase):
     def test_large_write_goes_to_parquet(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = many_cells(RustEngine(), n=12_000)
-            FileJournal(tmp).start(m)
+            FileJournal(tmp).start(m.model)
             with m.transaction(user="etl"):
                 m.spread("V", 24_000.0, how="even")
             m.set_cell("V", 1.0, K="k7", T="t1")  # 少ないセルは、これまでどおり行に書く
             (f,) = (Path(tmp) / "cells").glob("*.parquet")
-            self.assertTrue(f.name.endswith(f"-{m.metrics['V'].id}.parquet"))
+            self.assertTrue(f.name.endswith(f"-{m.metric('V').id}.parquet"))
             lines = FileJournal(tmp).log_path.read_text().splitlines()
             self.assertLess(len(lines[0]), 1000)  # 記録の行には、ファイルの名前とハッシュだけ
             self.assertIn('"cells":[', lines[1])
             for e in (ReferenceEngine, RustEngine):
-                check_same_state(self, m, FileJournal(tmp).open(e()))
-            history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")  # 変更の塊を Rust で探す
+                check_same_state(self, m, Named(FileJournal(tmp).open(e())))
+            history = m.cell_history(FileJournal(tmp), "V", K="k5", T="t0")  # 変更の塊を Rust で探す
             self.assertEqual([(h["user"], h["old"], h["new"]) for h in history], [("etl", 5.0, 2.0)])
-            history = FileJournal(tmp).cell_history(m, "V", K="k7", T="t1")
+            history = m.cell_history(FileJournal(tmp), "V", K="k7", T="t1")
             self.assertEqual([(h["old"], h["new"]) for h in history], [(None, 1.0)])
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_corrupted_cell_file_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = many_cells(RustEngine())
-            FileJournal(tmp, bulk_cells=1000).start(m)
+            FileJournal(tmp, bulk_cells=1000).start(m.model)
             m.spread("V", 3000.0, how="even")
             (f,) = (Path(tmp) / "cells").glob("*.parquet")
             f.write_bytes(f.read_bytes()[:-10])
             with self.assertRaisesRegex(ValueError, "壊れている"):
-                FileJournal(tmp).open(RustEngine())
+                Named(FileJournal(tmp).open(RustEngine()))
 
     def test_moved_directory_still_opens(self):
         with tempfile.TemporaryDirectory() as tmp:
             m = build_with(ReferenceEngine())
-            FileJournal(Path(tmp) / "a", bulk_cells=3).start(m)
+            FileJournal(Path(tmp) / "a", bulk_cells=3).start(m.model)
             m.spread("Cost", 100, Product="C")
             (Path(tmp) / "a").rename(Path(tmp) / "b")  # ファイルの名前は記録先のディレクトリからの相対
-            check_same_state(self, m, FileJournal(Path(tmp) / "b").open(ReferenceEngine()))
+            check_same_state(self, m, Named(FileJournal(Path(tmp) / "b").open(ReferenceEngine())))
 
 
 if __name__ == "__main__":

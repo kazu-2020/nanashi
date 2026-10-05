@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.rust_engine import RustEngine
 
 
@@ -26,7 +26,7 @@ def rebuild_time(m: Model) -> float:
 
 
 def chain(n: int) -> tuple[float, float]:
-    m = Model(engine=RustEngine())
+    m = Named(Model(engine=RustEngine()))
     m.add_dimension("T", ["a", "b"])
     m.add_input("x0", ["T"], {("a",): 1.0})
     t = time.perf_counter()
@@ -39,7 +39,7 @@ def chain(n: int) -> tuple[float, float]:
 
 
 def wide(n: int) -> tuple[float, float]:
-    m = Model(engine=RustEngine())
+    m = Named(Model(engine=RustEngine()))
     m.add_dimension("T", ["a", "b"])
     m.add_dimension("P", ["p", "q", "r"])
     t = time.perf_counter()

@@ -136,6 +136,20 @@ ok alice DeleteMetric "{\"appId\": \"$APP\", \"id\": \"$COST\"}" >/dev/null
 
 Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$REVENUE\"], \"rows\": [\"$PRODUCT\"]}")
 check "BY SUM of transactions" "[$(cell "$REVENUE" "[\"$A\"]").number, $(cell "$REVENUE" "[\"$C\"]").number] == [125, 10]" "$Q"
+# A rename changes only the name. The formula shows the new names, and the values do not change.
+ok alice RenameList "{\"appId\": \"$APP\", \"id\": \"$SALES\", \"name\": \"Orders\"}" >/dev/null
+ok alice RenameProperty "{\"appId\": \"$APP\", \"list\": \"$SALES\", \"id\": \"$SPROD\", \"name\": \"Item\"}" >/dev/null
+ok alice RenameProperty "{\"appId\": \"$APP\", \"list\": \"$SALES\", \"id\": \"$AMOUNT\", \"name\": \"Total\"}" >/dev/null
+check "a formula shows the new list and property names" \
+  ".metrics[] | select(.id == \"$REVENUE\") | .formula == \"'Orders.Total'[BY SUM: Orders.Item]\"" "$(model "$APP")"
+check "the renamed list and properties keep their values" \
+  "[$(cell "$REVENUE" "[\"$A\"]").number, $(cell "$REVENUE" "[\"$C\"]").number] == [125, 10]" \
+  "$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$REVENUE\"], \"rows\": [\"$PRODUCT\"]}")"
+check "a list name is used once" '.code == "already_exists" or .code == "invalid_argument"' \
+  "$(call alice RenameList "{\"appId\": \"$APP\", \"id\": \"$SALES\", \"name\": \"Product\"}")"
+ok alice RenameList "{\"appId\": \"$APP\", \"id\": \"$SALES\", \"name\": \"Sales\"}" >/dev/null
+ok alice RenameProperty "{\"appId\": \"$APP\", \"list\": \"$SALES\", \"id\": \"$SPROD\", \"name\": \"Product\"}" >/dev/null
+ok alice RenameProperty "{\"appId\": \"$APP\", \"list\": \"$SALES\", \"id\": \"$AMOUNT\", \"name\": \"Amount\"}" >/dev/null
 FEB=$(member "$MODEL" Month 2026-02) MAR=$(member "$MODEL" Month 2026-03)
 Q=$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$BUDGET\"], \"rows\": [\"$PRODUCT\"], \"columns\": [\"$SCENARIO\"],
   \"filters\": {\"$MONTH\": {\"ids\": [\"$JAN\", \"$FEB\", \"$MAR\"]}}}")

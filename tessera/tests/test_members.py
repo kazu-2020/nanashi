@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
@@ -15,7 +15,7 @@ except ImportError:  # nanashi_core をビルドしていない環境
 
 
 def small() -> Model:
-    m = Model()
+    m = Named(Model())
     m.add_dimension("Product", ["A", "B"])
     m.add_dimension("Category", ["X", "Y"])
     m.add_dimension("Month", ["Jan", "Feb"], ordered=True)
@@ -55,7 +55,7 @@ class Validation(unittest.TestCase):
         m = small()
         with self.assertRaises(ValueError):
             m.add_member("Product", "C", Category="Z")
-        self.assertEqual(m.dimensions["Product"].members, ["A", "B"])
+        self.assertEqual(m.dimension("Product").members, ["A", "B"])
 
     def test_new_member_accepts_input(self):
         m = small()
@@ -120,7 +120,7 @@ class RustRepacksWhenKeysOverflow(unittest.TestCase):
             for i in range(10):
                 model.add_member("Region", f"R{i}")
                 model.set_cell("Volume", float(i + 1), Product="A", Region=f"R{i}", Month="Mar")
-        for name in ref.metrics:
+        for name in ref._metric_ids:
             with self.subTest(name):
                 self.assertTrue(same(ref.value(name).cells, rs.value(name).cells))
 
@@ -134,14 +134,14 @@ def random_round(rng: random.Random, models: list[Model], counter: list[int]) ->
         name = f"{kind[0]}new{counter[0]}"
         props = {}
         if kind == "Product":
-            props = {"Category": rng.choice(m0.dimensions["Category"].members)}
+            props = {"Category": rng.choice(m0.dimension("Category").members)}
         for m in models:
             m.add_member(kind, name, **props)
         return
-    inputs = [n for n, x in m0.metrics.items() if x.formula is None]
+    inputs = [x.name for x in m0.metrics.values() if x.formula is None]
     name = rng.choice(inputs)
-    meta = m0.metrics[name]
-    coords = {d: rng.choice(m0.dimensions[d].members) for d in meta.dims}
+    meta = m0.metric(name)
+    coords = {m0.dimension(d).name: rng.choice(m0.dimension(d).members) for d in meta.dims}
     if rng.random() < 0.3:
         value = None
     elif meta.kind == "boolean":
@@ -164,7 +164,7 @@ class MatchesFullRecalc(unittest.TestCase):
             incremental = snapshot(m)
             m._invalidate()
             full = snapshot(m)
-            for name in m.metrics:
+            for name in m._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     self.assertTrue(same(incremental[name], full[name]),
                                     f"{name}\n差分: {incremental[name]}\n全体: {full[name]}")
@@ -180,7 +180,7 @@ class RustMatchesReference(unittest.TestCase):
         for round_ in range(120):
             for _ in range(rng.randint(1, 3)):
                 random_round(rng, [ref, rs], counter)
-            for name in ref.metrics:
+            for name in ref._metric_ids:
                 with self.subTest(round=round_, metric=name):
                     a, b = ref.value(name).cells, rs.value(name).cells
                     self.assertTrue(same(a, b), f"{name}\n参照: {a}\nRust: {b}")

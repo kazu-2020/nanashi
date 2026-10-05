@@ -31,10 +31,10 @@ But save and load (Parquet) uses `nanashi_core`.
 ## Minimal example
 
 ```python
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.rust_engine import RustEngine
 
-m = Model(engine=RustEngine())
+m = Named(Model(engine=RustEngine()))  # Named takes names. Model itself takes ids (see below)
 m.add_dimension("Employee", ["alice", "bob", "carol"])
 m.add_dimension("Department", ["営業", "開発"])
 m.add_dimension("Month", ["Jan", "Feb", "Mar"], ordered=True)
@@ -56,6 +56,17 @@ Use `add_formula` to add a Metric that a formula calculates.
 You set the dimensions and the value kind of a Metric when you add it.
 You cannot change them later.
 When you read a value, the engine calculates again only the range that changed.
+
+`Model` takes and gives ids (UUIDs) for a Metric, a dimension, a member and a property. Coordinates are a mapping
+`{dimension id: member id}`. Each definition returns the id that it used. Only the formula text uses names.
+`Named` (`sparse_engine/named.py`) wraps a `Model` and changes names to ids before each call, and ids to names in
+the results. Use `Named` in scripts, tests and notebooks. Use `Model` where ids come from outside (the HTTP server).
+
+```python
+model = m.model                                   # the Model under the facade
+cost, dept = m.metric("Cost").id, m.dimension_id("Department")
+model.get(cost, {dept: m.member_id("Department", "開発"), m.dimension_id("Month"): m.member_id("Month", "Mar")})
+```
 
 ## Documentation
 

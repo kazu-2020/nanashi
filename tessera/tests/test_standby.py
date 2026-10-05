@@ -4,6 +4,7 @@ import unittest
 import urllib.request
 
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.named import Named
 from sparse_engine.journal import Fenced
 from sparse_engine.workspace import NotLeader, Role, Workspace
 
@@ -21,8 +22,8 @@ class Standby(JournalCase):
     def setUp(self):
         super().setUp()
         m = model(ReferenceEngine())
-        self.journals.journal().start(m)
-        self.a = Workspace(m, self.journal(endpoint="http://a"), standby=True, interval=0.05)
+        self.journals.journal().start(m.model)
+        self.a = Workspace(m.model, self.journal(endpoint="http://a"), standby=True, interval=0.05)
         self.addCleanup(self.a.close)
         self.b = Workspace.open(self.journal(endpoint="http://b"), ReferenceEngine(), standby=True, interval=0.05)
         self.addCleanup(self.b.close)
@@ -45,7 +46,7 @@ class Standby(JournalCase):
         self.assertEqual(self.b.ready(), [])  # 読み出しは受けられる
         self.assertEqual(self.a.write(move("p0", "p1", "Jan", 5)), 1)
         wait_for(lambda: self.b.seq == 1)  # 書き込みは受けないが、追従する
-        self.assertEqual(self.b.version.get("Stock", Product="p1", Month="Jan"), 105.0)
+        self.assertEqual(Named(self.b.version).get("Stock", Product="p1", Month="Jan"), 105.0)
         self.assertIs(self.b.role, Role.STANDBY)
 
     def test_standby_takes_over_when_the_leader_closes(self):
@@ -54,9 +55,9 @@ class Standby(JournalCase):
         self.a.close()
         wait_for(lambda: self.b.role is Role.LEADER, timeout=2.0)
         self.assertEqual(self.b.seq, 2)  # a の書き込みを含む版で書き手になる
-        self.assertEqual(self.b.version.get("Stock", Product="p1", Month="Feb"), 103.0)
+        self.assertEqual(Named(self.b.version).get("Stock", Product="p1", Month="Feb"), 103.0)
         self.assertEqual(self.b.write(move("p2", "p3", "Jan", 1)), 3)
-        check_same_state(self, self.b.version, self.journal().open(ReferenceEngine()))
+        check_same_state(self, self.b.version, Named(self.journal().open(ReferenceEngine())))
 
     def test_failed_promotion_releases_the_lease(self):
         failing, real_publish = threading.Event(), self.b._publish
@@ -84,7 +85,7 @@ class Standby(JournalCase):
             if not committed.is_set():
                 try:
                     other.refresh()  # FileJournal の open は、作ったときより後の記録を読み直さない
-                    m = other.open(ReferenceEngine())
+                    m = Named(other.open(ReferenceEngine()))
                     move("p2", "p3", "Jan", 7)(m)  # a が権利を持っている間は Fenced（何もしない）
                     other.release()
                     committed.set()
@@ -96,9 +97,9 @@ class Standby(JournalCase):
         self.a.close()
         wait_for(lambda: self.b.role is Role.LEADER, timeout=2.0)
         self.assertTrue(committed.is_set())
-        self.assertEqual(self.b.version.get("Stock", Product="p3", Month="Jan"), 107.0)
+        self.assertEqual(Named(self.b.version).get("Stock", Product="p3", Month="Jan"), 107.0)
         self.assertEqual(self.b.write(move("p4", "p5", "Jan", 1)), self.b.journal.head)
-        check_same_state(self, self.b.version, self.journal().open(ReferenceEngine()))
+        check_same_state(self, self.b.version, Named(self.journal().open(ReferenceEngine())))
 
 
 class FileStandby(Standby, unittest.TestCase):

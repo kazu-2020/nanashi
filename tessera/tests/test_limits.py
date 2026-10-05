@@ -2,7 +2,7 @@
 import tempfile
 import unittest
 
-from sparse_engine import FormulaError, Model
+from sparse_engine import FormulaError, Model, Named
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import LOG_MAX
 
@@ -13,7 +13,7 @@ except ImportError:  # nanashi_core をビルドしていない環境
 
 
 def wide(engine) -> Model:
-    m = Model(engine=engine)
+    m = Named(Model(engine=engine))
     for i in range(5):
         m.add_dimension(f"D{i}", [f"m{j}" for j in range(1 << 13)])  # 13 ビット × 5 = 65 ビット
     return m
@@ -40,12 +40,12 @@ class KeyWidth(unittest.TestCase):
         m.add_formula("Z", ["D0", "D1", "D2"], "(X[EXPAND: D3, D4] * Y[EXPAND: D0, D1])[REMOVE SUM: D3, D4]")
         with self.assertRaisesRegex(FormulaError, "途中の結果の軸 .*64 ビット.*D0 13 ビット.*先に集計して"):
             m.recalc()
-        m.add_formula("Z", ["D0", "D1", "D2"], "X * Y[REMOVE SUM: D3, D4]", id=m.metric_id("Z"))
+        m.add_formula("Z", ["D0", "D1", "D2"], "X * Y[REMOVE SUM: D3, D4]", id=m.metric("Z").id)
         self.assertEqual(m.get("Z", D0="m1", D1="m2", D2="m3"), 2.0)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_member_that_would_widen_past_64_bits_is_refused(self):
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         for i in range(4):
             m.add_dimension(f"D{i}", [f"m{j}" for j in range(1 << 13)])  # 13 ビット × 4
         m.add_dimension("E", [f"e{j}" for j in range(1 << 12)])          # 12 ビット（合わせて 64 ビット）
@@ -55,7 +55,7 @@ class KeyWidth(unittest.TestCase):
         self.assertEqual(m.get("Z", D0="m1"), 2.0)
         with self.assertRaisesRegex(FormulaError, "途中の結果の軸"):  # E が 13 ビットになると収まらない
             m.add_member("E", "e_new")
-        self.assertNotIn("e_new", m.dimensions["E"])
+        self.assertNotIn("e_new", m.dimension("E"))
         m.set_cell("Y", 3.0, E="e1")
         self.assertEqual(m.get("Z", D0="m1"), 3.0)
 
@@ -63,7 +63,7 @@ class KeyWidth(unittest.TestCase):
     def by_metric(ebits: int) -> Model:
         """Salary[E, D1, D2, D3] を所属（DeptOf[E] -> Dept）で部署別に集計するモデル。結果の軸は
         D1、D2、D3、Dept の 52 ビットだが、途中で社員と部署の両方を持つ（E が 13 ビットなら 65 ビット）。"""
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         m.add_dimension("E", [f"e{j}" for j in range(1 << ebits)])
         m.add_dimension("Dept", [f"g{j}" for j in range(1 << 13)])
         for i in range(1, 4):
@@ -80,7 +80,7 @@ class KeyWidth(unittest.TestCase):
         m = self.by_metric(13)
         with self.assertRaisesRegex(FormulaError, r"式の途中の結果の軸 \[.*E.*Dept.*\] が 64 ビット.*E 13 ビット"):
             m.recalc()
-        m.add_formula("Cost", ["D1", "D2", "D3"], "Salary[REMOVE SUM: E]", id=m.metric_id("Cost"))  # the corrected formula passes
+        m.add_formula("Cost", ["D1", "D2", "D3"], "Salary[REMOVE SUM: E]", id=m.metric("Cost").id)  # the corrected formula passes
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1"), 15.0)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -89,7 +89,7 @@ class KeyWidth(unittest.TestCase):
         m = self.by_metric(13)
         m.add_dimension("Month", ["Jan", "Feb"])
         m.add_input("DeptOfM", ["E", "Month"], {("e1", "Jan"): "g1"}, kind="member:Dept")
-        m.add_formula("Cost", ["D1", "D2", "D3", "Dept", "Month"], "Salary[BY SUM: E.DeptOfM]", id=m.metric_id("Cost"))
+        m.add_formula("Cost", ["D1", "D2", "D3", "Dept", "Month"], "Salary[BY SUM: E.DeptOfM]", id=m.metric("Cost").id)
         with self.assertRaisesRegex(FormulaError, "DeptOfM の軸 .*Month.* を持っていない"):
             m.recalc()
 
@@ -99,7 +99,7 @@ class KeyWidth(unittest.TestCase):
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g1"), 10.0)
         with self.assertRaisesRegex(FormulaError, "途中の結果の軸"):  # E が 13 ビットになると結合が収まらない
             m.add_member("E", "e_new")
-        self.assertNotIn("e_new", m.dimensions["E"])
+        self.assertNotIn("e_new", m.dimension("E"))
         m.set_cell("Salary", 20.0, E="e1", D1="m1", D2="m1", D3="m1")  # 拒否したあとも計算し直せる
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g1"), 20.0)
         m.set_cell("DeptOf", "g2", E="e1")
@@ -116,7 +116,7 @@ ENGINES = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
 def big(engine) -> Model:
     """顧客 200 × 商品 100（全組み合わせで 2 万）のモデル。値は少しだけ入れ、上限を 1 万にする。
     上限の検査が壊れていても、テストが大量のメモリを使わない大きさにしてある。"""
-    m = Model(engine=engine, max_cells=10_000)
+    m = Named(Model(engine=engine, max_cells=10_000))
     m.add_dimension("Customer", [f"c{i}" for i in range(200)])
     m.add_dimension("SKU", [f"s{i}" for i in range(100)])
     m.add_dimension("Week", [f"w{i}" for i in range(52)], ordered=True)
@@ -126,7 +126,7 @@ def big(engine) -> Model:
 
 class CellEstimates(unittest.TestCase):
     def test_default_limit(self):
-        self.assertEqual(Model(engine=ReferenceEngine()).max_cells, 1_000_000_000)
+        self.assertEqual(Named(Model(engine=ReferenceEngine())).max_cells, 1_000_000_000)
 
     def test_rejects_formulas_that_densify_beyond_the_limit(self):
         for engine in ENGINES:
@@ -136,9 +136,9 @@ class CellEstimates(unittest.TestCase):
                 with self.assertRaisesRegex(FormulaError, r"Filled: .*最大 20,000 .*上限 10,000 .*"
                                                           r"IFBLANK が \['Customer', 'SKU'\]"):
                     m.recalc()
-                m.add_formula("Filled", ["Customer", "SKU"], "Sales * 2", id=m.metric_id("Filled"))  # the corrected formula passes
+                m.add_formula("Filled", ["Customer", "SKU"], "Sales * 2", id=m.metric("Filled").id)  # the corrected formula passes
                 self.assertEqual(m.value("Filled").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
-                self.assertEqual(m.cell_estimates["Filled"], 2.0)
+                self.assertEqual(m.cell_estimates[m.metric("Filled").id], 2.0)
 
     def test_rejected_definition_is_rolled_back_in_a_transaction(self):
         for engine in ENGINES:
@@ -148,7 +148,7 @@ class CellEstimates(unittest.TestCase):
                 m.recalc()
                 with self.assertRaises(FormulaError):
                     with m.transaction():
-                        m.add_formula("Double", ["Customer", "SKU"], "Sales + 1", id=m.metric_id("Double"))  # the addition of a constant makes it dense
+                        m.add_formula("Double", ["Customer", "SKU"], "Sales + 1", id=m.metric("Double").id)  # the addition of a constant makes it dense
                 self.assertEqual(m.value("Double").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
 
     def test_downstream_of_a_dense_metric_is_checked_too(self):
@@ -166,7 +166,7 @@ class CellEstimates(unittest.TestCase):
         for engine in ENGINES:
             for limit in (8, None):
                 with self.subTest(engine=engine.__name__, limit=limit):
-                    m = Model(engine=engine(), max_cells=limit)
+                    m = Named(Model(engine=engine(), max_cells=limit))
                     m.add_dimension("P", ["a", "b", "c"])
                     m.add_dimension("M", ["x", "y", "z"])
                     m.add_input("V", ["P", "M"], {("a", "x"): 1.0})
@@ -176,7 +176,7 @@ class CellEstimates(unittest.TestCase):
                             m.recalc()
                     else:
                         self.assertEqual(len(m.value("Filled").cells), 9)
-                        self.assertEqual(m.cell_estimates["Filled"], 9.0)
+                        self.assertEqual(m.cell_estimates[m.metric("Filled").id], 9.0)
 
     def test_scan_is_estimated_as_carried_over_all_periods(self):
         for engine in ENGINES:
@@ -185,7 +185,7 @@ class CellEstimates(unittest.TestCase):
                 m.add_input("In", ["Customer", "SKU", "Week"], {("c1", "s1", "w3"): 5.0})
                 m.add_formula("Stock", ["Customer", "SKU", "Week"], "PREVIOUS(Week) + In")
                 m.recalc()
-                self.assertEqual(m.cell_estimates["Stock"], 52.0)  # 1 セルが 52 週へ持ち越されうる
+                self.assertEqual(m.cell_estimates[m.metric("Stock").id], 52.0)  # 1 セルが 52 週へ持ち越されうる
                 self.assertEqual(len(m.value("Stock").cells), 49)  # 実際は w3 から w51 まで
 
     def test_incremental_estimates_match_full(self):
@@ -196,16 +196,16 @@ class CellEstimates(unittest.TestCase):
                 m = model(engine())
                 m.recalc()
                 steps = [
-                    lambda: m.add_formula("Revenue", ["Product", "Month"], "IFBLANK(Volume, 0) * Price[EXPAND: Month]", id=m.metric_id("Revenue")),
+                    lambda: m.add_formula("Revenue", ["Product", "Month"], "IFBLANK(Volume, 0) * Price[EXPAND: Month]", id=m.metric("Revenue").id),
                     lambda: m.rename_metric("Revenue", "Rev"),
-                    lambda: m.add_formula("Rev", ["Product", "Month"], "Volume * Price", id=m.metric_id("Rev")),
-                    lambda: m.add_input("Volume", ["Product", "Month"], {("A", "Jan"): 1, ("B", "Jan"): 2}, id=m.metric_id("Volume")),
+                    lambda: m.add_formula("Rev", ["Product", "Month"], "Volume * Price", id=m.metric("Rev").id),
+                    lambda: m.add_input("Volume", ["Product", "Month"], {("A", "Jan"): 1, ("B", "Jan"): 2}, id=m.metric("Volume").id),
                     lambda: m.add_formula("Leaf", ["Month"], "Total[FILTER: Actual]"),
                     lambda: m.remove_metric("Leaf"),
-                    lambda: m.add_formula("Total", ["Month"], "IFBLANK(ByCat[REMOVE SUM: Category], 0)", id=m.metric_id("Total")),
-                    lambda: m.add_input("Total", ["Month"], {("Jan",): 1.0}, id=m.metric_id("Total")),  # as an input, it reads nothing
+                    lambda: m.add_formula("Total", ["Month"], "IFBLANK(ByCat[REMOVE SUM: Category], 0)", id=m.metric("Total").id),
+                    lambda: m.add_input("Total", ["Month"], {("Jan",): 1.0}, id=m.metric("Total").id),  # as an input, it reads nothing
                     lambda: m.remove_metric("ByCat"),
-                    lambda: m.add_formula("Total", ["Month"], "Rev[REMOVE SUM: Product]", id=m.metric_id("Total")),
+                    lambda: m.add_formula("Total", ["Month"], "Rev[REMOVE SUM: Product]", id=m.metric("Total").id),
                 ]
                 for step in steps:  # m は差分の見積もりだけを続け、全体の見積もり直しは複製で行う
                     step()
@@ -218,10 +218,10 @@ class CellEstimates(unittest.TestCase):
     def test_limit_is_saved(self):
         for engine in ENGINES:
             with self.subTest(engine=engine.__name__), tempfile.TemporaryDirectory() as d:
-                m = Model(engine=engine(), max_cells=123)
+                m = Named(Model(engine=engine(), max_cells=123))
                 m.add_dimension("P", ["a"])
                 m.save(d)
-                self.assertEqual(Model.load(d, engine()).max_cells, 123)
+                self.assertEqual(Named.load(d, engine()).max_cells, 123)
 
 
 class Memory(unittest.TestCase):
@@ -236,7 +236,7 @@ class Memory(unittest.TestCase):
         nanashi_core.track_heap(True)
         self.addCleanup(nanashi_core.track_heap, False)
         before = nanashi_core.heap()[0]
-        m = Model(engine=RustEngine())
+        m = Named(Model(engine=RustEngine()))
         m.add_dimension("P", [f"p{i}" for i in range(2000)])
         m.add_dimension("M", [f"m{i}" for i in range(12)])
         m.add_input("V", ["P", "M"], {(f"p{i}", f"m{j}"): float(i) for i in range(2000) for j in range(12)})
@@ -262,7 +262,7 @@ class Memory(unittest.TestCase):
         self.assertEqual(nanashi_core.heap()[0], now)
 
     def test_reference_reports_rows_only(self):
-        m = Model(engine=ReferenceEngine())
+        m = Named(Model(engine=ReferenceEngine()))
         m.add_dimension("P", ["a", "b"])
         m.add_input("V", ["P"], {("a",): 1.0})
         self.assertEqual(m.memory(), {"V": {"rows": 1}})
@@ -270,7 +270,7 @@ class Memory(unittest.TestCase):
 
 class Logs(unittest.TestCase):
     def test_observation_logs_do_not_grow_without_bound(self):
-        m = Model(engine=ReferenceEngine())
+        m = Named(Model(engine=ReferenceEngine()))
         m.add_dimension("P", ["a", "b"])
         m.add_input("X", ["P"], {("a",): 1})
         m.add_formula("Y", ["P"], "X * 2")

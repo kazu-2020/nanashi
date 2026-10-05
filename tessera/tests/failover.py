@@ -36,7 +36,7 @@ from typing import Iterator
 
 import psycopg
 
-from sparse_engine import Model
+from sparse_engine import Model, Named
 from sparse_engine.pg_journal import PgJournal
 from sparse_engine.rust_engine import RustEngine
 
@@ -90,7 +90,7 @@ class Server:
 
 
 def seed() -> Model:
-    m = Model(engine=RustEngine())
+    m = Named(Model(engine=RustEngine()))
     # The UUIDs are fixed strings, so the writes can name the objects without a read of GET /
     m.add_dimension("Item", [], id="dim-item")
     for i in ITEMS:
@@ -107,7 +107,7 @@ def seeded_model() -> Iterator[tuple[str, Path]]:
         model_id = str(uuid.uuid4())  # The router takes only a canonical UUID as a model ID (docs/ids.md).
         journal = PgJournal(DSN, model_id, Path(tmp) / "objects", heartbeat=False)
         try:
-            journal.start(seed())
+            journal.start(seed().model)
             yield model_id, Path(tmp)
         finally:
             journal.drop()
@@ -295,7 +295,7 @@ def run(sig: signal.Signals, via_router: bool = False) -> Report:
                 (model_id,)).fetchall())
         journal = PgJournal(DSN, model_id, tmp / "objects", heartbeat=False)
         try:
-            m = journal.open(RustEngine())
+            m = Named(journal.open(RustEngine()))
             report.cells = {i: (m.get("Value", Item=i), m.get("Double", Item=i)) for i in ITEMS}
         finally:
             journal.close()

@@ -1,5 +1,10 @@
 # Model operations
 
+The examples use `Named` (`m = Named(Model())`), which takes names. `Model` takes the same operations with ids:
+a Metric, dimension, member or property argument is an id, and coordinates are a mapping `{dimension id: member id}`
+(for example `model.get(revenue, {product: p0001, month: m01})`). The reads of `Model` give ids. See "Minimal
+example" in the [README](../README.md).
+
 ## Read values
 
 There are four interfaces that read only the necessary cells, and `value`, which reads all cells.
@@ -50,7 +55,7 @@ On an ordered dimension (a time master list), the order sets the meaning of refe
 You can rename a member with `rename_member` and remove it with `remove_member`.
 
 ```python
-m.rename_member("Employee", "dave", "David")  # Values, properties, and Employee."dave" in formulas all change to the new name
+m.rename_member("Employee", "dave", "David")  # Values, properties, and Employee."dave" in formulas show the new name
 m.remove_member("Month", "Feb")               # The previous month of Mar becomes Jan
 ```
 
@@ -61,12 +66,12 @@ In the engine, members have numbers, and the numbers become compact when you rem
 ```python
 pid = m.dimensions["Product"].id_of("p9")      # The ID of a member
 m.dimensions["Product"].member_of(pid)         # The current name from the ID
-m.metrics["Revenue"].id, m.metric_name(mid)    # The ID of a Metric, and the current name from the ID
+m.metric("Revenue").id, m.metric(mid).name     # The id (UUID) of a Metric, and the current name from the id
 ```
 
-A copy (`fork`) continues to give IDs from the same counter. Thus, an item that you add in the copy and an item that you add in the original can get the same ID.
+Each ID is a UUID. Thus, an item that you add in a copy (`fork`) and an item that you add in the original do not get the same ID.
 
-In the engine, members have numbers. Thus, a rename does not change values and does not cause a recalculation.
+In the engine, the cells, the property maps and the formulas hold the member id. Thus, a rename changes only the name and does not cause a recalculation.
 
 When you remove a member, the engine removes the cells of that member from all Metrics.
 The engine also removes the member from the property mapping tables. Members that referred to the removed member then have no reference.
