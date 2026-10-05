@@ -36,10 +36,35 @@ test("after an ambiguous error, the next action resends the original request", a
   };
   expect(await run(send("old"))).toBe(null);
   // The user edits the data and clicks again: the original request goes again with the same id.
-  expect(await run(send("new"))).toBe(true);
+  expect(await run(send("new"))).toBe(false);
   expect(sent.slice(3)).toEqual([["old", sent[0][1]]]);
   // After it settles, the next action runs its own request with a new id.
   expect(await run(send("new"))).toBe(true);
   expect(sent[4][0]).toBe("new");
   expect(sent[4][1]).not.toBe(sent[0][1]);
+});
+
+test("a click that resends the held action runs the held success code and asks for a new click", async () => {
+  const reports: unknown[] = [];
+  const run = runner((e) => reports.push(e), { current: null });
+  let draftId = "a";
+  let up = false;
+  // The create renews the draft id itself, after it succeeds.
+  const create = (id: string) => async () => {
+    if (!up) throw new ConnectError("x", Code.Unavailable);
+    draftId = id === "a" ? "b" : "c";
+  };
+  expect(await run(create(draftId))).toBe(null);
+  expect(draftId).toBe("a");
+  up = true;
+  // A different click (a delete) resends the held create instead of its own action.
+  let deleted = false;
+  expect(
+    await run(async () => {
+      deleted = true;
+    }),
+  ).toBe(false);
+  expect(deleted).toBe(false);
+  expect(draftId).toBe("b");
+  expect(reports.at(-1)).toBe("前の操作を送り直した。今の操作はもう一度実行して");
 });

@@ -291,7 +291,8 @@ export function TablesPage() {
                     (r) => api.updateTable(r),
                   );
                   setSel(draftId);
-                }).then((ok) => ok !== null && !t && setDraftId(newId()))
+                  setDraftId(newId());
+                })
               }
             >
               保存

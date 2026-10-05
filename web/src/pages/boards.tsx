@@ -70,7 +70,8 @@ export function BoardsPage() {
                     (r) => api.updateBoard(r),
                   );
                   choose(draftId);
-                }).then((ok) => ok !== null && setDraftId(newId()))
+                  setDraftId(newId());
+                })
               }
             >
               ボードを作成

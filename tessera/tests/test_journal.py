@@ -351,6 +351,13 @@ class Journal(JournalCase, unittest.TestCase):
         j.record_rejection("new", 400, {})
         self.assertEqual(self.journals.journal(op_window=2).outcomes_of_many(["old", "new"])[1], {"new": (400, {})})
 
+    def test_a_rejection_after_a_cut_rejection_line_is_read(self):
+        self.file_only()
+        (self.path / "rejections.jsonl").write_text('{"client_op_id":"cut","head')  # A crash cut the line
+        j = self.journals.journal()
+        j.record_rejection("rj-1", 400, {})
+        self.assertEqual(self.journals.journal().outcomes_of_many(["rj-1"])[1], {"rj-1": (400, {})})
+
     def test_corruption_in_the_middle_is_an_error(self):
         self.file_only()
         self.m.set_cell("Price", 12, Product="A")

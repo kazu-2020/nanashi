@@ -149,7 +149,8 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
         (r) => api.createView(r),
         (r) => api.updateView(r),
       );
-    }).then((ok) => ok !== null && !id && setDraftId(newId()));
+      setDraftId(newId());
+    });
 
   const exportCsv = (g: Grid) => {
     const a = document.createElement("a");

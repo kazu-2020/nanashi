@@ -841,6 +841,7 @@ class FileJournal(Journal):
         The first rejection of a client_op_id stays, as in PgJournal."""
         if client_op_id in self._rejected:
             return
+        self.acquire()  # The first acquire removes a line that a crash cut. Without it, this line joins that line.
         line = {"client_op_id": client_op_id, "head_seq": self.head, "status": status, "body": body}
         fd = os.open(self._rejections_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         try:

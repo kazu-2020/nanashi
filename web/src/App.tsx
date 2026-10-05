@@ -155,13 +155,14 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
     queryFn: () => api.listSnapshots({ appId: from }),
     enabled: !!from,
   });
-  // The id of the next application. A new id comes after each create, except after an ambiguous error:
-  // then the next click sends the same application again.
+  // The id of the next application. The action makes a new id after a successful create. After an error,
+  // the next click sends the same id again.
   const [id, setId] = useState(newId);
   const create = (snapshotId: string) =>
     run(async (clientOpId) => {
       props.onOpen(await api.createApplication({ id, clientOpId, name, snapshotId }));
-    }).then((ok) => ok !== null && setId(newId()));
+      setId(newId());
+    });
   return (
     <div className="flex flex-col gap-4">
       <h2 className="text-lg font-bold">アプリケーション</h2>

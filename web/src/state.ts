@@ -31,7 +31,8 @@ const ambiguous = (e: unknown) =>
   e instanceof ConnectError && (e.code === Code.Unavailable || e.code === Code.DeadlineExceeded);
 
 // useRun gives a function that runs an action and shows its error. It returns true on success, false after a
-// definite error, and null after an ambiguous error (the api may have applied the write).
+// definite error or after it sent a held action instead, and null after an ambiguous error (the api may have
+// applied the write).
 // It gives f one client_op_id for the user action. Send it with each write of the action.
 export function useRun() {
   const report = useContext(Report);
@@ -47,14 +48,19 @@ type Held = { f: Action; clientOpId: string } | null;
 // sends this original request again instead of its own f, so the api gives the stored result. A new f can
 // make a different request (edited data, new object ids), and the api refuses it under the same client_op_id.
 // After a success or a definite error, the next action runs its own f with a new client_op_id.
+// If runner sends the held f, the next action does not run: runner tells the user and gives false.
+// Thus put the success code of an action (for example, a new draft id) in f, not after runner.
 export function runner(report: (e: unknown) => void, held: { current: Held }) {
   return async (next: Action) => {
+    const resend = held.current !== null;
     const { f, clientOpId } = held.current ?? { f: next, clientOpId: newId() };
     held.current = null;
     for (let attempt = 1; ; attempt++) {
       try {
         await f(clientOpId);
-        return true;
+        if (!resend) return true;
+        report("前の操作を送り直した。今の操作はもう一度実行して");
+        return false;
       } catch (e) {
         if (ambiguous(e) && attempt < 3) continue;
         report(errorText(e));

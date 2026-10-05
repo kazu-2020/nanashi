@@ -411,6 +411,7 @@ class Workspace:
             return
         working = self._version.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
+        refused: list[tuple[_Request, Exception]] = []
         aliases: list[tuple[_Request, _Request]] = []  # 同じまとまりで同じ client_op_id を送ったもの
         firsts: dict[str, _Request] = {}
         ids = [r.client_op_id for r in batch if r.client_op_id is not None]
@@ -438,15 +439,13 @@ class Workspace:
                 applied.append((req, txn.record))
             except Exception as e:
                 self.stats.add(rejected=1)
-                # Record a terminal rejection before the next request, so a resend cannot apply the write
-                if req.client_op_id is not None and (r := rejection_of(e)) is not None:
-                    self._reject(req.client_op_id, *r)
-                req.future.set_exception(e)
+                refused.append((req, e))
 
         committed = [(req, rec) for req, rec in applied if rec["ops"]]
         if not committed:  # 何も変えていない（すべて失敗したか、操作を呼ばなかった）。版はそのまま
             for req, _ in applied:
                 req.future.set_result(self._version.seq)
+            self._refuse(refused)
             for req, first in aliases:
                 _follow(req, first)
             return
@@ -464,7 +463,8 @@ class Workspace:
                 self._demote()
             elif isinstance(e, Stale):
                 self._reload()  # 別のプロセスが書き込んでいた。知らせる前に、記録先から最新の版を開き直す
-            for req, _ in applied:
+            # An earlier request of the batch can cause a refusal. Thus do not record the refusals.
+            for req, _ in applied + refused:
                 req.future.set_exception(e)
             for req, _ in aliases:
                 req.future.set_exception(e)
@@ -485,9 +485,19 @@ class Workspace:
 
         for req, rec in applied:
             req.future.set_result(rec.get("seq", working.seq))
+        self._refuse(refused)
         for req, first in aliases:
             _follow(req, first)
         self._maybe_checkpoint()
+
+    def _refuse(self, refused: list[tuple[_Request, Exception]]) -> None:
+        """Give each refused request its error. Record a terminal rejection first, so a resend cannot apply the
+        write. Call this only after the batch is committed or has nothing to commit.
+        An earlier request of the batch can cause a refusal, so do not record it if the append fails."""
+        for req, e in refused:
+            if req.client_op_id is not None and (r := rejection_of(e)) is not None:
+                self._reject(req.client_op_id, *r)
+            req.future.set_exception(e)
 
     def _outcomes(self, ids: list[str]) -> tuple[dict[str, int], dict[str, tuple[int, dict]]]:
         """The committed client_op_id -> seq and the rejected client_op_id -> (status, body).
