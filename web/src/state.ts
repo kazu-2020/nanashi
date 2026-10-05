@@ -33,32 +33,37 @@ const ambiguous = (e: unknown) =>
 // useRun gives a function that runs an action and shows its error. It returns true on success, false after a
 // definite error, and null after an ambiguous error (the api may have applied the write).
 // It gives f one client_op_id for the user action. Send it with each write of the action.
-// After an ambiguous error, it runs f again with the same client_op_id (up to 3 times). If the error stays
-// ambiguous, the next user action of this component gets the same client_op_id again: the api then gives the
-// stored result instead of a second write. A caller keeps its object id in the same way (a null result).
-// After a success or a definite error, the next user action gets a new client_op_id.
 export function useRun() {
   const report = useContext(Report);
-  const held = useRef<string | null>(null);
-  return useCallback(
-    async (f: (clientOpId: string) => Promise<unknown>) => {
-      const clientOpId = held.current ?? newId();
-      held.current = null;
-      for (let attempt = 1; ; attempt++) {
-        try {
-          await f(clientOpId);
-          return true;
-        } catch (e) {
-          if (ambiguous(e) && attempt < 3) continue;
-          report(errorText(e));
-          if (!ambiguous(e)) return false;
-          held.current = clientOpId;
-          return null;
-        }
+  const held = useRef<Held>(null);
+  return useCallback((f: Action) => runner(report, held)(f), [report]);
+}
+
+type Action = (clientOpId: string) => Promise<unknown>;
+type Held = { f: Action; clientOpId: string } | null;
+
+// runner runs f with a new client_op_id. After an ambiguous error, it runs f again with the same client_op_id
+// (up to 3 times). If the error stays ambiguous, it keeps f with its client_op_id in held. The next action then
+// sends this original request again instead of its own f, so the api gives the stored result. A new f can
+// make a different request (edited data, new object ids), and the api refuses it under the same client_op_id.
+// After a success or a definite error, the next action runs its own f with a new client_op_id.
+export function runner(report: (e: unknown) => void, held: { current: Held }) {
+  return async (next: Action) => {
+    const { f, clientOpId } = held.current ?? { f: next, clientOpId: newId() };
+    held.current = null;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await f(clientOpId);
+        return true;
+      } catch (e) {
+        if (ambiguous(e) && attempt < 3) continue;
+        report(errorText(e));
+        if (!ambiguous(e)) return false;
+        held.current = { f, clientOpId };
+        return null;
       }
-    },
-    [report],
-  );
+    }
+  };
 }
 
 // useMutate runs a write, then reads again every query whose key starts with ["app", appId, part].

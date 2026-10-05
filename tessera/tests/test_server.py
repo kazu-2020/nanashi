@@ -743,9 +743,10 @@ class WithJournal(JournalCase, unittest.TestCase):
             self.assertEqual(c.get(path(ws, "Stock", "cell", Product="p0", Month="Jan"))[1]["value"], 104.0)
             self.assertEqual(c.post("/writes", {"client_op_id": "w3", "ops": [write(ws, "Stock", 1, Product="p0", Month="Jan")]}),
                              (200, {"seq": 4}))  # 再起動をまたいでも再送は二重に確定しない
-            if isinstance(self.journals, PgStore):  # the PostgreSQL journal keeps the rejections over a restart
-                self.assertEqual(c.get("/operations/w-bad"), rejected)
-                self.assertEqual(c.post("/writes", {"client_op_id": "w-bad", "ops": []})[0], 400)
+            # Both journals keep the rejections over a restart: a resend gets the same rejection and commits nothing
+            self.assertEqual(c.get("/operations/w-bad"), rejected)
+            self.assertEqual(c.post("/writes", {"client_op_id": "w-bad", "ops": [write(ws, "Stock", 1, Product="p0", Month="Jan")]}),
+                             (rejected[1]["status"], rejected[1]["body"]))
             # 再起動した書き手は、前の書き手の権利（PgJournal のリース）の期限を待たずに書ける
             self.assertEqual(c.post("/writes", {"client_op_id": "w5", "ops": [write(ws, "Stock", 7, Product="p0", Month="Jan")]}),
                              (200, {"seq": 6}))

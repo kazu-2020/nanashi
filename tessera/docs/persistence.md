@@ -91,6 +91,7 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
 - `cells/<random number>-<Metric ID>.parquet`: The cell changes of a journal entry that changes more than 10 thousand cells (`bulk_cells`).
   The format is the same as `PgJournal`. The journal line has only the file name (relative to the directory) and the hash.
   The engine writes the file before it appends the line. Thus the files of a committed journal entry are always complete.
+- `rejections.jsonl`: 1 rejected write on each line (`client_op_id`, the head sequence number at that time, the HTTP status and body).
 - `snapshots/<sequence number>-<random number>/`: The model at that time, and `manifest.json` with the hashes of the files.
   The engine puts each file first, and then puts `manifest.json` last. Thus it does not use a snapshot that stopped before completion.
   The engine checks the hashes while it reads the files at open. If a file is damaged, it uses the snapshot before that one and replays more journal entries.
@@ -102,7 +103,7 @@ If you give the ID from the sender to `transaction(client_op_id=...)`, and a tra
 Thus, if a user does not receive the response and sends again, the engine does not commit twice.
 
 The writer also records a rejected write with its `client_op_id` (`record_rejection`: the HTTP status and body). It records the rejection before it takes the next write, so a resend cannot apply the write.
-`FileJournal` keeps these in memory for the last `op_window` rejections. After a restart, the same write gets the same rejection again, because the model refuses it again.
+`FileJournal` appends them to the file `rejections.jsonl`. When it opens, it reads the rejections in the last `op_window` journal entries. `prune` removes the older lines.
 `PgJournal` keeps them in the table `nanashi_rejection`, so a restarted server gives the same answer.
 
 ### Journal in PostgreSQL

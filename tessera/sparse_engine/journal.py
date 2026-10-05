@@ -603,6 +603,7 @@ class FileJournal(Journal):
         path/log/<最初の通し番号>.jsonl   1 行 1 トランザクションの記録（区切り）。追記して fsync する
         path/cells/<乱数>-<Metric>.parquet   bulk_cells を超えるセルを書き換えた記録の、セルの変更
         path/snapshots/<通し番号>-<乱数>/   その時点のモデル（Model.save の形式）と manifest.json（通し番号、ハッシュ）
+        path/rejections.jsonl   1 line for each rejected write (client_op_id, head_seq, status, body)
 
     記録はスナップショットを置いたあと（か、区切りが segment_bytes を超えたら）、次の追記から新しい区切りに
     書く。開くときは最後の区切りと、client_op_id を覚えておく範囲（最後の op_window 件）だけを読み、
@@ -620,6 +621,7 @@ class FileJournal(Journal):
     ファイルは必ずそろっている（行を書く前に落ちれば、参照されないファイルが残るだけ）。
 
     client_op_id は最後の op_window 件の記録の分だけ覚える（再送しても二重に確定しないと保証する範囲）。
+    The journal keeps a rejection while its head_seq is in the last op_window entries, as PgJournal does.
     """
 
     def __init__(self, path, *, fsync: bool = True, bulk_cells: int = 10_000, op_window: int = 100_000,
@@ -634,9 +636,6 @@ class FileJournal(Journal):
         self._lock_file = None  # 書き込みの権利（path/lock の排他ロック）。最初に書くときに取る
         self._broken: BaseException | None = None  # 追記の失敗を取り消せなかった（以後は書かない）
         self._rotate = False  # 次の追記から新しい区切りに書く（スナップショットを置いた）
-        # The rejected writes (client_op_id -> (status, body)), the last op_window only. This journal is for
-        # development, so they stay in memory: after a restart, the same write gets the same rejection again
-        self._rejected: collections.OrderedDict[str, tuple[int, dict]] = collections.OrderedDict()
         self._scan()
 
     @property
@@ -740,6 +739,15 @@ class FileJournal(Journal):
                 f.truncate(self._size)
                 if self.fsync:
                     _sync(f.fileno())
+        # The rejected writes (client_op_id -> (head_seq, status, body)) in the last op_window entries
+        self._rejected: collections.OrderedDict[str, tuple[int, int, dict]] = collections.OrderedDict()
+        size = 0
+        for rec, n in self._read_segment(0, self._rejections_path):
+            size += n
+            if rec["head_seq"] > oldest:
+                self._rejected.setdefault(rec["client_op_id"], (rec["head_seq"], rec["status"], rec["body"]))
+        if repair and self._rejections_path.exists() and self._rejections_path.stat().st_size > size:
+            os.truncate(self._rejections_path, size)  # Remove a line that a crash cut
 
     def refresh(self) -> int:
         """最後に読んだところより後に追記された記録を読む（全体を読み直さない）。別のプロセスが新しい区切りに
@@ -824,14 +832,28 @@ class FileJournal(Journal):
     def seq_of(self, client_op_id: str) -> int | None:
         return self._by_client_op.get(client_op_id)
 
+    @property
+    def _rejections_path(self) -> Path:
+        return self.path / "rejections.jsonl"
+
     def record_rejection(self, client_op_id: str, status: int, body: dict) -> None:
-        self._rejected[client_op_id] = (status, body)
-        while len(self._rejected) > self.op_window:
-            self._rejected.popitem(last=False)
+        """Append the rejection to path/rejections.jsonl, so that a resend after a restart gets the same answer.
+        The first rejection of a client_op_id stays, as in PgJournal."""
+        if client_op_id in self._rejected:
+            return
+        line = {"client_op_id": client_op_id, "head_seq": self.head, "status": status, "body": body}
+        fd = os.open(self._rejections_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            _write_all(fd, (json.dumps(line, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+            if self.fsync:
+                _sync(fd)
+        finally:
+            os.close(fd)
+        self._rejected[client_op_id] = (self.head, status, body)
 
     def outcomes_of_many(self, client_op_ids: list[str]) -> tuple[dict[str, int], dict[str, tuple[int, dict]]]:
         return ({i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op},
-                {i: self._rejected[i] for i in client_op_ids if i in self._rejected})
+                {i: self._rejected[i][1:] for i in client_op_ids if i in self._rejected})
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
@@ -873,6 +895,12 @@ class FileJournal(Journal):
                     out["cells"] += 1
             path.unlink()
             out["segments"] += 1
+        # Forget the rejections before the last op_window entries (write the kept lines to a new file)
+        kept = [{"client_op_id": i, "head_seq": q, "status": st, "body": b}
+                for i, (q, st, b) in self._rejected.items() if q > self.head - self.op_window]
+        self.objects.put(self._rejections_path.name, "".join(
+            json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n" for r in kept).encode("utf-8"))
+        self._rejected = collections.OrderedDict((r["client_op_id"], (r["head_seq"], r["status"], r["body"])) for r in kept)
         return out
 
     # ------------------------------------------------ スナップショット
