@@ -102,7 +102,7 @@ def seed() -> Model:
 def seeded_model() -> Iterator[tuple[str, Path]]:
     """種のモデルを記録先に置き、(モデルの ID, 作業用のディレクトリ) を渡す。抜けるときに記録を消す。"""
     with tempfile.TemporaryDirectory() as tmp:
-        model_id = f"failover-{uuid.uuid4().hex[:12]}"
+        model_id = str(uuid.uuid4())  # The router takes only a canonical UUID as a model ID (docs/ids.md).
         journal = PgJournal(DSN, model_id, Path(tmp) / "objects", heartbeat=False)
         try:
             journal.start(seed())
