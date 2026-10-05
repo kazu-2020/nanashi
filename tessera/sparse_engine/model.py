@@ -522,6 +522,8 @@ class Model:
         """Rename the dimension. The formulas and all internal state hold the dimension id, so nothing is
         calculated again and no formula changes: the display shows the new name. The id does not change."""
         d = self.dimension(dim)
+        if new == d.name:
+            return
         self._check_dim_name(new)
         del self._dim_ids[d.name]
         d.name = new
@@ -570,8 +572,11 @@ class Model:
     def rename_property(self, dim: str, prop: str, new: str) -> None:
         """Rename the property (ids). Nothing is calculated again and no formula changes. The id does not change."""
         d = self.dimension(dim)
+        prop = self._prop(d, prop)
+        if new == d.property_names[prop]:
+            return
         self._check_prop_name(d, new)
-        d.rename_property(self._prop(d, prop), new)
+        d.rename_property(prop, new)
 
     @staticmethod
     def _prop(d: Dimension, prop: str) -> str:
@@ -744,6 +749,8 @@ class Model:
         calculated again and no formula changes: the display of a formula shows the new name. The hidden
         override input of an overridable Metric follows the owner. The id does not change."""
         m = self._own_metric(id)
+        if new == m.name:
+            return
         if not isinstance(new, str) or not new or new.startswith("__"):
             raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {new!r}")
         if new in self._metric_ids:
@@ -967,7 +974,9 @@ class Model:
         calculated again and nothing else changes: the display shows the new name. The id does not change.
         """
         d = self.dimension(dim)
-        d.rename_member(self._member(d, member), new)
+        member = self._member(d, member)
+        if new != d.members[d._by_id[member]]:
+            d.rename_member(member, new)
 
     @_operation
     def remove_member(self, dim: str, member: str) -> None:

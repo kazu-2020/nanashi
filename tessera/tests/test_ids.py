@@ -670,6 +670,18 @@ class IdApi(unittest.TestCase):
         self.product, self.a = self.m.dimension_id("Product"), self.m.member_id("Product", "A")
         self.price = self.m.metric("Price").id
 
+    def test_rename_to_the_current_name_changes_nothing(self):
+        m = Model()
+        d = m.add_dimension("Region", ["N"])
+        target = m.add_dimension("Zone", ["Z"]).id
+        prop = m.add_property(d.id, "In", target, {})
+        x = m.add_input("Sales", [d.id])
+        m.rename_dimension(d.id, "Region")
+        m.rename_property(d.id, prop, "In")
+        m.rename_member(d.id, d.ids[0], "N")
+        m.rename_metric(x, "Sales")
+        self.assertEqual((d.name, d.property_names[prop], d.members, m.metric(x).name), ("Region", "In", ["N"], "Sales"))
+
     def test_model_rejects_a_name_where_an_id_is_required(self):
         model = self.model
         with self.assertRaisesRegex(ValueError, "Metric Price がない"):
