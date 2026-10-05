@@ -287,7 +287,6 @@ def _op_set_property_values(m, n, dim, prop, values):
 
 
 def _op_add_input(m, n, id, name, dims, kind="number", cells=None, partition=None):
-    """The cells come as [[coordinates, value], ...]."""
     dims, kind = _dims(n, dims), n.kind(kind)
     if partition is not None:
         partition = n.dim(partition).name
@@ -325,7 +324,7 @@ def _op_set_cell(m, n, metric, value, coords=None, override=False):
 
 
 def _op_spread(m, n, metric, total, how="proportional", where=None, coords=None):
-    mt = _target(m, n, metric, False)
+    mt = n.metric(metric)
     named = None
     if where is not None:
         if not isinstance(where, dict):
@@ -549,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
             seq = self.server.workspace.write(
                 lambda m: apply_ops(m, ops), user=user, reason=body.get("reason"),
                 client_op_id=client_op_id, expect=body.get("expect"), timeout=self.server.write_timeout)
-        except Rejected as e:  # the same client_op_id was rejected before: the same answer
+        except Rejected as e:
             return e.status, e.body
         # _run answers a terminal rejection (DuplicateId, FormulaError, ValueError). The writer recorded it already
         except Conflict as e:
@@ -574,11 +573,11 @@ def _dimensions_out(n: Names) -> dict:
     out = {}
     for d in n.m.dimensions.values():
         uid = lambda name: n.member_id(d, name)
-        props = {n.m.uuid_of(d.property_ids[p]): {"name": p, "target": n.dim_id(t)} for p, (t, _) in d.properties.items()}
-        values = {}
+        props, values = {}, {}
         for p, (t, mapping) in d.properties.items():
-            td = n.m.dimension(t)
-            values[n.m.uuid_of(d.property_ids[p])] = {uid(k): n.member_id(td, v) for k, v in mapping.items()}
+            pid, td = n.m.uuid_of(d.property_ids[p]), n.m.dimension(t)
+            props[pid] = {"name": p, "target": n.dim_id(t)}
+            values[pid] = {uid(k): n.member_id(td, v) for k, v in mapping.items()}
         out[n.dim_id(d.name)] = {"name": d.name, "ordered": d.ordered,
                                  "members": [{"id": uid(x), "name": x} for x in d.in_order()],
                                  "properties": props, "property_values": values}

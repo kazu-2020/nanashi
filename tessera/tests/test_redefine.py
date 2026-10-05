@@ -68,7 +68,7 @@ class Redefine(unittest.TestCase):
         self.m.add_formula("Margin", ["Product", "Month"], "PREVIOUS(Month) * 0.5 + Revenue[REMOVE SUM: Region] - Cost", id=self.m.metric_id("Margin"))
         self.m.recalc()
         check_full(self, self.m)
-        self.m.add_formula("Stock", ["Product", "Month"], "Margin - Outflow", id=self.m.metric_id("Stock"))  # 循環がなくなる
+        self.m.add_formula("Stock", ["Product", "Month"], "Margin - Outflow", id=self.m.metric_id("Stock"))  # the cycle goes away
         self.m.recalc()
         check_full(self, self.m)
 
@@ -105,7 +105,7 @@ class Redefine(unittest.TestCase):
         m.add_input("X", ["P", "M"], {("a", "x"): 1.0}, id=m.metric_id("X"))
         with self.assertRaisesRegex(FormulaError, r"^Y: 式の軸 \('P', 'M'\) が宣言した軸 \('P',\) と一致しない$"):
             m.recalc()
-        m.add_input("X", ["P"], {("a",): 3.0}, id=m.metric_id("X"))  # 元の軸に戻せば計算できる
+        m.add_input("X", ["P"], {("a",): 3.0}, id=m.metric_id("X"))  # with the original dimensions, it can calculate
         m.recalc()
         self.assertEqual(m.get("Y", P="a"), 6.0)
 
@@ -148,7 +148,7 @@ class Redefine(unittest.TestCase):
         self.m.recalc()
         self.m.set_cell("Volume", 5, Product="A", Region="S", Month="Jan")  # scan の中で集計元が増える
         self.m.recalc()
-        self.m.add_formula("Revenue", ["Product", "Region", "Month"], "Volume * Price", id=self.m.metric_id("Revenue"))  # scan から出る
+        self.m.add_formula("Revenue", ["Product", "Region", "Month"], "Volume * Price", id=self.m.metric_id("Revenue"))  # the formula leaves the scan
         self.m.recalc()
         self.m.set_cell("Volume", None, Product="A", Region="N", Month="Jan")  # 件数が正しくないと空になる
         self.assertEqual(self.m.get("RevTotal", Product="A", Month="Jan"), 50)

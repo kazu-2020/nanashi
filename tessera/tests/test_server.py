@@ -198,7 +198,7 @@ class Api:
                                                 write(ws, "Nope", 1, Product="p0", Month="Jan")]}
         status, err = self.c.post("/writes", bad)
         self.assertEqual((status, err["error"]), (400, "bad_request"))
-        self.assertEqual(self.c.get(path(ws, "Stock", "cell", Product="p0", Month="Jan"))[1]["value"], 95.0)  # 全部取り消し
+        self.assertEqual(self.c.get(path(ws, "Stock", "cell", Product="p0", Month="Jan"))[1]["value"], 95.0)  # the server cancels all the ops
         self.assertEqual(self.c.post("/writes", {"ops": [write(ws, "Stock", 1, Product="p0", Month="Jan")]})[0], 400)
         self.assertEqual(self.c.post("/writes", {"client_op_id": "x", "ops": []})[0], 400)
         formula = {"client_op_id": "op-3", "ops": [{"op": "add_formula", "id": "m-bad", "name": "Bad",
@@ -282,7 +282,7 @@ class Api:
         self.assertEqual(post("d-9", {"op": "remove_metric", "id": "m-1"})[0], 200)
         status, body = post("d-10", {"op": "add_input", "id": "m-1", "name": "Thrice", "dims": [product]})
         self.assertEqual((status, body["error"]), (409, "duplicate_id"))
-        self.assertEqual(self.c.post("/writes", {"client_op_id": "d-10", "ops": []})[0], 400)  # no ops: not the record
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "d-10", "ops": []})[0], 400)  # the body check comes before the lookup of the rejection
         self.assertEqual(self.c.get("/operations/d-10"), (200, {"state": "rejected", "status": 409, "body": body}))
         self.assertEqual(set(ws.version.tombstones), {"mem-1", "m-1"})
 
@@ -331,11 +331,11 @@ class Api:
 
     def test_size_limits(self):
         ws = self.ws
-        status, err = self.c.get(path(ws, "Stock", "slice"))  # 80 セルは上限 50 を超える
+        status, err = self.c.get(path(ws, "Stock", "slice"))  # 80 cells are more than the limit of 50
         self.assertEqual((status, err["error"]), (413, "too_large"))
         self.assertEqual(self.c.get(path(ws, "Stock", "slice", Product=["p1", "p2"]))[0], 200)
         self.assertEqual(self.c.get(path(ws, "Stock", "rows", params="limit=51"))[0], 400)
-        status, body = self.c.get(path(ws, "Stock", "rows"))  # limit を省くと上限まで
+        status, body = self.c.get(path(ws, "Stock", "rows"))  # without limit, the page has the maximum size
         self.assertEqual((status, len(body["rows"]), body["total"]), (200, 50, 80))
         self.assertEqual(self.c.get(path(ws, "Stock", "summary", keep=["Product", "Month"]))[0], 413)
         self.assertEqual(self.c.get(path(ws, "Stock", "summary", keep=["Product", "Month"], Month="Jan"))[0], 200)
@@ -398,7 +398,7 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "o", "ops": ops})[0], 200)
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][:4], ["p2", "p0", "p_new", "p1"])
         rows = self.c.get(path(ws, "Stock", "rows", Month="Jan", params="limit=3"))[1]["rows"]
-        self.assertEqual([ws.version.dimensions["Product"].member_of(ws.version.ids[r[0]]) for r in rows], ["p2", "p0", "p1"])  # p_new には値がない
+        self.assertEqual([ws.version.dimensions["Product"].member_of(ws.version.ids[r[0]]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
         status, err = self.c.post("/writes", {"client_op_id": "o2", "ops": [
             {"op": "move_member", "dim": did(ws, "Month"), "id": xid(ws, "Month", "Mar"), "at": 0}]})
         self.assertEqual((status, err["error"]), (400, "bad_request"))

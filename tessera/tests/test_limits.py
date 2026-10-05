@@ -80,7 +80,7 @@ class KeyWidth(unittest.TestCase):
         m = self.by_metric(13)
         with self.assertRaisesRegex(FormulaError, r"式の途中の結果の軸 \[.*E.*Dept.*\] が 64 ビット.*E 13 ビット"):
             m.recalc()
-        m.add_formula("Cost", ["D1", "D2", "D3"], "Salary[REMOVE SUM: E]", id=m.metric_id("Cost"))  # 直せば通る
+        m.add_formula("Cost", ["D1", "D2", "D3"], "Salary[REMOVE SUM: E]", id=m.metric_id("Cost"))  # the corrected formula passes
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1"), 15.0)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -136,7 +136,7 @@ class CellEstimates(unittest.TestCase):
                 with self.assertRaisesRegex(FormulaError, r"Filled: .*最大 20,000 .*上限 10,000 .*"
                                                           r"IFBLANK が \['Customer', 'SKU'\]"):
                     m.recalc()
-                m.add_formula("Filled", ["Customer", "SKU"], "Sales * 2", id=m.metric_id("Filled"))  # 直せば通る
+                m.add_formula("Filled", ["Customer", "SKU"], "Sales * 2", id=m.metric_id("Filled"))  # the corrected formula passes
                 self.assertEqual(m.value("Filled").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
                 self.assertEqual(m.cell_estimates["Filled"], 2.0)
 
@@ -148,7 +148,7 @@ class CellEstimates(unittest.TestCase):
                 m.recalc()
                 with self.assertRaises(FormulaError):
                     with m.transaction():
-                        m.add_formula("Double", ["Customer", "SKU"], "Sales + 1", id=m.metric_id("Double"))  # 定数との足し算で密になる
+                        m.add_formula("Double", ["Customer", "SKU"], "Sales + 1", id=m.metric_id("Double"))  # the addition of a constant makes it dense
                 self.assertEqual(m.value("Double").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
 
     def test_downstream_of_a_dense_metric_is_checked_too(self):
@@ -203,7 +203,7 @@ class CellEstimates(unittest.TestCase):
                     lambda: m.add_formula("Leaf", ["Month"], "Total[FILTER: Actual]"),
                     lambda: m.remove_metric("Leaf"),
                     lambda: m.add_formula("Total", ["Month"], "IFBLANK(ByCat[REMOVE SUM: Category], 0)", id=m.metric_id("Total")),
-                    lambda: m.add_input("Total", ["Month"], {("Jan",): 1.0}, id=m.metric_id("Total")),  # 式を入力にすると何も読まない
+                    lambda: m.add_input("Total", ["Month"], {("Jan",): 1.0}, id=m.metric_id("Total")),  # as an input, it reads nothing
                     lambda: m.remove_metric("ByCat"),
                     lambda: m.add_formula("Total", ["Month"], "Rev[REMOVE SUM: Product]", id=m.metric_id("Total")),
                 ]

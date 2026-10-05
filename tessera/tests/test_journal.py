@@ -42,7 +42,7 @@ def definitions(m: Model) -> dict:
 
 def check_same_state(test, a: Model, b: Model) -> None:
     test.assertEqual(definitions(a), definitions(b))
-    test.assertEqual((a.ids, a.tombstones), (b.ids, b.tombstones))  # the UUIDs and the tombstones survive a replay
+    test.assertEqual((a.ids, a.tombstones), (b.ids, b.tombstones))
     test.assertEqual({d.name: d.property_ids for d in a.dimensions.values()},
                      {d.name: d.property_ids for d in b.dimensions.values()})
     sa, sb = snapshot(a), snapshot(b)
@@ -163,11 +163,11 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.rename_metric("Margin", "Profit")
             self.m.remove_member("Month", "Feb")
             self.m.remove_member("Product", "B")
-            self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"}, id=self.m.property_id("Product", "Category"))  # D は対応を外す
+            self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"}, id=self.m.property_id("Product", "Category"))  # D loses its mapping
             self.m.set_property_values("Product", "Category", {"A": "X", "C": None, "D": "Y"})
             self.m.remove_metric("CatShare")
-        self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric_id("Salary"))  # 入力の置き換え
-        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric_id("Stock"))  # 計算 Metric を入力に
+        self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric_id("Salary"))  # replace an input
+        self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric_id("Stock"))  # a formula Metric becomes an input
         check_same_state(self, self.m, self.reopen())
 
     def test_rolled_back_transactions_are_not_recorded(self):

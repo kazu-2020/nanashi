@@ -528,19 +528,15 @@ class Model:
         return self._uuids[handle]
 
     def metric_id(self, name: str) -> str:
-        """The UUID of the Metric."""
         return self.uuid_of(self._metric(name).id)
 
     def dimension_id(self, name: str) -> str:
-        """The UUID of the dimension."""
         return self.uuid_of(self.dimension(name).id)
 
     def member_id(self, dim: str, member: str) -> str:
-        """The UUID of the member."""
         return self.uuid_of(self.dimension(dim).id_of(member))
 
     def property_id(self, dim: str, prop: str) -> str:
-        """The UUID of the property."""
         d = self.dimension(dim)
         if prop not in d.property_ids:
             raise ValueError(f"{dim} にプロパティ {prop} がない")

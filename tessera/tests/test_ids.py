@@ -185,7 +185,7 @@ class Uuids(unittest.TestCase):
         m.add_formula("Bonus", ["Product"], "Price * 0.1", overridable=True, id="bonus")
         hidden = m.metric_id("__override__Bonus")
         m.remove_metric("Bonus")
-        self.assertEqual({"bonus", hidden} & m.tombstones, {"bonus", hidden})
+        self.assertLessEqual({"bonus", hidden}, m.tombstones)
 
     def test_fork_keeps_uuids_and_tombstones(self):
         m = self.m
@@ -340,7 +340,7 @@ class Storage(unittest.TestCase):
             m.save(tmp)
             loaded = Model.load(tmp, self.engine())
         self.assertEqual(all_ids(loaded), all_ids(m))
-        self.assertEqual((loaded.ids, loaded.tombstones), (m.ids, m.tombstones))  # the UUIDs and the tombstones too
+        self.assertEqual((loaded.ids, loaded.tombstones), (m.ids, m.tombstones))
         self.assertEqual(loaded.dimensions["Product"].property_ids, m.dimensions["Product"].property_ids)
         a, b = snapshot(m), snapshot(loaded)
         for name in a:

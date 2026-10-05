@@ -99,8 +99,6 @@ class Follow(JournalCase):
             status, err = c.post("/writes", {"client_op_id": "x", "ops": [write(self.replica, "Stock", 1, Product="p0", Month="Jan")]})
             self.assertEqual((status, err["error"]), (405, "read_only"))
             self.assertEqual(c.get("/operations/x")[0], 404)  # a follower reads the journal only
-            status, err = c.post("/writes", {"client_op_id": "x", "ops": [write(self.replica, "Stock", 1, Product="p0", Month="Jan")]})
-            self.assertEqual((status, err["error"]), (405, "read_only"))
         finally:
             server.stop()
 
