@@ -24,6 +24,24 @@ const lines = (s: string) =>
     .map((x) => x.trim())
     .filter(Boolean);
 
+// The key remounts the Input when the name changes, so that defaultValue shows the new name.
+function RenameInput(props: {
+  name: string;
+  label: string;
+  disabled: boolean;
+  onRename: (name: string) => unknown;
+}) {
+  return (
+    <Input
+      key={props.name}
+      aria-label={props.label}
+      disabled={props.disabled}
+      defaultValue={props.name}
+      onBlur={(e) => e.target.value !== props.name && props.onRename(e.target.value)}
+    />
+  );
+}
+
 export function ListsPage() {
   const { appId, model, names, can } = useApp();
   const mutate = useMutate();
@@ -87,16 +105,13 @@ export function ListsPage() {
         <div className="flex flex-wrap items-center gap-2">
           <Sel label="リスト" value={sel} onChange={setSel} options={listOptions(model)} />
           {list && (
-            <Input
-              key={`${list.id}:${list.name}`}
-              aria-label="リスト名"
+            <RenameInput
+              key={list.id}
+              name={list.name}
+              label="リスト名"
               disabled={!modeler}
-              defaultValue={list.name}
-              onBlur={(e) =>
-                e.target.value !== list.name &&
-                mutate((clientOpId) =>
-                  api.renameList({ appId, clientOpId, id: list.id, name: e.target.value }),
-                )
+              onRename={(name) =>
+                mutate((clientOpId) => api.renameList({ appId, clientOpId, id: list.id, name }))
               }
             />
           )}
@@ -110,21 +125,13 @@ export function ListsPage() {
                 <th>名前</th>
                 {list.properties.map((p) => (
                   <th key={p.id}>
-                    <Input
-                      key={p.name}
-                      aria-label="プロパティ名"
+                    <RenameInput
+                      name={p.name}
+                      label="プロパティ名"
                       disabled={!modeler}
-                      defaultValue={p.name}
-                      onBlur={(e) =>
-                        e.target.value !== p.name &&
+                      onRename={(name) =>
                         mutate((clientOpId) =>
-                          api.renameProperty({
-                            appId,
-                            clientOpId,
-                            list: sel,
-                            id: p.id,
-                            name: e.target.value,
-                          }),
+                          api.renameProperty({ appId, clientOpId, list: sel, id: p.id, name }),
                         )
                       }
                     />
@@ -138,16 +145,12 @@ export function ListsPage() {
               {list.members.map((m, i) => (
                 <tr key={m.id}>
                   <td>
-                    <Input
-                      key={m.name}
-                      aria-label="メンバー名"
+                    <RenameInput
+                      name={m.name}
+                      label="メンバー名"
                       disabled={!modeler}
-                      defaultValue={m.name}
-                      onBlur={(e) =>
-                        e.target.value !== m.name &&
-                        edit([
-                          { edit: { case: "rename", value: { id: m.id, name: e.target.value } } },
-                        ])
+                      onRename={(name) =>
+                        edit([{ edit: { case: "rename", value: { id: m.id, name } } }])
                       }
                     />
                   </td>

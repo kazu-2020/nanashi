@@ -357,9 +357,9 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
     Expand, By, Remove, Shift and AsAxis, the member of Member and Select, and By.prop (a property id, or a
     Metric id when it names a Metric).
 
-    names gives more name -> id pairs (the Metric that the formula defines). A field that already holds an id
-    stays. An unknown name raises FormulaError (unknown_metric, unknown_dim, unknown_member, select_member,
-    no_property_or_metric) with the name that the user wrote.
+    names gives more name -> id pairs (the Metric that the formula defines). An unknown name raises
+    FormulaError (unknown_metric, unknown_dim, unknown_member, select_member, no_property_or_metric) with the
+    name that the user wrote.
     """
     def id_of(name: str) -> str | None:
         if names and name in names:
@@ -367,16 +367,12 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
         return cat._metric_ids.get(name)
 
     def dim(name: str) -> str:
-        if name in cat.dimensions:
-            return name
         if name in cat._dim_ids:
             return cat._dim_ids[name]
         raise FormulaError("unknown_dim", name=name)
 
     def go(e: Expr) -> Expr:
         if isinstance(e, Ref):
-            if e.name in cat.metrics or e.name in cat.dimensions:
-                return e
             if (id := id_of(e.name)) is not None:
                 return Ref(id)
             if e.name in cat._dim_ids:
@@ -385,30 +381,20 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
         changes = {f.name: r for f in fields(e)
                    if isinstance(v := getattr(e, f.name), Expr) and (r := go(v)) is not v}
         if isinstance(e, Expand):
-            dims = tuple(dim(d) for d in e.dims)
-            if dims != e.dims:
-                changes["dims"] = dims
+            changes["dims"] = tuple(dim(d) for d in e.dims)
         elif isinstance(e, (Member, Select, By, Remove, Shift, AsAxis)):
-            if (d := dim(e.dim)) != e.dim:
-                changes["dim"] = d
+            changes["dim"] = d = dim(e.dim)
             if isinstance(e, (Member, Select)):
                 members = cat.dimensions[d]
-                member = e.member if e.member in members._by_id else members.ids[members._index[e.member]] \
-                    if e.member in members._index else None
-                if member is None:
+                if e.member not in members._index:
                     code = "unknown_member" if isinstance(e, Member) else "select_member"
                     raise FormulaError(code, dim=e.dim, member=e.member)
-                if member != e.member:
-                    changes["member"] = member
+                changes["member"] = members.ids[members._index[e.member]]
             if isinstance(e, By):
-                props = cat.dimensions[d]
-                prop = e.prop if e.prop in props.properties else props._props.get(e.prop)
-                if prop is None and e.prop not in cat.metrics:
-                    prop = id_of(e.prop)
-                    if prop is None:
-                        raise FormulaError("no_property_or_metric", dim=e.dim, prop=e.prop)
-                if prop is not None and prop != e.prop:
-                    changes["prop"] = prop
+                prop = cat.dimensions[d]._props.get(e.prop) or id_of(e.prop)
+                if prop is None:
+                    raise FormulaError("no_property_or_metric", dim=e.dim, prop=e.prop)
+                changes["prop"] = prop
         return replace(e, **changes) if changes else e
     return go(expr)
 

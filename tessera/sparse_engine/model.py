@@ -95,14 +95,6 @@ LOG_MAX = 10_000  # 観察用の記録の上限（古いものから捨てる）
 DENSE = frozenset({"densify", "isblank_dense", "ifblank_dense"})  # the warning codes of a dense operation
 
 
-class MetricLog(deque):
-    """An observation log of Metric ids (the Metrics that a recalculation touched). If it has more than LOG_MAX
-    items, it discards the oldest items. The name facade (named.py) shows the current names."""
-
-    def __init__(self):
-        super().__init__(maxlen=LOG_MAX)
-
-
 class SliceLog:
     """An observation log of the recalculated (Metric id, range) items. A range that the engine gave as member
     numbers becomes member ids only when the log is read (to change hundreds of ranges after each change would
@@ -287,9 +279,11 @@ class Model:
     _dim_ids: dict[str, str] = field(default_factory=dict)  # dimension name -> id (the name index)
     metrics: dict[str, Metric] = field(default_factory=dict)  # Metric id -> Metric, in definition order
     _metric_ids: dict[str, str] = field(default_factory=dict)  # Metric name -> id (the name index)
-    eval_log: MetricLog = None  # The recalculated Metrics (observation). __post_init__ makes the logs
-    slice_log: SliceLog = None  # The recalculated ranges (observation)
-    delta_log: MetricLog = None  # The Metrics that incremental aggregation updated (observation)
+    # The recalculated Metrics (observation)
+    eval_log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_MAX))
+    slice_log: SliceLog = field(default_factory=SliceLog)  # The recalculated ranges (observation)
+    # The Metrics that incremental aggregation updated (observation)
+    delta_log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_MAX))
     _state: dict[str, MetricState] = field(default_factory=dict)  # Metric ごとの、定義以外の状態
     _plan: list[Step] | None = None
     _levels: list[list[Step]] = field(default_factory=list)  # 依存関係の段ごとの計画（全体の再計算用）
@@ -312,9 +306,6 @@ class Model:
     cell_estimates = _per_metric("estimate", "計算 Metric のセル数の見積もり（上限）")
     _estimate_refs = _per_metric("estimate_refs", "見積もりが読んだ Metric")
     _estimate_users = _per_metric("estimate_users", "Metric -> それを読む見積もり")
-
-    def __post_init__(self):
-        self.eval_log, self.delta_log, self.slice_log = MetricLog(), MetricLog(), SliceLog()
 
     @property
     def warnings(self) -> dict[str, list[str]]:
@@ -540,11 +531,6 @@ class Model:
 
     # ------------------------------------------------ UUIDs
 
-    def _has_id(self, id: str) -> bool:
-        """Tell if a dimension, member, property or Metric has this id."""
-        return (id in self.metrics or id in self.dimensions
-                or any(id in d._by_id or id in d.properties for d in self.dimensions.values()))
-
     @_operation
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str], *,
                      id: str | None = None) -> str:
@@ -625,7 +611,8 @@ class Model:
             raise DuplicateId(f"ID {id} は消したオブジェクトのもの（再利用できない）")
         old = objects.get(id)
         if old is None:
-            if self._has_id(id):
+            if (id in self.metrics or id in self.dimensions
+                    or any(id in d._by_id or id in d.properties for d in self.dimensions.values())):
                 raise DuplicateId(f"ID {id} は別の種類のオブジェクトのもの")
             if name in names:
                 raise ValueError(f"{shown or name}: 同じ名前の{what}が別の ID にある")

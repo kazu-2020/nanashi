@@ -477,7 +477,8 @@ class PgJournal(Journal):
                                       " order by c.seq, c.metric_id", (self.model_id, after)).fetchall()
         by_seq: dict[int, dict[str, list]] = {}
         for seq, metric, coords, old, new, old_member, new_member in cells:
-            by_seq.setdefault(seq, {}).setdefault(metric, []).append([coords, _value(old, old_member), _value(new, new_member)])
+            row = [coords, old if old_member is None else old_member, new if new_member is None else new_member]
+            by_seq.setdefault(seq, {}).setdefault(metric, []).append(row)
         for seq, rec in ops:
             if "cells_blob" in rec:  # 大量のセルはファイルから読む
                 rec["changes"]["cells"] = self._read_blob(rec.pop("cells_blob"))
@@ -498,7 +499,8 @@ class PgJournal(Journal):
                 " where c.model_id = %s and c.metric_id = %s and c.coords = %s::text[] order by c.seq",
                 (self.model_id, m.id, key)).fetchall()
         return _shown(model, m, [{"seq": s, "at": _iso(a), "user": u, "reason": r,
-                                  "old": _value(o, om), "new": _value(n, nm)} for s, a, u, r, o, n, om, nm in rows])
+                                  "old": o if om is None else om, "new": n if nm is None else nm}
+                                 for s, a, u, r, o, n, om, nm in rows])
 
     # ------------------------------------------------ スナップショット
 
@@ -584,11 +586,6 @@ def _number(v):
 
 def _member(v):
     return v if isinstance(v, str) else None
-
-
-def _value(number, member):
-    """The value of a row of nanashi_cell_change in the form of a record (a member id for a member type)."""
-    return number if member is None else member
 
 
 def _iso(at) -> str:

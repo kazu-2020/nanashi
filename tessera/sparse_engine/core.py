@@ -49,21 +49,17 @@ class Dimension:
         self._index = {m: i for i, m in enumerate(self.members)}
         if len(self._index) != len(self.members):
             raise ValueError(f"{name}: メンバーが重複している")
-        self.set_ids([uuid7() for _ in self.members] if ids is None else ids)
+        ids = [uuid7() for _ in self.members] if ids is None else list(ids)
+        if len(ids) != len(self.members) or len(set(ids)) != len(ids):
+            raise ValueError(f"{name}: メンバーの ID はメンバーと同じ数で、重複しないこと")
+        self.ids = ids
+        self._by_id = {i: pos for pos, i in enumerate(ids)}
         self._order: list[int] | None = None  # 順位 -> 番号。None なら番号の順のまま
         self._rank: dict[str, int] | None = None  # 名前 -> 順位（必要になったら作る）
         # property id -> (the id of the target Dimension, {member -> target member})
         self.properties: dict[str, tuple[str, dict[str, str]]] = {}
         self.property_names: dict[str, str] = {}  # property id -> name
         self._props: dict[str, str] = {}  # property name -> id (the name index)
-
-    def set_ids(self, ids: Iterable[str]) -> None:
-        """Set the member id of each position (when a saved model is read)."""
-        ids = list(ids)
-        if len(ids) != len(self.members) or len(set(ids)) != len(ids):
-            raise ValueError(f"{self.name}: メンバーの ID はメンバーと同じ数で、重複しないこと")
-        self.ids = ids
-        self._by_id = {i: pos for pos, i in enumerate(ids)}
 
     def id_of(self, member: str) -> str:
         """The id of the member with this name. ValueError if there is none."""

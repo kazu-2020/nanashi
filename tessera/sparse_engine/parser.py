@@ -387,9 +387,7 @@ def _fmt(e: Expr, show) -> tuple[str, int]:
     """(text, precedence). show gives the display name of an id (or returns a name as it is)."""
     sub = lambda x: _fmt(x, show)[0]
     match e:
-        case Ref(name):
-            return _name(show(name)), _ATOM
-        case DimRef(name):
+        case Ref(name) | DimRef(name):
             return _name(show(name)), _ATOM
         case Member(dim, member):
             return f'{_name(show(dim))}."{show(member).replace(chr(34), chr(34) * 2)}"', _ATOM

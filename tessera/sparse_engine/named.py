@@ -74,9 +74,7 @@ class Named:
     def _value_in(self, m: Metric, value):
         """A member-type value (a name) as a member id. An unknown name stays as it is."""
         d = self._value_dim(m)
-        if d is None or not isinstance(value, str) or value not in d._index:
-            return value
-        return d.id_of(value)
+        return value if d is None else self._member(d, value)
 
     def _value_dim(self, m: Metric) -> Dimension | None:
         return self.model.dimensions[m.kind.removeprefix("member:")] if m.kind.startswith("member:") else None
@@ -151,9 +149,8 @@ class Named:
         dims = tuple(self._dim(d) for d in dims)
         kind = self._kind(kind)
         if cells:
-            value_in = self._value_in if kind.startswith("member:") else (lambda m, v: v)
             m = Metric(name, dims, kind)
-            cells = {self._key(dims, tuple(k)): value_in(m, v) for k, v in cells.items()}
+            cells = {self._key(dims, tuple(k)): self._value_in(m, v) for k, v in cells.items()}
         return self.model.add_input(name, dims, cells, kind=kind, storage=storage,
                                     partition=None if partition is None else self._dim(partition), id=id)
 
@@ -270,77 +267,48 @@ class Named:
 
     @property
     def eval_log(self) -> NamedLog:
-        return NamedLog(self.model.eval_log, self.model._name_of)
+        log, name = self.model.eval_log, self.model._name_of
+        return NamedLog(log.clear, lambda: [name(i) for i in log])
 
     @property
     def delta_log(self) -> NamedLog:
-        return NamedLog(self.model.delta_log, self.model._name_of)
+        log, name = self.model.delta_log, self.model._name_of
+        return NamedLog(log.clear, lambda: [name(i) for i in log])
 
     @property
-    def slice_log(self) -> NamedSliceLog:
-        return NamedSliceLog(self.model)
-
-
-class NamedLog:
-    """A Metric log of the Model (ids) shown with the current names."""
-
-    def __init__(self, ids, names: Callable[[str], str]):
-        self._ids, self._names = ids, names
-
-    def _shown(self) -> list[str]:
-        return [self._names(i) for i in self._ids]
-
-    def clear(self) -> None:
-        self._ids.clear()
-
-    def count(self, name: str) -> int:
-        return self._shown().count(name)
-
-    def __iter__(self):
-        return iter(self._shown())
-
-    def __len__(self) -> int:
-        return len(self._ids)
-
-    def __getitem__(self, i):
-        return self._shown()[i]
-
-    def __contains__(self, name) -> bool:
-        return name in self._shown()
-
-    def __eq__(self, other) -> bool:
-        return self._shown() == list(other)
-
-    def __repr__(self) -> str:
-        return repr(self._shown())
-
-
-class NamedSliceLog:
-    """The slice log of the Model (Metric id, dimension id -> member ids) shown with the current names. A removed
-    member shows its id."""
-
-    def __init__(self, model: Model):
-        self._model = model
-
-    def _shown(self) -> list[tuple[str, dict]]:
-        name, dims = self._model._name_of, self._model.dimensions
+    def slice_log(self) -> NamedLog:
+        """(Metric id, dimension id -> member ids) items with the current names. A removed member shows its id."""
+        model = self.model
+        name, dims = model._name_of, model.dimensions
 
         def members(d: str, ms: frozenset) -> frozenset:
             by_id, names = dims[d]._by_id, dims[d].members
             return frozenset(names[by_id[x]] if x in by_id else x for x in ms)
-        return [(name(i), {dims[d].name: members(d, ms) for d, ms in r.items()}) for i, r in self._model.slice_log]
+        return NamedLog(model.slice_log.clear,
+                        lambda: [(name(i), {dims[d].name: members(d, ms) for d, ms in r.items()})
+                                 for i, r in model.slice_log])
 
-    def clear(self) -> None:
-        self._model.slice_log.clear()
+
+class NamedLog:
+    """An observation log of the Model (ids) shown with the current names. shown gives the items."""
+
+    def __init__(self, clear: Callable[[], None], shown: Callable[[], list]):
+        self.clear, self._shown = clear, shown
+
+    def count(self, item) -> int:
+        return self._shown().count(item)
 
     def __iter__(self):
         return iter(self._shown())
 
     def __len__(self) -> int:
-        return len(self._model.slice_log)
+        return len(self._shown())
 
     def __getitem__(self, i):
         return self._shown()[i]
+
+    def __contains__(self, item) -> bool:
+        return item in self._shown()
 
     def __eq__(self, other) -> bool:
         return self._shown() == list(other)
