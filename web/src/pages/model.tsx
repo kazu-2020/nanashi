@@ -84,7 +84,23 @@ export function ListsPage() {
         </Section>
       )}
       <Section title="リスト">
-        <Sel label="リスト" value={sel} onChange={setSel} options={listOptions(model)} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Sel label="リスト" value={sel} onChange={setSel} options={listOptions(model)} />
+          {list && (
+            <Input
+              key={`${list.id}:${list.name}`}
+              aria-label="リスト名"
+              disabled={!modeler}
+              defaultValue={list.name}
+              onBlur={(e) =>
+                e.target.value !== list.name &&
+                mutate((clientOpId) =>
+                  api.renameList({ appId, clientOpId, id: list.id, name: e.target.value }),
+                )
+              }
+            />
+          )}
+        </div>
       </Section>
       {list && (
         <Section title={`${list.name} のメンバー（${list.members.length}）`}>
@@ -94,7 +110,24 @@ export function ListsPage() {
                 <th>名前</th>
                 {list.properties.map((p) => (
                   <th key={p.id}>
-                    {p.name}
+                    <Input
+                      key={p.name}
+                      aria-label="プロパティ名"
+                      disabled={!modeler}
+                      defaultValue={p.name}
+                      onBlur={(e) =>
+                        e.target.value !== p.name &&
+                        mutate((clientOpId) =>
+                          api.renameProperty({
+                            appId,
+                            clientOpId,
+                            list: sel,
+                            id: p.id,
+                            name: e.target.value,
+                          }),
+                        )
+                      }
+                    />
                     {p.target && ` → ${label(names, p.target)}`}
                   </th>
                 ))}

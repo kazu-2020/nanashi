@@ -260,3 +260,93 @@ func TestEditMembersRefusalRestoresText(t *testing.T) {
 		t.Errorf("text values after the refusal: %s, want %s", text, want)
 	}
 }
+
+func TestRenameListRenamesThePropertyMetrics(t *testing.T) {
+	em := model(t)
+	amountProp, text := "0192f3a4-0000-7000-8000-0000000000d1", "0192f3a4-0000-7000-8000-0000000000d2"
+	meta := appMeta{Props: []propRow{
+		{ListID: sales, ID: amountProp, Name: "Amount", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, MetricID: amount},
+		{ListID: sales, ID: text, Name: "Gone", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, MetricID: newMember}, // Its Metric is pending.
+		{ListID: sales, ID: salesProduct, Name: "Product", Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION},
+	}}
+	p, err := renameListPlan(em, meta, sales, "Orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(`[{"id":%q,"name":"Orders","op":"rename_dimension"},{"id":%q,"name":"Orders.Amount","op":"rename_metric"}]`, sales, amount)
+	if got := opsJSON(t, p.ops); got != want || len(p.stmts) != 0 {
+		t.Errorf("got %s %v\nwant %s and no statement", got, p.stmts, want)
+	}
+	if _, err := renameListPlan(em, meta, newMember, "X"); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
+		t.Errorf("an unknown list: got %v, want NOT_FOUND", err)
+	}
+}
+
+func TestRenamePropertyPlan(t *testing.T) {
+	em := model(t)
+	amountProp, note := "0192f3a4-0000-7000-8000-0000000000e1", "0192f3a4-0000-7000-8000-0000000000e2"
+	meta := appMeta{Props: []propRow{
+		{ListID: sales, ID: amountProp, Name: "Amount", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, MetricID: amount},
+		{ListID: sales, ID: salesProduct, Name: "Product", Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION},
+		{ListID: sales, ID: note, Name: "Note", Type: nanashiv1.PropertyType_PROPERTY_TYPE_TEXT},
+	}}
+	for id, want := range map[string]string{
+		amountProp:   fmt.Sprintf(`[{"id":%q,"name":"Sales.New","op":"rename_metric"}]`, amount),
+		salesProduct: fmt.Sprintf(`[{"dim":%q,"id":%q,"name":"New","op":"rename_property"}]`, sales, salesProduct),
+		note:         `null`,
+	} {
+		p, err := renamePropertyPlan("app", em, meta, sales, id, "New")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := opsJSON(t, p.ops); got != want {
+			t.Errorf("%s: got %s, want %s", id, got, want)
+		}
+		if len(p.stmts) != 1 || len(p.made) != 1 || p.made[0].NewName != "New" {
+			t.Errorf("%s: the api row must get the new name: %v %v", id, p.stmts, p.made)
+		}
+	}
+	if _, err := renamePropertyPlan("app", em, meta, sales, note, "Amount"); connect.CodeOf(connectError(err)) != connect.CodeAlreadyExists {
+		t.Errorf("a name of another property: got %v, want ALREADY_EXISTS", err)
+	}
+	if _, err := renamePropertyPlan("app", em, meta, product, note, "X"); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
+		t.Errorf("a property of another list: got %v, want NOT_FOUND", err)
+	}
+}
+
+// TestRenamePropertyRefusalRestoresName: the engine refuses the new name, so the api row gets the old name back.
+func TestRenamePropertyRefusalRestoresName(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	if _, err := pool.Exec(ctx, "insert into app_property (app_id, list_id, id, name, type) values ($1, $2, $3, 'Product', $4)",
+		app, sales, salesProduct, nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION); err != nil {
+		t.Fatal(err)
+	}
+	e := newFakeEngine(t, sample)
+	alice := testClient(t, pool, e)("alice")
+	rename := func(name string) error {
+		_, err := alice.RenameProperty(ctx, connect.NewRequest(&nanashiv1.RenamePropertyRequest{AppId: app, ClientOpId: uuid.NewString(), List: sales, Id: salesProduct, Name: name}))
+		return err
+	}
+	nameOf := func() (name string) {
+		if err := pool.QueryRow(ctx, "select name from app_property where app_id = $1 and id = $2", app, salesProduct).Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+	if err := rename(" Item "); err != nil || nameOf() != "Item" {
+		t.Fatalf("got %v and %q, want the name Item", err, nameOf())
+	}
+	if w := e.writes; len(w) != 1 || w[0]["ops"].([]any)[0].(map[string]any)["op"] != "rename_property" {
+		t.Errorf("engine writes: %v", w)
+	}
+	e.reply = func(int, map[string]any) (int, string) { return 400, `{"error": "bad_request", "message": "だめ"}` }
+	if err := rename("Taken"); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("got %v, want the refusal", err)
+	}
+	if got := nameOf(); got != "Item" {
+		t.Errorf("name after the refusal: %q, want Item", got)
+	}
+}

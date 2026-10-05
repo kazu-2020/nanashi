@@ -434,6 +434,50 @@ func pruneItems(out *nanashiv1.ModelDef, em engineModel) {
 	}
 }
 
+// renameListPlan renames the list id. The Metric "<list>.<property>" of each NUMBER or BOOLEAN property gets the
+// new list name. The api keeps no list name, so no api row changes.
+func renameListPlan(em engineModel, meta appMeta, id, name string) (plan, error) {
+	if _, ok := em.dim(id); !ok {
+		return plan{}, tag(errNotFound, "リスト %s がない", id)
+	}
+	ops := []op{newOp("rename_dimension", map[string]any{"id": id, "name": name})}
+	for _, p := range meta.Props {
+		if _, ok := em.metric(p.MetricID); p.ListID == id && p.MetricID != "" && ok {
+			ops = append(ops, newOp("rename_metric", map[string]any{"id": p.MetricID, "name": propMetric(name, p.Name)}))
+		}
+	}
+	return plan{ops: ops}, nil
+}
+
+// renamePropertyPlan renames the property id of the list in app_property. The engine also gets the new name: as
+// a property for a DIMENSION property, in the Metric name for a NUMBER or BOOLEAN property. A TEXT property has no
+// engine object.
+func renamePropertyPlan(app string, em engineModel, meta appMeta, list, id, name string) (plan, error) {
+	dim, ok := em.dim(list)
+	if !ok {
+		return plan{}, tag(errNotFound, "リスト %s がない", list)
+	}
+	i := slices.IndexFunc(meta.Props, func(p propRow) bool { return p.ListID == list && p.ID == id })
+	if i < 0 {
+		return plan{}, tag(errNotFound, "%s にプロパティ %s がない", dim.Name, id)
+	}
+	prop := meta.Props[i]
+	if slices.ContainsFunc(meta.Props, func(p propRow) bool { return p.ListID == list && p.ID != id && p.Name == name }) {
+		return plan{}, tag(errExists, "%s にプロパティ %s はすでにある", dim.Name, name)
+	}
+	out := plan{
+		stmts: []stmt{{sql: "update app_property set name = $4 where app_id = $1 and list_id = $2 and id = $3",
+			args: []any{app, list, id, name}, zero: tag(errNotFound, "%s にプロパティ %s がない", dim.Name, id)}},
+		made: []madeRow{{Table: "app_property_name", ID: id, ListID: list, OldName: prop.Name, NewName: name}},
+	}
+	if _, ok := em.metric(prop.MetricID); prop.MetricID != "" && ok {
+		out.ops = []op{newOp("rename_metric", map[string]any{"id": prop.MetricID, "name": propMetric(dim.Name, name)})}
+	} else if prop.Type == nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION {
+		out.ops = []op{newOp("rename_property", map[string]any{"dim": list, "id": id, "name": name})}
+	}
+	return out, nil
+}
+
 // The actions follow.
 
 type querier interface {
@@ -582,6 +626,26 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 		st, made := propertyStmt(app, list, p.Id, name, p.Type, metric)
 		return plan{ops: []op{newOp("add_input", map[string]any{"id": metric, "name": propMetric(dim.Name, name), "dims": []string{list}, "kind": kind, "cells": []any{}})},
 			stmts: []stmt{st}, made: []madeRow{made}}, nil
+	}))
+}
+
+func (s *PlanServer) RenameList(ctx context.Context, req *connect.Request[nanashiv1.RenameListRequest]) (*ack, error) {
+	name := strings.TrimSpace(req.Msg.Name)
+	if name == "" {
+		return nil, invalid(errors.New("リストの名前が空"))
+	}
+	return ackOf(s.change(ctx, req.Msg.AppId, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
+		return renameListPlan(em, meta, req.Msg.Id, name)
+	}))
+}
+
+func (s *PlanServer) RenameProperty(ctx context.Context, req *connect.Request[nanashiv1.RenamePropertyRequest]) (*ack, error) {
+	m, name := req.Msg, strings.TrimSpace(req.Msg.Name)
+	if name == "" {
+		return nil, invalid(errors.New("プロパティの名前が空"))
+	}
+	return ackOf(s.change(ctx, m.AppId, m, func(em engineModel, meta appMeta) (plan, error) {
+		return renamePropertyPlan(m.AppId, em, meta, m.List, m.Id, name)
 	}))
 }
 

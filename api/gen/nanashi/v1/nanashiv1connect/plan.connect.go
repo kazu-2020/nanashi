@@ -43,8 +43,13 @@ const (
 	PlanServiceGetModelProcedure = "/nanashi.v1.PlanService/GetModel"
 	// PlanServiceCreateListProcedure is the fully-qualified name of the PlanService's CreateList RPC.
 	PlanServiceCreateListProcedure = "/nanashi.v1.PlanService/CreateList"
+	// PlanServiceRenameListProcedure is the fully-qualified name of the PlanService's RenameList RPC.
+	PlanServiceRenameListProcedure = "/nanashi.v1.PlanService/RenameList"
 	// PlanServiceAddPropertyProcedure is the fully-qualified name of the PlanService's AddProperty RPC.
 	PlanServiceAddPropertyProcedure = "/nanashi.v1.PlanService/AddProperty"
+	// PlanServiceRenamePropertyProcedure is the fully-qualified name of the PlanService's
+	// RenameProperty RPC.
+	PlanServiceRenamePropertyProcedure = "/nanashi.v1.PlanService/RenameProperty"
 	// PlanServiceEditMembersProcedure is the fully-qualified name of the PlanService's EditMembers RPC.
 	PlanServiceEditMembersProcedure = "/nanashi.v1.PlanService/EditMembers"
 	// PlanServiceCreateCalendarProcedure is the fully-qualified name of the PlanService's
@@ -123,7 +128,13 @@ type PlanServiceClient interface {
 	// Modeling.
 	GetModel(context.Context, *connect.Request[v1.GetModelRequest]) (*connect.Response[v1.ModelDef], error)
 	CreateList(context.Context, *connect.Request[v1.CreateListRequest]) (*connect.Response[v1.Ack], error)
+	// RenameList changes the name of a list. It also renames the Metric "<list>.<property>" of each NUMBER or
+	// BOOLEAN property.
+	RenameList(context.Context, *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error)
 	AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error)
+	// RenameProperty changes the name of a property. The name of a NUMBER or BOOLEAN property is also in the name
+	// of its Metric "<list>.<property>".
+	RenameProperty(context.Context, *connect.Request[v1.RenamePropertyRequest]) (*connect.Response[v1.Ack], error)
 	EditMembers(context.Context, *connect.Request[v1.EditMembersRequest]) (*connect.Response[v1.Ack], error)
 	CreateCalendar(context.Context, *connect.Request[v1.CreateCalendarRequest]) (*connect.Response[v1.Ack], error)
 	// CreateScenario adds a member to the scenario list (it makes the list on the first call) and copies the
@@ -200,10 +211,22 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("CreateList")),
 			connect.WithClientOptions(opts...),
 		),
+		renameList: connect.NewClient[v1.RenameListRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceRenameListProcedure,
+			connect.WithSchema(planServiceMethods.ByName("RenameList")),
+			connect.WithClientOptions(opts...),
+		),
 		addProperty: connect.NewClient[v1.AddPropertyRequest, v1.Ack](
 			httpClient,
 			baseURL+PlanServiceAddPropertyProcedure,
 			connect.WithSchema(planServiceMethods.ByName("AddProperty")),
+			connect.WithClientOptions(opts...),
+		),
+		renameProperty: connect.NewClient[v1.RenamePropertyRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceRenamePropertyProcedure,
+			connect.WithSchema(planServiceMethods.ByName("RenameProperty")),
 			connect.WithClientOptions(opts...),
 		),
 		editMembers: connect.NewClient[v1.EditMembersRequest, v1.Ack](
@@ -377,7 +400,9 @@ type planServiceClient struct {
 	createApplication *connect.Client[v1.CreateApplicationRequest, v1.Application]
 	getModel          *connect.Client[v1.GetModelRequest, v1.ModelDef]
 	createList        *connect.Client[v1.CreateListRequest, v1.Ack]
+	renameList        *connect.Client[v1.RenameListRequest, v1.Ack]
 	addProperty       *connect.Client[v1.AddPropertyRequest, v1.Ack]
+	renameProperty    *connect.Client[v1.RenamePropertyRequest, v1.Ack]
 	editMembers       *connect.Client[v1.EditMembersRequest, v1.Ack]
 	createCalendar    *connect.Client[v1.CreateCalendarRequest, v1.Ack]
 	createScenario    *connect.Client[v1.CreateScenarioRequest, v1.Ack]
@@ -427,9 +452,19 @@ func (c *planServiceClient) CreateList(ctx context.Context, req *connect.Request
 	return c.createList.CallUnary(ctx, req)
 }
 
+// RenameList calls nanashi.v1.PlanService.RenameList.
+func (c *planServiceClient) RenameList(ctx context.Context, req *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error) {
+	return c.renameList.CallUnary(ctx, req)
+}
+
 // AddProperty calls nanashi.v1.PlanService.AddProperty.
 func (c *planServiceClient) AddProperty(ctx context.Context, req *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error) {
 	return c.addProperty.CallUnary(ctx, req)
+}
+
+// RenameProperty calls nanashi.v1.PlanService.RenameProperty.
+func (c *planServiceClient) RenameProperty(ctx context.Context, req *connect.Request[v1.RenamePropertyRequest]) (*connect.Response[v1.Ack], error) {
+	return c.renameProperty.CallUnary(ctx, req)
 }
 
 // EditMembers calls nanashi.v1.PlanService.EditMembers.
@@ -576,7 +611,13 @@ type PlanServiceHandler interface {
 	// Modeling.
 	GetModel(context.Context, *connect.Request[v1.GetModelRequest]) (*connect.Response[v1.ModelDef], error)
 	CreateList(context.Context, *connect.Request[v1.CreateListRequest]) (*connect.Response[v1.Ack], error)
+	// RenameList changes the name of a list. It also renames the Metric "<list>.<property>" of each NUMBER or
+	// BOOLEAN property.
+	RenameList(context.Context, *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error)
 	AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error)
+	// RenameProperty changes the name of a property. The name of a NUMBER or BOOLEAN property is also in the name
+	// of its Metric "<list>.<property>".
+	RenameProperty(context.Context, *connect.Request[v1.RenamePropertyRequest]) (*connect.Response[v1.Ack], error)
 	EditMembers(context.Context, *connect.Request[v1.EditMembersRequest]) (*connect.Response[v1.Ack], error)
 	CreateCalendar(context.Context, *connect.Request[v1.CreateCalendarRequest]) (*connect.Response[v1.Ack], error)
 	// CreateScenario adds a member to the scenario list (it makes the list on the first call) and copies the
@@ -649,10 +690,22 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(planServiceMethods.ByName("CreateList")),
 		connect.WithHandlerOptions(opts...),
 	)
+	planServiceRenameListHandler := connect.NewUnaryHandler(
+		PlanServiceRenameListProcedure,
+		svc.RenameList,
+		connect.WithSchema(planServiceMethods.ByName("RenameList")),
+		connect.WithHandlerOptions(opts...),
+	)
 	planServiceAddPropertyHandler := connect.NewUnaryHandler(
 		PlanServiceAddPropertyProcedure,
 		svc.AddProperty,
 		connect.WithSchema(planServiceMethods.ByName("AddProperty")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceRenamePropertyHandler := connect.NewUnaryHandler(
+		PlanServiceRenamePropertyProcedure,
+		svc.RenameProperty,
+		connect.WithSchema(planServiceMethods.ByName("RenameProperty")),
 		connect.WithHandlerOptions(opts...),
 	)
 	planServiceEditMembersHandler := connect.NewUnaryHandler(
@@ -827,8 +880,12 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceGetModelHandler.ServeHTTP(w, r)
 		case PlanServiceCreateListProcedure:
 			planServiceCreateListHandler.ServeHTTP(w, r)
+		case PlanServiceRenameListProcedure:
+			planServiceRenameListHandler.ServeHTTP(w, r)
 		case PlanServiceAddPropertyProcedure:
 			planServiceAddPropertyHandler.ServeHTTP(w, r)
+		case PlanServiceRenamePropertyProcedure:
+			planServiceRenamePropertyHandler.ServeHTTP(w, r)
 		case PlanServiceEditMembersProcedure:
 			planServiceEditMembersHandler.ServeHTTP(w, r)
 		case PlanServiceCreateCalendarProcedure:
@@ -908,8 +965,16 @@ func (UnimplementedPlanServiceHandler) CreateList(context.Context, *connect.Requ
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateList is not implemented"))
 }
 
+func (UnimplementedPlanServiceHandler) RenameList(context.Context, *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.RenameList is not implemented"))
+}
+
 func (UnimplementedPlanServiceHandler) AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.AddProperty is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) RenameProperty(context.Context, *connect.Request[v1.RenamePropertyRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.RenameProperty is not implemented"))
 }
 
 func (UnimplementedPlanServiceHandler) EditMembers(context.Context, *connect.Request[v1.EditMembersRequest]) (*connect.Response[v1.Ack], error) {
