@@ -50,7 +50,7 @@ On an ordered dimension (a time master list), the order sets the meaning of refe
 You can rename a member with `rename_member` and remove it with `remove_member`.
 
 ```python
-m.rename_member("Employee", "dave", "David")  # Values, properties, and Employee."dave" in formulas all change to the new name
+m.rename_member("Employee", "dave", "David")  # Values, properties, and Employee."dave" in formulas show the new name
 m.remove_member("Month", "Feb")               # The previous month of Mar becomes Jan
 ```
 
@@ -66,7 +66,7 @@ m.metric("Revenue").id, m.metric(mid).name     # The id (UUID) of a Metric, and 
 
 A copy (`fork`) continues to give IDs from the same counter. Thus, an item that you add in the copy and an item that you add in the original can get the same ID.
 
-In the engine, members have numbers. Thus, a rename does not change values and does not cause a recalculation.
+In the engine, the cells, the property maps and the formulas hold the member id. Thus, a rename changes only the name and does not cause a recalculation.
 
 When you remove a member, the engine removes the cells of that member from all Metrics.
 The engine also removes the member from the property mapping tables. Members that referred to the removed member then have no reference.

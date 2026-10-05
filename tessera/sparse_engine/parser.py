@@ -362,7 +362,8 @@ _NOT, _UNARY, _POSTFIX, _ATOM = 3, 7, 8, 9
 
 
 def to_formula(expr: Expr, model=None) -> str:
-    """The text of a formula. With model, a Metric, dimension or property id in the AST shows its current name."""
+    """The text of a formula. With model, a Metric, dimension, property or member id in the AST shows its
+    current name."""
     show = (lambda x: x) if model is None else model._name_of
     return _fmt(expr, show)[0]
 
@@ -391,7 +392,7 @@ def _fmt(e: Expr, show) -> tuple[str, int]:
         case DimRef(name):
             return _name(show(name)), _ATOM
         case Member(dim, member):
-            return f'{_name(show(dim))}."{member.replace(chr(34), chr(34) * 2)}"', _ATOM
+            return f'{_name(show(dim))}."{show(member).replace(chr(34), chr(34) * 2)}"', _ATOM
         case Const(value):
             if isinstance(value, bool):
                 return ("TRUE" if value else "FALSE"), _ATOM
@@ -427,6 +428,6 @@ def _fmt(e: Expr, show) -> tuple[str, int]:
             sign = "-" if n >= 0 else "+"
             return f"{_wrap(x, _POSTFIX, show)}[SELECT: {_name(show(dim))} {sign} {abs(n)}]", _POSTFIX
         case Select(x, dim, member):
-            quoted = '"' + member.replace('"', '""') + '"'
+            quoted = '"' + show(member).replace('"', '""') + '"'
             return f"{_wrap(x, _POSTFIX, show)}[SELECT: {_name(show(dim))}.{quoted}]", _POSTFIX
     raise TypeError(e)

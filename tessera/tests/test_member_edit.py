@@ -7,7 +7,7 @@ from examples.fpa import build
 from sparse_engine import Model, ref, to_formula
 from sparse_engine.engine import ReferenceEngine
 
-from .test_incremental import cells, check_full, same, snapshot
+from .test_incremental import cells, check_full, mapping, same, snapshot
 from .test_input_features import model as planning_model
 from .test_member_values import model as version_model
 
@@ -79,8 +79,7 @@ class Rename(unittest.TestCase):
     def test_properties_on_both_sides(self):
         self.m.rename_member("Category", "ハード", "HW")
         self.m.rename_member("Product", "C", "Cee")
-        props = self.m.dimension("Product").properties[self.m.property_id("Product", "Category")][1]
-        self.assertEqual(props, {"A": "HW", "B": "HW", "Cee": "ソフト"})
+        self.assertEqual(mapping(self.m, "Product", "Category"), {"A": "HW", "B": "HW", "Cee": "ソフト"})
         self.m.set_cell("Rate", 20, Category="HW")
         self.assertEqual(self.m.get("Priced", Product="A", Month="Jan"), 20)
         self.m.set_cell("X", 1, Product="Cee", Month="Jan")
@@ -152,7 +151,7 @@ class Remove(unittest.TestCase):
 
     def test_property_target(self):
         self.m.remove_member("Category", "ハード")
-        self.assertEqual(self.m.dimension("Product").properties[self.m.property_id("Product", "Category")][1], {"C": "ソフト"})
+        self.assertEqual(mapping(self.m, "Product", "Category"), {"C": "ソフト"})
         self.assertEqual(cells(self.m, "Priced"), {("C", "Apr"): 1600})  # A と B は参照先がなくなった
         self.assertEqual(cells(self.m, "ByCategory"), {("ソフト", "Apr"): 16})
         self.check_full()

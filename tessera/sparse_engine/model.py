@@ -26,20 +26,17 @@ import itertools
 from collections import deque
 import math
 import re
-import secrets
-import time
-import uuid
 from dataclasses import dataclass, field
 from statistics import mean
 from collections.abc import MutableMapping
 from typing import Any, Callable, Mapping
 
-from .core import Cube, Dimension, Key
+from .core import Cube, Dimension, Key, uuid7
 from .delta import DeltaPlan
 from .engine import Store, default_engine
 from .evaluate import Edge, FormulaError, Kind, Restrict, Type, bind, combos, member_kind, union_region
 from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_member, references_metric,
-                   rename_member, uses_property)
+                   uses_property)
 from .journal import LOG_VERSION, AlreadyCommitted, Transaction, changes, jsonable, now
 from .messages import Msg, msg, render
 from .parser import parse
@@ -50,13 +47,6 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 class DuplicateId(Exception):
     """The UUID belongs to an object of a different kind, or to a removed object (a tombstone)."""
-
-
-def uuid7() -> str:
-    """Make a UUIDv7 (RFC 9562): the Unix time in milliseconds, then random bits. Python 3.12 has no uuid.uuid7."""
-    ms = time.time_ns() // 1_000_000
-    rand_a, rand_b = secrets.randbits(12), secrets.randbits(62)
-    return str(uuid.UUID(int=(ms << 80) | (7 << 76) | (rand_a << 64) | (2 << 62) | rand_b))
 
 
 @dataclass
@@ -78,16 +68,16 @@ class Metric:
 
 @dataclass
 class Pending:
-    """前回の再計算のあとにためている変更。recalc が消費して空にする。
+    """The changes that wait after the last recalculation. recalc consumes them and makes this empty.
 
-    Model の操作はここに変更を積むだけで、値の計算はしない。rename_member のように名前で持つ
-    記録を壊す操作は、先に recalc でここを空にしてから行う。
+    An operation of the Model only puts a change here. It does not calculate values. The ranges hold member ids,
+    so a rename does not touch them.
     """
     full: bool = True  # 次の recalc で全体を計算し直すか
     changed: dict[str, Restrict] = field(default_factory=dict)  # 入力 Metric の変更範囲
     old_cells: dict[str, dict[Key, Any]] = field(default_factory=dict)  # 入力の変更前の値（差分集計用）
     old_slices: dict[str, Any] = field(default_factory=dict)  # 範囲ごと空にした入力の、変更前の値
-    added: dict[str, set[str]] = field(default_factory=dict)  # 前回の再計算以降に追加したメンバー
+    added: dict[str, set[str]] = field(default_factory=dict)  # dimension id -> the member ids added since the last recalc
     dirty: set[str] = field(default_factory=set)  # 前回の計画のあとで定義を変えた Metric
     forced: dict[str, Restrict] = field(default_factory=dict)  # 次の再計算で必ず計算し直す計算 Metric の範囲
 
@@ -149,14 +139,15 @@ class MetricLog:
 
 
 class SliceLog:
-    """An observation log of the recalculated (Metric id, range) items. It shows the current Metric names when
-    it is read. A range that the engine gave as member numbers also becomes member names only when the log is
-    read (to change hundreds of ranges after each change would take time)."""
+    """An observation log of the recalculated (Metric id, range) items. It keeps ids and shows the current
+    Metric, dimension and member names when it is read. A range that the engine gave as member numbers also
+    becomes member ids only when the log is read (to change hundreds of ranges after each change would take
+    time). A removed member shows its id."""
 
-    def __init__(self, names: Callable[[str], str]):
-        self._names = names  # Metric id or dimension id -> current name
+    def __init__(self, model: Model):
+        self._model = model
         self._items: list[tuple[str, Restrict]] = []
-        self._later: list = []  # functions that give the items with member names
+        self._later: list = []  # functions that give the items with member ids
 
     def _flush(self) -> list[tuple[str, Restrict]]:
         for named in self._later:
@@ -167,7 +158,12 @@ class SliceLog:
         return self._items
 
     def _shown(self) -> list[tuple[str, Restrict]]:
-        return [(self._names(i), {self._names(d): ms for d, ms in r.items()}) for i, r in self._flush()]
+        name, dims = self._model._name_of, self._model.dimensions
+
+        def members(d: str, ms: frozenset) -> frozenset:
+            by_id, names = dims[d]._by_id, dims[d].members
+            return frozenset(names[by_id[x]] if x in by_id else x for x in ms)
+        return [(name(i), {dims[d].name: members(d, ms) for d, ms in r.items()}) for i, r in self._flush()]
 
     def append(self, item: tuple[str, Restrict]) -> None:
         self._flush().append(item)
@@ -369,7 +365,7 @@ class Model:
 
     def __post_init__(self):
         name = self._name_of
-        self.eval_log, self.delta_log, self.slice_log = MetricLog(name), MetricLog(name), SliceLog(name)
+        self.eval_log, self.delta_log, self.slice_log = MetricLog(name), MetricLog(name), SliceLog(self)
 
     @property
     def warnings(self) -> dict[str, list[str]]:
@@ -393,8 +389,8 @@ class Model:
         return d
 
     def _name_of(self, id: str) -> str:
-        """The current name of a Metric, dimension or property id, or a kind "member:<dim id>" with the name.
-        Another string comes back as it is."""
+        """The current name of a Metric, dimension, property or member id, or a kind "member:<dim id>" with the
+        name. Another string comes back as it is."""
         if id.startswith("member:"):
             return "member:" + self._name_of(id.removeprefix("member:"))
         if id in self.metrics:
@@ -404,6 +400,8 @@ class Model:
         for d in self.dimensions.values():
             if id in d.property_names:
                 return d.property_names[id]
+            if id in d._by_id:
+                return d.member_of(id)
         return id
 
     def metric(self, name: str) -> Metric:
@@ -533,8 +531,8 @@ class Model:
             self._txn = None
 
     def _restore(self, saved: Model) -> None:
-        """トランザクションの前の版 saved に戻す（観察用の記録と記録先はそのまま）。"""
-        self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、軸を戻す前に名前へ直す
+        """Go back to the version saved from before the transaction (the observation logs and the journal stay)."""
+        self.slice_log._flush()  # the log can hold member numbers: make them ids before the dimensions go back
         for f in dataclasses.fields(Model):
             if f.name not in _KEPT_ON_RESTORE:
                 setattr(self, f.name, getattr(saved, f.name))
@@ -574,13 +572,12 @@ class Model:
                 self.rename_dimension(id, name)
             return old
         self._check_dim_name(name)
-        members = list(members)
-        d = Dimension(name, members, ordered=ordered, id=id, ids=[self._new_id() for _ in members])
+        d = Dimension(name, members, ordered=ordered, id=id)
         self.dimensions[id] = d
         self._dim_ids[name] = id
         self._bind(id, self._new_id())
-        for h in d.ids:
-            self._bind(uuid7(), h)
+        for u in d.ids:
+            self._bind(u, self._new_id())
         return d
 
     @_operation
@@ -632,22 +629,18 @@ class Model:
             del self.ids[id]
             self.tombstones.add(id)
 
-    def uuid_of(self, handle: int) -> str:
-        """The UUID of a dimension, member, or property handle."""
-        return self._uuids[handle]
-
     def dimension_id(self, name: str) -> str:
         return self.dimension(name).id
 
     def member_id(self, dim: str, member: str) -> str:
-        return self.uuid_of(self.dimension(dim).id_of(member))
+        return self.dimension(dim).member_id(member)
 
     def property_id(self, dim: str, prop: str) -> str:
         return self.dimension(dim).prop_id(prop)
 
     def _new_id(self) -> int:
-        """The handle of a member: an integer that is unique in the model. A dimension, property or Metric also
-        gets one, but only the journal and the storage formats use it (through Model.ids).
+        """The handle of a dimension, member, property or Metric: an integer that is unique in the model. Only
+        the journal and the storage formats use it (through Model.ids).
 
         A copy (fork) continues from the same number, so objects added separately to the copy and to the
         original can get the same handle (to merge the changes of a copy, give the handles again).
@@ -659,18 +652,19 @@ class Model:
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str], *,
                      id: str | None = None) -> None:
         """Add the property prop (a member of dim -> a member of target) to the dimension dim. id is its UUID.
+        The members in mapping are ids or names.
 
         If id is the UUID of a property of dim, the mapping replaces the old one (a new name renames it).
         Then the Metrics that use the property in a formula (`[BY: dim.prop]`) are calculated again.
         If prop is the name of a property with a different UUID, raise ValueError.
         """
-        d = self.dimension(dim)
+        d, t = self.dimension(dim), self.dimension(target)
         id, old = self._same_object("プロパティ", prop, id, d.properties, d._props, f"{d.name}.{prop}")
         if old is not None and d.property_names[id] != prop:
             self.rename_property(d.id, id, prop)
         if old is None:
             self._check_prop_name(d, prop)
-        d.add_property(id, prop, self.dimension(target), mapping)
+        d.add_property(id, prop, t, {_member(d, k): _member(t, v) for k, v in mapping.items()})
         if old is None:
             self._bind(id, self._new_id())
         self.engine.dimension_changed(self, d.id)  # the engine replaces the mapping that it holds
@@ -706,8 +700,7 @@ class Model:
         target, mapping = d.properties[id]
         mapping = dict(mapping)
         for member, value in values.items():
-            if member not in d:
-                raise ValueError(f"{d.name}: メンバー {member!r} がない")
+            member = d.member_id(member)
             if value is None:
                 mapping.pop(member, None)
             else:
@@ -764,7 +757,8 @@ class Model:
         if storage is None:
             self.metrics[id] = new  # _check uses the dimensions of the registered Metric
             try:
-                checked = {key: self._check(id, key, value) for key, value in (cells or {}).items()}
+                checked = {(k := self._member_ids(new, key)): self._check(id, k, value)
+                           for key, value in (cells or {}).items()}
             except ValueError:
                 if old is None:
                     del self.metrics[id]
@@ -948,19 +942,21 @@ class Model:
             raise ValueError(f"{name}: 按分する合計は数値（{total!r}）")
         if how not in ("proportional", "even"):
             raise ValueError(f"how は proportional か even（{how!r}）")
-        region: dict[str, frozenset[str]] = {}
+        region: Restrict = {}
         for d, member in self._coords(m, coords).items():
-            if member not in self.dimension(d):
+            mid = self.dimensions[d].find_member(member)
+            if mid is None:
                 raise ValueError(f"{name}: {self.dimensions[d].name} にメンバー {member!r} がない")
-            region[d] = frozenset([member])
+            region[d] = frozenset([mid])
         for path, value in (where or {}).items():
             dim, _, prop = path.partition(".")
             d = self._find_dim(dim)
             pid = None if d is None else d.find_prop(prop)
             if d is None or d.id not in m.dims or pid is None:
                 raise ValueError(f"{name}: where の {path!r} は「軸.プロパティ」ではない")
-            mapping = d.properties[pid][1]
-            chosen = frozenset(x for x in d.members if mapping.get(x) == value)
+            target, mapping = d.properties[pid]
+            value = self.dimensions[target].find_member(value)
+            chosen = frozenset(x for x in d.ids if mapping.get(x) == value)
             region[d.id] = region.get(d.id, chosen) & chosen
         self.recalc()
         # セルを名前の組にせず、軸ごとのメンバー番号の列のまま配って、まとめて書き込む
@@ -970,8 +966,8 @@ class Model:
             new = [float(total * v / weight) for v in values]
         else:
             n = len(values)
-            if not values:  # 値のあるセルがなければ、範囲の全組み合わせ
-                index = [self.dimension(d)._index for d in m.dims]
+            if not values:  # no cell has a value: all combinations in the range
+                index = [self.dimension(d)._by_id for d in m.dims]
                 picks = [sorted(ix[x] for x in region[d]) if d in region else range(len(ix))
                          for d, ix in zip(m.dims, index)]
                 combos = list(itertools.product(*picks))
@@ -1005,37 +1001,37 @@ class Model:
         so the next recalculation calculates that range.
         """
         d = self.dimension(dim)
-        props = {d.prop_id(prop): value for prop, value in properties.items()}
-        for pid, value in props.items():
+        props = {}
+        for prop, value in properties.items():
+            pid = d.prop_id(prop)
             target = self.dimensions[d.properties[pid][0]]
-            if value not in target:
+            if (found := target.find_member(value)) is None:
                 raise ValueError(f"{d.name}.{d.property_names[pid]}: {target.name} に {value!r} がない")
-        id, handle = self._resolve(id, lambda h: h in d._by_id)
+            props[pid] = found
+        id, handle = self._resolve(id, lambda h: self._uuids[h] in d._by_id)
         if handle is not None:
-            old = d.members[d._by_id[handle]]
-            if old != member:
-                self.rename_member(d.id, old, member)
+            if d.member_of(id) != member:
+                self.rename_member(d.id, id, member)
             if at is not None:
-                self.move_member(d.id, member, at)
+                self.move_member(d.id, id, at)
             for pid, value in props.items():
-                self.set_property_values(d.id, pid, {member: value})
+                self.set_property_values(d.id, pid, {id: value})
             return
         bits = _bits(len(d.members))
-        handle = self._new_id()
-        d.add_member(member, handle, at)
+        d.add_member(member, id, at)
         if self.engine.key_bits is not None and _bits(len(d.members)) > bits:
             try:  # the bit width of the dimension grew: if a Metric or a formula no longer fits the key, fail
                 self.engine.dimension_changed(self, d.id)
                 self._check_widths(d.id)
             except Exception:
-                d.remove_member(member)
+                d.remove_member(id)
                 self.engine.dimension_changed(self, d.id)
                 raise
-        self._bind(id, handle)
+        self._bind(id, self._new_id())
         for pid, value in props.items():
-            d.set_property_value(pid, member, value, self.dimensions[d.properties[pid][0]])
+            d.set_property_value(pid, id, value, self.dimensions[d.properties[pid][0]])
         self._member_added(d.id)
-        self._pending.added.setdefault(d.id, set()).add(member)
+        self._pending.added.setdefault(d.id, set()).add(id)
 
     @_operation
     def move_member(self, dim: str, member: str, at: int) -> None:
@@ -1046,7 +1042,8 @@ class Model:
         並び順は rows() や一覧の表示の順で、エンジンの番号もセルも変えないので、何も計算し直さない。
         順序付きの軸（時系列）は並び順が計算の意味を持つので、並び替えられない。
         """
-        self.dimension(dim).move_member(member, at)
+        d = self.dimension(dim)
+        d.move_member(d.member_id(member), at)
 
     def _check_widths(self, dim: str) -> None:
         """軸 dim のビット幅が増えたあとも、dim を持つ Metric と、すべての式の途中の結果が、エンジンの
@@ -1071,37 +1068,13 @@ class Model:
 
     @_operation
     def rename_member(self, dim: str, old: str, new: str) -> None:
-        """Rename the member old of the dimension dim to new.
+        """Rename the member old (an id or a name) of the dimension dim to new.
 
-        The values and the results do not change (the engines hold members as numbers), so nothing is calculated
-        again. The property mappings, the member-type Metrics and `dim."old"` in the formulas get the new name.
+        The formulas, the property maps, the stored data and the change ranges hold the member id, so nothing is
+        calculated again and nothing else changes: the display shows the new name. The id does not change.
         """
-        dim = self.dimension(dim).id
-        self.recalc()  # the change ranges hold member names, so settle the waiting changes first
-        self.slice_log._flush()  # fix the log with the current names
-        self._rename_member_raw(dim, old, new)
-        for name, m in self.metrics.items():
-            if m.written is not None:
-                m.written = rename_member(m.written, dim, old, new)
-                m.formula = rename_member(m.formula, dim, old, new)
-        for name, plan in self._delta.items():
-            if plan.count is not None:
-                self._delta[name] = dataclasses.replace(plan, count=rename_member(plan.count, dim, old, new))
-
-    def _rename_member_raw(self, dim: str, old: str, new: str) -> None:
-        """Apply the rename of a member to the dimension (an id), the property mappings and the stored data
-        (the formulas do not change here)."""
-        self.dimensions[dim].rename_member(old, new)
-        for other in self.dimensions.values():
-            for prop, (target, mapping) in list(other.properties.items()):
-                if target == dim and old in mapping.values():
-                    other.properties[prop] = (target, {k: new if v == old else v for k, v in mapping.items()})
-        self.engine.dimension_changed(self, dim)
-        for name, m in self.metrics.items():
-            if dim in m.dims and name in self._values:  # 再生の途中では計算 Metric の格納データがない
-                self._values[name] = self.engine.rename_member(self._values[name], dim, old, new, self)
-                if name in self._counts:
-                    self._counts[name] = self.engine.rename_member(self._counts[name], dim, old, new, self)
+        d = self.dimension(dim)
+        d.rename_member(d.member_id(old), new)
 
     @_operation
     def remove_member(self, dim: str, member: str) -> None:
@@ -1118,14 +1091,12 @@ class Model:
         for the member (and their aggregates), and a previous-period reference across the member.
         """
         d = self.dimension(dim)
-        dim = d.id
-        if member not in d:
-            raise ValueError(f"{d.name}: メンバー {member!r} がない")
+        dim, member = d.id, d.member_id(member)
         for m in self.metrics.values():
             if m.written is not None and mentions_member(m.written, dim, member):
-                raise ValueError(f'{m.name} の式が {d.name}."{member}" を参照しているので消せない')
+                raise ValueError(f'{m.name} の式が {d.name}."{d.member_of(member)}" を参照しているので消せない')
         self.recalc()
-        index = d._index[member]
+        index = d._by_id[member]
         point = {dim: frozenset([member])}
         values_kind = member_kind(dim)
         eng = self.engine
@@ -1161,17 +1132,17 @@ class Model:
         # 2. メンバーを消して変わる範囲を、消す前の軸と対応表のもとで求める。下流に伝えるのは、
         #    そのメンバーのセルが実際にある Metric の消えるセルと、計算し直す範囲だけにする
         todo = self.engine.planner.removal_regions(self.compiled(), self._values, self, dim, member)
-        self.slice_log._flush()  # 記録はメンバーの番号で持っていることがあるので、詰める前に名前へ直す
-        self._forget(d.id_of(member))
+        self.slice_log._flush()  # the log can hold member numbers: make them ids before the numbers close up
+        self._forget(self.ids[member])
         self._drop_member(dim, member)
         self._pending.forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
         self.recalc()
 
     def _drop_member(self, dim: str, member: str) -> None:
-        """Apply the removal of a member to the dimension (an id), the property mappings and the stored data
-        (the positions close up). Nothing is calculated again."""
+        """Apply the removal of a member (an id) to the dimension (an id), the property mappings and the stored
+        data (the positions close up). Nothing is calculated again."""
         d = self.dimensions[dim]
-        index = d._index[member]
+        index = d._by_id[member]
         values_kind = member_kind(dim)
         d.remove_member(member)
         for other in self.dimensions.values():
@@ -1198,7 +1169,7 @@ class Model:
             return self.set_cell(m.override, value, **coords)
         key = self._key(m, coords)
         value = self._check(m.id, key, value)
-        id = m.id
+        id = m.id  # the key holds member ids, as the change ranges do
         if self._plan is not None and id in self._delta_sources():
             # 差分集計には変更前の値が要る。前回の再計算以降で最初に触れたときの値を覚えておく
             old = self._pending.old_cells.setdefault(id, {})
@@ -1217,7 +1188,7 @@ class Model:
         if self._plan is not None and id in self._delta_sources():
             self._keep_old(id)  # 1 セルずつ覚える代わりに、前回の再計算の時点の値を丸ごと取っておく
         self._values[id] = self.engine.write_many(self._values[id], cols, values, self)
-        members = [self.dimension(d).members for d in m.dims]
+        members = [self.dimension(d).ids for d in m.dims]
         box = {d: frozenset(ms[i] for i in set(col)) for d, ms, col in zip(m.dims, members, cols)}
         self._pending.changed[id] = union_region(self._pending.changed.get(id), box)
 
@@ -1231,20 +1202,21 @@ class Model:
             self._pending.old_slices[id] = before
 
     def _check(self, id: str, key: Key, value: float | bool | None) -> float | bool | None:
-        """Check the key and the value, and return the value to store (None is blank)."""
+        """Check the key (member ids, from _key) and the value, and return the value to store (None is blank)."""
         m = self.metrics[id]
         if len(key) != len(m.dims):
-            raise ValueError(f"{m.name}: キー {key} の長さが軸 {m.dims} と合わない")
+            raise ValueError(f"{m.name}: キー {key} の長さが軸 {self._dim_names(m.dims)} と合わない")
         for d, member in zip(m.dims, key):
-            if member not in self.dimension(d):
+            if member not in self.dimension(d)._by_id:
                 raise ValueError(f"{m.name}: {self.dimensions[d].name} に {member!r} がない")
         if value is None:
             return None
         if m.kind.startswith("member:"):
             d = self.dimension(m.kind.removeprefix("member:"))
-            if not isinstance(value, str) or value not in d:
+            mid = d.find_member(value) if isinstance(value, str) else None
+            if mid is None:
                 raise ValueError(f"{m.name} は {d.name} のメンバーを値に持つ Metric: {value!r}")
-            return float(d._index[value])  # エンジンにはメンバーの番号で持たせる
+            return float(d._by_id[mid])  # the engine holds a member value as its number
         if m.kind == "boolean":
             if not isinstance(value, bool):
                 raise ValueError(f"{m.name} は boolean の Metric: {value!r}")
@@ -1272,8 +1244,8 @@ class Model:
         m = self.metric(name)
         key = self._key(m, coords)
         for d, member in zip(m.dims, key):
-            if member not in self.dimension(d):
-                return None  # ないメンバーのセルは空（消した、名前を変えた直後の読み出しなど）
+            if member not in self.dimension(d)._by_id:
+                return None  # the cell of a member that does not exist is blank (removed, or the old name)
         return self._decode(m, self.engine.get(self._values[m.id], key, self))
 
     def slice(self, name: str, **coords) -> Cube:
@@ -1296,7 +1268,8 @@ class Model:
         if offset < 0 or (limit is not None and limit < 0):
             raise ValueError("offset と limit は 0 以上")
         rows, total = self.engine.rows(self._values[m.id], self._restrict(m, coords), self, offset, limit)
-        return [(k, self._decode(m, v)) for k, v in rows], total
+        names = self._namer(m.dims)
+        return [(names(k), self._decode(m, v)) for k, v in rows], total
 
     def summarize(self, name: str, keep=(), agg: str = "sum", **coords) -> Cube:
         """Aggregate the range in coords and keep only the dimensions in keep (SUM, AVG, MIN, MAX, COUNT).
@@ -1315,7 +1288,8 @@ class Model:
             raise ValueError(f"{m.name} は {m.kind} なので {agg} で集計できない（{'、'.join(numeric)} は使える）")
         keep = tuple(self._dim_in(m, d) for d in keep)
         cube = self.engine.aggregate(self._values[m.id], m.dims, keep, agg, self._restrict(m, coords), self)
-        return Cube(self._dim_names(cube.dims), cube.cells)
+        names = self._namer(cube.dims)
+        return Cube(self._dim_names(cube.dims), {names(k): v for k, v in cube.cells.items()})
 
     @staticmethod
     def _missing(name: str, dim: str):
@@ -1334,21 +1308,37 @@ class Model:
         return {self._dim_in(m, d): v for d, v in coords.items()}
 
     def _key(self, m: Metric, coords: Mapping[str, str]) -> Key:
-        """The member names of one cell of m in the order of m.dims. coords is dimension -> member name."""
+        """The member ids of one cell of m in the order of m.dims. coords is dimension -> member (an id or a
+        name). An unknown member stays as it is (the caller reports it)."""
         by_id = self._coords(m, coords)
-        return tuple(by_id[d] if d in by_id else self._missing(m.name, self.dimensions[d].name) for d in m.dims)
+        return tuple(_member(self.dimensions[d], by_id[d]) if d in by_id else self._missing(m.name, self.dimensions[d].name)
+                     for d in m.dims)
 
     def _restrict(self, m: Metric, coords: Mapping[str, Any]) -> Restrict:
-        """Check coords (dimension -> a member name or a collection of them) and make the restrict form
-        (dimension id -> member names)."""
+        """Check coords (dimension -> a member or a collection of them, as ids or names) and make the restrict
+        form (dimension id -> member ids)."""
         out: Restrict = {}
         for d, ms in self._coords(m, coords).items():
-            members = frozenset([ms]) if isinstance(ms, str) else frozenset(ms)
-            for x in members:
-                if x not in self.dimension(d):
-                    raise ValueError(f"{m.name}: {self.dimensions[d].name} に {x!r} がない")
-            out[d] = members
+            dim = self.dimensions[d]
+            members = set()
+            for x in ([ms] if isinstance(ms, str) else ms):
+                if (mid := dim.find_member(x)) is None:
+                    raise ValueError(f"{m.name}: {dim.name} に {x!r} がない")
+                members.add(mid)
+            out[d] = frozenset(members)
         return out
+
+    def _member_ids(self, m: Metric, key: Key) -> Key:
+        """The key of one cell of m (members as ids or names, in the order of m.dims) with member ids. A key of
+        the wrong length stays as it is (_check reports it)."""
+        if len(key) != len(m.dims):
+            return key
+        return tuple(_member(self.dimensions[d], x) for d, x in zip(m.dims, key))
+
+    def _namer(self, dims) -> Callable[[Key], tuple[str, ...]]:
+        """A function that gives the member names of a key of member ids (for many keys of the same dims)."""
+        tables = [(self.dimensions[d]._by_id, self.dimensions[d].members) for d in dims]
+        return lambda key: tuple(names[by_id[x]] for (by_id, names), x in zip(tables, key))
 
     def _decode(self, m: Metric, v):
         """エンジンの値（float）を利用者に見せる値にする。"""
@@ -1361,12 +1351,14 @@ class Model:
         return v
 
     def _shown(self, m: Metric, cube: Cube) -> Cube:
-        """The cube for a caller: dimension names, and member names for the values of a member-type Metric."""
+        """The cube for a caller: dimension names, member names in the keys, and member names for the values of
+        a member-type Metric."""
         kind, dims = m.kind, self._dim_names(cube.dims)
+        names = self._namer(cube.dims)
         if kind.startswith("member:"):
             members = self.dimension(kind.removeprefix("member:")).members
-            return Cube(dims, {k: members[int(v)] for k, v in cube.cells.items()})
-        return Cube(dims, cube.cells)
+            return Cube(dims, {names(k): members[int(v)] for k, v in cube.cells.items()})
+        return Cube(dims, {names(k): v for k, v in cube.cells.items()})
 
     # ------------------------------------------------ 計算計画
 
@@ -1560,7 +1552,7 @@ class Model:
         """分割軸の選択に使う、入力 Metric の 1 セル（各軸の先頭メンバー）。"""
         m = self.metrics[name]
         if m.formula is None and m.dims and all(self.dimensions[d].members for d in m.dims):
-            return {d: frozenset([self.dimensions[d].members[0]]) for d in m.dims}
+            return {d: frozenset([self.dimensions[d].ids[0]]) for d in m.dims}
         return None
 
     def _choose_layout(self) -> dict[str, str | None]:
@@ -1596,8 +1588,8 @@ class Model:
             dim = self.dimensions[d]
             width = -(-len(dim.members) // partitions)
             total = -(-len(dim.members) // width)
-            # 記録したあとで名前を変えたり消したりしたメンバーは読み飛ばす（分割軸の選び方にしか使わない）
-            return len({dim._index[x] // width for x in region[d] if x in dim._index}) / total
+            # skip a member that was removed after the range was recorded (this only selects the partition dimension)
+            return len({dim._by_id[x] // width for x in region[d] if x in dim._by_id}) / total
 
         regions = samples.get(name)
         if not regions:
@@ -1715,6 +1707,13 @@ class Model:
         for key, value in self._pending.old_cells.get(name, {}).items():
             old = self.engine.write(old, key, value, self)
         return old
+
+
+def _member(d: Dimension, member: str) -> str:
+    """The member id for an id or a name (the bridge). An unknown member stays as it is, so the caller can report
+    the name that the user gave."""
+    found = d.find_member(member)
+    return member if found is None else found
 
 
 def _regions_by_metric(samples: Mapping[str, dict[str, Restrict]]) -> dict[str, list[Restrict]]:

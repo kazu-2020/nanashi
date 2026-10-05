@@ -76,8 +76,8 @@ class Syntax(unittest.TestCase):
 class TypeChecking(unittest.TestCase):
     def reject(self, formula, dims, pattern):
         m = model()
-        m.add_formula("Bad", dims, formula)
-        with self.assertRaisesRegex(FormulaError, pattern):
+        with self.assertRaisesRegex(FormulaError, pattern):  # an unknown member fails at the definition (bind)
+            m.add_formula("Bad", dims, formula)
             m.recalc()
 
     def test_unknown_member(self):

@@ -25,7 +25,8 @@ class FailedRecalc(unittest.TestCase):
         self.m = build_with(RustEngine())
         ref = build_with(ReferenceEngine())
         self.m.recalc()
-        inputs = {x.name: self.m.value(x.id).cells for x in self.m.metrics.values() if x.formula is None}
+        raw = lambda x: self.m.engine.to_cube(self.m._values[x.id], self.m).cells  # keys are member ids
+        inputs = {x.name: raw(x) for x in self.m.metrics.values() if x.formula is None}
         for m in (self.m, ref):
             m.set_cell("Volume", 50, Product="B", Region="S", Month="Feb")
             m.set_cell("Price", 7, Product="A")

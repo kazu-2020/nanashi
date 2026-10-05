@@ -7,7 +7,7 @@ from sparse_engine import FormulaError, Model
 from sparse_engine.engine import ReferenceEngine
 
 from .test_engines import build_with
-from .test_incremental import check_full, model as build, same, snapshot
+from .test_incremental import check_full, mapping, model as build, same, snapshot
 from .test_members import random_round as edit_or_add_member
 
 try:
@@ -189,7 +189,7 @@ class Redefine(unittest.TestCase):
         m.add_formula("Looked", ["Product"], "Rate[BY: Product.Category]")
         m.recalc()
         m.set_property_values("Product", "Category", {"A": "Y", "C": None})
-        self.assertEqual(m.dimension("Product").properties[m.property_id("Product", "Category")][1], {"A": "Y", "B": "Y"})
+        self.assertEqual(mapping(m, "Product", "Category"), {"A": "Y", "B": "Y"})
         self.assertEqual(dict(m.value("Looked").cells), {("A",): 2, ("B",): 2})
         with self.assertRaises(ValueError):
             m.set_property_values("Product", "Category", {"A": "Z"})

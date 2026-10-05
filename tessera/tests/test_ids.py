@@ -9,7 +9,7 @@ from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import _UNSET, DuplicateId, uuid7
 
 from .test_engines import build_with
-from .test_incremental import check_full, same, snapshot
+from .test_incremental import check_full, mapping, same, snapshot
 
 try:
     from sparse_engine.rust_engine import RustEngine
@@ -26,7 +26,7 @@ def all_ids(m: Model) -> list[str]:
     """The UUIDs of the dimensions, the Metrics and the members."""
     ids = [d.id for d in m.dimensions.values()] + [x.id for x in m.metrics.values()]
     for d in m.dimensions.values():
-        ids += [m.uuid_of(h) for h in d.ids]
+        ids += list(d.ids)
     return ids
 
 
@@ -128,7 +128,7 @@ class Uuids(unittest.TestCase):
         for u in m.ids:
             self.assertEqual(uuid.UUID(u).version, 7)
         self.assertIn(m.metric("Margin").id, m.ids)  # a Metric also has a handle, for the journal and storage formats
-        self.assertEqual(m.member_id("Product", "A"), m.uuid_of(m.dimension("Product").id_of("A")))
+        self.assertEqual(m.member_id("Product", "A"), m.dimension("Product").id_of("A"))
         self.assertEqual(m.dimension("Product").property_names[m.property_id("Product", "Category")], "Category")
 
     def test_uuid7_is_ordered_by_time(self):
@@ -150,7 +150,7 @@ class Uuids(unittest.TestCase):
         a = m.member_id("Product", "A")
         m.add_member("Product", "Alpha", id=a, at=2, Category="Y")
         self.assertEqual((m.dimension("Product").in_order()[2], m.member_id("Product", "Alpha")), ("Alpha", a))
-        self.assertEqual(m.dimension("Product").properties[m.property_id("Product", "Category")][1]["Alpha"], "Y")
+        self.assertEqual(mapping(m, "Product", "Category")["Alpha"], "Y")
         self.assertIs(m.add_dimension("Product", [], id=m.dimension_id("Product")), m.dimension("Product"))
         check_full(self, m)
 
@@ -504,6 +504,93 @@ class RustDimensionRenames(DimensionRenames):
     engine = staticmethod(RustEngine)
 
 
+class MemberRenames(unittest.TestCase):
+    """rename_member changes only the name and the name index: no recalculation, and the property maps, the
+    stored data and the formulas stay as they are (they hold the member id)."""
+    engine = staticmethod(ReferenceEngine)
+
+    def setUp(self):
+        self.m = build_with(self.engine())
+        self.m.add_formula("JanCost", ["Product"], 'Cost[SELECT: Month."Jan"]')
+        self.m.recalc()
+
+    def test_rename_is_an_attribute_change(self):
+        m = self.m
+        product, month = m.dimension("Product"), m.dimension("Month")
+        jan, a = m.member_id("Month", "Jan"), m.member_id("Product", "A")
+        category = m.property_id("Product", "Category")
+        before = snapshot(m)
+        props, values = product.properties[category], {i: m._values[i] for i in m._values}
+        m.set_cell("Cost", 1, Product="A", Month="Jan")  # a change that waits
+        m.eval_log.clear()
+        m.slice_log.clear()
+        m.rename_member("Month", "Jan", "January")
+        m.rename_member("Product", a, "Alpha")  # by id
+        self.assertEqual(list(m.eval_log), [])
+        self.assertEqual(list(m.slice_log), [])
+        self.assertIs(product.properties[category], props)  # the same map object: it holds ids
+        for i, v in values.items():
+            self.assertIs(m._values[i], v)  # the stored data is not written
+        self.assertEqual((m.member_id("Month", "January"), m.member_id("Product", "Alpha")), (jan, a))
+        self.assertEqual((month.member_of(jan), product.member_of(a)), ("January", "Alpha"))
+        self.assertEqual(to_formula(m.metric("JanCost").written, m), 'Cost[SELECT: Month."January"]')
+        self.assertEqual(mapping(m, "Product", "Category")["Alpha"], "X")
+        self.assertEqual(m.get("JanCost", Product="Alpha"), 1)  # the waiting change applies under the new name
+        self.assertEqual(m.get("Cost", Product="Alpha", Month="January"), 1)
+        self.assertIsNone(m.get("Cost", Product="A", Month="Jan"))  # the old names are not members
+        with self.assertRaisesRegex(ValueError, "'A' がない"):
+            m.set_cell("Cost", 2, Product="A", Month="January")
+        with self.assertRaisesRegex(ValueError, "'Jan' がない"):
+            m.slice("Cost", Month="Jan")
+        self.assertIn("JanCost", m.eval_log)
+        m.rename_member("Month", "January", "Jan")
+        m.rename_member("Product", "Alpha", "A")
+        m.set_cell("Cost", 7, Product="A", Month="Jan")
+        self.assertEqual(snapshot(m), before)  # the values are the same under the names from before
+        check_full(self, m)
+
+    def test_rename_of_a_property_target(self):
+        m = self.m
+        category = m.property_id("Product", "Category")
+        props = m.dimension("Product").properties[category]
+        m.eval_log.clear()
+        m.rename_member("Category", "X", "Hard")
+        self.assertEqual(list(m.eval_log), [])
+        self.assertIs(m.dimension("Product").properties[category], props)
+        self.assertEqual(mapping(m, "Product", "Category"), {"A": "Hard", "B": "Hard", "C": "Y", "D": "Y"})
+        self.assertEqual(m.get("RevByCat", Category="Hard", Region="N", Month="Jan"),
+                         m.summarize("Revenue", Product=["A", "B"], Region="N", Month="Jan").cells[()])
+        m.set_cell("Rate", 0.25, Category="Hard")
+        self.assertEqual(m.get("Rate", Category="Hard"), 0.25)
+        m.set_property_values("Product", "Category", {"C": "Hard"})
+        self.assertEqual(mapping(m, "Product", "Category")["C"], "Hard")
+        check_full(self, m)
+
+    def test_logs_show_member_names(self):
+        m = self.m
+        m.slice_log.clear()
+        m.set_cell("Cost", 1, Product="A", Month="Jan")
+        m.recalc()
+        ranges = [r for n, r in m.slice_log if n == "JanCost"]
+        self.assertEqual(ranges, [{"Product": frozenset(["A"])}])
+        m.rename_member("Product", "A", "Alpha")
+        self.assertEqual([r for n, r in m.slice_log if n == "JanCost"], [{"Product": frozenset(["Alpha"])}])
+
+    def test_errors(self):
+        m = self.m
+        with self.assertRaisesRegex(ValueError, "がない"):
+            m.rename_member("Month", "Dec", "December")
+        with self.assertRaisesRegex(ValueError, "すでにある"):
+            m.rename_member("Month", "Jan", "Feb")
+        with self.assertRaisesRegex(FormulaError, "'Dec' がない"):  # a bind error shows the name that the user wrote
+            m.add_formula("Bad", ["Product"], 'Cost[SELECT: Month."Dec"]')
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustMemberRenames(MemberRenames):
+    engine = staticmethod(RustEngine)
+
+
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class Storage(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
@@ -528,6 +615,23 @@ class Storage(unittest.TestCase):
             self.assertTrue(same(a[name], b[name]), name)
         loaded.add_member("Product", "F")  # 読み込んだあとも、使った ID を振らない
         self.assertEqual(len(set(all_ids(loaded))), len(all_ids(loaded)))
+
+    def test_member_renames_survive_save_and_load(self):
+        m = build_with(self.engine())
+        m.add_formula("JanCost", ["Product"], 'Cost[SELECT: Month."Jan"]')
+        m.rename_member("Month", "Jan", "January")
+        m.rename_member("Category", "X", "Hard")  # a property target
+        m.rename_member("Product", "A", "Alpha")
+        with tempfile.TemporaryDirectory() as tmp:
+            m.save(tmp)
+            loaded = Model.load(tmp, self.engine())
+        self.assertEqual(all_ids(loaded), all_ids(m))
+        self.assertEqual(loaded.dimension("Month").members, m.dimension("Month").members)
+        self.assertEqual(to_formula(loaded.metric("JanCost").written, loaded), 'Cost[SELECT: Month."January"]')
+        self.assertEqual(mapping(loaded, "Product", "Category"), mapping(m, "Product", "Category"))
+        a, b = snapshot(m), snapshot(loaded)
+        for name in a:
+            self.assertTrue(same(a[name], b[name]), name)
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")

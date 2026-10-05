@@ -231,17 +231,13 @@ class RustAffectedMatchesPython(unittest.TestCase):
             cases = []
             for name in inputs:
                 dims = m.metric(name).dims
-                cases.append(({name: {d: frozenset([m.dimension(d).members[0]]) for d in dims}}, None))
+                cases.append(({name: {d: frozenset([m.dimension(d).ids[0]]) for d in dims}}, None))
                 cases.append(({name: {}}, None))
-            cases.append(({n: {d: frozenset(m.dimension(d).members[:2]) for d in m.metric(n).dims} for n in inputs[:3]},
-                          {m.dimension_id("Month"): frozenset(["Zzz"])}))
+            m.add_member("Month", "Zzz")
+            m.recalc()
+            cases.append(({n: {d: frozenset(m.dimension(d).ids[:2]) for d in m.metric(n).dims} for n in inputs[:3]},
+                          {m.dimension_id("Month"): frozenset([m.member_id("Month", "Zzz")])}))
             for changed, added in cases:
-                if added:
-                    for d, ms in added.items():
-                        for x in ms:
-                            if x not in m.dimension(d):
-                                m.dimension(d).add_member(x, m._new_id())
-                                m._member_added(m.dimension_id(d))
                 with self.subTest(changed=list(changed), added=added):
                     got = m._propagate(changed, added)
                     with python_resolved(m):
@@ -252,7 +248,7 @@ class RustAffectedMatchesPython(unittest.TestCase):
         for m in self.models():
             m.recalc()
             for dim in m.dimensions:
-                member = m.dimension(dim).members[1]
+                member = m.dimension(dim).ids[1]
                 with self.subTest(dim=dim, member=member):
                     got = m.engine.planner.removal_regions(m.compiled(), m._values, m, dim, member)
                     with python_resolved(m):
@@ -264,7 +260,7 @@ class RustAffectedMatchesPython(unittest.TestCase):
         for m in self.models():
             m.recalc()
             inputs = [n for n, x in m.metrics.items() if x.formula is None]
-            regions = {n: {d: frozenset(m.dimension(d).members[:1]) for d in m.metric(n).dims} for n in inputs}
+            regions = {n: {d: frozenset(m.dimension(d).ids[:1]) for d in m.metric(n).dims} for n in inputs}
             for x in m.metrics.values():
                 if x.formula is not None:
                     with self.subTest(metric=x.name):

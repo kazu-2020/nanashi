@@ -53,6 +53,14 @@ def cells(m: Model, name: str) -> dict:
     return dict(m.value(name).cells)
 
 
+def mapping(m: Model, dim: str, prop: str) -> dict[str, str]:
+    """The map of the property with the member names (the Model holds member ids)."""
+    d = m.dimension(dim)
+    target, by_id = d.properties[m.property_id(dim, prop)]
+    t = m.dimension(target)
+    return {d.member_of(k): t.member_of(v) for k, v in by_id.items()}
+
+
 def snapshot(m: Model) -> dict:
     return {n: cells(m, n) for n in m._metric_ids}
 

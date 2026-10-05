@@ -178,7 +178,8 @@ def main() -> None:
     if args.show:
         m = build(None, *SIZES[args.size or "small"])
         for name in ["OperatingIncome", "Variance", "Cash", "Headcount"]:
-            print(f"--- {name}\n{m.value(name).format(m.dimensions)}\n")
+            order = {d.name: d for d in m.dimensions.values()}
+            print(f"--- {name}\n{m.value(name).format(order)}\n")
         return
     for size in [args.size] if args.size else list(SIZES):
         r = bench(size, args.engine, args.repeats)

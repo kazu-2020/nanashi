@@ -115,7 +115,7 @@ class Api:
     def named(self, dims: list, rows: list) -> list:
         v = self.ws.version
         ds = [v.dimensions[d] for d in dims]
-        return sorted([*(d.member_of(v.ids[x]) for d, x in zip(ds, k[:-1])), k[-1]] for k in rows)
+        return sorted([*(d.member_of(x) for d, x in zip(ds, k[:-1])), k[-1]] for k in rows)
 
     def test_definition_and_health(self):
         status, body = self.c.get("/")
@@ -398,7 +398,7 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "o", "ops": ops})[0], 200)
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][:4], ["p2", "p0", "p_new", "p1"])
         rows = self.c.get(path(ws, "Stock", "rows", Month="Jan", params="limit=3"))[1]["rows"]
-        self.assertEqual([ws.version.dimension("Product").member_of(ws.version.ids[r[0]]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
+        self.assertEqual([ws.version.dimension("Product").member_of(r[0]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
         status, err = self.c.post("/writes", {"client_op_id": "o2", "ops": [
             {"op": "move_member", "dim": did(ws, "Month"), "id": xid(ws, "Month", "Mar"), "at": 0}]})
         self.assertEqual((status, err["error"]), (400, "bad_request"))

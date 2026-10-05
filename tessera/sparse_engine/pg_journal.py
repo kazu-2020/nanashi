@@ -48,7 +48,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .engine import native
-from .journal import (Fenced, Journal, Snapshot, _shown, as_block, cell_count, put_snapshot, read_cell_files,
+from .journal import (Fenced, Journal, Snapshot, _key_handles, _shown, as_block, cell_count, put_snapshot, read_cell_files,
                       write_cell_files)
 from .objects import open_objects
 
@@ -480,7 +480,7 @@ class PgJournal(Journal):
         """The change history of one cell, from the cell index (not from a scan of the records)."""
         self.index_pending()  # 確定の後に回した分を先に反映する
         m = model.metric(metric)
-        key = [model.dimensions[d].id_of(x) for d, x in zip(m.dims, model._key(m, coords))]
+        key = _key_handles(model, m, coords)
         with self._lock:
             rows = self.conn.execute(
             "select c.seq, o.at, o.user_name, o.reason, c.old_value, c.new_value"

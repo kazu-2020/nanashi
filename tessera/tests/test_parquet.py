@@ -33,7 +33,13 @@ def model(engine) -> Model:
 
 
 def cells(m: Model, name: str) -> dict:
-    return m.engine.to_cube(m._values[m.metric(name).id], m).cells
+    return shown(m, m._values[m.metric(name).id])
+
+
+def shown(m: Model, store) -> dict:
+    """The cells of a store with member names (the engine holds member ids)."""
+    cube = m.engine.to_cube(store, m)
+    return {tuple(m.dimension(d).member_of(x) for d, x in zip(cube.dims, k)): v for k, v in cube.cells.items()}
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
@@ -55,7 +61,7 @@ class ParquetRoundTrip(unittest.TestCase):
                         data = src.engine.to_parquet(src._values[src.metric(name).id], dims, kind, src, {"metric": str(m.id)})
                         self.assertIsInstance(data, bytes)
                         store = dst.engine.from_parquet(data, dims, kind, dst, partition)
-                        self.assertEqual(dst.engine.to_cube(store, dst).cells, cells(src, name))
+                        self.assertEqual(shown(dst, store), cells(src, name))
                         self.assertIn(("metric", str(m.id)), nanashi_core.parquet_metadata(data))
 
     def test_values_keep_their_types(self):
@@ -77,7 +83,7 @@ class ParquetRoundTrip(unittest.TestCase):
                 m.rename_member("Employee", "e3", "Eve")
                 store = m.engine.from_parquet(data, ("Employee", "Month"), "number", m)
                 after = {tuple("Eve" if x == "e3" else x for x in k): v for k, v in before.items()}
-                self.assertEqual(m.engine.to_cube(store, m).cells, after)
+                self.assertEqual(shown(m, store), after)
 
     def test_rejects_mismatch(self):
         for engine in self.engines():
@@ -92,7 +98,7 @@ class ParquetRoundTrip(unittest.TestCase):
             with self.subTest(engine=engine.name, case="軸の並びが違う"):  # 列は名前で選ぶ
                 store = m.engine.from_parquet(data, ("Month", "Employee"), "number", m)
                 want = {(t, e): v for (e, t), v in cells(m, "Salary").items()}
-                self.assertEqual(m.engine.to_cube(store, m).cells, want)
+                self.assertEqual(shown(m, store), want)
             with self.subTest(engine=engine.name, case="壊れたバイト列"):
                 with self.assertRaisesRegex(ValueError, "Parquet"):
                     m.engine.from_parquet(data[:-20], ("Employee", "Month"), "number", m)
@@ -161,28 +167,31 @@ class ApplyBlock(unittest.TestCase):
         rng = random.Random(9)
         for n in (50, 3000):  # 1024 件未満は差分に入れ、それ以上は本体を作り直す
             for name in ("V", "M"):
-                a, b = self.model(), self.model()
+                a = self.model()
+                b = a.fork()  # the same member handles
                 x = a.metric(name)
                 dims = [a.dimension(d) for d in x.dims]
                 vdim = a.dimension("D") if name == "M" else None
                 rows = []
                 for _ in range(n):
-                    ids = [d.ids[rng.randrange(len(d.ids))] for d in dims]
+                    ids = [a.ids[d.ids[rng.randrange(len(d.ids))]] for d in dims]
                     if rng.random() < 0.05:
                         ids[0] = 10 ** 6  # 軸にないメンバー（消したメンバー）は飛ばす
                     new = None if rng.random() < 0.2 else (
-                        vdim.ids[rng.randrange(3)] if vdim else round(rng.uniform(-9, 9), 2))
+                        a.ids[vdim.ids[rng.randrange(3)]] if vdim else round(rng.uniform(-9, 9), 2))
                     rows.append([ids, None, new])
                 with self.subTest(n=n, metric=name):
                     block = nanashi_core.CellBlock.from_rows(rows)
-                    a._values[a.metric(name).id] = a.engine.apply_block(a._values[a.metric(name).id], block, [d.ids for d in dims],
-                                                           None if vdim is None else vdim.ids)
+                    handles = lambda d: [a.ids[u] for u in d.ids]
+                    a._values[a.metric(name).id] = a.engine.apply_block(a._values[a.metric(name).id], block,
+                                                                        [handles(d) for d in dims],
+                                                                        None if vdim is None else handles(vdim))
                     store = b._values[b.metric(name).id]
                     for ids, _, new in rows:  # journal.apply の 1 セルずつの経路と同じ
-                        if not all(i in d._by_id for d, i in zip(dims, ids)):
+                        key = tuple(b._uuids.get(i) for i in ids)
+                        if not all(u in d._by_id for d, u in zip(dims, key)):
                             continue
-                        key = tuple(d.member_of(i) for d, i in zip(dims, ids))
-                        value = new if new is None or vdim is None else float(vdim._by_id[new])
+                        value = new if new is None or vdim is None else float(vdim._by_id[b._uuids[new]])
                         store = b.engine.write(store, key, value, b)
                     self.assertEqual(cells(a, name), cells(b, name))
 

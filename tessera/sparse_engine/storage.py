@@ -5,6 +5,7 @@ A directory holds 2 kinds of files.
   properties) and the Metrics (handle, dimensions, kind, partition dimension, formula text). The dimensions
   and the Metrics in a Metric definition are handles. Each dimension, member, property and Metric also has its
   UUID ("uuid", "member_uuids", the keys of "properties"), and "tombstones" has the UUIDs of removed objects.
+  A property mapping is {member UUID: member UUID}.
 - inputs.<Metric handle>.parquet: one for each input Metric. A column of member numbers for each dimension
   (d<dimension handle>) and the value column v (Float64 for number, Boolean for boolean, UInt32 member numbers
   for a member type).
@@ -24,7 +25,7 @@ from typing import Callable
 from .engine import Store, default_engine
 from .parser import to_formula
 
-FORMAT_VERSION = 6
+FORMAT_VERSION = 7
 
 
 def save(model, path) -> None:
@@ -44,7 +45,7 @@ def dump(model) -> dict[str, bytes]:
                         "id": model.ids[prop]}
                  for prop, (target, mapping) in d.properties.items()}
         dims.append({"name": d.name, "id": model.ids[d.id], "uuid": d.id, "members": d.members,
-                     "member_ids": d.ids, "member_uuids": [model.uuid_of(i) for i in d.ids],
+                     "member_ids": [model.ids[u] for u in d.ids], "member_uuids": d.ids,
                      "ordered": d.ordered, "properties": props})
         if d.rank_table() is not None:
             dims[-1]["member_order"] = d.order()
@@ -97,7 +98,7 @@ def read(file: Callable[[str], bytes], engine: Store | None = None):
         m.add_dimension(d["name"], d["members"], ordered=d["ordered"], id=d["uuid"])
         # Parquet column names are dimension handles, so restore the saved handles before the inputs are read
         m._bind(d["uuid"], d["id"])
-        m.dimensions[d["uuid"]].set_ids(d["member_ids"])
+        m.dimensions[d["uuid"]].set_ids(d["member_uuids"])
         if "member_order" in d:
             m.dimensions[d["uuid"]].set_order(d["member_order"])
     for d in meta["dimensions"]:  # the properties come after all the target dimensions

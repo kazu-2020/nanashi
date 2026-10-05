@@ -88,11 +88,11 @@ class WriteMany(unittest.TestCase):
                 m._values[m.metric("X").id] = m.engine.write_many(m._values[m.metric("X").id], cols, values, m)
             ref_m, rs = models
             with self.subTest(count=count):
-                self.assertEqual(ref_m.engine.to_cube(ref_m._values[ref_m.metric("X").id], ref_m).cells,
-                                 rs.engine.to_cube(rs._values[rs.metric("X").id], rs).cells)
+                self.assertEqual(ref_m.value("X").cells, rs.value("X").cells)  # with member names: the ids differ
                 read = []
                 for m in models:
-                    region = {m.dimension_id("A"): frozenset(["a1", "a7", "a30"]), m.dimension_id("C"): frozenset(["c2", "c4"])}
+                    ids = lambda d, xs: frozenset(m.member_id(d, x) for x in xs)
+                    region = {m.dimension_id("A"): ids("A", ["a1", "a7", "a30"]), m.dimension_id("C"): ids("C", ["c2", "c4"])}
                     cols, values = m.engine.columns(m._values[m.metric("X").id], region, m)
                     read.append(sorted(zip(*cols, values)))
                 self.assertEqual(read[0], read[1])

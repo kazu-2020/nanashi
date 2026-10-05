@@ -114,9 +114,6 @@ class Names:
     def __init__(self, model):
         self.m = model
 
-    def _handle(self, id) -> int | None:
-        return self.m.ids.get(id) if isinstance(id, str) else None
-
     def dim(self, id) -> Dimension:
         d = self.m.dimensions.get(id) if isinstance(id, str) else None
         if d is None:
@@ -130,10 +127,9 @@ class Names:
         return m
 
     def member(self, d: Dimension, id) -> str:
-        pos = d._by_id.get(self._handle(id))
-        if pos is None:
+        if not isinstance(id, str) or id not in d._by_id:
             raise ValueError(f"{d.name} にメンバー {id} がない")
-        return d.members[pos]
+        return d.member_of(id)
 
     def prop(self, d: Dimension, id) -> str:
         """The property id (the Model takes it in place of the name)."""
@@ -172,7 +168,7 @@ class Names:
         return self.m.dimension_id(name)
 
     def member_id(self, d: Dimension, name: str) -> str:
-        return self.m.member_id(d.name, name)
+        return d.id_of(name)
 
     def kind_out(self, kind: str) -> str:
         return "member:" + self.dim_id(kind.removeprefix("member:")) if kind.startswith("member:") else kind
@@ -575,9 +571,8 @@ def _dimensions_out(n: Names) -> dict:
         uid = lambda name: n.member_id(d, name)
         props, values = {}, {}
         for pid, (t, mapping) in d.properties.items():
-            td = n.m.dimensions[t]
             props[pid] = {"name": d.property_names[pid], "target": t}
-            values[pid] = {uid(k): n.member_id(td, v) for k, v in mapping.items()}
+            values[pid] = dict(mapping)  # the map holds member UUIDs
         out[d.id] = {"name": d.name, "ordered": d.ordered,
                                  "members": [{"id": uid(x), "name": x} for x in d.in_order()],
                                  "properties": props, "property_values": values}

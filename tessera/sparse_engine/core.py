@@ -5,10 +5,20 @@ Cube は値のあるセルだけを dict に持つ。キーが存在しないセ
 """
 from __future__ import annotations
 
+import secrets
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
-Key = tuple[str, ...]
+Key = tuple[str, ...]  # the member ids of one cell, in the order of the dimensions
+
+
+def uuid7() -> str:
+    """Make a UUIDv7 (RFC 9562): the Unix time in milliseconds, then random bits. Python 3.12 has no uuid.uuid7."""
+    ms = time.time_ns() // 1_000_000
+    rand_a, rand_b = secrets.randbits(12), secrets.randbits(62)
+    return str(uuid.UUID(int=(ms << 80) | (7 << 76) | (rand_a << 64) | (2 << 62) | rand_b))
 
 
 def _show(v: float | bool) -> str:
@@ -16,28 +26,30 @@ def _show(v: float | bool) -> str:
 
 
 class Dimension:
-    """名前付きの軸。メンバーは後から増やす、消す、名前を変えることができるが、Metric が持つ軸の組は固定。
+    """A named axis. Members can be added, removed and renamed later. The dimensions of a Metric are fixed.
 
-    メンバーは番号で扱う（members と ids は番号ごとの名前と ID）。番号はエンジンのキーに詰める値で、
-    足したメンバーは末尾の番号になり、メンバーを消すと後ろの番号が詰まる。記録や保存のために変わらない
-    ID も持つ。ID は名前を変えても変わらず、消した ID は再利用しない。Model に登録した軸の ID は、Model が
-    軸や Metric と重ならないように振る。
+    Each member has 3 values. The id (a UUID) is the key of the engine: the restricts, the reference cubes,
+    the property maps and the formulas hold it. It does not change with a rename, and a removed id is not used
+    again. The number (the position in members and ids) is the value that the engine packs in a cell key. A new
+    member gets the last number, and a removal closes up the numbers after it. The name is for people: the
+    formula text and the public reads show it. _index (name -> number) is the name index.
 
-    並び順（順位）は番号と別に持つ。順序のない軸は、途中への挿入（add_member の at）と並び替え
-    （move_member）で順位だけを変え、番号もセルも変えない。順序付きの軸は時系列のマスターで、
-    並び順が計算の意味（前期、大小比較）を持つので、順位はいつも番号と同じにする。
+    The order (rank) is separate from the numbers. On a dimension without order, an insert (the at of
+    add_member) and a move (move_member) change only the rank, not the numbers or the cells. An ordered
+    dimension is a time master list: the order has a meaning in the calculation (the previous period,
+    comparisons), so its rank is always the number.
     """
 
     def __init__(self, name: str, members: Iterable[str], *, ordered: bool = False,
-                 ids: Iterable[int] | None = None, id: str = ""):
+                 ids: Iterable[str] | None = None, id: str = ""):
         self.name = name
         self.id = id  # The UUID. It does not change with a rename. It is the key of Model.dimensions
         self.members: list[str] = list(members)
-        self.ordered = ordered  # True の軸だけ prev（時間方向のずらし）を許す
+        self.ordered = ordered  # Only an ordered dimension allows prev (a shift in time)
         self._index = {m: i for i, m in enumerate(self.members)}
         if len(self._index) != len(self.members):
             raise ValueError(f"{name}: メンバーが重複している")
-        self.set_ids(range(1, len(self.members) + 1) if ids is None else ids)
+        self.set_ids([uuid7() for _ in self.members] if ids is None else ids)
         self._order: list[int] | None = None  # 順位 -> 番号。None なら番号の順のまま
         self._rank: dict[str, int] | None = None  # 名前 -> 順位（必要になったら作る）
         # property id -> (the id of the target Dimension, {member -> target member})
@@ -45,25 +57,39 @@ class Dimension:
         self.property_names: dict[str, str] = {}  # property id -> name
         self._props: dict[str, str] = {}  # property name -> id (the name index)
 
-    def set_ids(self, ids: Iterable[int]) -> None:
-        """位置ごとのメンバーの ID を設定する（保存したモデルを読み込むとき）。"""
-        ids = [int(i) for i in ids]
+    def set_ids(self, ids: Iterable[str]) -> None:
+        """Set the member id of each position (when a saved model is read)."""
+        ids = list(ids)
         if len(ids) != len(self.members) or len(set(ids)) != len(ids):
             raise ValueError(f"{self.name}: メンバーの ID はメンバーと同じ数で、重複しないこと")
         self.ids = ids
         self._by_id = {i: pos for pos, i in enumerate(ids)}
 
-    def id_of(self, member: str) -> int:
-        """メンバーの変わらない ID。"""
+    def id_of(self, member: str) -> str:
+        """The id of the member with this name. ValueError if there is none."""
         if member not in self._index:
             raise ValueError(f"{self.name}: メンバー {member!r} がない")
         return self.ids[self._index[member]]
 
-    def member_of(self, id: int) -> str:
-        """ID のメンバーの今の名前。消したメンバーの ID なら ValueError。"""
+    def member_of(self, id: str) -> str:
+        """The current name of the member with this id. ValueError for the id of a removed member."""
         if id not in self._by_id:
             raise ValueError(f"{self.name}: ID {id} のメンバーがない")
         return self.members[self._by_id[id]]
+
+    def find_member(self, member: str) -> str | None:
+        """The id of the member with this id, or else with this name. None if there is none."""
+        if member in self._by_id:
+            return member
+        pos = self._index.get(member)
+        return None if pos is None else self.ids[pos]
+
+    def member_id(self, member: str) -> str:
+        """The id of the member with this id, or else with this name. ValueError if there is none."""
+        id = self.find_member(member)
+        if id is None:
+            raise ValueError(f"{self.name}: メンバー {member!r} がない")
+        return id
 
     def copy(self) -> Dimension:
         """同じメンバーとプロパティを持つ別の Dimension。対応表の dict は共有する
@@ -78,6 +104,7 @@ class Dimension:
         return other
 
     def __contains__(self, member: str) -> bool:
+        """Tell if a member has this name."""
         return member in self._index
 
     def find_prop(self, prop: str) -> str | None:
@@ -92,11 +119,12 @@ class Dimension:
         return id
 
     def add_property(self, id: str, name: str, target: Dimension, mapping: Mapping[str, str]) -> None:
-        """Add the property, or replace its mapping. The name of a property that exists does not change here."""
+        """Add the property, or replace its mapping ({member id: member id of target}). The name of a property
+        that exists does not change here."""
         for src, dst in mapping.items():
-            if src not in self:
+            if src not in self._by_id:
                 raise ValueError(f"{self.name}.{name}: 未知のメンバー {src!r}")
-            if dst not in target:
+            if dst not in target._by_id:
                 raise ValueError(f"{self.name}.{name}: {target.name} に {dst!r} がない")
         self.properties[id] = (target.id, dict(mapping))
         if id not in self.property_names:
@@ -109,16 +137,15 @@ class Dimension:
         self.property_names[id] = new
         self._props[new] = id
 
-    def add_member(self, member: str, id: int | None = None, at: int | None = None) -> None:
-        """メンバーを足す。番号はいつも末尾になる。at を渡すと、並び順の at 番目（0 から）に入れる
-        （省けば最後。順序付きの軸では最後の時点の次で、途中には入れられない）。
-        id を省くと、この軸の中で使ったことのない ID を振る（Model は自分で振った ID を渡す）。"""
+    def add_member(self, member: str, id: str | None = None, at: int | None = None) -> None:
+        """Add the member. Its number is always the last. With at, put it at position at (from 0) of the order
+        (the default is the end. An ordered dimension accepts only the end). Without id, make a UUID."""
         if member in self._index:
             raise ValueError(f"{self.name}: メンバー {member!r} はすでにある")
         n = len(self.members)
         at = self._position(at, n + 1)
         if id is None:
-            id = max(self.ids, default=0) + 1
+            id = uuid7()
         if id in self._by_id:
             raise ValueError(f"{self.name}: ID {id} はすでにある")
         order = self.order() if at < n or self._order is not None else None  # 足す前の並び順
@@ -131,13 +158,14 @@ class Dimension:
             self._set_order(order)
 
     def move_member(self, member: str, at: int) -> None:
-        """メンバーを並び順の at 番目（0 から）に移す。番号は変えない。順序のない軸だけ。"""
-        if member not in self._index:
-            raise ValueError(f"{self.name}: メンバー {member!r} がない")
+        """Move the member (an id) to position at (from 0) of the order. The number does not change. Only a
+        dimension without order."""
+        if member not in self._by_id:
+            raise ValueError(f"{self.name}: ID {member} のメンバーがない")
         at = self._position(at, len(self.members))
         order = self.order()
-        order.remove(self._index[member])
-        order.insert(at, self._index[member])
+        order.remove(self._by_id[member])
+        order.insert(at, self._by_id[member])
         self._set_order(order)
 
     def _position(self, at: int | None, size: int) -> int:
@@ -188,27 +216,27 @@ class Dimension:
             table[i] = r
         return table
 
-    def rename_member(self, old: str, new: str) -> None:
-        """メンバーの名前を変える。番号（並び順）はそのまま。自分のプロパティの対応表も新しい dict にする。"""
-        if old not in self._index:
-            raise ValueError(f"{self.name}: メンバー {old!r} がない")
+    def rename_member(self, id: str, new: str) -> None:
+        """Rename the member with this id. Only the name and the name index change: the number, the order, the
+        property maps and the cells hold the id."""
+        if id not in self._by_id:
+            raise ValueError(f"{self.name}: ID {id} のメンバーがない")
         if not isinstance(new, str) or not new:
             raise ValueError(f"{self.name}: メンバー名は空でない文字列: {new!r}")
         if new in self._index:
             raise ValueError(f"{self.name}: メンバー {new!r} はすでにある")
-        i = self._index.pop(old)
+        i = self._by_id[id]
+        del self._index[self.members[i]]
         self._index[new] = i
         self.members[i] = new
-        self._rank = None  # 名前 -> 順位の表は名前を鍵にするので作り直す
-        for prop, (target, mapping) in list(self.properties.items()):
-            if old in mapping:
-                self.properties[prop] = (target, {(new if k == old else k): v for k, v in mapping.items()})
+        self._rank = None  # the name -> rank table has names as keys, so make it again
 
     def remove_member(self, member: str) -> None:
-        """メンバーを消す。後ろのメンバーの番号は 1 つずつ詰まる。自分のプロパティの対応表からも消す。"""
-        if member not in self._index:
-            raise ValueError(f"{self.name}: メンバー {member!r} がない")
-        pos = self._index[member]
+        """Remove the member with this id. The numbers after it close up by 1. The member also goes from the
+        maps of its own properties."""
+        if member not in self._by_id:
+            raise ValueError(f"{self.name}: ID {member} のメンバーがない")
+        pos = self._by_id[member]
         del self.members[pos]
         del self.ids[pos]
         self._index = {m: i for i, m in enumerate(self.members)}
@@ -220,22 +248,23 @@ class Dimension:
                 self.properties[prop] = (target, {k: v for k, v in mapping.items() if k != member})
 
     def set_property_value(self, prop: str, member: str, value: str, target: Dimension) -> None:
-        """Set the property prop (an id) of member to value. The mapping becomes a new dict, so an engine
-        can detect the change of a cached mapping by identity."""
+        """Set the property prop (an id) of the member (an id) to value (a member id of target). The mapping
+        becomes a new dict, so an engine can detect the change of a cached mapping by identity."""
         if prop not in self.properties:
             raise ValueError(f"{self.name} にプロパティ {prop} がない")
         name = self.property_names[prop]
-        if member not in self:
+        if member not in self._by_id:
             raise ValueError(f"{self.name}.{name}: 未知のメンバー {member!r}")
-        if value not in target:
+        if value not in target._by_id:
             raise ValueError(f"{self.name}.{name}: {target.name} に {value!r} がない")
         target_id, mapping = self.properties[prop]
         self.properties[prop] = (target_id, {**mapping, member: value})
 
     def offset(self, member: str, n: int) -> str | None:
-        """順序付き軸で n 個先のメンバー。範囲外なら None。"""
-        i = self._index[member] + n
-        return self.members[i] if 0 <= i < len(self.members) else None
+        """The id of the member n positions after the member with this id (an ordered dimension). None if it is
+        out of the range."""
+        i = self._by_id[member] + n
+        return self.ids[i] if 0 <= i < len(self.members) else None
 
 
 @dataclass

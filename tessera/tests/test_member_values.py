@@ -75,8 +75,8 @@ class Values(unittest.TestCase):
 class TypeChecking(unittest.TestCase):
     def reject(self, formula, dims, pattern, kind="number"):
         m = model()
-        m.add_formula("Bad", dims, formula, kind=kind)
-        with self.assertRaisesRegex(FormulaError, pattern):
+        with self.assertRaisesRegex(FormulaError, pattern):  # an unknown member fails at the definition (bind)
+            m.add_formula("Bad", dims, formula, kind=kind)
             m.recalc()
 
     def test_unordered_dim_cannot_be_ordered(self):

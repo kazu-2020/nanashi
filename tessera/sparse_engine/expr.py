@@ -1,7 +1,7 @@
 """式の AST。Metric 全体（ブロック）に対する演算だけを表現し、セル単位の式は持たない。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import Any, Callable
 
 @dataclass(frozen=True)
@@ -139,13 +139,10 @@ def _children(e: Expr):
             yield f.name, v
 
 
-def _names_member(e: Expr, dim: str, member: str) -> bool:
-    return isinstance(e, (Member, Select)) and e.dim == dim and e.member == member
-
-
 def mentions_member(e: Expr, dim: str, member: str) -> bool:
-    """式が `dim."member"`（定数か SELECT）を書いているか。"""
-    return _names_member(e, dim, member) or any(mentions_member(c, dim, member) for _, c in _children(e))
+    """Tell if the formula holds the member (a constant or a SELECT). dim and member are ids."""
+    here = isinstance(e, (Member, Select)) and e.dim == dim and e.member == member
+    return here or any(mentions_member(c, dim, member) for _, c in _children(e))
 
 
 def references_metric(e: Expr, name: str) -> bool:
@@ -158,14 +155,6 @@ def uses_property(e: Expr, dim: str, prop: str) -> bool:
     """式が `[BY: dim.prop]` を書いているか。"""
     here = isinstance(e, By) and e.dim == dim and e.prop == prop
     return here or any(uses_property(c, dim, prop) for _, c in _children(e))
-
-
-def rename_member(e: Expr, dim: str, old: str, new: str) -> Expr:
-    """式の中の `dim."old"` を `dim."new"` にする。変わらなければ同じオブジェクトを返す。"""
-    changes: dict = {n: r for n, c in _children(e) if (r := rename_member(c, dim, old, new)) is not c}
-    if _names_member(e, dim, old):
-        changes["member"] = new
-    return replace(e, **changes) if changes else e
 
 
 @dataclass(eq=False)
@@ -186,7 +175,7 @@ class DimRef(Expr):
 
 @dataclass(eq=False)
 class Member(Expr):
-    """軸のメンバーの定数。"""
+    """The constant of a member of a dimension. After bind, dim and member are ids."""
     dim: str
     member: str
 

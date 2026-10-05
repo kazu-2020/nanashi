@@ -66,8 +66,8 @@ class Planner(Protocol):
 
     def removal_regions(self, plan: CompiledPlan, stores: dict[str, Any], cat: Catalog, dim: str,
                         member: str) -> dict[str, Restrict]:
-        """入力を空にしたあと、軸 dim のメンバー member を消すと値が変わる範囲
-        （計算 Metric -> 消すメンバーを除いた範囲）。"""
+        """The ranges that change when the member (an id) of the dimension dim goes, after its inputs became
+        blank (formula Metric -> the range without the removed member)."""
 
     def recalc(self, plan: CompiledPlan, stores: dict[str, Any], counts: dict[str, Any], cat: Catalog,
                changed: dict[str, Restrict], added: dict[str, frozenset[str]], olds: dict[str, Any],
@@ -376,7 +376,7 @@ class _Run:
 
         # 格納データにその場で 1 時点ずつ書き込む。次の時点の PREVIOUS は、書き込んだばかりの
         # 前の時点（範囲の外なら元のまま）を読む
-        for t in cat.dimension(dim).members:
+        for t in cat.dimension(dim).ids:
             for n, r in active.items():
                 if dim in r and t not in r[dim]:
                     continue
