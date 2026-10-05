@@ -228,8 +228,9 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 			if err != nil {
 				return plan{}, err
 			}
-			ops, stmts, err := editOps(app, em, dim, meta, edits)
-			return plan{ops: ops, stmts: stmts, result: rows{int32(n)}}, err
+			p, err := editOps(app, em, dim, meta, edits)
+			p.result = rows{int32(n)}
+			return p, err
 		}
 	case *nanashiv1.ImportRequest_Metric:
 		planOf = func(em engineModel, _ appMeta) (plan, error) {

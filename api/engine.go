@@ -248,20 +248,19 @@ type engineReply struct {
 type outcome int
 
 const (
-	done     outcome = iota // 200: the engine committed the write, now or at an earlier send.
-	failed                  // 400 (bad_request or formula) or 409 duplicate_id: the engine refused the write and records the refusal.
-	conflict                // 409 conflict: a write in between changed the cells that expect protects. Plan again.
-	unknown                 // Anything else: the result is not known. The write stays pending.
+	done    outcome = iota // 200: the engine committed the write, now or at an earlier send.
+	failed                 // The engine or the router refused the request: 400, 413 or 409 duplicate_id. A resend gets the same refusal.
+	unknown                // Anything else: the result is not known. The write stays pending.
 )
 
+// outcome tells what a write reply means for the outbox. A 4xx that is a state of the system and not a refusal
+// of the request stays unknown: 404 no_model, 405 read_only, 421 not_leader and 429 overloaded can go away.
 func (r engineReply) outcome() outcome {
 	switch {
 	case r.Status == http.StatusOK:
 		return done
-	case r.Status == http.StatusBadRequest, r.Status == http.StatusConflict && r.Code == "duplicate_id":
+	case r.Status == http.StatusBadRequest, r.Status == http.StatusRequestEntityTooLarge, r.Status == http.StatusConflict && r.Code == "duplicate_id":
 		return failed
-	case r.Status == http.StatusConflict && r.Code == "conflict":
-		return conflict
 	}
 	return unknown
 }
@@ -338,14 +337,9 @@ func (e *Engines) read(ctx context.Context, app string, r engineRead) (engineCub
 
 // write sends the operations as one transaction. The client_op_id of the request (opID) lets the api resend it
 // safely: the engine does not commit the same opID two times, and it returns the same refusal again.
-// With expect, the engine refuses the write (409 conflict) if a write after that version changed the same cells.
 // The error is only for a transport failure: the result is then not known.
-func (e *Engines) write(ctx context.Context, app, reason, opID string, ops []op, expect *int64) (engineReply, error) {
-	body := map[string]any{"client_op_id": opID, "reason": reason, "ops": ops}
-	if expect != nil {
-		body["expect"] = *expect
-	}
-	b, err := json.Marshal(body)
+func (e *Engines) write(ctx context.Context, app, reason, opID string, ops []op) (engineReply, error) {
+	b, err := json.Marshal(map[string]any{"client_op_id": opID, "reason": reason, "ops": ops})
 	if err != nil {
 		return engineReply{}, err
 	}

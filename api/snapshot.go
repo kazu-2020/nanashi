@@ -184,8 +184,10 @@ func (s *PlanServer) ListSnapshots(ctx context.Context, req *connect.Request[nan
 }
 
 // CreateSnapshot reads one version of the application without a lock. It settles the pending operations, reads
-// the engine (all cubes of one seq), and then reads the api rows in one REPEATABLE READ transaction. If the
-// version changed since the start, or an operation is pending, the api rows can differ from the engine: read again.
+// the version and the pending count, reads the engine (all cubes of one seq), and then reads the api rows in one
+// REPEATABLE READ transaction. A pending row at the first read, a version change, or a pending row at the end
+// means that the api rows can differ from the engine: read again. The first read sees a row that another process
+// made pending after the settle, so the engine read never misses its operations.
 func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[nanashiv1.CreateSnapshotRequest]) (*connect.Response[nanashiv1.Snapshot], error) {
 	app := req.Msg.AppId
 	if req.Msg.Id == "" {
@@ -196,9 +198,15 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 		if err := s.settlePending(ctx, app); err != nil {
 			return nil, err
 		}
-		var version int64
-		if err := s.Pool.QueryRow(ctx, "select version from app_application where id = $1", app).Scan(&version); err != nil {
+		var version, pending int64
+		if err := s.Pool.QueryRow(ctx, versionAndPending, app).Scan(&version, &pending); err != nil {
 			return nil, dbError(err)
+		}
+		if pending > 0 {
+			if try == 2 {
+				return nil, connect.NewError(connect.CodeUnavailable, errors.New("結果の分からない操作が残っているので、スナップショットを作れない。もう一度試す"))
+			}
+			continue
 		}
 		data, err := s.readEngine(ctx, app)
 		if err != nil {
@@ -206,8 +214,7 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 		}
 		result, err := s.apiOnlyTx(ctx, app, req.Msg, pgx.TxOptions{IsoLevel: pgx.RepeatableRead}, func(tx pgx.Tx) (any, error) {
 			var now, pending int64
-			if err := tx.QueryRow(ctx, `select a.version, (select count(*) from app_operation o where o.app_id = a.id and o.status = 'pending')
-				from app_application a where a.id = $1`, app).Scan(&now, &pending); err != nil {
+			if err := tx.QueryRow(ctx, versionAndPending, app).Scan(&now, &pending); err != nil {
 				return nil, err
 			}
 			if now != version || pending > 0 {
@@ -247,6 +254,10 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 		return connect.NewResponse(snap), nil
 	}
 }
+
+// versionAndPending reads the version of the api rows and the count of the pending operations in one query.
+const versionAndPending = `select a.version, (select count(*) from app_operation o where o.app_id = a.id and o.status = 'pending')
+	from app_application a where a.id = $1`
 
 // errChanged passes dbError as a Connect error. CreateSnapshot reads again.
 var errChanged = connect.NewError(connect.CodeAborted, errors.New("changed"))

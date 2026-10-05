@@ -1,9 +1,17 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+	"github.com/google/uuid"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
@@ -13,7 +21,7 @@ const newMember = "0192f3a4-0000-7000-8000-0000000000aa"
 func TestEditMembersRenameRemove(t *testing.T) {
 	em := model(t)
 	dim, _ := em.dim(sales)
-	ops, stmts, err := editOps("app", em, dim, appMeta{}, []*nanashiv1.MemberEdit{
+	p, err := editOps("app", em, dim, appMeta{}, []*nanashiv1.MemberEdit{
 		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Id: sale1, Properties: map[string]string{salesProduct: memberA}}}},
 		{Edit: &nanashiv1.MemberEdit_Rename{Rename: &nanashiv1.RenameMember{Id: sale1, Name: " one "}}},
 		{Edit: &nanashiv1.MemberEdit_Remove{Remove: &nanashiv1.RemoveMember{Id: sale2}}},
@@ -26,18 +34,18 @@ func TestEditMembersRenameRemove(t *testing.T) {
 	// A rename changes no reference: the values of a member go at the end, in one operation. A blank value removes the value.
 	want := fmt.Sprintf(`[{"dim":%q,"id":%q,"name":"one","op":"rename_member"},{"dim":%q,"id":%q,"op":"remove_member"},`+
 		`{"dim":%q,"op":"set_property_values","prop":%q,"values":{%q:null,%q:%q}}]`, sales, sale1, sales, sale2, sales, salesProduct, sale1, sale9, memberB)
-	if got := opsJSON(t, ops); got != want {
+	if got := opsJSON(t, p.ops); got != want {
 		t.Errorf("got %s\nwant %s", got, want)
 	}
-	if len(stmts) != 0 {
-		t.Errorf("a rename or a removal must change no api row: %v", stmts)
+	if len(p.stmts) != 0 {
+		t.Errorf("a rename or a removal must change no api row: %v", p.stmts)
 	}
-	if _, _, err := editOps("app", em, dim, appMeta{}, []*nanashiv1.MemberEdit{
+	if _, err := editOps("app", em, dim, appMeta{}, []*nanashiv1.MemberEdit{
 		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Id: sale1, Properties: map[string]string{newMember: "x"}}}},
 	}); err == nil {
 		t.Error("an unknown property must be an error")
 	}
-	if _, _, err := editOps("app", em, dim, appMeta{}, []*nanashiv1.MemberEdit{
+	if _, err := editOps("app", em, dim, appMeta{}, []*nanashiv1.MemberEdit{
 		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Id: sale1, Properties: map[string]string{salesProduct: "A"}}}},
 	}); err == nil {
 		t.Error("a member name as the value of a DIMENSION property must be an error")
@@ -52,7 +60,7 @@ func TestEditMembersTextAndNumber(t *testing.T) {
 		{ListID: sales, ID: amountProp, Name: "Amount", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, MetricID: amount},
 		{ListID: sales, ID: note, Name: "Note", Type: nanashiv1.PropertyType_PROPERTY_TYPE_TEXT},
 	}}
-	ops, stmts, err := editOps("app", em, dim, meta, []*nanashiv1.MemberEdit{
+	p, err := editOps("app", em, dim, meta, []*nanashiv1.MemberEdit{
 		{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: newMember, Name: "10", Properties: map[string]string{amountProp: "1,200", note: "first"}}}},
 		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Id: sale1, Properties: map[string]string{note: ""}}}},
 	})
@@ -60,11 +68,11 @@ func TestEditMembersTextAndNumber(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := fmt.Sprintf(`[{"dim":%q,"id":%q,"name":"10","op":"add_member"},{"coords":{%q:%q},"metric":%q,"op":"set_cell","value":1200}]`, sales, newMember, sales, newMember, amount)
-	if got := opsJSON(t, ops); got != want {
+	if got := opsJSON(t, p.ops); got != want {
 		t.Errorf("got %s\nwant %s", got, want)
 	}
-	if len(stmts) != 1 || fmt.Sprint(stmts[0].args) != fmt.Sprintf(`[app %s %s [%s] {%q:"first"}]`, sales, note, sale1, newMember) {
-		t.Errorf("text statements: %v", stmts)
+	if len(p.stmts) != 1 || fmt.Sprint(p.stmts[0].args) != fmt.Sprintf(`[app %s %s [%s] {%q:"first"}]`, sales, note, sale1, newMember) {
+		t.Errorf("text statements: %v", p.stmts)
 	}
 }
 
@@ -141,15 +149,15 @@ func TestEditMembersSelfReference(t *testing.T) {
 	add := func(id, name, parentID string) *nanashiv1.MemberEdit {
 		return &nanashiv1.MemberEdit{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: id, Name: name, Properties: map[string]string{parent: parentID}}}}
 	}
-	ops, _, err := editOps("app", em, em.Dims[0], appMeta{}, []*nanashiv1.MemberEdit{add(a, "A", x), add(c, "C", x), add(b, "B", "")})
+	p, err := editOps("app", em, em.Dims[0], appMeta{}, []*nanashiv1.MemberEdit{add(a, "A", x), add(c, "C", x), add(b, "B", "")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := opsJSON(t, ops)
+	got := opsJSON(t, p.ops)
 	if !strings.HasSuffix(got, fmt.Sprintf(`{"dim":%q,"op":"set_property_values","prop":%q,"values":{%q:%q,%q:null,%q:%q}}]`, product, parent, a, x, b, c, x)) {
 		t.Errorf("got %s", got)
 	}
-	if _, _, err := editOps("app", em, em.Dims[0], appMeta{}, []*nanashiv1.MemberEdit{add(a, "A", b)}); err == nil {
+	if _, err := editOps("app", em, em.Dims[0], appMeta{}, []*nanashiv1.MemberEdit{add(a, "A", b)}); err == nil {
 		t.Error("a value that is not a member must be an error")
 	}
 }
@@ -169,5 +177,86 @@ func TestPruneItems(t *testing.T) {
 	}
 	if len(out.Boards[0].Widgets) != 2 {
 		t.Errorf("widgets: %v", out.Boards[0].Widgets)
+	}
+}
+
+// TestCreateScenarioReplansWhenTheCubesAreNewer: the copy reads the cells after the model. If a write came in
+// between, the cubes have another seq than the model: the plan runs again with the new model and cells.
+func TestCreateScenarioReplansWhenTheCubesAreNewer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	if _, err := pool.Exec(ctx, "insert into app_list (app_id, id, kind) values ($1, $2, $3)", app, product, nanashiv1.ListKind_LIST_KIND_SCENARIO); err != nil {
+		t.Fatal(err)
+	}
+	e := newFakeEngine(t, sample)
+	e.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		switch {
+		case r.Method == "POST":
+			var body map[string]any
+			b, _ := io.ReadAll(r.Body)
+			json.Unmarshal(b, &body)
+			e.writes = append(e.writes, body)
+			io.WriteString(w, `{"seq": 9}`)
+		case strings.HasSuffix(r.URL.Path, "/"):
+			e.gets++
+			// The first model read is older than the cells (a write came in between).
+			io.WriteString(w, strings.Replace(sample, `"seq": 7`, fmt.Sprintf(`"seq": %d`, 6+e.gets), 1))
+		default:
+			fmt.Fprintf(w, `{"seq": 8, "dims": [%q, %q], "cells": [[%q, %q, %d]]}`, product, region, memberA, east, e.gets)
+		}
+	})
+	alice := testClient(t, pool, e)("alice")
+	_, err := alice.CreateScenario(ctx, connect.NewRequest(&nanashiv1.CreateScenarioRequest{AppId: app, ClientOpId: uuid.NewString(), Id: uuid.Must(uuid.NewV7()).String(), Name: "S2", CopyFrom: memberA}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.gets != 2 {
+		t.Errorf("model reads: %d, want 2 (one plan again after the cells were newer)", e.gets)
+	}
+	if len(e.writes) != 1 {
+		t.Fatalf("engine writes: %d, want 1", len(e.writes))
+	}
+	for _, o := range e.writes[0]["ops"].([]any) {
+		if o := o.(map[string]any); o["op"] == "set_cell" && o["value"] != 2.0 {
+			t.Errorf("the copy must have the cells of the second read: %v", o)
+		}
+	}
+	if _, ok := e.writes[0]["expect"]; ok {
+		t.Errorf("expect is of no use for a copy: nobody else writes the new scenario")
+	}
+}
+
+// TestEditMembersRefusalRestoresText: the TEXT values of a refused edit go back to the old values.
+func TestEditMembersRefusalRestoresText(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	note := uuid.Must(uuid.NewV7()).String()
+	if _, err := pool.Exec(ctx, "insert into app_property (app_id, list_id, id, name, type, text_values) values ($1, $2, $3, 'Note', $4, $5)",
+		app, product, note, nanashiv1.PropertyType_PROPERTY_TYPE_TEXT, fmt.Sprintf(`{%q: "a", %q: "b"}`, memberA, memberB)); err != nil {
+		t.Fatal(err)
+	}
+	e := newFakeEngine(t, sample)
+	e.reply = func(int, map[string]any) (int, string) { return 400, `{"error": "bad_request", "message": "だめ"}` }
+	alice := testClient(t, pool, e)("alice")
+	_, err := alice.EditMembers(ctx, connect.NewRequest(&nanashiv1.EditMembersRequest{AppId: app, ClientOpId: uuid.NewString(), List: product, Edits: []*nanashiv1.MemberEdit{
+		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Id: memberA, Properties: map[string]string{note: "x"}}}},
+		{Edit: &nanashiv1.MemberEdit_Set{Set: &nanashiv1.SetProperties{Id: memberB, Properties: map[string]string{note: ""}}}},
+		{Edit: &nanashiv1.MemberEdit_Remove{Remove: &nanashiv1.RemoveMember{Id: memberB}}},
+	}}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("got %v, want the refusal", err)
+	}
+	var text string
+	if err := pool.QueryRow(ctx, "select text_values::text from app_property where app_id = $1 and id = $2", app, note).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf(`{%q: "a", %q: "b"}`, memberA, memberB); text != want {
+		t.Errorf("text values after the refusal: %s, want %s", text, want)
 	}
 }

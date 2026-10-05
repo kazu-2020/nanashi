@@ -102,7 +102,7 @@ export function SnapshotsPage() {
               mutate(async (clientOpId) => {
                 await api.createSnapshot({ appId, clientOpId, id, name });
                 setName("");
-              }).then(() => setId(newId()))
+              }).then((ok) => ok !== null && setId(newId()))
             }
           >
             作成
@@ -247,7 +247,7 @@ export function AccessPage() {
                   () => api.createAccessRule(req),
                   () => api.updateAccessRule(req),
                 );
-              }).then(() => setRuleId(newId()))
+              }).then((ok) => ok !== null && setRuleId(newId()))
             }
           >
             ルールを追加

@@ -137,7 +137,7 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void })
                   () => api.updateMetric(req),
                 );
               props.onSaved(f.id);
-            }).then((ok) => ok || d || setF((x) => ({ ...x, id: newId() })))
+            }).then((ok) => ok === false && !d && setF((x) => ({ ...x, id: newId() })))
           }
         >
           保存
@@ -291,7 +291,7 @@ export function TablesPage() {
                     () => api.updateTable(req),
                   );
                   setSel(draftId);
-                }).then(() => !t && setDraftId(newId()))
+                }).then((ok) => ok !== null && !t && setDraftId(newId()))
               }
             >
               保存

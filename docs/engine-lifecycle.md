@@ -152,17 +152,20 @@ The serialization points are the engine (one writer, with the lease and the `hea
 A change that the engine and the api tables both take goes through `app_operation` (`change` in `api/server.go`):
 
 1. The api looks the `client_op_id` up. A `done` row gives the stored result, a `failed` row the stored error. A `pending` row is settled first.
-2. The api settles the other `pending` rows of the application in their order.
+2. The api settles the other `pending` rows of the application in their order. A row whose result stays unknown does not block this change: the engine orders the writes, so a later settle of that row is a later write. If the engine is down, step 3 or step 5 of this change fails on its own.
 3. The api reads the model and the api rows, and makes the plan. The ids that the api makes come from here, one time for each plan.
    A name that the api makes from a count (the rows of a TRANSACTION list) does not come from the model it read: concurrent plans read the same model. `Import` reserves the row numbers in `app_list.next_row` with one `update ... returning`, so the stored operations hold the final names.
 4. The first transaction inserts the `pending` row and runs the api statements. A constraint violation rolls back before the engine sees anything.
-5. The api sends the operations to the engine. 200 is `done`. 400 and 409 `duplicate_id` are `failed`, and the engine records the refusal for the `client_op_id`. Any other answer leaves the row `pending`.
-6. The second transaction flips the row with `where status = 'pending'`. A `failed` row deletes the rows that the first transaction made.
+5. The api sends the operations to the engine. 200 is `done`. 400, 413 and 409 `duplicate_id` are `failed`: the engine or the router refused the request, and a resend gets the same refusal. Any other answer leaves the row `pending`. This includes 404 `no_model`, 405 `read_only`, 421 `not_leader` and 429 `overloaded`: they are states of the system that can go away, not refusals of the request.
+6. The second transaction flips the row with `where status = 'pending'`. A `done` row gets its audit row here, so an operation has one audit row, also when another request settles it, and a resend adds none. A `failed` row undoes the rows that the first transaction made or changed: it deletes a made row, and it puts the old values of `app_metric` and of the TEXT property values back where the row still has the new values.
 
 Two api processes can settle the same row. The flip of the second one changes 0 rows, and the engine gives both the same result.
 A process that stops after the engine write leaves a `pending` row. The next change of the application settles it.
 
-The lock also kept `CreateSnapshot` consistent. Now `CreateSnapshot` settles the pending rows, reads the engine, and reads the api rows in one REPEATABLE READ transaction. If `app_application.version` changed, or a row is pending, it reads again.
+The lock also kept `CreateSnapshot` consistent. Now `CreateSnapshot` settles the pending rows, reads `app_application.version` and the count of pending rows in one query, reads the engine, and reads the api rows in one REPEATABLE READ transaction. If a row was pending at the first read, if the version changed, or if a row is pending at the end, it reads again.
+The pending count at the first read is necessary: a change can commit its first transaction after the settle and before the version read. The final check then sees the same version and no pending row, but the engine read came before the engine write of that change. The first read sees that row as pending and reads again.
+
+The engine remembers the result of a `client_op_id` for the last `op_window` records of the journal (100,000 by default). A `pending` row that the api sends again after more than `op_window` later writes is a new write for the engine, and the engine can apply it two times. For a `set_cell` or an `add_member` the second application gives the same state. For an `add_input` with `cells`, the second application defines the input again with those cells and drops the cells that came after the first application. The api does not ask `GET /operations/<id>` before a resend: inside the window the resend itself is safe, and outside the window the engine answers 404 `unknown_operation` and does not know the result either. The bound is the window: a row stays `pending` only while the engine gives no definite answer, and the next change of the application settles it, so a row older than `op_window` later writes needs the engine to answer nothing for that long.
 
 The engine starts in the router while the api waits for the engine answer of step 5. If the engine cannot start, the router answers 503 `engine_failing` at once, and the row stays `pending`.
 

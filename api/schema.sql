@@ -112,12 +112,15 @@ create table if not exists app_operation (
   request_hash text not null,
   ops jsonb,
   seq bigint,
-  expect boolean not null default false,
-  -- The rows that the first transaction made, as [{"table", "id", "list_id"?}]. A refusal deletes them.
+  -- The rows that the first transaction made or changed (madeRow in server.go). A refusal undoes them.
   made jsonb,
+  -- The request as JSON, for the audit row that the flip to done writes.
+  detail text,
   status text not null,
   result jsonb,
   error jsonb,
   created_at timestamptz not null default now(),
   primary key (app_id, client_op_id)
 );
+alter table app_operation add column if not exists detail text;
+alter table app_operation drop column if exists expect;

@@ -73,9 +73,10 @@ func propMetric(list, prop string) string { return list + "." + prop }
 // coords makes the coordinates of a cell: list id to member id.
 func coords(list, member string) map[string]any { return map[string]any{list: member} }
 
-// editOps changes member edits into engine operations and the statements for the TEXT values. The engine keeps
-// the DIMENSION property values and the member names. Every reference is an id, so a rename changes no api row.
-func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*nanashiv1.MemberEdit) ([]op, []stmt, error) {
+// editOps changes member edits into the plan: engine operations, the statements for the TEXT values, and the
+// old and new TEXT values for the compensation. The engine keeps the DIMENSION property values and the member
+// names. Every reference is an id, so a rename changes no api row.
+func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*nanashiv1.MemberEdit) (plan, error) {
 	members := map[string]string{} // Id to name.
 	names := map[string]bool{}
 	for _, m := range dim.Members {
@@ -88,8 +89,7 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 			props[p.ID] = p
 		}
 	}
-	var ops []op
-	var stmts []stmt
+	var p plan
 	exists := func(id string) error {
 		if _, ok := members[id]; !ok {
 			return fmt.Errorf("%s にメンバー %s がない", dim.Name, id)
@@ -114,19 +114,28 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 				continue
 			}
 			if _, ok := dim.prop(prop); ok {
-				ops = append(ops, newOp("set_property_values", map[string]any{"dim": dim.ID, "prop": prop, "values": touched}))
+				p.ops = append(p.ops, newOp("set_property_values", map[string]any{"dim": dim.ID, "prop": prop, "values": touched}))
 			} else {
-				stmts = append(stmts, textValues(app, dim.ID, prop, touched))
+				old := map[string]*string{}
+				for k := range touched {
+					if v, ok := props[prop].Text[k]; ok {
+						old[k] = &v
+					} else {
+						old[k] = nil
+					}
+				}
+				p.stmts = append(p.stmts, textValues(app, dim.ID, prop, touched))
+				p.made = append(p.made, madeRow{Table: "app_property_text", ID: prop, ListID: dim.ID, OldText: old, NewText: touched})
 			}
 		}
 	}
 	setProps := func(member string, in map[string]string) error {
 		for _, prop := range slices.Sorted(maps.Keys(in)) {
 			v := strings.TrimSpace(in[prop])
-			p, known := props[prop]
+			pr, known := props[prop]
 			ep, isDim := dim.prop(prop)
-			switch kind, isMetric := propKind[p.Type]; {
-			case isDim, known && p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+			switch kind, isMetric := propKind[pr.Type]; {
+			case isDim, known && pr.Type == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
 				if isDim && v != "" {
 					// The value is a member id of the target list. On a list that refers to itself, the member can be
 					// one that this edit adds.
@@ -150,9 +159,9 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 			case isMetric:
 				val, err := parseValue(kind, v)
 				if err != nil {
-					return fmt.Errorf("%s.%s: %w", dim.Name, p.Name, err)
+					return fmt.Errorf("%s.%s: %w", dim.Name, pr.Name, err)
 				}
-				ops = append(ops, newOp("set_cell", map[string]any{"metric": p.MetricID, "value": val, "coords": coords(dim.ID, member)}))
+				p.ops = append(p.ops, newOp("set_cell", map[string]any{"metric": pr.MetricID, "value": val, "coords": coords(dim.ID, member)}))
 			default:
 				return fmt.Errorf("%s にプロパティ %s がない", dim.Name, prop)
 			}
@@ -164,53 +173,53 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 		case *nanashiv1.MemberEdit_Add:
 			name := strings.TrimSpace(x.Add.Name)
 			if name == "" || x.Add.Id == "" {
-				return nil, nil, errors.New("メンバーの id と名前が要る")
+				return plan{}, errors.New("メンバーの id と名前が要る")
 			}
 			if _, ok := members[x.Add.Id]; ok || names[name] {
-				return nil, nil, tag(errExists, "%s にメンバー %q はすでにある", dim.Name, name)
+				return plan{}, tag(errExists, "%s にメンバー %q はすでにある", dim.Name, name)
 			}
-			ops = append(ops, newOp("add_member", map[string]any{"dim": dim.ID, "id": x.Add.Id, "name": name}))
+			p.ops = append(p.ops, newOp("add_member", map[string]any{"dim": dim.ID, "id": x.Add.Id, "name": name}))
 			members[x.Add.Id], names[name] = name, true
 			if err := setProps(x.Add.Id, x.Add.Properties); err != nil {
-				return nil, nil, err
+				return plan{}, err
 			}
 		case *nanashiv1.MemberEdit_Set:
 			if err := exists(x.Set.Id); err != nil {
-				return nil, nil, err
+				return plan{}, err
 			}
 			if err := setProps(x.Set.Id, x.Set.Properties); err != nil {
-				return nil, nil, err
+				return plan{}, err
 			}
 		case *nanashiv1.MemberEdit_Rename:
 			name := strings.TrimSpace(x.Rename.Name)
 			if err := exists(x.Rename.Id); err != nil {
-				return nil, nil, err
+				return plan{}, err
 			}
 			if name == "" || names[name] {
-				return nil, nil, fmt.Errorf("%s に %q という名前は付けられない", dim.Name, name)
+				return plan{}, fmt.Errorf("%s に %q という名前は付けられない", dim.Name, name)
 			}
-			ops = append(ops, newOp("rename_member", map[string]any{"dim": dim.ID, "id": x.Rename.Id, "name": name}))
+			p.ops = append(p.ops, newOp("rename_member", map[string]any{"dim": dim.ID, "id": x.Rename.Id, "name": name}))
 			delete(names, members[x.Rename.Id])
 			members[x.Rename.Id], names[name] = name, true
 		case *nanashiv1.MemberEdit_Remove:
 			if err := exists(x.Remove.Id); err != nil {
-				return nil, nil, err
+				return plan{}, err
 			}
 			send(&x.Remove.Id)
-			ops = append(ops, newOp("remove_member", map[string]any{"dim": dim.ID, "id": x.Remove.Id}))
+			p.ops = append(p.ops, newOp("remove_member", map[string]any{"dim": dim.ID, "id": x.Remove.Id}))
 			delete(names, members[x.Remove.Id])
 			delete(members, x.Remove.Id)
 		case *nanashiv1.MemberEdit_Move:
 			if err := exists(x.Move.Id); err != nil {
-				return nil, nil, err
+				return plan{}, err
 			}
-			ops = append(ops, newOp("move_member", map[string]any{"dim": dim.ID, "id": x.Move.Id, "at": x.Move.Position}))
+			p.ops = append(p.ops, newOp("move_member", map[string]any{"dim": dim.ID, "id": x.Move.Id, "at": x.Move.Position}))
 		default:
-			return nil, nil, errors.New("メンバーの変更が空")
+			return plan{}, errors.New("メンバーの変更が空")
 		}
 	}
 	send(nil)
-	return ops, stmts, nil
+	return p, nil
 }
 
 // textValues gives the statement that sets the TEXT property values of some members. A nil value removes the
@@ -600,8 +609,7 @@ func (s *PlanServer) EditMembers(ctx context.Context, req *connect.Request[nanas
 		if !ok {
 			return plan{}, fmt.Errorf("リスト %s がない", list)
 		}
-		ops, stmts, err := editOps(app, em, dim, meta, req.Msg.Edits)
-		return plan{ops: ops, stmts: stmts}, err
+		return editOps(app, em, dim, meta, req.Msg.Edits)
 	}))
 }
 
@@ -648,8 +656,10 @@ func (s *PlanServer) CreateScenario(ctx context.Context, req *connect.Request[na
 		if _, ok := dim.member(from); !ok {
 			return plan{}, fmt.Errorf("シナリオ %s がない", from)
 		}
-		// The copy reads cells of the version seq. expect makes the engine refuse the write if a write in between
-		// changed these cells. Then the client tries again.
+		// The copy reads the cells after the model. If a write came in between, a cube has another seq than the
+		// model: plan again with the new model (errConflict in outbox). Nobody else writes the new scenario, so the
+		// engine cannot see a conflict for this write.
+		cubes := map[string]engineCube{}
 		for _, m := range em.Metrics {
 			if m.Formula != "" || !slices.Contains(m.Dims, list) {
 				continue
@@ -658,8 +668,12 @@ func (s *PlanServer) CreateScenario(ctx context.Context, req *connect.Request[na
 			if err != nil {
 				return plan{}, err
 			}
+			cubes[m.ID] = cube
 			ops = append(ops, copyCellOps(m.ID, list, req.Msg.Id, cube, false)...)
 		}
-		return plan{ops: ops, expect: true}, nil
+		if !sameSeq(em, cubes) {
+			return plan{}, errConflict
+		}
+		return plan{ops: ops}, nil
 	}))
 }

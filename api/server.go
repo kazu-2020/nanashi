@@ -43,7 +43,7 @@ type (
 	role    = nanashiv1.Role
 	rpcRule struct {
 		min   role // The minimum role in the application. ROLE_UNSPECIFIED: the RPC needs no application.
-		audit bool // Record the call in the audit trail.
+		audit bool // The interceptor records a successful call in the audit trail.
 	}
 )
 
@@ -56,19 +56,21 @@ const (
 
 // rpcRules gives the minimum role and the audit of each RPC. An RPC that is not in the table is refused.
 var rpcRules = map[string]rpcRule{
-	"ListApplications": {}, "CreateApplication": {audit: true},
+	"ListApplications": {}, "CreateApplication": {},
 	"GetModel": {min: viewer}, "Query": {min: viewer}, "ListComments": {min: viewer}, "AddComment": {viewer, true},
 	"ListSnapshots": {min: viewer},
 	// The audit detail has the full requests (cells and CSV), and the access rules do not apply to it.
 	"ListAudit":  {min: modeler},
-	"WriteCells": {contributor, true}, "Import": {contributor, true}, "CreateSnapshot": {contributor, true},
-	"CreateList": {modeler, true}, "AddProperty": {modeler, true}, "EditMembers": {modeler, true},
-	"CreateCalendar": {modeler, true}, "CreateScenario": {modeler, true}, "CreateMetric": {modeler, true},
-	"UpdateMetric": {modeler, true}, "RenameMetric": {modeler, true}, "DeleteMetric": {modeler, true},
-	"CreateTable": {modeler, true}, "UpdateTable": {modeler, true}, "CreateView": {modeler, true},
-	"UpdateView": {modeler, true}, "CreateBoard": {modeler, true}, "UpdateBoard": {modeler, true},
-	"DeleteItem": {modeler, true}, "GetAccess": {min: admin}, "SetMemberRole": {admin, true},
-	"CreateAccessRule": {admin, true}, "UpdateAccessRule": {admin, true}, "DeleteAccessRule": {admin, true},
+	// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
+	// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
+	"WriteCells": {contributor, true}, "Import": {min: contributor}, "CreateSnapshot": {min: contributor},
+	"CreateList": {min: modeler}, "AddProperty": {min: modeler}, "EditMembers": {min: modeler},
+	"CreateCalendar": {min: modeler}, "CreateScenario": {min: modeler}, "CreateMetric": {min: modeler},
+	"UpdateMetric": {min: modeler}, "RenameMetric": {min: modeler}, "DeleteMetric": {min: modeler},
+	"CreateTable": {min: modeler}, "UpdateTable": {min: modeler}, "CreateView": {min: modeler},
+	"UpdateView": {min: modeler}, "CreateBoard": {min: modeler}, "UpdateBoard": {min: modeler},
+	"DeleteItem": {min: modeler}, "GetAccess": {min: admin}, "SetMemberRole": {min: admin},
+	"CreateAccessRule": {min: admin}, "UpdateAccessRule": {min: admin}, "DeleteAccessRule": {min: admin},
 }
 
 // caller is the user of a request and the rights of the user in the application of the request.
@@ -246,6 +248,12 @@ func requestHash(m proto.Message) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// detailOf gives the request as JSON for the audit trail.
+func detailOf(m proto.Message) string {
+	b, _ := protojson.Marshal(m)
+	return string(b)
+}
+
 func connectError(err error) error {
 	if cerr := new(connect.Error); errors.As(err, &cerr) {
 		return err
@@ -283,16 +291,19 @@ type stmt struct {
 	zero error
 }
 
-// madeRow is a row that the first transaction makes or changes. A refusal of the engine deletes it, or for
-// app_metric puts Old back (compensation).
+// madeRow is a row that the first transaction makes or changes. A refusal of the engine deletes it, or puts the
+// old values back (compensation). The compensation changes a value only if it still has the new value, so it
+// does not undo a later change.
 type madeRow struct {
 	Table  string `json:"table"`
 	ID     string `json:"id"`
 	ListID string `json:"list_id,omitempty"`
 	// app_metric only. New is the values that the change wrote. Old is the values before the change (nil: no row).
-	// The compensation changes the row only if it still has New, so it does not undo a later change.
 	Old *metricRow `json:"old,omitempty"`
 	New *metricRow `json:"new,omitempty"`
+	// app_property_text only: the TEXT values of the property ID, by member. nil: the member has no value.
+	OldText map[string]*string `json:"old_text,omitempty"`
+	NewText map[string]*string `json:"new_text,omitempty"`
 }
 
 // plan is one change to an application: the engine operations, the statements for the api tables, the rows
@@ -301,7 +312,6 @@ type plan struct {
 	ops    []op
 	stmts  []stmt
 	made   []madeRow
-	expect bool  // Send the version of the model that the plan read: the engine refuses a conflicting write.
 	seq    int64 // The version of the model that the plan read.
 	result any   // The stored result of the operation. nil gives {}.
 }
@@ -311,7 +321,6 @@ type opRow struct {
 	opID, user, method, hash, status string
 	ops                              []op
 	seq                              int64
-	expect                           bool
 	made                             []madeRow
 	result                           json.RawMessage
 	err                              json.RawMessage
@@ -337,7 +346,7 @@ func (r opRow) same(c caller, hash string) error {
 	return nil
 }
 
-// compensation gives the statements that delete the rows of a refused change.
+// compensation gives the statements that undo the rows of a refused change.
 func compensation(app string, made []madeRow) []stmt {
 	var out []stmt
 	for _, m := range made {
@@ -356,9 +365,20 @@ func compensation(app string, made []madeRow) []stmt {
 			} else {
 				out = append(out, stmt{sql: "update app_metric set description = $5, folder = $6 " + key, args: append(args, m.Old.Description, m.Old.Folder)})
 			}
+		case "app_property_text":
+			// Each member whose value is still the new value ('null': no value) gets the old value back.
+			out = append(out, stmt{sql: `update app_property set text_values = jsonb_strip_nulls(text_values || (
+				select coalesce(jsonb_object_agg(n.key, o.value), '{}') from jsonb_each($4::jsonb) n join jsonb_each($5::jsonb) o on o.key = n.key
+				where coalesce(text_values -> n.key, 'null'::jsonb) = n.value))
+				where app_id = $1 and list_id = $2 and id = $3`, args: []any{app, m.ListID, m.ID, jsonText(m.NewText), jsonText(m.OldText)}})
 		}
 	}
 	return out
+}
+
+func jsonText(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 // The tags give an error its Connect code (connectError). An error without a tag is an input error.
@@ -429,12 +449,8 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 			}
 			res, err := next(context.WithValue(ctx, callerKey{}, c), req)
 			if err == nil && rule.audit {
-				if a, ok := res.Any().(*nanashiv1.Application); ok {
-					appID = a.Id
-				}
-				detail, _ := protojson.Marshal(msg)
 				if _, err := s.Pool.Exec(ctx, "insert into app_audit (app_id, user_name, action, detail) values ($1, $2, $3, $4)",
-					appID, user, method, string(detail)); err != nil {
+					appID, user, method, detailOf(msg)); err != nil {
 					log.Printf("audit %s %s: %v", appID, method, err)
 				}
 			}
@@ -462,9 +478,9 @@ func (s *PlanServer) ListApplications(ctx context.Context, _ *connect.Request[na
 // lookupOp reads the row of a client_op_id.
 func (s *PlanServer) lookupOp(ctx context.Context, app, opID string) (opRow, bool, error) {
 	r := opRow{opID: opID}
-	err := s.Pool.QueryRow(ctx, `select user_name, method, request_hash, status, coalesce(ops, '[]'), coalesce(seq, 0), expect,
+	err := s.Pool.QueryRow(ctx, `select user_name, method, request_hash, status, coalesce(ops, '[]'), coalesce(seq, 0),
 		coalesce(made, '[]'), coalesce(result, '{}'), coalesce(error, '{}') from app_operation where app_id = $1 and client_op_id = $2`, app, opID).
-		Scan(&r.user, &r.method, &r.hash, &r.status, &r.ops, &r.seq, &r.expect, &r.made, &r.result, &r.err)
+		Scan(&r.user, &r.method, &r.hash, &r.status, &r.ops, &r.seq, &r.made, &r.result, &r.err)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, false, nil
 	}
@@ -480,7 +496,8 @@ func (s *PlanServer) lookupOp(ctx context.Context, app, opID string) (opRow, boo
 //  3. planOf reads the model and the api data and makes the plan. The ids that the api makes come from here.
 //  4. The first transaction inserts the pending row and runs the api statements. A constraint violation rolls back
 //     before the engine sees anything.
-//  5. settle sends the operations to the engine and flips the row to done or failed in the second transaction.
+//  5. settle sends the operations to the engine and flips the row to done (with the audit row) or failed (with
+//     the compensation) in the second transaction.
 func (s *PlanServer) change(ctx context.Context, app string, req proto.Message, planOf func(engineModel, appMeta) (plan, error)) (json.RawMessage, error) {
 	return s.outbox(ctx, app, req, func() (plan, error) {
 		em, _, err := s.Engines.model(ctx, app)
@@ -504,7 +521,7 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 	c := callerOf(ctx)
 	hash := requestHash(req)
 	conflicts := 0
-	// again tells if a conflict of the engine (409 conflict, not recorded) lets the plan run again.
+	// again tells if errConflict lets the plan run again.
 	again := func(err error) bool {
 		conflicts++
 		return errors.Is(err, errConflict) && conflicts <= 3
@@ -534,6 +551,9 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 			return nil, err
 		}
 		p, err := planOf()
+		if again(err) {
+			continue // The plan read cells of another version than the model (CreateScenario). Plan again.
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -542,12 +562,12 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 		if err != nil || p.result == nil {
 			result = []byte("{}")
 		}
-		row = opRow{opID: c.opID, user: c.user, method: c.method, hash: hash, status: "pending", ops: p.ops, seq: seq, expect: p.expect, made: p.made, result: result}
+		row = opRow{opID: c.opID, user: c.user, method: c.method, hash: hash, status: "pending", ops: p.ops, seq: seq, made: p.made, result: result}
 		inserted := false
 		err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-			tag, err := tx.Exec(ctx, `insert into app_operation (app_id, client_op_id, user_name, method, request_hash, ops, seq, expect, made, result, status)
+			tag, err := tx.Exec(ctx, `insert into app_operation (app_id, client_op_id, user_name, method, request_hash, ops, seq, made, result, detail, status)
 				values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') on conflict do nothing`,
-				app, c.opID, c.user, c.method, hash, p.ops, seq, p.expect, p.made, string(result))
+				app, c.opID, c.user, c.method, hash, p.ops, seq, p.made, string(result), detailOf(req))
 			if err != nil || tag.RowsAffected() == 0 {
 				return err
 			}
@@ -581,24 +601,25 @@ func (s *PlanServer) outbox(ctx context.Context, app string, req proto.Message, 
 	}
 }
 
-// errConflict: the engine refused the write because of expect. The row is gone, so the plan can run again.
+// errConflict: the plan read cells of another version than the model. No row exists, so the plan can run again.
 var errConflict = connect.NewError(connect.CodeAborted, errors.New("ほかの書き込みと重なった。もう一度試す"))
 
 // settlePending settles the pending rows of the application in their order (step 2 of change).
 func (s *PlanServer) settlePending(ctx context.Context, app string) error {
-	rows, _ := s.Pool.Query(ctx, `select client_op_id, user_name, method, request_hash, coalesce(ops, '[]'), coalesce(seq, 0), expect,
+	rows, _ := s.Pool.Query(ctx, `select client_op_id, user_name, method, request_hash, coalesce(ops, '[]'), coalesce(seq, 0),
 		coalesce(made, '[]'), coalesce(result, '{}') from app_operation where app_id = $1 and status = 'pending' order by created_at, client_op_id`, app)
 	pending, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (opRow, error) {
 		r := opRow{status: "pending"}
-		return r, row.Scan(&r.opID, &r.user, &r.method, &r.hash, &r.ops, &r.seq, &r.expect, &r.made, &r.result)
+		return r, row.Scan(&r.opID, &r.user, &r.method, &r.hash, &r.ops, &r.seq, &r.made, &r.result)
 	})
 	if err != nil {
 		return dbError(err)
 	}
 	for _, r := range pending {
-		// A refusal is the stored result of that operation, not of this one. A conflict deletes the row: its
-		// client plans again when it sends the request again.
-		if _, err := s.settle(ctx, app, r); err != nil && connect.CodeOf(err) == connect.CodeUnavailable {
+		// A refusal is the stored result of that operation, not of this one. A row whose result stays unknown does
+		// not block this operation: the engine orders the writes, so a later settle of the row is a later write.
+		// If the engine is down, the engine read or write of this operation fails on its own.
+		if _, err := s.settle(ctx, app, r); err != nil && ctx.Err() != nil {
 			return err
 		}
 	}
@@ -607,8 +628,8 @@ func (s *PlanServer) settlePending(ctx context.Context, app string) error {
 
 // settle sends a pending row to the engine (step 5 of change) and flips the row (step 6). It gives the stored
 // result, or the stored error of a refusal. If the engine result is not known, the row stays pending and the
-// error is Unavailable: the client sends the request again with the same client_op_id. A conflict (expect)
-// deletes the row and gives errConflict.
+// error is Unavailable: the client sends the request again with the same client_op_id. The flip to done writes
+// the audit row, so an operation has one audit row, also when another request settles it.
 func (s *PlanServer) settle(ctx context.Context, app string, r opRow) (json.RawMessage, error) {
 	reply := engineReply{Status: 200}
 	if r.method == "CreateApplication" {
@@ -617,19 +638,15 @@ func (s *PlanServer) settle(ctx context.Context, app string, r opRow) (json.RawM
 		}
 	}
 	if len(r.ops) > 0 {
-		var expect *int64
-		if r.expect {
-			expect = &r.seq
-		}
 		var err error
-		if reply, err = s.Engines.write(ctx, app, r.user, r.opID, r.ops, expect); err != nil {
+		if reply, err = s.Engines.write(ctx, app, r.user, r.opID, r.ops); err != nil {
 			return nil, err
 		}
 	}
 	var stored *storedError
 	out := reply.outcome()
 	switch out {
-	case done, conflict:
+	case done:
 	case failed:
 		stored = &storedError{connect.CodeOf(reply.connectError()), reply.connectError().(*connect.Error).Message()}
 	default:
@@ -642,13 +659,15 @@ func (s *PlanServer) settle(ctx context.Context, app string, r opRow) (json.RawM
 		errJSON, _ := json.Marshal(stored)
 		flip = stmt{sql: "update app_operation set status = 'failed', error = $3, ops = null where app_id = $1 and client_op_id = $2 and status = 'pending'", args: []any{app, r.opID, string(errJSON)}}
 	}
-	if out == conflict {
-		flip = stmt{sql: "delete from app_operation where app_id = $1 and client_op_id = $2 and status = 'pending'", args: []any{app, r.opID}}
-	}
 	for try := 0; ; try++ {
 		err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 			tag, err := tx.Exec(ctx, flip.sql, flip.args...)
-			if err != nil || tag.RowsAffected() == 0 || out == done {
+			if err != nil || tag.RowsAffected() == 0 {
+				return err
+			}
+			if out == done {
+				_, err = tx.Exec(ctx, `insert into app_audit (app_id, user_name, action, detail)
+					select app_id, user_name, method, coalesce(detail, '') from app_operation where app_id = $1 and client_op_id = $2`, app, r.opID)
 				return err
 			}
 			for _, st := range compensation(app, r.made) {
@@ -665,17 +684,14 @@ func (s *PlanServer) settle(ctx context.Context, app string, r opRow) (json.RawM
 			return nil, dbError(err)
 		}
 	}
-	if out == conflict {
-		return nil, errConflict
-	}
 	if stored != nil {
 		return nil, connect.NewError(stored.Code, errors.New(stored.Message))
 	}
 	return r.result, nil
 }
 
-// apiOnly applies a change that only the api tables take, in one transaction with its app_operation row (done).
-// A resend with the same client_op_id gives the stored result. f gives the result to store.
+// apiOnly applies a change that only the api tables take, in one transaction with its app_operation row (done)
+// and its audit row. A resend with the same client_op_id gives the stored result. f gives the result to store.
 func (s *PlanServer) apiOnly(ctx context.Context, app string, req proto.Message, f func(tx pgx.Tx) (any, error)) (json.RawMessage, error) {
 	return s.apiOnlyTx(ctx, app, req, pgx.TxOptions{}, f)
 }
@@ -695,6 +711,9 @@ func (s *PlanServer) apiOnlyTx(ctx context.Context, app string, req proto.Messag
 		}
 		v, err := f(tx)
 		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "insert into app_audit (app_id, user_name, action, detail) values ($1, $2, $3, $4)", app, c.user, c.method, detailOf(req)); err != nil {
 			return err
 		}
 		if result, err = json.Marshal(v); err != nil || v == nil {

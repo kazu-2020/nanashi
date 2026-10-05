@@ -487,3 +487,130 @@ func TestCreateSnapshotRetriesWhenTheVersionChanges(t *testing.T) {
 		t.Errorf("snapshots: %d, want 1", n)
 	}
 }
+
+// TestOutboxTooLargeIsFinal: a 413 of the router or the engine is a refusal: the row is failed, the client gets
+// ResourceExhausted, and the next change of the application is not blocked.
+func TestOutboxTooLargeIsFinal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	e := newFakeEngine(t, sample)
+	e.reply = func(n int, _ map[string]any) (int, string) {
+		if n == 1 {
+			return 413, `{"error": "too_large", "message": "本文は 16 MiB まで"}`
+		}
+		return 200, `{"seq": 8}`
+	}
+	alice := testClient(t, pool, e)("alice")
+	opID := uuid.NewString()
+	create := func(opID, name string) error {
+		_, err := alice.CreateList(ctx, connect.NewRequest(&nanashiv1.CreateListRequest{AppId: app, ClientOpId: opID, Id: uuid.Must(uuid.NewV7()).String(), Name: name, Kind: nanashiv1.ListKind_LIST_KIND_DIMENSION}))
+		return err
+	}
+	if err := create(opID, "Big"); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("got %v, want ResourceExhausted", err)
+	}
+	if got := opStatus(t, ctx, pool, app, opID); got != "failed" {
+		t.Fatalf("status %s, want failed", got)
+	}
+	if err := create(uuid.NewString(), "Next"); err != nil {
+		t.Fatalf("the next change: %v", err)
+	}
+}
+
+// TestOutboxUnknownRowDoesNotBlock: a row whose engine result stays unknown does not block the next change. The
+// engine orders the writes, so a later settle of the row is a later write.
+func TestOutboxUnknownRowDoesNotBlock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	e := newFakeEngine(t, sample)
+	e.reply = func(n int, body map[string]any) (int, string) {
+		if n <= 2 { // The first send and the settle by the next change get no answer.
+			return 0, ""
+		}
+		return 200, `{"seq": 9}`
+	}
+	alice := testClient(t, pool, e)("alice")
+	op1, op2 := uuid.NewString(), uuid.NewString()
+	list1 := uuid.Must(uuid.NewV7()).String()
+	create := func(opID, id, name string) error {
+		_, err := alice.CreateList(ctx, connect.NewRequest(&nanashiv1.CreateListRequest{AppId: app, ClientOpId: opID, Id: id, Name: name, Kind: nanashiv1.ListKind_LIST_KIND_DIMENSION}))
+		return err
+	}
+	if err := create(op1, list1, "Stuck"); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("first create: got %v, want Unavailable", err)
+	}
+	if err := create(op2, uuid.Must(uuid.NewV7()).String(), "Next"); err != nil {
+		t.Fatalf("the next change must not wait for the unknown row: %v", err)
+	}
+	if got := e.opIDs(); len(got) != 3 || got[1] != op1 || got[2] != op2 {
+		t.Fatalf("engine writes: got %v, want op1, op1 again, op2", got)
+	}
+	if got := opStatus(t, ctx, pool, app, op1); got != "pending" {
+		t.Fatalf("after the next change: status %s, want pending", got)
+	}
+	if err := create(op1, list1, "Stuck"); err != nil {
+		t.Fatalf("resend after the engine answers: %v", err)
+	}
+	if got := opStatus(t, ctx, pool, app, op1); got != "done" {
+		t.Fatalf("after the resend: status %s, want done", got)
+	}
+}
+
+func auditCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, app, opID string) int {
+	t.Helper()
+	return count(t, ctx, pool, "select count(*) from app_audit where app_id = $1 and detail like '%' || $2 || '%'", app, opID)
+}
+
+// TestAuditOnceForEachOperation: an operation gets one audit row when it is done, also when another request
+// settles it. A resend adds no row. An api-only change audits in its own transaction, one time.
+func TestAuditOnceForEachOperation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	e := newFakeEngine(t, sample)
+	e.reply = func(n int, _ map[string]any) (int, string) {
+		if n == 1 {
+			return 0, ""
+		}
+		return 200, `{"seq": 9}`
+	}
+	alice := testClient(t, pool, e)("alice")
+	op1, op2, op3 := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	list1 := uuid.Must(uuid.NewV7()).String()
+	create := func(opID, id, name string) error {
+		_, err := alice.CreateList(ctx, connect.NewRequest(&nanashiv1.CreateListRequest{AppId: app, ClientOpId: opID, Id: id, Name: name, Kind: nanashiv1.ListKind_LIST_KIND_DIMENSION}))
+		return err
+	}
+	if err := create(op1, list1, "Pending"); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("first create: got %v, want Unavailable", err)
+	}
+	if err := create(op2, uuid.Must(uuid.NewV7()).String(), "Next"); err != nil {
+		t.Fatal(err)
+	}
+	if n := auditCount(t, ctx, pool, app, op1); n != 1 {
+		t.Errorf("audit rows of the operation that the next change settled: %d, want 1", n)
+	}
+	if err := create(op1, list1, "Pending"); err != nil {
+		t.Fatal(err)
+	}
+	if n := auditCount(t, ctx, pool, app, op1); n != 1 {
+		t.Errorf("audit rows after a resend: %d, want 1", n)
+	}
+	if n := auditCount(t, ctx, pool, app, op2); n != 1 {
+		t.Errorf("audit rows of the next change: %d, want 1", n)
+	}
+	table := &nanashiv1.TableDef{Id: uuid.Must(uuid.NewV7()).String(), Name: "T", Metrics: []string{budget}}
+	for range 2 {
+		if _, err := alice.CreateTable(ctx, connect.NewRequest(&nanashiv1.CreateTableRequest{AppId: app, ClientOpId: op3, Table: table})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := auditCount(t, ctx, pool, app, op3); n != 1 {
+		t.Errorf("audit rows of an api-only change sent two times: %d, want 1", n)
+	}
+}

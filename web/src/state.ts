@@ -1,6 +1,6 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 import { useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext } from "react";
+import { createContext, useCallback, useContext, useRef } from "react";
 import { errorText, newId } from "./api";
 import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
 import { METRIC, type Names } from "./logic";
@@ -32,15 +32,20 @@ export function modelNames(model: ModelDef): Names {
 const ambiguous = (e: unknown) =>
   e instanceof ConnectError && (e.code === Code.Unavailable || e.code === Code.DeadlineExceeded);
 
-// useRun gives a function that runs an action and shows its error. It returns true on success.
-// It gives f one new client_op_id for the user action. Send it with each write of the action.
-// After an ambiguous error, it runs f again with the same client_op_id (up to 3 times). After a definite error,
-// the next user action gets new ids.
+// useRun gives a function that runs an action and shows its error. It returns true on success, false after a
+// definite error, and null after an ambiguous error (the api may have applied the write).
+// It gives f one client_op_id for the user action. Send it with each write of the action.
+// After an ambiguous error, it runs f again with the same client_op_id (up to 3 times). If the error stays
+// ambiguous, the next user action of this component gets the same client_op_id again: the api then gives the
+// stored result instead of a second write. A caller keeps its object id in the same way (a null result).
+// After a success or a definite error, the next user action gets a new client_op_id.
 export function useRun() {
   const report = useContext(Report);
+  const held = useRef<string | null>(null);
   return useCallback(
     async (f: (clientOpId: string) => Promise<unknown>) => {
-      const clientOpId = newId();
+      const clientOpId = held.current ?? newId();
+      held.current = null;
       for (let attempt = 1; ; attempt++) {
         try {
           await f(clientOpId);
@@ -48,7 +53,9 @@ export function useRun() {
         } catch (e) {
           if (ambiguous(e) && attempt < 3) continue;
           report(errorText(e));
-          return false;
+          if (!ambiguous(e)) return false;
+          held.current = clientOpId;
+          return null;
         }
       }
     },

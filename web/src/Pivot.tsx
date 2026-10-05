@@ -151,7 +151,7 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
         () => api.createView(req),
         () => api.updateView(req),
       );
-    }).then(() => id || setDraftId(newId()));
+    }).then((ok) => ok !== null && !id && setDraftId(newId()));
 
   const exportCsv = (g: Grid) => {
     const a = document.createElement("a");
@@ -261,7 +261,7 @@ function Body(props: {
   names: Names;
   display: Display;
   editable: (metric: string) => boolean;
-  onWrite?: (r: string[], c: string[], text: string) => Promise<boolean>;
+  onWrite?: (r: string[], c: string[], text: string) => Promise<boolean | null>;
   onSelect?: (r: string[], c: string[]) => void;
 }) {
   const g = props.grid;
@@ -390,16 +390,18 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
         />
         <Button
           size="sm"
-          onPress={() =>
-            mutate(async (clientOpId) => {
+          onPress={() => {
+            // One id for the user action: a resend of the write carries the same comment.
+            const id = newId();
+            return mutate(async (clientOpId) => {
               await api.addComment({
                 appId,
                 clientOpId,
-                comment: { id: newId(), metric: props.metric, cell: props.coords, body },
+                comment: { id, metric: props.metric, cell: props.coords, body },
               });
               setBody("");
-            })
-          }
+            });
+          }}
         >
           追加
         </Button>

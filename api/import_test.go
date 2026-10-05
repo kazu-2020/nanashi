@@ -31,7 +31,7 @@ func TestImportTransactionList(t *testing.T) {
 	if err != nil || rows != 2 {
 		t.Fatal(rows, err)
 	}
-	ops, stmts, err := editOps("app", em, dim, meta, edits)
+	p, err := editOps("app", em, dim, meta, edits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,12 +45,12 @@ func TestImportTransactionList(t *testing.T) {
 		`{"dim":%q,"id":%q,"name":"11","op":"add_member"},{"coords":{%q:%q},"metric":%q,"op":"set_cell","value":5},`+
 		`{"dim":%q,"op":"set_property_values","prop":%q,"values":{%q:%q,%q:%q}}]`,
 		sales, id10, sales, id10, amount, sales, id11, sales, id11, amount, sales, salesProduct, id10, memberA, id11, memberB)
-	if got := opsJSON(t, ops); got != want {
+	if got := opsJSON(t, p.ops); got != want {
 		t.Errorf("got %s\nwant %s", got, want)
 	}
 	// Row 10 sets its Note, and the blank Note of row 11 removes the value. The other values stay in the table.
-	if len(stmts) != 1 || fmt.Sprint(stmts[0].args) != fmt.Sprintf(`[app %s %s [%s] {%q:"first"}]`, sales, note, id11, id10) {
-		t.Errorf("text statements: %v", stmts)
+	if len(p.stmts) != 1 || fmt.Sprint(p.stmts[0].args) != fmt.Sprintf(`[app %s %s [%s] {%q:"first"}]`, sales, note, id11, id10) {
+		t.Errorf("text statements: %v", p.stmts)
 	}
 	if _, _, err := importListEdits("product\nNope\n", &nanashiv1.ListImport{List: sales, PropertyColumns: map[string]string{salesProduct: "product"}}, em, dim, meta, 1); err == nil {
 		t.Error("an unknown member name in a DIMENSION column must be an error")

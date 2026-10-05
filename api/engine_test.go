@@ -37,7 +37,8 @@ func TestEngineReplyOutcome(t *testing.T) {
 		{http.StatusBadRequest, "bad_request", failed},
 		{http.StatusBadRequest, "formula", failed}, // A formula error is final: a resend gets the same refusal.
 		{http.StatusConflict, "duplicate_id", failed},
-		{http.StatusConflict, "conflict", conflict},
+		{http.StatusRequestEntityTooLarge, "too_large", failed}, // The engine or the router refused the body: a resend gets the same refusal.
+		{http.StatusTooManyRequests, "overloaded", unknown},
 		{http.StatusServiceUnavailable, "stale", unknown},
 		{http.StatusGatewayTimeout, "timeout", unknown},
 		{http.StatusNotFound, "no_model", unknown},

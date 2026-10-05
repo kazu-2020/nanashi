@@ -291,7 +291,7 @@ func (s *PlanServer) WriteCells(ctx context.Context, req *connect.Request[nanash
 	if len(ops) == 0 {
 		return ok()
 	}
-	reply, err := s.Engines.write(ctx, app, c.user, c.opID, ops, nil)
+	reply, err := s.Engines.write(ctx, app, c.user, c.opID, ops)
 	if err != nil {
 		return nil, err
 	}
