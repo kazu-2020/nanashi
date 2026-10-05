@@ -4,13 +4,25 @@ import (
 	"cmp"
 	"testing"
 
+	"connectrpc.com/connect"
+
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
 
-func TestMetricOpKeepsInputCells(t *testing.T) {
+func TestMetricOpCreateAndUpdate(t *testing.T) {
 	em := model(t)
 	budget := func(dims ...string) *nanashiv1.MetricDef {
 		return &nanashiv1.MetricDef{Name: "Budget", Dimensions: dims}
+	}
+	if _, err := metricOp(em, budget("Product"), "number", true); connect.CodeOf(connectError(err)) != connect.CodeAlreadyExists {
+		t.Errorf("create of an existing Metric: got %v, want AlreadyExists", err)
+	}
+	if _, err := metricOp(em, &nanashiv1.MetricDef{Name: "New"}, "number", false); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
+		t.Errorf("update of a missing Metric: got %v, want NotFound", err)
+	}
+	if ops, err := metricOp(em, &nanashiv1.MetricDef{Name: "New"}, "number", true); err != nil ||
+		opsJSON(t, ops) != `[{"op":"add_input","args":["New",[],[]],"kwargs":{"kind":"number"}}]` {
+		t.Errorf("create: got %s, %v", opsJSON(t, ops), err)
 	}
 	if ops, err := metricOp(em, budget("Product", "Region"), "number", false); err != nil || len(ops) != 0 {
 		t.Errorf("same input Metric: got %v, %v, want no operation", ops, err)
@@ -23,12 +35,8 @@ func TestMetricOpKeepsInputCells(t *testing.T) {
 		{budget("Product", "Region"), "boolean"},
 		{&nanashiv1.MetricDef{Name: "Budget", Dimensions: []string{"Product", "Region"}, Formula: "1"}, "number"},
 	} {
-		m := c.m
-		if _, err := metricOp(em, m, c.kind, false); err == nil {
-			t.Errorf("%v: replaced the input cells without replace", m)
-		}
-		if ops, err := metricOp(em, m, c.kind, true); err != nil || len(ops) != 1 {
-			t.Errorf("%v with replace: got %v, %v", m, ops, err)
+		if ops, err := metricOp(em, c.m, c.kind, false); err != nil || len(ops) != 1 {
+			t.Errorf("update %v: got %v, %v", c.m, ops, err)
 		}
 	}
 	if ops, err := metricOp(em, &nanashiv1.MetricDef{Name: "Revenue", Dimensions: []string{"Product"}, Formula: "2"}, "number", false); err != nil ||

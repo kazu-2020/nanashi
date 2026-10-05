@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,16 +60,18 @@ var rpcRules = map[string]rpcRule{
 	"ListAudit":  {min: modeler},
 	"WriteCells": {contributor, true}, "Import": {contributor, true}, "CreateSnapshot": {contributor, true},
 	"CreateList": {modeler, true}, "AddProperty": {modeler, true}, "EditMembers": {modeler, true},
-	"CreateCalendar": {modeler, true}, "CreateScenario": {modeler, true}, "SaveMetric": {modeler, true},
-	"RenameMetric": {modeler, true}, "DeleteMetric": {modeler, true}, "SaveTable": {modeler, true},
-	"SaveView": {modeler, true}, "SaveBoard": {modeler, true}, "DeleteItem": {modeler, true},
-	"GetAccess": {min: admin}, "SetMemberRole": {admin, true}, "SaveAccessRule": {admin, true},
-	"DeleteAccessRule": {admin, true},
+	"CreateCalendar": {modeler, true}, "CreateScenario": {modeler, true}, "CreateMetric": {modeler, true},
+	"UpdateMetric": {modeler, true}, "RenameMetric": {modeler, true}, "DeleteMetric": {modeler, true},
+	"CreateTable": {modeler, true}, "UpdateTable": {modeler, true}, "CreateView": {modeler, true},
+	"UpdateView": {modeler, true}, "CreateBoard": {modeler, true}, "UpdateBoard": {modeler, true},
+	"DeleteItem": {modeler, true}, "GetAccess": {min: admin}, "SetMemberRole": {admin, true},
+	"CreateAccessRule": {admin, true}, "UpdateAccessRule": {admin, true}, "DeleteAccessRule": {admin, true},
 }
 
 // caller is the user of a request and the rights of the user in the application of the request.
 type caller struct {
 	user  string
+	opID  string // The client_op_id of a request that changes data, in canonical form. Empty for a read.
 	role  role
 	rules []*nanashiv1.AccessRule // The access rules of the application. Empty when role >= MODELER.
 }
@@ -95,6 +98,16 @@ func dbError(err error) error {
 
 func invalid(err error) error { return connect.NewError(connect.CodeInvalidArgument, err) }
 
+// parseID gives the canonical form (lower case, with hyphens) of a UUID from a request.
+// If s is not a UUID, it gives an InvalidArgument error.
+func parseID(field, s string) (string, error) {
+	u, err := uuid.Parse(s)
+	if err != nil {
+		return "", invalid(fmt.Errorf("%s が UUID ではない: %q", field, s))
+	}
+	return u.String(), nil
+}
+
 func connectError(err error) error {
 	if cerr := new(connect.Error); errors.As(err, &cerr) {
 		return err
@@ -110,6 +123,7 @@ func connectError(err error) error {
 var errorCodes = map[error]connect.Code{
 	errDenied:       connect.CodePermissionDenied,
 	errExists:       connect.CodeAlreadyExists,
+	errNotFound:     connect.CodeNotFound,
 	errPrecondition: connect.CodeFailedPrecondition,
 }
 
@@ -148,6 +162,7 @@ type stmt struct {
 var (
 	errDenied       = errors.New("permission denied")
 	errExists       = errors.New("already exists")
+	errNotFound     = errors.New("not found")
 	errPrecondition = errors.New("failed precondition")
 )
 
@@ -206,6 +221,13 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 					return nil, connect.NewError(connect.CodePermissionDenied, errors.New("この操作をする権限がない"))
 				}
 			}
+			// Each request that changes data has a client_op_id. Check it here, so that each RPC can trust it.
+			if r, ok := req.Any().(interface{ GetClientOpId() string }); ok {
+				var err error
+				if c.opID, err = parseID("client_op_id", r.GetClientOpId()); err != nil {
+					return nil, err
+				}
+			}
 			res, err := next(context.WithValue(ctx, callerKey{}, c), req)
 			if err == nil && rule.audit {
 				if a, ok := res.Any().(*nanashiv1.Application); ok {
@@ -259,7 +281,8 @@ func (s *PlanServer) change(ctx context.Context, app string, planOf func(engineM
 				return err
 			}
 		}
-		return s.Engines.write(ctx, app, callerOf(ctx).user, p.ops)
+		c := callerOf(ctx)
+		return s.Engines.write(ctx, app, c.user, c.opID, p.ops)
 	})
 	if err != nil {
 		return nil, dbError(err)

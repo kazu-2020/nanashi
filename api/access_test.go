@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 	"github.com/kazu-2020/nanashi/api/gen/nanashi/v1/nanashiv1connect"
@@ -53,7 +54,7 @@ func TestAccessByRole(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool := testPool(t, ctx)
-	app := "api-test-" + newID()
+	app := "api-test-" + uuid.NewString()
 	if _, err := pool.Exec(ctx, "insert into app_application (id, name) values ($1, 'test')", app); err != nil {
 		t.Fatal(err)
 	}

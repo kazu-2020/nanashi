@@ -84,6 +84,10 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 	if name == "" {
 		return nil, invalid(errors.New("アプリケーションの名前が空"))
 	}
+	app, err := parseID("id", req.Msg.Id)
+	if err != nil {
+		return nil, err
+	}
 	var snap snapshotData
 	if req.Msg.SnapshotId != "" {
 		var source, content string
@@ -113,10 +117,10 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 			return nil, dbError(err)
 		}
 	}
-	app := "app-" + newID()
 	// The rows go first, so an error before Engines.Create makes no engine model. A replay error or a commit error
 	// after Engines.Create leaves an engine model without an application in the router (the router has no delete).
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	// An existing id breaks the primary key, and dbError gives AlreadyExists.
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "insert into app_application (id, name) values ($1, $2)", app, name); err != nil {
 			return err
 		}
@@ -146,7 +150,7 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 		if snap.Engine == nil {
 			return nil
 		}
-		return s.Engines.write(ctx, app, c.user, replayOps(em, snap.Inputs, snap.Overrides))
+		return s.Engines.write(ctx, app, c.user, c.opID, replayOps(em, snap.Inputs, snap.Overrides))
 	})
 	if err != nil {
 		return nil, dbError(err)
@@ -169,6 +173,10 @@ func (s *PlanServer) ListSnapshots(ctx context.Context, req *connect.Request[nan
 
 func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[nanashiv1.CreateSnapshotRequest]) (*connect.Response[nanashiv1.Snapshot], error) {
 	app := req.Msg.AppId
+	id, err := parseID("id", req.Msg.Id)
+	if err != nil {
+		return nil, err
+	}
 	// The lock makes the engine reads and the api rows (meta, items) read one version of the application.
 	defer s.lock(app)()
 	var data snapshotData
@@ -209,7 +217,7 @@ func (s *PlanServer) CreateSnapshot(ctx context.Context, req *connect.Request[na
 	if err != nil {
 		return nil, err
 	}
-	snap := &nanashiv1.Snapshot{Id: newID(), Name: req.Msg.Name, User: callerOf(ctx).user}
+	snap := &nanashiv1.Snapshot{Id: id, Name: req.Msg.Name, User: callerOf(ctx).user}
 	if err := s.Pool.QueryRow(ctx, `insert into app_snapshot (id, app_id, name, user_name, content) values ($1, $2, $3, $4, $5)
 		returning (extract(epoch from created_at) * 1000)::bigint`, snap.Id, app, snap.Name, snap.User, string(content)).Scan(&snap.CreatedAt); err != nil {
 		return nil, dbError(err)

@@ -1,11 +1,10 @@
 import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
-import { Code, ConnectError } from "@connectrpc/connect";
-import { api, errorText } from "../api";
+import { api, newId } from "../api";
 import { ItemType, type MetricDef, Role, ValueKind } from "../gen/nanashi/v1/plan_pb";
-import { defaultSpec, toFilters } from "../logic";
+import { defaultSpec, dropsInputCells, toFilters } from "../logic";
 import { PivotEditor } from "../Pivot";
-import { cls, useApp, useMutate } from "../state";
+import { cls, createOrUpdate, useApp, useMutate } from "../state";
 import { Check, Checks, Sel } from "../ui";
 
 const FORMULA_HELP: [string, string][] = [
@@ -104,14 +103,15 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
       <div className="flex flex-wrap gap-2">
         <Button
           onPress={() =>
-            mutate(async () => {
-              const save = (replace: boolean) => api.saveMetric({ appId, metric: f, replace });
-              // The api refuses a change that deletes the input values, until the user accepts it.
-              await save(false).catch(async (e: unknown) => {
-                const refused = e instanceof ConnectError && e.code === Code.FailedPrecondition;
-                if (!refused || !confirm(`${errorText(e)}。変更しますか？`)) throw e;
-                await save(true);
-              });
+            // A change that deletes the input values needs the consent of the user.
+            (!d ||
+              !dropsInputCells(d, f) ||
+              confirm(
+                `入力メトリック ${d.name} を変更すると、入力した値がすべて消える。変更しますか？`,
+              )) &&
+            mutate(async (clientOpId) => {
+              const req = { appId, clientOpId, metric: f };
+              await (d ? api.updateMetric(req) : api.createMetric(req));
               props.onSaved(f.name);
             })
           }
@@ -129,8 +129,8 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
             <Button
               variant="secondary"
               onPress={() =>
-                mutate(async () => {
-                  await api.renameMetric({ appId, name: d.name, newName });
+                mutate(async (clientOpId) => {
+                  await api.renameMetric({ appId, clientOpId, name: d.name, newName });
                   props.onSaved(newName);
                 })
               }
@@ -141,8 +141,8 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
               variant="danger"
               onPress={() =>
                 confirm(`${d.name} を削除しますか？`) &&
-                mutate(async () => {
-                  await api.deleteMetric({ appId, name: d.name });
+                mutate(async (clientOpId) => {
+                  await api.deleteMetric({ appId, clientOpId, name: d.name });
                   props.onSaved("");
                 })
               }
@@ -203,11 +203,14 @@ export function TablesPage() {
   const { appId, model, can } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.tables[0]?.id ?? "");
+  // The id of the next new table. It changes each time the form becomes a new table.
+  const [draftId, setDraftId] = useState(newId);
   const t = model.tables.find((x) => x.id === sel);
   const [f, setF] = useState({ name: t?.name ?? "", metrics: t?.metrics ?? [] });
   const open = (id: string) => {
     const x = model.tables.find((y) => y.id === id);
     setSel(id);
+    if (!id) setDraftId(newId());
     setF({ name: x?.name ?? "", metrics: x?.metrics ?? [] });
   };
   const dims = [
@@ -241,7 +244,15 @@ export function TablesPage() {
           <div className="flex gap-2">
             <Button
               onPress={() =>
-                mutate(async () => setSel((await api.saveTable({ appId, id: sel, ...f })).id))
+                mutate(async (clientOpId) => {
+                  const req = { appId, clientOpId, table: { id: t ? t.id : draftId, ...f } };
+                  if (t) return api.updateTable(req);
+                  await createOrUpdate(
+                    () => api.createTable(req),
+                    () => api.updateTable(req),
+                  );
+                  setSel(draftId);
+                })
               }
             >
               保存
@@ -250,8 +261,8 @@ export function TablesPage() {
               <Button
                 variant="danger"
                 onPress={() =>
-                  mutate(async () => {
-                    await api.deleteItem({ appId, type: ItemType.TABLE, id: t.id });
+                  mutate(async (clientOpId) => {
+                    await api.deleteItem({ appId, clientOpId, type: ItemType.TABLE, id: t.id });
                     open("");
                   })
                 }
@@ -288,7 +299,11 @@ export function ViewsPage() {
           <Button
             variant="danger"
             size="sm"
-            onPress={() => mutate(() => api.deleteItem({ appId, type: ItemType.VIEW, id: v.id }))}
+            onPress={() =>
+              mutate((clientOpId) =>
+                api.deleteItem({ appId, clientOpId, type: ItemType.VIEW, id: v.id }),
+              )
+            }
           >
             削除
           </Button>

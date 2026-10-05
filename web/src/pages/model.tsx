@@ -34,7 +34,7 @@ export function ListsPage() {
   const list = model.lists.find((l) => l.name === sel);
   const modeler = can(Role.MODELER);
   const edit = (edits: MessageInitShape<typeof MemberEditSchema>[]) =>
-    mutate(() => api.editMembers({ appId, list: sel, edits }));
+    mutate((clientOpId) => api.editMembers({ appId, clientOpId, list: sel, edits }));
 
   return (
     <div>
@@ -61,8 +61,9 @@ export function ListsPage() {
             />
             <Button
               onPress={() =>
-                mutate(async () => {
+                mutate(async (clientOpId) => {
                   await api.createList({
+                    clientOpId,
                     appId,
                     name: form.name,
                     kind: Number(form.kind),
@@ -239,8 +240,9 @@ export function ListsPage() {
                 )}
                 <Button
                   onPress={() =>
-                    mutate(async () => {
+                    mutate(async (clientOpId) => {
                       await api.addProperty({
+                        clientOpId,
                         appId,
                         list: sel,
                         property: { name: prop.name, type: Number(prop.type), target: prop.target },
@@ -289,8 +291,13 @@ export function CalendarPage() {
           />
           <Button
             onPress={() =>
-              mutate(() =>
-                api.createCalendar({ appId, startYear: Number(start), years: Number(years) }),
+              mutate((clientOpId) =>
+                api.createCalendar({
+                  appId,
+                  clientOpId,
+                  startYear: Number(start),
+                  years: Number(years),
+                }),
               )
             }
           >
@@ -334,7 +341,13 @@ export function ScenariosPage() {
             empty="（空）"
             options={members.map((m) => m.name)}
           />
-          <Button onPress={() => mutate(() => api.createScenario({ appId, name, copyFrom: from }))}>
+          <Button
+            onPress={() =>
+              mutate((clientOpId) =>
+                api.createScenario({ appId, clientOpId, name, copyFrom: from }),
+              )
+            }
+          >
             シナリオを作成
           </Button>
         </div>
@@ -419,8 +432,9 @@ function ImportListForm(props: { csv: string; header: string[] }) {
       </div>
       <Button
         onPress={() =>
-          mutate(async () => {
+          mutate(async (clientOpId) => {
             const r = await api.import({
+              clientOpId,
               appId,
               csv: props.csv,
               target: {
@@ -470,8 +484,9 @@ function ImportMetricForm(props: { csv: string; header: string[] }) {
       </div>
       <Button
         onPress={() =>
-          mutate(async () => {
+          mutate(async (clientOpId) => {
             const r = await api.import({
+              clientOpId,
               appId,
               csv: props.csv,
               target: {

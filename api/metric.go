@@ -52,20 +52,22 @@ func valueKind(kind string) (nanashiv1.ValueKind, string) {
 	return nanashiv1.ValueKind_VALUE_KIND_NUMBER, ""
 }
 
-// metricOp gives the operations that save m with the engine kind. It gives no operation for an input Metric that does not change.
-// add_input and add_formula delete the cells of an input Metric, so a change to one needs replace.
-func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, replace bool) ([]op, error) {
+// metricOp gives the operations that make m (create) or change m with the engine kind.
+// If create is true and m exists, it gives an errExists error. If create is false and m is missing, it gives an errNotFound error.
+// It gives no operation for an input Metric that does not change. Other changes to an input Metric delete its cells.
+func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, create bool) ([]op, error) {
 	dims := m.Dimensions
 	if dims == nil {
 		dims = []string{}
 	}
-	if old, err := em.metric(m.Name); err == nil && old.Formula == "" {
-		if m.Formula == "" && old.Kind == kind && slices.Equal(old.Dims, dims) {
-			return nil, nil
-		}
-		if !replace {
-			return nil, tag(errPrecondition, "入力メトリック %s を変更すると、入力した値がすべて消える", m.Name)
-		}
+	old, err := em.metric(m.Name)
+	switch {
+	case create && err == nil:
+		return nil, tag(errExists, "Metric %s はすでにある", m.Name)
+	case !create && err != nil:
+		return nil, tag(errNotFound, "Metric %s がない", m.Name)
+	case !create && old.Formula == "" && m.Formula == "" && old.Kind == kind && slices.Equal(old.Dims, dims):
+		return nil, nil
 	}
 	if m.Formula == "" {
 		return []op{newOp("add_input", m.Name, dims, []any{}).with(map[string]any{"kind": kind})}, nil
@@ -75,8 +77,15 @@ func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, replace bool)
 
 // The actions follow.
 
-func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanashiv1.SaveMetricRequest]) (*ack, error) {
-	app, m := req.Msg.AppId, req.Msg.Metric
+func (s *PlanServer) CreateMetric(ctx context.Context, req *connect.Request[nanashiv1.CreateMetricRequest]) (*ack, error) {
+	return s.saveMetric(ctx, req.Msg.AppId, req.Msg.Metric, true)
+}
+
+func (s *PlanServer) UpdateMetric(ctx context.Context, req *connect.Request[nanashiv1.UpdateMetricRequest]) (*ack, error) {
+	return s.saveMetric(ctx, req.Msg.AppId, req.Msg.Metric, false)
+}
+
+func (s *PlanServer) saveMetric(ctx context.Context, app string, m *nanashiv1.MetricDef, create bool) (*ack, error) {
 	if m == nil || strings.TrimSpace(m.Name) == "" {
 		return nil, invalid(errors.New("Metric の名前が空"))
 	}
@@ -88,7 +97,7 @@ func (s *PlanServer) SaveMetric(ctx context.Context, req *connect.Request[nanash
 		if err != nil {
 			return plan{}, err
 		}
-		ops, err := metricOp(em, m, kind, req.Msg.Replace)
+		ops, err := metricOp(em, m, kind, create)
 		return plan{ops: ops}, err
 	})
 }

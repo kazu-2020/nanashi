@@ -1,10 +1,10 @@
 import { Button, Input } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "../api";
+import { api, newId } from "../api";
 import { Role } from "../gen/nanashi/v1/plan_pb";
 import { ROLES, roleName } from "../logic";
-import { cls, memberNames, time, useApp, useMutate } from "../state";
+import { cls, createOrUpdate, memberNames, time, useApp, useMutate } from "../state";
 import { Check, Checks, Section, Sel } from "../ui";
 
 export function CommentsPage() {
@@ -81,6 +81,8 @@ export function SnapshotsPage() {
   const { appId, can } = useApp();
   const mutate = useMutate("snapshots");
   const [name, setName] = useState("");
+  // The id of the next snapshot. A new id comes after each create.
+  const [id, setId] = useState(newId);
   const { data: r } = useQuery({
     queryKey: ["app", appId, "snapshots"],
     queryFn: () => api.listSnapshots({ appId }),
@@ -97,9 +99,10 @@ export function SnapshotsPage() {
           />
           <Button
             onPress={() =>
-              mutate(async () => {
-                await api.createSnapshot({ appId, name });
+              mutate(async (clientOpId) => {
+                await api.createSnapshot({ appId, clientOpId, id, name });
                 setName("");
+                setId(newId());
               })
             }
           >
@@ -136,6 +139,8 @@ export function AccessPage() {
     members: [] as string[],
     write: false,
   });
+  // The id of the next access rule. A new id comes after each create.
+  const [ruleId, setRuleId] = useState(newId);
   return (
     <div>
       <Section title="メンバー">
@@ -149,7 +154,13 @@ export function AccessPage() {
                     ariaLabel={`${m.user} のロール`}
                     value={String(m.role)}
                     onChange={(v) =>
-                      mutate(() => api.setMemberRole({ appId, user: m.user, role: Number(v) }))
+                      mutate((clientOpId) =>
+                        api.setMemberRole({
+                          appId,
+                          clientOpId,
+                          member: { user: m.user, role: Number(v) },
+                        }),
+                      )
                     }
                     empty="（外す）"
                     options={ROLES}
@@ -168,7 +179,11 @@ export function AccessPage() {
           />
           <Sel ariaLabel="追加するロール" value={role} onChange={setRole} options={ROLES} />
           <Button
-            onPress={() => mutate(() => api.setMemberRole({ appId, user, role: Number(role) }))}
+            onPress={() =>
+              mutate((clientOpId) =>
+                api.setMemberRole({ appId, clientOpId, member: { user, role: Number(role) } }),
+              )
+            }
           >
             追加
           </Button>
@@ -187,7 +202,9 @@ export function AccessPage() {
                   <Button
                     size="sm"
                     variant="danger-soft"
-                    onPress={() => mutate(() => api.deleteAccessRule({ appId, id: x.id }))}
+                    onPress={() =>
+                      mutate((clientOpId) => api.deleteAccessRule({ appId, clientOpId, id: x.id }))
+                    }
                   >
                     削除
                   </Button>
@@ -221,7 +238,18 @@ export function AccessPage() {
           </Check>
           <Button
             onPress={() =>
-              mutate(() => api.saveAccessRule({ appId, ...rule, role: Number(rule.role) }))
+              mutate(async (clientOpId) => {
+                const req = {
+                  appId,
+                  clientOpId,
+                  rule: { ...rule, id: ruleId, role: Number(rule.role) },
+                };
+                await createOrUpdate(
+                  () => api.createAccessRule(req),
+                  () => api.updateAccessRule(req),
+                );
+                setRuleId(newId());
+              })
             }
           >
             ルールを追加

@@ -275,15 +275,15 @@ func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nana
 	return connect.NewResponse(&nanashiv1.ListCommentsResponse{Comments: comments}), nil
 }
 
-func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanashiv1.Comment]) (*connect.Response[nanashiv1.Comment], error) {
-	c := req.Msg
-	if strings.TrimSpace(c.Body) == "" || c.Metric == "" {
+func (s *PlanServer) AddComment(ctx context.Context, req *connect.Request[nanashiv1.AddCommentRequest]) (*connect.Response[nanashiv1.Comment], error) {
+	c := req.Msg.Comment
+	if strings.TrimSpace(c.GetBody()) == "" || c.GetMetric() == "" {
 		return nil, invalid(errors.New("コメントのメトリックと本文が要る"))
 	}
-	c.User = callerOf(ctx).user
+	c.AppId, c.User = req.Msg.AppId, callerOf(ctx).user
 	var id int64
 	if err := s.Pool.QueryRow(ctx, `insert into app_comment (app_id, metric, cell, user_name, body) values ($1, $2, $3, $4, $5)
-		returning id, (extract(epoch from created_at) * 1000)::bigint`, c.AppId, c.Metric, textJSON(c.Cell), c.User, c.Body).Scan(&id, &c.CreatedAt); err != nil {
+		returning id, (extract(epoch from created_at) * 1000)::bigint`, req.Msg.AppId, c.Metric, textJSON(c.Cell), c.User, c.Body).Scan(&id, &c.CreatedAt); err != nil {
 		return nil, dbError(err)
 	}
 	c.Id = strconv.FormatInt(id, 10)

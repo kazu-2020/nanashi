@@ -145,3 +145,15 @@ func TestDBErrorGivesAlreadyExistsForAUniqueViolation(t *testing.T) {
 		t.Fatal("another database error must stay Unavailable")
 	}
 }
+
+func TestParseID(t *testing.T) {
+	got, err := parseID("id", "0192F3A4-5B6C-7D8E-9F01-23456789ABCD")
+	if err != nil || got != "0192f3a4-5b6c-7d8e-9f01-23456789abcd" {
+		t.Errorf("upper case: got %q, %v, want the lower case form", got, err)
+	}
+	for _, s := range []string{"", "app-1a2b3c4d5e6f7a8b", "0192f3a4-5b6c-7d8e-9f01", "0192f3a4-5b6c-7d8e-9f01-23456789abcz"} {
+		if _, err := parseID("id", s); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%q: got %v, want InvalidArgument", s, err)
+		}
+	}
+}

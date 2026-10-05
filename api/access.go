@@ -195,28 +195,28 @@ func (s *PlanServer) GetAccess(ctx context.Context, req *connect.Request[nanashi
 	return connect.NewResponse(&nanashiv1.Access{Members: members, Rules: rules}), nil
 }
 
-func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nanashiv1.AppMember]) (*ack, error) {
-	m := req.Msg
-	if strings.TrimSpace(m.User) == "" {
+func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nanashiv1.SetMemberRoleRequest]) (*ack, error) {
+	app, m := req.Msg.AppId, req.Msg.Member
+	if strings.TrimSpace(m.GetUser()) == "" {
 		return nil, invalid(errors.New("利用者が空"))
 	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		// Lock the members of the application, so that two ADMINs cannot remove each other at the same time.
-		if _, err := tx.Exec(ctx, "select 1 from app_member where app_id = $1 for update", m.AppId); err != nil {
+		if _, err := tx.Exec(ctx, "select 1 from app_member where app_id = $1 for update", app); err != nil {
 			return err
 		}
 		var err error
 		if m.Role == nanashiv1.Role_ROLE_UNSPECIFIED {
-			_, err = tx.Exec(ctx, "delete from app_member where app_id = $1 and user_name = $2", m.AppId, m.User)
+			_, err = tx.Exec(ctx, "delete from app_member where app_id = $1 and user_name = $2", app, m.User)
 		} else {
 			_, err = tx.Exec(ctx, `insert into app_member (app_id, user_name, role) values ($1, $2, $3)
-				on conflict (app_id, user_name) do update set role = excluded.role`, m.AppId, m.User, m.Role)
+				on conflict (app_id, user_name) do update set role = excluded.role`, app, m.User, m.Role)
 		}
 		if err != nil {
 			return err
 		}
 		var admins int
-		if err := tx.QueryRow(ctx, "select count(*) from app_member where app_id = $1 and role = $2", m.AppId, admin).Scan(&admins); err != nil {
+		if err := tx.QueryRow(ctx, "select count(*) from app_member where app_id = $1 and role = $2", app, admin).Scan(&admins); err != nil {
 			return err
 		}
 		if admins == 0 {
@@ -230,14 +230,27 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 	return ok()
 }
 
-func (s *PlanServer) SaveAccessRule(ctx context.Context, req *connect.Request[nanashiv1.AccessRule]) (*connect.Response[nanashiv1.AccessRule], error) {
-	r := req.Msg
+func (s *PlanServer) CreateAccessRule(ctx context.Context, req *connect.Request[nanashiv1.CreateAccessRuleRequest]) (*ack, error) {
+	return s.saveAccessRule(ctx, req.Msg.AppId, req.Msg.Rule, true)
+}
+
+func (s *PlanServer) UpdateAccessRule(ctx context.Context, req *connect.Request[nanashiv1.UpdateAccessRuleRequest]) (*ack, error) {
+	return s.saveAccessRule(ctx, req.Msg.AppId, req.Msg.Rule, false)
+}
+
+// saveAccessRule makes the rule r (create) or changes it. If create is true, an existing id gives AlreadyExists.
+// If create is false, a missing id gives NotFound.
+func (s *PlanServer) saveAccessRule(ctx context.Context, app string, r *nanashiv1.AccessRule, create bool) (*ack, error) {
+	id, err := parseID("id", r.GetId())
+	if err != nil {
+		return nil, err
+	}
 	if r.Role != viewer && r.Role != contributor {
 		return nil, invalid(errors.New("ルールは VIEWER か CONTRIBUTOR に付ける（MODELER と ADMIN はルールを無視する）"))
 	}
-	// A rename between the member check and the upsert would leave the old name in the rule.
-	defer s.lock(r.AppId)()
-	em, _, err := s.Engines.model(ctx, r.AppId)
+	// A rename between the member check and the write would leave the old name in the rule.
+	defer s.lock(app)()
+	em, _, err := s.Engines.model(ctx, app)
 	if err != nil {
 		return nil, err
 	}
@@ -250,23 +263,34 @@ func (s *PlanServer) SaveAccessRule(ctx context.Context, req *connect.Request[na
 			return nil, invalid(fmt.Errorf("%s に %q がない", r.List, x))
 		}
 	}
-	if r.Id == "" {
-		r.Id = newID()
-	}
 	members := r.Members
 	if members == nil {
 		members = []string{}
 	}
-	if _, err := s.Pool.Exec(ctx, `insert into app_access_rule (app_id, id, role, list, members, write) values ($1, $2, $3, $4, $5, $6)
-		on conflict (app_id, id) do update set role = excluded.role, list = excluded.list, members = excluded.members, write = excluded.write`,
-		r.AppId, r.Id, r.Role, r.List, members, r.Write); err != nil {
+	sql := "update app_access_rule set role = $3, list = $4, members = $5, write = $6 where app_id = $1 and id = $2"
+	if create {
+		sql = `insert into app_access_rule (app_id, id, role, list, members, write) values ($1, $2, $3, $4, $5, $6)
+			on conflict (app_id, id) do nothing`
+	}
+	res, err := s.Pool.Exec(ctx, sql, app, id, r.Role, r.List, members, r.Write)
+	if err != nil {
 		return nil, dbError(err)
 	}
-	return connect.NewResponse(r), nil
+	if res.RowsAffected() == 0 && create {
+		return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("同じ id のルールがすでにある"))
+	}
+	if res.RowsAffected() == 0 {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("変更するルールがない"))
+	}
+	return ok()
 }
 
 func (s *PlanServer) DeleteAccessRule(ctx context.Context, req *connect.Request[nanashiv1.DeleteAccessRuleRequest]) (*ack, error) {
-	if _, err := s.Pool.Exec(ctx, "delete from app_access_rule where app_id = $1 and id = $2", req.Msg.AppId, req.Msg.Id); err != nil {
+	id, err := parseID("id", req.Msg.Id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.Pool.Exec(ctx, "delete from app_access_rule where app_id = $1 and id = $2", req.Msg.AppId, id); err != nil {
 		return nil, dbError(err)
 	}
 	return ok()

@@ -14,7 +14,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { api, getUser } from "./api";
+import { api, getUser, newId } from "./api";
 import { Aggregation, Display, Role } from "./gen/nanashi/v1/plan_pb";
 import {
   buildGrid,
@@ -33,7 +33,7 @@ import {
   type Spec,
   toProtoFilters,
 } from "./logic";
-import { cls, time, useApp, useMutate } from "./state";
+import { cls, createOrUpdate, time, useApp, useMutate } from "./state";
 import { Checks, Sel } from "./ui";
 
 const DISPLAYS: [string, string][] = [
@@ -112,25 +112,38 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
     const metric = g.metric(r, c);
     const def = defs.get(metric)!;
     const coords = writeCoords(def.dimensions, g, r, c, filters);
-    return writeCells(async () => {
+    return writeCells(async (clientOpId) => {
       const v = parseValue(def.kind, text);
       await api.writeCells({
         appId,
+        clientOpId,
         writes: [{ metric, coords, value: v ? { value: v } : undefined }],
       });
     });
   };
 
-  const saveView = (id: string) =>
-    mutate(() =>
-      api.saveView({
+  // The id of the next new view. A new id comes after each create.
+  const [draftId, setDraftId] = useState(newId);
+  // saveView changes the view with the id, or makes a new view without an id.
+  const saveView = (id?: string) =>
+    mutate(async (clientOpId) => {
+      const req = {
         appId,
-        id,
-        name: viewName,
-        ...spec,
-        filters: toProtoFilters(spec.filters),
-      }),
-    );
+        clientOpId,
+        view: {
+          id: id ?? draftId,
+          name: viewName,
+          ...spec,
+          filters: toProtoFilters(spec.filters),
+        },
+      };
+      if (id) return api.updateView(req);
+      await createOrUpdate(
+        () => api.createView(req),
+        () => api.updateView(req),
+      );
+      setDraftId(newId());
+    });
 
   const exportCsv = (g: Grid) => {
     const a = document.createElement("a");
@@ -198,7 +211,7 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
                 value={viewName}
                 onChange={(e) => setViewName(e.target.value)}
               />
-              <Button size="sm" variant="secondary" onPress={() => saveView("")}>
+              <Button size="sm" variant="secondary" onPress={() => saveView()}>
                 ビューとして保存
               </Button>
               {view && (
@@ -361,8 +374,12 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
         <Button
           size="sm"
           onPress={() =>
-            mutate(async () => {
-              await api.addComment({ appId, metric: props.metric, cell: props.coords, body });
+            mutate(async (clientOpId) => {
+              await api.addComment({
+                appId,
+                clientOpId,
+                comment: { metric: props.metric, cell: props.coords, body },
+              });
               setBody("");
             })
           }

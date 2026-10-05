@@ -1,6 +1,7 @@
+import { Code, ConnectError } from "@connectrpc/connect";
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext } from "react";
-import { errorText } from "./api";
+import { errorText, newId } from "./api";
 import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
 
 export const Report = createContext<(e: unknown) => void>(() => {});
@@ -14,12 +15,13 @@ export const AppCtx = createContext<AppState | null>(null);
 export const useApp = () => useContext(AppCtx)!;
 
 // useRun gives a function that runs an action and shows its error. It returns true on success.
+// It gives f one new client_op_id for the user action. Send it with each write of the action.
 export function useRun() {
   const report = useContext(Report);
   return useCallback(
-    async (f: () => Promise<unknown>) => {
+    async (f: (clientOpId: string) => Promise<unknown>) => {
       try {
-        await f();
+        await f(newId());
         return true;
       } catch (e) {
         report(errorText(e));
@@ -39,12 +41,25 @@ export function useMutate(part?: "query" | "comments" | "snapshots") {
   const { appId } = useApp();
   const queryClient = useQueryClient();
   const queryKey = part ? ["app", appId, part] : ["app", appId];
-  return (f: () => Promise<unknown>) =>
-    run(async () => {
-      await f();
+  return (f: (clientOpId: string) => Promise<unknown>) =>
+    run(async (clientOpId) => {
+      await f(clientOpId);
       await queryClient.invalidateQueries({ queryKey });
       queryClient.removeQueries({ queryKey, type: "inactive" });
     });
+}
+
+// createOrUpdate runs create. If the id already exists (an earlier send of the same create committed), it runs update.
+export async function createOrUpdate(
+  create: () => Promise<unknown>,
+  update: () => Promise<unknown>,
+) {
+  try {
+    await create();
+  } catch (e) {
+    if (!(e instanceof ConnectError && e.code === Code.AlreadyExists)) throw e;
+    await update();
+  }
 }
 
 export const memberNames = (model: ModelDef, list: string) =>

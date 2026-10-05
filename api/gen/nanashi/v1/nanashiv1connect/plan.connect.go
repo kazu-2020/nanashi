@@ -53,8 +53,12 @@ const (
 	// PlanServiceCreateScenarioProcedure is the fully-qualified name of the PlanService's
 	// CreateScenario RPC.
 	PlanServiceCreateScenarioProcedure = "/nanashi.v1.PlanService/CreateScenario"
-	// PlanServiceSaveMetricProcedure is the fully-qualified name of the PlanService's SaveMetric RPC.
-	PlanServiceSaveMetricProcedure = "/nanashi.v1.PlanService/SaveMetric"
+	// PlanServiceCreateMetricProcedure is the fully-qualified name of the PlanService's CreateMetric
+	// RPC.
+	PlanServiceCreateMetricProcedure = "/nanashi.v1.PlanService/CreateMetric"
+	// PlanServiceUpdateMetricProcedure is the fully-qualified name of the PlanService's UpdateMetric
+	// RPC.
+	PlanServiceUpdateMetricProcedure = "/nanashi.v1.PlanService/UpdateMetric"
 	// PlanServiceRenameMetricProcedure is the fully-qualified name of the PlanService's RenameMetric
 	// RPC.
 	PlanServiceRenameMetricProcedure = "/nanashi.v1.PlanService/RenameMetric"
@@ -67,12 +71,18 @@ const (
 	PlanServiceWriteCellsProcedure = "/nanashi.v1.PlanService/WriteCells"
 	// PlanServiceImportProcedure is the fully-qualified name of the PlanService's Import RPC.
 	PlanServiceImportProcedure = "/nanashi.v1.PlanService/Import"
-	// PlanServiceSaveTableProcedure is the fully-qualified name of the PlanService's SaveTable RPC.
-	PlanServiceSaveTableProcedure = "/nanashi.v1.PlanService/SaveTable"
-	// PlanServiceSaveViewProcedure is the fully-qualified name of the PlanService's SaveView RPC.
-	PlanServiceSaveViewProcedure = "/nanashi.v1.PlanService/SaveView"
-	// PlanServiceSaveBoardProcedure is the fully-qualified name of the PlanService's SaveBoard RPC.
-	PlanServiceSaveBoardProcedure = "/nanashi.v1.PlanService/SaveBoard"
+	// PlanServiceCreateTableProcedure is the fully-qualified name of the PlanService's CreateTable RPC.
+	PlanServiceCreateTableProcedure = "/nanashi.v1.PlanService/CreateTable"
+	// PlanServiceUpdateTableProcedure is the fully-qualified name of the PlanService's UpdateTable RPC.
+	PlanServiceUpdateTableProcedure = "/nanashi.v1.PlanService/UpdateTable"
+	// PlanServiceCreateViewProcedure is the fully-qualified name of the PlanService's CreateView RPC.
+	PlanServiceCreateViewProcedure = "/nanashi.v1.PlanService/CreateView"
+	// PlanServiceUpdateViewProcedure is the fully-qualified name of the PlanService's UpdateView RPC.
+	PlanServiceUpdateViewProcedure = "/nanashi.v1.PlanService/UpdateView"
+	// PlanServiceCreateBoardProcedure is the fully-qualified name of the PlanService's CreateBoard RPC.
+	PlanServiceCreateBoardProcedure = "/nanashi.v1.PlanService/CreateBoard"
+	// PlanServiceUpdateBoardProcedure is the fully-qualified name of the PlanService's UpdateBoard RPC.
+	PlanServiceUpdateBoardProcedure = "/nanashi.v1.PlanService/UpdateBoard"
 	// PlanServiceDeleteItemProcedure is the fully-qualified name of the PlanService's DeleteItem RPC.
 	PlanServiceDeleteItemProcedure = "/nanashi.v1.PlanService/DeleteItem"
 	// PlanServiceListCommentsProcedure is the fully-qualified name of the PlanService's ListComments
@@ -93,9 +103,12 @@ const (
 	// PlanServiceSetMemberRoleProcedure is the fully-qualified name of the PlanService's SetMemberRole
 	// RPC.
 	PlanServiceSetMemberRoleProcedure = "/nanashi.v1.PlanService/SetMemberRole"
-	// PlanServiceSaveAccessRuleProcedure is the fully-qualified name of the PlanService's
-	// SaveAccessRule RPC.
-	PlanServiceSaveAccessRuleProcedure = "/nanashi.v1.PlanService/SaveAccessRule"
+	// PlanServiceCreateAccessRuleProcedure is the fully-qualified name of the PlanService's
+	// CreateAccessRule RPC.
+	PlanServiceCreateAccessRuleProcedure = "/nanashi.v1.PlanService/CreateAccessRule"
+	// PlanServiceUpdateAccessRuleProcedure is the fully-qualified name of the PlanService's
+	// UpdateAccessRule RPC.
+	PlanServiceUpdateAccessRuleProcedure = "/nanashi.v1.PlanService/UpdateAccessRule"
 	// PlanServiceDeleteAccessRuleProcedure is the fully-qualified name of the PlanService's
 	// DeleteAccessRule RPC.
 	PlanServiceDeleteAccessRuleProcedure = "/nanashi.v1.PlanService/DeleteAccessRule"
@@ -115,8 +128,11 @@ type PlanServiceClient interface {
 	CreateCalendar(context.Context, *connect.Request[v1.CreateCalendarRequest]) (*connect.Response[v1.Ack], error)
 	// CreateScenario adds a member to the dimension "Scenario" and copies the input cells of copy_from.
 	CreateScenario(context.Context, *connect.Request[v1.CreateScenarioRequest]) (*connect.Response[v1.Ack], error)
-	// SaveMetric makes or changes a Metric. An empty formula makes an input Metric.
-	SaveMetric(context.Context, *connect.Request[v1.SaveMetricRequest]) (*connect.Response[v1.Ack], error)
+	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing name gives ALREADY_EXISTS.
+	CreateMetric(context.Context, *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error)
+	// UpdateMetric changes a Metric. A missing name gives NOT_FOUND.
+	// A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
+	UpdateMetric(context.Context, *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error)
 	RenameMetric(context.Context, *connect.Request[v1.RenameMetricRequest]) (*connect.Response[v1.Ack], error)
 	DeleteMetric(context.Context, *connect.Request[v1.DeleteMetricRequest]) (*connect.Response[v1.Ack], error)
 	// Data.
@@ -125,20 +141,25 @@ type PlanServiceClient interface {
 	WriteCells(context.Context, *connect.Request[v1.WriteCellsRequest]) (*connect.Response[v1.Ack], error)
 	Import(context.Context, *connect.Request[v1.ImportRequest]) (*connect.Response[v1.ImportResponse], error)
 	// Tables, views and boards.
-	SaveTable(context.Context, *connect.Request[v1.TableDef]) (*connect.Response[v1.TableDef], error)
-	SaveView(context.Context, *connect.Request[v1.ViewDef]) (*connect.Response[v1.ViewDef], error)
-	SaveBoard(context.Context, *connect.Request[v1.BoardDef]) (*connect.Response[v1.BoardDef], error)
+	// A Create RPC gives ALREADY_EXISTS if the id exists. An Update RPC gives NOT_FOUND if the id does not exist.
+	CreateTable(context.Context, *connect.Request[v1.CreateTableRequest]) (*connect.Response[v1.Ack], error)
+	UpdateTable(context.Context, *connect.Request[v1.UpdateTableRequest]) (*connect.Response[v1.Ack], error)
+	CreateView(context.Context, *connect.Request[v1.CreateViewRequest]) (*connect.Response[v1.Ack], error)
+	UpdateView(context.Context, *connect.Request[v1.UpdateViewRequest]) (*connect.Response[v1.Ack], error)
+	CreateBoard(context.Context, *connect.Request[v1.CreateBoardRequest]) (*connect.Response[v1.Ack], error)
+	UpdateBoard(context.Context, *connect.Request[v1.UpdateBoardRequest]) (*connect.Response[v1.Ack], error)
 	DeleteItem(context.Context, *connect.Request[v1.DeleteItemRequest]) (*connect.Response[v1.Ack], error)
 	// Collaboration.
 	ListComments(context.Context, *connect.Request[v1.ListCommentsRequest]) (*connect.Response[v1.ListCommentsResponse], error)
-	AddComment(context.Context, *connect.Request[v1.Comment]) (*connect.Response[v1.Comment], error)
+	AddComment(context.Context, *connect.Request[v1.AddCommentRequest]) (*connect.Response[v1.Comment], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
 	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.Snapshot], error)
 	// Access rights. Only an ADMIN can change them.
 	GetAccess(context.Context, *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error)
-	SetMemberRole(context.Context, *connect.Request[v1.AppMember]) (*connect.Response[v1.Ack], error)
-	SaveAccessRule(context.Context, *connect.Request[v1.AccessRule]) (*connect.Response[v1.AccessRule], error)
+	SetMemberRole(context.Context, *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error)
+	CreateAccessRule(context.Context, *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
+	UpdateAccessRule(context.Context, *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 	DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 }
 
@@ -201,10 +222,16 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("CreateScenario")),
 			connect.WithClientOptions(opts...),
 		),
-		saveMetric: connect.NewClient[v1.SaveMetricRequest, v1.Ack](
+		createMetric: connect.NewClient[v1.CreateMetricRequest, v1.Ack](
 			httpClient,
-			baseURL+PlanServiceSaveMetricProcedure,
-			connect.WithSchema(planServiceMethods.ByName("SaveMetric")),
+			baseURL+PlanServiceCreateMetricProcedure,
+			connect.WithSchema(planServiceMethods.ByName("CreateMetric")),
+			connect.WithClientOptions(opts...),
+		),
+		updateMetric: connect.NewClient[v1.UpdateMetricRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceUpdateMetricProcedure,
+			connect.WithSchema(planServiceMethods.ByName("UpdateMetric")),
 			connect.WithClientOptions(opts...),
 		),
 		renameMetric: connect.NewClient[v1.RenameMetricRequest, v1.Ack](
@@ -237,22 +264,40 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("Import")),
 			connect.WithClientOptions(opts...),
 		),
-		saveTable: connect.NewClient[v1.TableDef, v1.TableDef](
+		createTable: connect.NewClient[v1.CreateTableRequest, v1.Ack](
 			httpClient,
-			baseURL+PlanServiceSaveTableProcedure,
-			connect.WithSchema(planServiceMethods.ByName("SaveTable")),
+			baseURL+PlanServiceCreateTableProcedure,
+			connect.WithSchema(planServiceMethods.ByName("CreateTable")),
 			connect.WithClientOptions(opts...),
 		),
-		saveView: connect.NewClient[v1.ViewDef, v1.ViewDef](
+		updateTable: connect.NewClient[v1.UpdateTableRequest, v1.Ack](
 			httpClient,
-			baseURL+PlanServiceSaveViewProcedure,
-			connect.WithSchema(planServiceMethods.ByName("SaveView")),
+			baseURL+PlanServiceUpdateTableProcedure,
+			connect.WithSchema(planServiceMethods.ByName("UpdateTable")),
 			connect.WithClientOptions(opts...),
 		),
-		saveBoard: connect.NewClient[v1.BoardDef, v1.BoardDef](
+		createView: connect.NewClient[v1.CreateViewRequest, v1.Ack](
 			httpClient,
-			baseURL+PlanServiceSaveBoardProcedure,
-			connect.WithSchema(planServiceMethods.ByName("SaveBoard")),
+			baseURL+PlanServiceCreateViewProcedure,
+			connect.WithSchema(planServiceMethods.ByName("CreateView")),
+			connect.WithClientOptions(opts...),
+		),
+		updateView: connect.NewClient[v1.UpdateViewRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceUpdateViewProcedure,
+			connect.WithSchema(planServiceMethods.ByName("UpdateView")),
+			connect.WithClientOptions(opts...),
+		),
+		createBoard: connect.NewClient[v1.CreateBoardRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceCreateBoardProcedure,
+			connect.WithSchema(planServiceMethods.ByName("CreateBoard")),
+			connect.WithClientOptions(opts...),
+		),
+		updateBoard: connect.NewClient[v1.UpdateBoardRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceUpdateBoardProcedure,
+			connect.WithSchema(planServiceMethods.ByName("UpdateBoard")),
 			connect.WithClientOptions(opts...),
 		),
 		deleteItem: connect.NewClient[v1.DeleteItemRequest, v1.Ack](
@@ -267,7 +312,7 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("ListComments")),
 			connect.WithClientOptions(opts...),
 		),
-		addComment: connect.NewClient[v1.Comment, v1.Comment](
+		addComment: connect.NewClient[v1.AddCommentRequest, v1.Comment](
 			httpClient,
 			baseURL+PlanServiceAddCommentProcedure,
 			connect.WithSchema(planServiceMethods.ByName("AddComment")),
@@ -297,16 +342,22 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("GetAccess")),
 			connect.WithClientOptions(opts...),
 		),
-		setMemberRole: connect.NewClient[v1.AppMember, v1.Ack](
+		setMemberRole: connect.NewClient[v1.SetMemberRoleRequest, v1.Ack](
 			httpClient,
 			baseURL+PlanServiceSetMemberRoleProcedure,
 			connect.WithSchema(planServiceMethods.ByName("SetMemberRole")),
 			connect.WithClientOptions(opts...),
 		),
-		saveAccessRule: connect.NewClient[v1.AccessRule, v1.AccessRule](
+		createAccessRule: connect.NewClient[v1.CreateAccessRuleRequest, v1.Ack](
 			httpClient,
-			baseURL+PlanServiceSaveAccessRuleProcedure,
-			connect.WithSchema(planServiceMethods.ByName("SaveAccessRule")),
+			baseURL+PlanServiceCreateAccessRuleProcedure,
+			connect.WithSchema(planServiceMethods.ByName("CreateAccessRule")),
+			connect.WithClientOptions(opts...),
+		),
+		updateAccessRule: connect.NewClient[v1.UpdateAccessRuleRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceUpdateAccessRuleProcedure,
+			connect.WithSchema(planServiceMethods.ByName("UpdateAccessRule")),
 			connect.WithClientOptions(opts...),
 		),
 		deleteAccessRule: connect.NewClient[v1.DeleteAccessRuleRequest, v1.Ack](
@@ -328,24 +379,29 @@ type planServiceClient struct {
 	editMembers       *connect.Client[v1.EditMembersRequest, v1.Ack]
 	createCalendar    *connect.Client[v1.CreateCalendarRequest, v1.Ack]
 	createScenario    *connect.Client[v1.CreateScenarioRequest, v1.Ack]
-	saveMetric        *connect.Client[v1.SaveMetricRequest, v1.Ack]
+	createMetric      *connect.Client[v1.CreateMetricRequest, v1.Ack]
+	updateMetric      *connect.Client[v1.UpdateMetricRequest, v1.Ack]
 	renameMetric      *connect.Client[v1.RenameMetricRequest, v1.Ack]
 	deleteMetric      *connect.Client[v1.DeleteMetricRequest, v1.Ack]
 	query             *connect.Client[v1.QueryRequest, v1.QueryResponse]
 	writeCells        *connect.Client[v1.WriteCellsRequest, v1.Ack]
 	_import           *connect.Client[v1.ImportRequest, v1.ImportResponse]
-	saveTable         *connect.Client[v1.TableDef, v1.TableDef]
-	saveView          *connect.Client[v1.ViewDef, v1.ViewDef]
-	saveBoard         *connect.Client[v1.BoardDef, v1.BoardDef]
+	createTable       *connect.Client[v1.CreateTableRequest, v1.Ack]
+	updateTable       *connect.Client[v1.UpdateTableRequest, v1.Ack]
+	createView        *connect.Client[v1.CreateViewRequest, v1.Ack]
+	updateView        *connect.Client[v1.UpdateViewRequest, v1.Ack]
+	createBoard       *connect.Client[v1.CreateBoardRequest, v1.Ack]
+	updateBoard       *connect.Client[v1.UpdateBoardRequest, v1.Ack]
 	deleteItem        *connect.Client[v1.DeleteItemRequest, v1.Ack]
 	listComments      *connect.Client[v1.ListCommentsRequest, v1.ListCommentsResponse]
-	addComment        *connect.Client[v1.Comment, v1.Comment]
+	addComment        *connect.Client[v1.AddCommentRequest, v1.Comment]
 	listAudit         *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
 	listSnapshots     *connect.Client[v1.ListSnapshotsRequest, v1.ListSnapshotsResponse]
 	createSnapshot    *connect.Client[v1.CreateSnapshotRequest, v1.Snapshot]
 	getAccess         *connect.Client[v1.GetAccessRequest, v1.Access]
-	setMemberRole     *connect.Client[v1.AppMember, v1.Ack]
-	saveAccessRule    *connect.Client[v1.AccessRule, v1.AccessRule]
+	setMemberRole     *connect.Client[v1.SetMemberRoleRequest, v1.Ack]
+	createAccessRule  *connect.Client[v1.CreateAccessRuleRequest, v1.Ack]
+	updateAccessRule  *connect.Client[v1.UpdateAccessRuleRequest, v1.Ack]
 	deleteAccessRule  *connect.Client[v1.DeleteAccessRuleRequest, v1.Ack]
 }
 
@@ -389,9 +445,14 @@ func (c *planServiceClient) CreateScenario(ctx context.Context, req *connect.Req
 	return c.createScenario.CallUnary(ctx, req)
 }
 
-// SaveMetric calls nanashi.v1.PlanService.SaveMetric.
-func (c *planServiceClient) SaveMetric(ctx context.Context, req *connect.Request[v1.SaveMetricRequest]) (*connect.Response[v1.Ack], error) {
-	return c.saveMetric.CallUnary(ctx, req)
+// CreateMetric calls nanashi.v1.PlanService.CreateMetric.
+func (c *planServiceClient) CreateMetric(ctx context.Context, req *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error) {
+	return c.createMetric.CallUnary(ctx, req)
+}
+
+// UpdateMetric calls nanashi.v1.PlanService.UpdateMetric.
+func (c *planServiceClient) UpdateMetric(ctx context.Context, req *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error) {
+	return c.updateMetric.CallUnary(ctx, req)
 }
 
 // RenameMetric calls nanashi.v1.PlanService.RenameMetric.
@@ -419,19 +480,34 @@ func (c *planServiceClient) Import(ctx context.Context, req *connect.Request[v1.
 	return c._import.CallUnary(ctx, req)
 }
 
-// SaveTable calls nanashi.v1.PlanService.SaveTable.
-func (c *planServiceClient) SaveTable(ctx context.Context, req *connect.Request[v1.TableDef]) (*connect.Response[v1.TableDef], error) {
-	return c.saveTable.CallUnary(ctx, req)
+// CreateTable calls nanashi.v1.PlanService.CreateTable.
+func (c *planServiceClient) CreateTable(ctx context.Context, req *connect.Request[v1.CreateTableRequest]) (*connect.Response[v1.Ack], error) {
+	return c.createTable.CallUnary(ctx, req)
 }
 
-// SaveView calls nanashi.v1.PlanService.SaveView.
-func (c *planServiceClient) SaveView(ctx context.Context, req *connect.Request[v1.ViewDef]) (*connect.Response[v1.ViewDef], error) {
-	return c.saveView.CallUnary(ctx, req)
+// UpdateTable calls nanashi.v1.PlanService.UpdateTable.
+func (c *planServiceClient) UpdateTable(ctx context.Context, req *connect.Request[v1.UpdateTableRequest]) (*connect.Response[v1.Ack], error) {
+	return c.updateTable.CallUnary(ctx, req)
 }
 
-// SaveBoard calls nanashi.v1.PlanService.SaveBoard.
-func (c *planServiceClient) SaveBoard(ctx context.Context, req *connect.Request[v1.BoardDef]) (*connect.Response[v1.BoardDef], error) {
-	return c.saveBoard.CallUnary(ctx, req)
+// CreateView calls nanashi.v1.PlanService.CreateView.
+func (c *planServiceClient) CreateView(ctx context.Context, req *connect.Request[v1.CreateViewRequest]) (*connect.Response[v1.Ack], error) {
+	return c.createView.CallUnary(ctx, req)
+}
+
+// UpdateView calls nanashi.v1.PlanService.UpdateView.
+func (c *planServiceClient) UpdateView(ctx context.Context, req *connect.Request[v1.UpdateViewRequest]) (*connect.Response[v1.Ack], error) {
+	return c.updateView.CallUnary(ctx, req)
+}
+
+// CreateBoard calls nanashi.v1.PlanService.CreateBoard.
+func (c *planServiceClient) CreateBoard(ctx context.Context, req *connect.Request[v1.CreateBoardRequest]) (*connect.Response[v1.Ack], error) {
+	return c.createBoard.CallUnary(ctx, req)
+}
+
+// UpdateBoard calls nanashi.v1.PlanService.UpdateBoard.
+func (c *planServiceClient) UpdateBoard(ctx context.Context, req *connect.Request[v1.UpdateBoardRequest]) (*connect.Response[v1.Ack], error) {
+	return c.updateBoard.CallUnary(ctx, req)
 }
 
 // DeleteItem calls nanashi.v1.PlanService.DeleteItem.
@@ -445,7 +521,7 @@ func (c *planServiceClient) ListComments(ctx context.Context, req *connect.Reque
 }
 
 // AddComment calls nanashi.v1.PlanService.AddComment.
-func (c *planServiceClient) AddComment(ctx context.Context, req *connect.Request[v1.Comment]) (*connect.Response[v1.Comment], error) {
+func (c *planServiceClient) AddComment(ctx context.Context, req *connect.Request[v1.AddCommentRequest]) (*connect.Response[v1.Comment], error) {
 	return c.addComment.CallUnary(ctx, req)
 }
 
@@ -470,13 +546,18 @@ func (c *planServiceClient) GetAccess(ctx context.Context, req *connect.Request[
 }
 
 // SetMemberRole calls nanashi.v1.PlanService.SetMemberRole.
-func (c *planServiceClient) SetMemberRole(ctx context.Context, req *connect.Request[v1.AppMember]) (*connect.Response[v1.Ack], error) {
+func (c *planServiceClient) SetMemberRole(ctx context.Context, req *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error) {
 	return c.setMemberRole.CallUnary(ctx, req)
 }
 
-// SaveAccessRule calls nanashi.v1.PlanService.SaveAccessRule.
-func (c *planServiceClient) SaveAccessRule(ctx context.Context, req *connect.Request[v1.AccessRule]) (*connect.Response[v1.AccessRule], error) {
-	return c.saveAccessRule.CallUnary(ctx, req)
+// CreateAccessRule calls nanashi.v1.PlanService.CreateAccessRule.
+func (c *planServiceClient) CreateAccessRule(ctx context.Context, req *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
+	return c.createAccessRule.CallUnary(ctx, req)
+}
+
+// UpdateAccessRule calls nanashi.v1.PlanService.UpdateAccessRule.
+func (c *planServiceClient) UpdateAccessRule(ctx context.Context, req *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
+	return c.updateAccessRule.CallUnary(ctx, req)
 }
 
 // DeleteAccessRule calls nanashi.v1.PlanService.DeleteAccessRule.
@@ -498,8 +579,11 @@ type PlanServiceHandler interface {
 	CreateCalendar(context.Context, *connect.Request[v1.CreateCalendarRequest]) (*connect.Response[v1.Ack], error)
 	// CreateScenario adds a member to the dimension "Scenario" and copies the input cells of copy_from.
 	CreateScenario(context.Context, *connect.Request[v1.CreateScenarioRequest]) (*connect.Response[v1.Ack], error)
-	// SaveMetric makes or changes a Metric. An empty formula makes an input Metric.
-	SaveMetric(context.Context, *connect.Request[v1.SaveMetricRequest]) (*connect.Response[v1.Ack], error)
+	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing name gives ALREADY_EXISTS.
+	CreateMetric(context.Context, *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error)
+	// UpdateMetric changes a Metric. A missing name gives NOT_FOUND.
+	// A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
+	UpdateMetric(context.Context, *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error)
 	RenameMetric(context.Context, *connect.Request[v1.RenameMetricRequest]) (*connect.Response[v1.Ack], error)
 	DeleteMetric(context.Context, *connect.Request[v1.DeleteMetricRequest]) (*connect.Response[v1.Ack], error)
 	// Data.
@@ -508,20 +592,25 @@ type PlanServiceHandler interface {
 	WriteCells(context.Context, *connect.Request[v1.WriteCellsRequest]) (*connect.Response[v1.Ack], error)
 	Import(context.Context, *connect.Request[v1.ImportRequest]) (*connect.Response[v1.ImportResponse], error)
 	// Tables, views and boards.
-	SaveTable(context.Context, *connect.Request[v1.TableDef]) (*connect.Response[v1.TableDef], error)
-	SaveView(context.Context, *connect.Request[v1.ViewDef]) (*connect.Response[v1.ViewDef], error)
-	SaveBoard(context.Context, *connect.Request[v1.BoardDef]) (*connect.Response[v1.BoardDef], error)
+	// A Create RPC gives ALREADY_EXISTS if the id exists. An Update RPC gives NOT_FOUND if the id does not exist.
+	CreateTable(context.Context, *connect.Request[v1.CreateTableRequest]) (*connect.Response[v1.Ack], error)
+	UpdateTable(context.Context, *connect.Request[v1.UpdateTableRequest]) (*connect.Response[v1.Ack], error)
+	CreateView(context.Context, *connect.Request[v1.CreateViewRequest]) (*connect.Response[v1.Ack], error)
+	UpdateView(context.Context, *connect.Request[v1.UpdateViewRequest]) (*connect.Response[v1.Ack], error)
+	CreateBoard(context.Context, *connect.Request[v1.CreateBoardRequest]) (*connect.Response[v1.Ack], error)
+	UpdateBoard(context.Context, *connect.Request[v1.UpdateBoardRequest]) (*connect.Response[v1.Ack], error)
 	DeleteItem(context.Context, *connect.Request[v1.DeleteItemRequest]) (*connect.Response[v1.Ack], error)
 	// Collaboration.
 	ListComments(context.Context, *connect.Request[v1.ListCommentsRequest]) (*connect.Response[v1.ListCommentsResponse], error)
-	AddComment(context.Context, *connect.Request[v1.Comment]) (*connect.Response[v1.Comment], error)
+	AddComment(context.Context, *connect.Request[v1.AddCommentRequest]) (*connect.Response[v1.Comment], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
 	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.Snapshot], error)
 	// Access rights. Only an ADMIN can change them.
 	GetAccess(context.Context, *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error)
-	SetMemberRole(context.Context, *connect.Request[v1.AppMember]) (*connect.Response[v1.Ack], error)
-	SaveAccessRule(context.Context, *connect.Request[v1.AccessRule]) (*connect.Response[v1.AccessRule], error)
+	SetMemberRole(context.Context, *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error)
+	CreateAccessRule(context.Context, *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
+	UpdateAccessRule(context.Context, *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 	DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 }
 
@@ -580,10 +669,16 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(planServiceMethods.ByName("CreateScenario")),
 		connect.WithHandlerOptions(opts...),
 	)
-	planServiceSaveMetricHandler := connect.NewUnaryHandler(
-		PlanServiceSaveMetricProcedure,
-		svc.SaveMetric,
-		connect.WithSchema(planServiceMethods.ByName("SaveMetric")),
+	planServiceCreateMetricHandler := connect.NewUnaryHandler(
+		PlanServiceCreateMetricProcedure,
+		svc.CreateMetric,
+		connect.WithSchema(planServiceMethods.ByName("CreateMetric")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceUpdateMetricHandler := connect.NewUnaryHandler(
+		PlanServiceUpdateMetricProcedure,
+		svc.UpdateMetric,
+		connect.WithSchema(planServiceMethods.ByName("UpdateMetric")),
 		connect.WithHandlerOptions(opts...),
 	)
 	planServiceRenameMetricHandler := connect.NewUnaryHandler(
@@ -616,22 +711,40 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(planServiceMethods.ByName("Import")),
 		connect.WithHandlerOptions(opts...),
 	)
-	planServiceSaveTableHandler := connect.NewUnaryHandler(
-		PlanServiceSaveTableProcedure,
-		svc.SaveTable,
-		connect.WithSchema(planServiceMethods.ByName("SaveTable")),
+	planServiceCreateTableHandler := connect.NewUnaryHandler(
+		PlanServiceCreateTableProcedure,
+		svc.CreateTable,
+		connect.WithSchema(planServiceMethods.ByName("CreateTable")),
 		connect.WithHandlerOptions(opts...),
 	)
-	planServiceSaveViewHandler := connect.NewUnaryHandler(
-		PlanServiceSaveViewProcedure,
-		svc.SaveView,
-		connect.WithSchema(planServiceMethods.ByName("SaveView")),
+	planServiceUpdateTableHandler := connect.NewUnaryHandler(
+		PlanServiceUpdateTableProcedure,
+		svc.UpdateTable,
+		connect.WithSchema(planServiceMethods.ByName("UpdateTable")),
 		connect.WithHandlerOptions(opts...),
 	)
-	planServiceSaveBoardHandler := connect.NewUnaryHandler(
-		PlanServiceSaveBoardProcedure,
-		svc.SaveBoard,
-		connect.WithSchema(planServiceMethods.ByName("SaveBoard")),
+	planServiceCreateViewHandler := connect.NewUnaryHandler(
+		PlanServiceCreateViewProcedure,
+		svc.CreateView,
+		connect.WithSchema(planServiceMethods.ByName("CreateView")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceUpdateViewHandler := connect.NewUnaryHandler(
+		PlanServiceUpdateViewProcedure,
+		svc.UpdateView,
+		connect.WithSchema(planServiceMethods.ByName("UpdateView")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceCreateBoardHandler := connect.NewUnaryHandler(
+		PlanServiceCreateBoardProcedure,
+		svc.CreateBoard,
+		connect.WithSchema(planServiceMethods.ByName("CreateBoard")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceUpdateBoardHandler := connect.NewUnaryHandler(
+		PlanServiceUpdateBoardProcedure,
+		svc.UpdateBoard,
+		connect.WithSchema(planServiceMethods.ByName("UpdateBoard")),
 		connect.WithHandlerOptions(opts...),
 	)
 	planServiceDeleteItemHandler := connect.NewUnaryHandler(
@@ -682,10 +795,16 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(planServiceMethods.ByName("SetMemberRole")),
 		connect.WithHandlerOptions(opts...),
 	)
-	planServiceSaveAccessRuleHandler := connect.NewUnaryHandler(
-		PlanServiceSaveAccessRuleProcedure,
-		svc.SaveAccessRule,
-		connect.WithSchema(planServiceMethods.ByName("SaveAccessRule")),
+	planServiceCreateAccessRuleHandler := connect.NewUnaryHandler(
+		PlanServiceCreateAccessRuleProcedure,
+		svc.CreateAccessRule,
+		connect.WithSchema(planServiceMethods.ByName("CreateAccessRule")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceUpdateAccessRuleHandler := connect.NewUnaryHandler(
+		PlanServiceUpdateAccessRuleProcedure,
+		svc.UpdateAccessRule,
+		connect.WithSchema(planServiceMethods.ByName("UpdateAccessRule")),
 		connect.WithHandlerOptions(opts...),
 	)
 	planServiceDeleteAccessRuleHandler := connect.NewUnaryHandler(
@@ -712,8 +831,10 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceCreateCalendarHandler.ServeHTTP(w, r)
 		case PlanServiceCreateScenarioProcedure:
 			planServiceCreateScenarioHandler.ServeHTTP(w, r)
-		case PlanServiceSaveMetricProcedure:
-			planServiceSaveMetricHandler.ServeHTTP(w, r)
+		case PlanServiceCreateMetricProcedure:
+			planServiceCreateMetricHandler.ServeHTTP(w, r)
+		case PlanServiceUpdateMetricProcedure:
+			planServiceUpdateMetricHandler.ServeHTTP(w, r)
 		case PlanServiceRenameMetricProcedure:
 			planServiceRenameMetricHandler.ServeHTTP(w, r)
 		case PlanServiceDeleteMetricProcedure:
@@ -724,12 +845,18 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceWriteCellsHandler.ServeHTTP(w, r)
 		case PlanServiceImportProcedure:
 			planServiceImportHandler.ServeHTTP(w, r)
-		case PlanServiceSaveTableProcedure:
-			planServiceSaveTableHandler.ServeHTTP(w, r)
-		case PlanServiceSaveViewProcedure:
-			planServiceSaveViewHandler.ServeHTTP(w, r)
-		case PlanServiceSaveBoardProcedure:
-			planServiceSaveBoardHandler.ServeHTTP(w, r)
+		case PlanServiceCreateTableProcedure:
+			planServiceCreateTableHandler.ServeHTTP(w, r)
+		case PlanServiceUpdateTableProcedure:
+			planServiceUpdateTableHandler.ServeHTTP(w, r)
+		case PlanServiceCreateViewProcedure:
+			planServiceCreateViewHandler.ServeHTTP(w, r)
+		case PlanServiceUpdateViewProcedure:
+			planServiceUpdateViewHandler.ServeHTTP(w, r)
+		case PlanServiceCreateBoardProcedure:
+			planServiceCreateBoardHandler.ServeHTTP(w, r)
+		case PlanServiceUpdateBoardProcedure:
+			planServiceUpdateBoardHandler.ServeHTTP(w, r)
 		case PlanServiceDeleteItemProcedure:
 			planServiceDeleteItemHandler.ServeHTTP(w, r)
 		case PlanServiceListCommentsProcedure:
@@ -746,8 +873,10 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceGetAccessHandler.ServeHTTP(w, r)
 		case PlanServiceSetMemberRoleProcedure:
 			planServiceSetMemberRoleHandler.ServeHTTP(w, r)
-		case PlanServiceSaveAccessRuleProcedure:
-			planServiceSaveAccessRuleHandler.ServeHTTP(w, r)
+		case PlanServiceCreateAccessRuleProcedure:
+			planServiceCreateAccessRuleHandler.ServeHTTP(w, r)
+		case PlanServiceUpdateAccessRuleProcedure:
+			planServiceUpdateAccessRuleHandler.ServeHTTP(w, r)
 		case PlanServiceDeleteAccessRuleProcedure:
 			planServiceDeleteAccessRuleHandler.ServeHTTP(w, r)
 		default:
@@ -791,8 +920,12 @@ func (UnimplementedPlanServiceHandler) CreateScenario(context.Context, *connect.
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateScenario is not implemented"))
 }
 
-func (UnimplementedPlanServiceHandler) SaveMetric(context.Context, *connect.Request[v1.SaveMetricRequest]) (*connect.Response[v1.Ack], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SaveMetric is not implemented"))
+func (UnimplementedPlanServiceHandler) CreateMetric(context.Context, *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateMetric is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) UpdateMetric(context.Context, *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.UpdateMetric is not implemented"))
 }
 
 func (UnimplementedPlanServiceHandler) RenameMetric(context.Context, *connect.Request[v1.RenameMetricRequest]) (*connect.Response[v1.Ack], error) {
@@ -815,16 +948,28 @@ func (UnimplementedPlanServiceHandler) Import(context.Context, *connect.Request[
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.Import is not implemented"))
 }
 
-func (UnimplementedPlanServiceHandler) SaveTable(context.Context, *connect.Request[v1.TableDef]) (*connect.Response[v1.TableDef], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SaveTable is not implemented"))
+func (UnimplementedPlanServiceHandler) CreateTable(context.Context, *connect.Request[v1.CreateTableRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateTable is not implemented"))
 }
 
-func (UnimplementedPlanServiceHandler) SaveView(context.Context, *connect.Request[v1.ViewDef]) (*connect.Response[v1.ViewDef], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SaveView is not implemented"))
+func (UnimplementedPlanServiceHandler) UpdateTable(context.Context, *connect.Request[v1.UpdateTableRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.UpdateTable is not implemented"))
 }
 
-func (UnimplementedPlanServiceHandler) SaveBoard(context.Context, *connect.Request[v1.BoardDef]) (*connect.Response[v1.BoardDef], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SaveBoard is not implemented"))
+func (UnimplementedPlanServiceHandler) CreateView(context.Context, *connect.Request[v1.CreateViewRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateView is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) UpdateView(context.Context, *connect.Request[v1.UpdateViewRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.UpdateView is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) CreateBoard(context.Context, *connect.Request[v1.CreateBoardRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateBoard is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) UpdateBoard(context.Context, *connect.Request[v1.UpdateBoardRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.UpdateBoard is not implemented"))
 }
 
 func (UnimplementedPlanServiceHandler) DeleteItem(context.Context, *connect.Request[v1.DeleteItemRequest]) (*connect.Response[v1.Ack], error) {
@@ -835,7 +980,7 @@ func (UnimplementedPlanServiceHandler) ListComments(context.Context, *connect.Re
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.ListComments is not implemented"))
 }
 
-func (UnimplementedPlanServiceHandler) AddComment(context.Context, *connect.Request[v1.Comment]) (*connect.Response[v1.Comment], error) {
+func (UnimplementedPlanServiceHandler) AddComment(context.Context, *connect.Request[v1.AddCommentRequest]) (*connect.Response[v1.Comment], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.AddComment is not implemented"))
 }
 
@@ -855,12 +1000,16 @@ func (UnimplementedPlanServiceHandler) GetAccess(context.Context, *connect.Reque
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.GetAccess is not implemented"))
 }
 
-func (UnimplementedPlanServiceHandler) SetMemberRole(context.Context, *connect.Request[v1.AppMember]) (*connect.Response[v1.Ack], error) {
+func (UnimplementedPlanServiceHandler) SetMemberRole(context.Context, *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SetMemberRole is not implemented"))
 }
 
-func (UnimplementedPlanServiceHandler) SaveAccessRule(context.Context, *connect.Request[v1.AccessRule]) (*connect.Response[v1.AccessRule], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SaveAccessRule is not implemented"))
+func (UnimplementedPlanServiceHandler) CreateAccessRule(context.Context, *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateAccessRule is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) UpdateAccessRule(context.Context, *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.UpdateAccessRule is not implemented"))
 }
 
 func (UnimplementedPlanServiceHandler) DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error) {

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
@@ -32,49 +33,74 @@ func (s *PlanServer) items(ctx context.Context, app string) ([]itemRow, error) {
 	return items, nil
 }
 
-// saveItem keeps the definition as protojson. If *id is empty, it sets a new id (id points into msg).
-func (s *PlanServer) saveItem(ctx context.Context, app string, typ nanashiv1.ItemType, id *string, msg proto.Message) error {
+// itemDef is the definition of a table, a view or a board.
+type itemDef interface {
+	proto.Message
+	GetId() string
+}
+
+func (s *PlanServer) CreateTable(ctx context.Context, req *connect.Request[nanashiv1.CreateTableRequest]) (*ack, error) {
+	return s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_TABLE, req.Msg.Table, true)
+}
+
+func (s *PlanServer) UpdateTable(ctx context.Context, req *connect.Request[nanashiv1.UpdateTableRequest]) (*ack, error) {
+	return s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_TABLE, req.Msg.Table, false)
+}
+
+func (s *PlanServer) CreateView(ctx context.Context, req *connect.Request[nanashiv1.CreateViewRequest]) (*ack, error) {
+	return s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_VIEW, req.Msg.View, true)
+}
+
+func (s *PlanServer) UpdateView(ctx context.Context, req *connect.Request[nanashiv1.UpdateViewRequest]) (*ack, error) {
+	return s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_VIEW, req.Msg.View, false)
+}
+
+func (s *PlanServer) CreateBoard(ctx context.Context, req *connect.Request[nanashiv1.CreateBoardRequest]) (*ack, error) {
+	return s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_BOARD, req.Msg.Board, true)
+}
+
+func (s *PlanServer) UpdateBoard(ctx context.Context, req *connect.Request[nanashiv1.UpdateBoardRequest]) (*ack, error) {
+	return s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_BOARD, req.Msg.Board, false)
+}
+
+// saveItem keeps the definition as protojson. GetModel takes the application ID and the id from the row, not from def.
+// If create is true, an existing id gives AlreadyExists. If create is false, a missing id (of this type) gives NotFound.
+func (s *PlanServer) saveItem(ctx context.Context, app string, typ nanashiv1.ItemType, def itemDef, create bool) (*ack, error) {
+	id, err := parseID("id", def.GetId())
+	if err != nil {
+		return nil, err
+	}
+	b, err := protojson.Marshal(def)
+	if err != nil {
+		return nil, err
+	}
 	// The lock keeps an item write out of a snapshot and out of a rename of the names that the item keeps.
 	defer s.lock(app)()
-	if *id == "" {
-		*id = newID()
+	sql := "update app_item set def = $4 where app_id = $1 and id = $2 and type = $3"
+	if create {
+		sql = "insert into app_item (app_id, id, type, def) values ($1, $2, $3, $4) on conflict (app_id, id) do nothing"
 	}
-	def, err := protojson.Marshal(msg)
+	res, err := s.Pool.Exec(ctx, sql, app, id, typ, string(b))
 	if err != nil {
-		return err
+		return nil, dbError(err)
 	}
-	if _, err := s.Pool.Exec(ctx, `insert into app_item (app_id, id, type, def) values ($1, $2, $3, $4)
-		on conflict (app_id, id) do update set def = excluded.def where app_item.type = excluded.type`, app, *id, typ, string(def)); err != nil {
-		return dbError(err)
+	if res.RowsAffected() == 0 && create {
+		return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("同じ id がすでにある"))
 	}
-	return nil
-}
-
-func (s *PlanServer) SaveTable(ctx context.Context, req *connect.Request[nanashiv1.TableDef]) (*connect.Response[nanashiv1.TableDef], error) {
-	if err := s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_TABLE, &req.Msg.Id, req.Msg); err != nil {
-		return nil, err
+	if res.RowsAffected() == 0 {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("変更する対象がない"))
 	}
-	return connect.NewResponse(req.Msg), nil
-}
-
-func (s *PlanServer) SaveView(ctx context.Context, req *connect.Request[nanashiv1.ViewDef]) (*connect.Response[nanashiv1.ViewDef], error) {
-	if err := s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_VIEW, &req.Msg.Id, req.Msg); err != nil {
-		return nil, err
-	}
-	return connect.NewResponse(req.Msg), nil
-}
-
-func (s *PlanServer) SaveBoard(ctx context.Context, req *connect.Request[nanashiv1.BoardDef]) (*connect.Response[nanashiv1.BoardDef], error) {
-	if err := s.saveItem(ctx, req.Msg.AppId, nanashiv1.ItemType_ITEM_TYPE_BOARD, &req.Msg.Id, req.Msg); err != nil {
-		return nil, err
-	}
-	return connect.NewResponse(req.Msg), nil
+	return ok()
 }
 
 func (s *PlanServer) DeleteItem(ctx context.Context, req *connect.Request[nanashiv1.DeleteItemRequest]) (*ack, error) {
+	id, err := parseID("id", req.Msg.Id)
+	if err != nil {
+		return nil, err
+	}
 	defer s.lock(req.Msg.AppId)()
 	if _, err := s.Pool.Exec(ctx, "delete from app_item where app_id = $1 and id = $2 and type = $3",
-		req.Msg.AppId, req.Msg.Id, req.Msg.Type); err != nil {
+		req.Msg.AppId, id, req.Msg.Type); err != nil {
 		return nil, dbError(err)
 	}
 	if req.Msg.Type == nanashiv1.ItemType_ITEM_TYPE_VIEW {
@@ -82,7 +108,7 @@ func (s *PlanServer) DeleteItem(ctx context.Context, req *connect.Request[nanash
 		if _, err := s.Pool.Exec(ctx, `update app_item set def = jsonb_set(def, '{widgets}', coalesce(
 			(select jsonb_agg(w) from jsonb_array_elements(def->'widgets') w where w->>'viewId' is distinct from $2), '[]'))
 			where app_id = $1 and type = $3 and def->'widgets' @> jsonb_build_array(jsonb_build_object('viewId', $2::text))`,
-			req.Msg.AppId, req.Msg.Id, nanashiv1.ItemType_ITEM_TYPE_BOARD); err != nil {
+			req.Msg.AppId, id, nanashiv1.ItemType_ITEM_TYPE_BOARD); err != nil {
 			return nil, dbError(err)
 		}
 	}

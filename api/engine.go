@@ -5,8 +5,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -193,12 +191,6 @@ type engineRead struct {
 
 // The actions follow.
 
-func newID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 // Create makes the model of an application in the router. It is idempotent and starts no engine.
 func (e *Engines) Create(ctx context.Context, app string) error {
 	req, err := http.NewRequestWithContext(ctx, "PUT", e.Router+"/models/"+app, nil)
@@ -240,12 +232,13 @@ func (e *Engines) read(ctx context.Context, app string, r engineRead) (engineCub
 	return cube, err
 }
 
-// write sends the operations as one transaction. A new client_op_id lets the router resend it safely.
-func (e *Engines) write(ctx context.Context, app, reason string, ops []op) error {
+// write sends the operations as one transaction. The client_op_id of the request (opID) lets the router and the
+// frontend resend it safely: the engine does not commit the same opID two times.
+func (e *Engines) write(ctx context.Context, app, reason, opID string, ops []op) error {
 	if len(ops) == 0 {
 		return nil
 	}
-	body, err := json.Marshal(map[string]any{"client_op_id": newID(), "reason": reason, "ops": ops})
+	body, err := json.Marshal(map[string]any{"client_op_id": opID, "reason": reason, "ops": ops})
 	if err != nil {
 		return err
 	}

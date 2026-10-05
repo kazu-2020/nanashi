@@ -9,7 +9,7 @@ import {
   type ComponentType,
   type ReactNode,
 } from "react";
-import { api, errorText, getUser, setUser } from "./api";
+import { api, errorText, getUser, newId, setUser } from "./api";
 import { Role } from "./gen/nanashi/v1/plan_pb";
 import { roleName } from "./logic";
 import { AppCtx, Report, useRun } from "./state";
@@ -155,8 +155,13 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
     queryFn: () => api.listSnapshots({ appId: from }),
     enabled: !!from,
   });
+  // The id of the next application. A new id comes after each create.
+  const [id, setId] = useState(newId);
   const create = (snapshotId: string) =>
-    run(async () => props.onOpen(await api.createApplication({ name, snapshotId })));
+    run(async (clientOpId) => {
+      props.onOpen(await api.createApplication({ id, clientOpId, name, snapshotId }));
+      setId(newId());
+    });
   return (
     <div className="flex flex-col gap-4">
       <h2 className="text-lg font-bold">アプリケーション</h2>
