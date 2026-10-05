@@ -1,54 +1,73 @@
+-- ponytail: a database from before the uuid ids has text ids. The system is not in production, so drop the old
+-- tables. Delete this block when no such database is left.
+do $$ begin
+  if exists (select 1 from information_schema.columns
+             where table_name = 'app_application' and column_name = 'id' and data_type = 'text') then
+    drop table if exists app_application, app_member, app_list, app_property, app_item, app_comment, app_audit,
+      app_snapshot, app_access_rule cascade;
+  end if;
+end $$;
+drop function if exists app_rename(jsonb, text, text);
+
 create table if not exists app_application (
-  id text primary key,
+  id uuid primary key,
   name text not null,
+  -- A transaction that writes a row of a snapshot (app_list, app_property, app_item) adds 1. CreateSnapshot compares it.
+  version bigint not null default 0,
   created_at timestamptz not null default now()
 );
 create table if not exists app_member (
-  app_id text not null references app_application (id) on delete cascade,
+  app_id uuid not null references app_application (id) on delete cascade,
   user_name text not null,
   role integer not null,
   primary key (app_id, user_name)
 );
 create table if not exists app_list (
-  app_id text not null,
-  name text not null,
+  app_id uuid not null references app_application (id) on delete cascade,
+  id uuid not null,
   kind integer not null,
-  primary key (app_id, name)
+  -- The number of the next new row of a TRANSACTION list. Import reserves a range with one update (row lock), so
+  -- concurrent imports get different names. The largest number in the model is a floor for a restored list.
+  next_row bigint not null default 1,
+  primary key (app_id, id)
 );
+alter table app_list add column if not exists next_row bigint not null default 1;
+-- app_property has a row for each property. The engine keeps the values of a DIMENSION property. The api keeps the
+-- values of a TEXT property. The Metric metric_id keeps the values of a NUMBER or BOOLEAN property.
 create table if not exists app_property (
-  app_id text not null,
-  list text not null,
+  app_id uuid not null references app_application (id) on delete cascade,
+  list_id uuid not null,
+  id uuid not null,
   name text not null,
   type integer not null,
+  metric_id uuid,
   text_values jsonb not null default '{}',
+  deleted boolean not null default false,
   ord bigserial,
-  primary key (app_id, list, name)
+  primary key (app_id, list_id, id)
 );
+create unique index if not exists app_property_name on app_property (app_id, list_id, name) where not deleted;
 create table if not exists app_item (
-  app_id text not null,
-  id text not null,
+  app_id uuid not null references app_application (id) on delete cascade,
+  id uuid not null,
   type integer not null,
   def jsonb not null,
   ord bigserial,
   primary key (app_id, id)
 );
 create table if not exists app_comment (
-  id bigserial primary key,
-  app_id text not null,
-  metric text not null,
+  app_id uuid not null references app_application (id) on delete cascade,
+  id uuid not null,
+  metric uuid not null,
   cell jsonb not null,
   user_name text not null,
   body text not null,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  primary key (app_id, id)
 );
--- ponytail: a database from before the column rename has "target". Delete this block when no such database is left.
-do $$ begin
-  alter table app_comment rename column target to metric;
-exception when undefined_column then null;
-end $$;
 create table if not exists app_audit (
   id bigserial primary key,
-  app_id text not null,
+  app_id uuid not null,
   user_name text not null,
   action text not null,
   detail text not null,
@@ -56,26 +75,39 @@ create table if not exists app_audit (
 );
 create index if not exists app_audit_app on app_audit (app_id, id);
 create table if not exists app_snapshot (
-  id text primary key,
-  app_id text not null,
+  id uuid primary key,
+  app_id uuid not null references app_application (id) on delete cascade,
   name text not null,
   user_name text not null,
   content text not null, -- text, not jsonb: jsonb does not keep the key order of the engine definitions
   created_at timestamptz not null default now()
 );
 create table if not exists app_access_rule (
-  app_id text not null,
-  id text not null,
+  app_id uuid not null references app_application (id) on delete cascade,
+  id uuid not null,
   role integer not null,
-  list text not null,
+  list uuid not null,
   members jsonb not null,
   write boolean not null,
   primary key (app_id, id)
 );
--- app_rename gives names (a JSON array of strings) with old replaced by new, in the same order.
--- If new is null, it removes old. An empty result is '[]'.
-create or replace function app_rename(names jsonb, old text, new text) returns jsonb language sql immutable as $$
-  select coalesce(jsonb_agg(case when n = to_jsonb(old) then to_jsonb(new) else n end order by i), '[]')
-  from jsonb_array_elements(names) with ordinality as e(n, i)
-  where n <> to_jsonb(old) or new is not null
-$$;
+-- app_operation is the outbox: one row for each client_op_id. A request that the engine must apply is pending
+-- until the api knows the engine result. A done row keeps the result. A failed row keeps the error.
+-- It has no foreign key: a failed CreateApplication deletes its application and keeps its row.
+create table if not exists app_operation (
+  app_id uuid not null,
+  client_op_id uuid not null,
+  user_name text not null,
+  method text not null,
+  request_hash text not null,
+  ops jsonb,
+  seq bigint,
+  expect boolean not null default false,
+  -- The rows that the first transaction made, as [{"table", "id", "list_id"?}]. A refusal deletes them.
+  made jsonb,
+  status text not null,
+  result jsonb,
+  error jsonb,
+  created_at timestamptz not null default now(),
+  primary key (app_id, client_op_id)
+);

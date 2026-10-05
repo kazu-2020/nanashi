@@ -12,7 +12,7 @@ import {
 import { api, errorText, getUser, newId, setUser } from "./api";
 import { Role } from "./gen/nanashi/v1/plan_pb";
 import { roleName } from "./logic";
-import { AppCtx, Report, useRun } from "./state";
+import { AppCtx, modelNames, Report, useRun } from "./state";
 import { Sel } from "./ui";
 
 const ListsPage = lazy(() => import("./pages/model").then((m) => ({ default: m.ListsPage })));
@@ -160,8 +160,7 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
   const create = (snapshotId: string) =>
     run(async (clientOpId) => {
       props.onOpen(await api.createApplication({ id, clientOpId, name, snapshotId }));
-      setId(newId());
-    });
+    }).then(() => setId(newId()));
   return (
     <div className="flex flex-col gap-4">
       <h2 className="text-lg font-bold">アプリケーション</h2>
@@ -223,7 +222,7 @@ function Shell(props: { appId: string }) {
   const pages = PAGES.filter((p) => !p.role || can(p.role));
   const Page = (pages.find((p) => p.id === page) ?? pages[0]).page;
   return (
-    <AppCtx.Provider value={{ appId: props.appId, model, can }}>
+    <AppCtx.Provider value={{ appId: props.appId, model, names: modelNames(model), can }}>
       <div className="flex gap-4">
         <nav className="flex w-40 shrink-0 flex-col gap-1">
           {pages.map((p) => (

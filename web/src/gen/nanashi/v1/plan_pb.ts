@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file nanashi/v1/plan.proto.
  */
 export const file_nanashi_v1_plan: GenFile = /*@__PURE__*/
-  fileDesc("ChVuYW5hc2hpL3YxL3BsYW4ucHJvdG8SCm5hbmFzaGkudjEiBQoDQWNrIkcKC0FwcGxpY2F0aW9uEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSHgoEcm9sZRgDIAEoDjIQLm5hbmFzaGkudjEuUm9sZSIZChdMaXN0QXBwbGljYXRpb25zUmVxdWVzdCJJChhMaXN0QXBwbGljYXRpb25zUmVzcG9uc2USLQoMYXBwbGljYXRpb25zGAEgAygLMhcubmFuYXNoaS52MS5BcHBsaWNhdGlvbiJfChhDcmVhdGVBcHBsaWNhdGlvblJlcXVlc3QSDAoEbmFtZRgBIAEoCRITCgtzbmFwc2hvdF9pZBgCIAEoCRIKCgJpZBgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkiIQoPR2V0TW9kZWxSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCSJTCgtQcm9wZXJ0eURlZhIMCgRuYW1lGAEgASgJEiYKBHR5cGUYAiABKA4yGC5uYW5hc2hpLnYxLlByb3BlcnR5VHlwZRIOCgZ0YXJnZXQYAyABKAkigQEKBk1lbWJlchIMCgRuYW1lGAEgASgJEjYKCnByb3BlcnRpZXMYAiADKAsyIi5uYW5hc2hpLnYxLk1lbWJlci5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEikwEKB0xpc3REZWYSDAoEbmFtZRgBIAEoCRIiCgRraW5kGAIgASgOMhQubmFuYXNoaS52MS5MaXN0S2luZBIjCgdtZW1iZXJzGAQgAygLMhIubmFuYXNoaS52MS5NZW1iZXISKwoKcHJvcGVydGllcxgFIAMoCzIXLm5hbmFzaGkudjEuUHJvcGVydHlEZWZKBAgDEAQijQEKCU1ldHJpY0RlZhIMCgRuYW1lGAEgASgJEhIKCmRpbWVuc2lvbnMYAiADKAkSIwoEa2luZBgDIAEoDjIVLm5hbmFzaGkudjEuVmFsdWVLaW5kEhMKC21lbWJlcl9saXN0GAYgASgJEg8KB2Zvcm11bGEYBCABKAkSEwoLb3ZlcnJpZGFibGUYBSABKAgi8QEKCE1vZGVsRGVmEh4KBHJvbGUYAiABKA4yEC5uYW5hc2hpLnYxLlJvbGUSIgoFbGlzdHMYAyADKAsyEy5uYW5hc2hpLnYxLkxpc3REZWYSJgoHbWV0cmljcxgEIAMoCzIVLm5hbmFzaGkudjEuTWV0cmljRGVmEiQKBnRhYmxlcxgFIAMoCzIULm5hbmFzaGkudjEuVGFibGVEZWYSIgoFdmlld3MYBiADKAsyEy5uYW5hc2hpLnYxLlZpZXdEZWYSJAoGYm9hcmRzGAcgAygLMhQubmFuYXNoaS52MS5Cb2FyZERlZkoECAEQAlIDc2VxInwKEUNyZWF0ZUxpc3RSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIMCgRuYW1lGAIgASgJEiIKBGtpbmQYAyABKA4yFC5uYW5hc2hpLnYxLkxpc3RLaW5kEg8KB21lbWJlcnMYBCADKAkSFAoMY2xpZW50X29wX2lkGAUgASgJInMKEkFkZFByb3BlcnR5UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDAoEbGlzdBgCIAEoCRIpCghwcm9wZXJ0eRgDIAEoCzIXLm5hbmFzaGkudjEuUHJvcGVydHlEZWYSFAoMY2xpZW50X29wX2lkGAQgASgJIm8KEkVkaXRNZW1iZXJzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDAoEbGlzdBgCIAEoCRIlCgVlZGl0cxgDIAMoCzIWLm5hbmFzaGkudjEuTWVtYmVyRWRpdBIUCgxjbGllbnRfb3BfaWQYBCABKAki5AEKCk1lbWJlckVkaXQSJAoDYWRkGAEgASgLMhUubmFuYXNoaS52MS5BZGRNZW1iZXJIABIqCgZyZW5hbWUYAiABKAsyGC5uYW5hc2hpLnYxLlJlbmFtZU1lbWJlckgAEioKBnJlbW92ZRgDIAEoCzIYLm5hbmFzaGkudjEuUmVtb3ZlTWVtYmVySAASJgoEbW92ZRgEIAEoCzIWLm5hbmFzaGkudjEuTW92ZU1lbWJlckgAEigKA3NldBgFIAEoCzIZLm5hbmFzaGkudjEuU2V0UHJvcGVydGllc0gAQgYKBGVkaXQihwEKCUFkZE1lbWJlchIMCgRuYW1lGAEgASgJEjkKCnByb3BlcnRpZXMYAiADKAsyJS5uYW5hc2hpLnYxLkFkZE1lbWJlci5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiLgoMUmVuYW1lTWVtYmVyEgwKBG5hbWUYASABKAkSEAoIbmV3X25hbWUYAiABKAkiHAoMUmVtb3ZlTWVtYmVyEgwKBG5hbWUYASABKAkiLAoKTW92ZU1lbWJlchIMCgRuYW1lGAEgASgJEhAKCHBvc2l0aW9uGAIgASgFIo8BCg1TZXRQcm9wZXJ0aWVzEgwKBG5hbWUYASABKAkSPQoKcHJvcGVydGllcxgCIAMoCzIpLm5hbmFzaGkudjEuU2V0UHJvcGVydGllcy5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiYAoVQ3JlYXRlQ2FsZW5kYXJSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRISCgpzdGFydF95ZWFyGAIgASgFEg0KBXllYXJzGAMgASgFEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJeChVDcmVhdGVTY2VuYXJpb1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSEQoJY29weV9mcm9tGAMgASgJEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJiChNDcmVhdGVNZXRyaWNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJQoGbWV0cmljGAMgASgLMhUubmFuYXNoaS52MS5NZXRyaWNEZWYiYgoTVXBkYXRlTWV0cmljUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiUKBm1ldHJpYxgDIAEoCzIVLm5hbmFzaGkudjEuTWV0cmljRGVmIlsKE1JlbmFtZU1ldHJpY1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSEAoIbmV3X25hbWUYAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJIkkKE0RlbGV0ZU1ldHJpY1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSFAoMY2xpZW50X29wX2lkGAMgASgJIhgKB01lbWJlcnMSDQoFbmFtZXMYASADKAkiRwoFVmFsdWUSEAoGbnVtYmVyGAEgASgBSAASEQoHYm9vbGVhbhgCIAEoCEgAEhAKBm1lbWJlchgDIAEoCUgAQgcKBXZhbHVlIvkBCgxRdWVyeVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEg8KB21ldHJpY3MYAiADKAkSDAoEcm93cxgDIAMoCRIPCgdjb2x1bW5zGAQgAygJEjYKB2ZpbHRlcnMYBSADKAsyJS5uYW5hc2hpLnYxLlF1ZXJ5UmVxdWVzdC5GaWx0ZXJzRW50cnkSLAoLYWdncmVnYXRpb24YBiABKA4yFy5uYW5hc2hpLnYxLkFnZ3JlZ2F0aW9uGkMKDEZpbHRlcnNFbnRyeRILCgNrZXkYASABKAkSIgoFdmFsdWUYAiABKAsyEy5uYW5hc2hpLnYxLk1lbWJlcnM6AjgBIk0KCVF1ZXJ5Q2VsbBIOCgZtZXRyaWMYASABKAkSDgoGY29vcmRzGAIgAygJEiAKBXZhbHVlGAMgASgLMhEubmFuYXNoaS52MS5WYWx1ZSJPCg1RdWVyeVJlc3BvbnNlEhIKCmRpbWVuc2lvbnMYAiADKAkSJAoFY2VsbHMYAyADKAsyFS5uYW5hc2hpLnYxLlF1ZXJ5Q2VsbEoECAEQAiKfAQoJQ2VsbFdyaXRlEg4KBm1ldHJpYxgBIAEoCRIxCgZjb29yZHMYAiADKAsyIS5uYW5hc2hpLnYxLkNlbGxXcml0ZS5Db29yZHNFbnRyeRIgCgV2YWx1ZRgDIAEoCzIRLm5hbmFzaGkudjEuVmFsdWUaLQoLQ29vcmRzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASJgChFXcml0ZUNlbGxzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSJQoGd3JpdGVzGAIgAygLMhUubmFuYXNoaS52MS5DZWxsV3JpdGUSFAoMY2xpZW50X29wX2lkGAMgASgJIqABCg1JbXBvcnRSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRILCgNjc3YYAiABKAkSFAoMY2xpZW50X29wX2lkGAUgASgJEiYKBGxpc3QYAyABKAsyFi5uYW5hc2hpLnYxLkxpc3RJbXBvcnRIABIqCgZtZXRyaWMYBCABKAsyGC5uYW5hc2hpLnYxLk1ldHJpY0ltcG9ydEgAQggKBnRhcmdldCKwAQoKTGlzdEltcG9ydBIMCgRsaXN0GAEgASgJEhUKDW1lbWJlcl9jb2x1bW4YAiABKAkSRQoQcHJvcGVydHlfY29sdW1ucxgDIAMoCzIrLm5hbmFzaGkudjEuTGlzdEltcG9ydC5Qcm9wZXJ0eUNvbHVtbnNFbnRyeRo2ChRQcm9wZXJ0eUNvbHVtbnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIs0BCgxNZXRyaWNJbXBvcnQSDgoGbWV0cmljGAEgASgJEkkKEWRpbWVuc2lvbl9jb2x1bW5zGAIgAygLMi4ubmFuYXNoaS52MS5NZXRyaWNJbXBvcnQuRGltZW5zaW9uQ29sdW1uc0VudHJ5EhQKDHZhbHVlX2NvbHVtbhgDIAEoCRITCgthZGRfbWVtYmVycxgEIAEoCBo3ChVEaW1lbnNpb25Db2x1bW5zRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASIeCg5JbXBvcnRSZXNwb25zZRIMCgRyb3dzGAEgASgFIl8KEkNyZWF0ZVRhYmxlUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiMKBXRhYmxlGAMgASgLMhQubmFuYXNoaS52MS5UYWJsZURlZiJfChJVcGRhdGVUYWJsZVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIjCgV0YWJsZRgDIAEoCzIULm5hbmFzaGkudjEuVGFibGVEZWYiRQoIVGFibGVEZWYSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEgwKBG5hbWUYAyABKAkSDwoHbWV0cmljcxgEIAMoCSJcChFDcmVhdGVWaWV3UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiEKBHZpZXcYAyABKAsyEy5uYW5hc2hpLnYxLlZpZXdEZWYiXAoRVXBkYXRlVmlld1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIhCgR2aWV3GAMgASgLMhMubmFuYXNoaS52MS5WaWV3RGVmIq8CCgdWaWV3RGVmEg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIMCgRuYW1lGAMgASgJEg8KB21ldHJpY3MYBCADKAkSDAoEcm93cxgFIAMoCRIPCgdjb2x1bW5zGAYgAygJEjEKB2ZpbHRlcnMYByADKAsyIC5uYW5hc2hpLnYxLlZpZXdEZWYuRmlsdGVyc0VudHJ5EiQKB2Rpc3BsYXkYCCABKA4yEy5uYW5hc2hpLnYxLkRpc3BsYXkSLAoLYWdncmVnYXRpb24YCSABKA4yFy5uYW5hc2hpLnYxLkFnZ3JlZ2F0aW9uGkMKDEZpbHRlcnNFbnRyeRILCgNrZXkYASABKAkSIgoFdmFsdWUYAiABKAsyEy5uYW5hc2hpLnYxLk1lbWJlcnM6AjgBIjYKBldpZGdldBIRCgd2aWV3X2lkGAEgASgJSAASDgoEdGV4dBgCIAEoCUgAQgkKB2NvbnRlbnQiXwoSQ3JlYXRlQm9hcmRSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIwoFYm9hcmQYAyABKAsyFC5uYW5hc2hpLnYxLkJvYXJkRGVmIl8KElVwZGF0ZUJvYXJkUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiMKBWJvYXJkGAMgASgLMhQubmFuYXNoaS52MS5Cb2FyZERlZiJxCghCb2FyZERlZhIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIjCgd3aWRnZXRzGAQgAygLMhIubmFuYXNoaS52MS5XaWRnZXQSFgoOcGFnZV9zZWxlY3RvcnMYBSADKAkiaQoRRGVsZXRlSXRlbVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEiIKBHR5cGUYAiABKA4yFC5uYW5hc2hpLnYxLkl0ZW1UeXBlEgoKAmlkGAMgASgJEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJfChFBZGRDb21tZW50UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiQKB2NvbW1lbnQYAyABKAsyEy5uYW5hc2hpLnYxLkNvbW1lbnQivwEKB0NvbW1lbnQSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEg4KBm1ldHJpYxgDIAEoCRIrCgRjZWxsGAQgAygLMh0ubmFuYXNoaS52MS5Db21tZW50LkNlbGxFbnRyeRIMCgR1c2VyGAUgASgJEgwKBGJvZHkYBiABKAkSEgoKY3JlYXRlZF9hdBgHIAEoAxorCglDZWxsRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASI1ChNMaXN0Q29tbWVudHNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIOCgZtZXRyaWMYAiABKAkiPQoUTGlzdENvbW1lbnRzUmVzcG9uc2USJQoIY29tbWVudHMYASADKAsyEy5uYW5hc2hpLnYxLkNvbW1lbnQiWgoKQXVkaXRFbnRyeRIKCgJpZBgBIAEoCRIMCgR1c2VyGAIgASgJEhIKCmNyZWF0ZWRfYXQYAyABKAMSDgoGYWN0aW9uGAQgASgJEg4KBmRldGFpbBgFIAEoCSIxChBMaXN0QXVkaXRSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRINCgVsaW1pdBgCIAEoBSI8ChFMaXN0QXVkaXRSZXNwb25zZRInCgdlbnRyaWVzGAEgAygLMhYubmFuYXNoaS52MS5BdWRpdEVudHJ5IkYKCFNuYXBzaG90EgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSDAoEdXNlchgDIAEoCRISCgpjcmVhdGVkX2F0GAQgASgDIiYKFExpc3RTbmFwc2hvdHNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCSJAChVMaXN0U25hcHNob3RzUmVzcG9uc2USJwoJc25hcHNob3RzGAEgAygLMhQubmFuYXNoaS52MS5TbmFwc2hvdCJXChVDcmVhdGVTbmFwc2hvdFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSCgoCaWQYAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJIiIKEEdldEFjY2Vzc1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJImMKFFNldE1lbWJlclJvbGVSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJQoGbWVtYmVyGAMgASgLMhUubmFuYXNoaS52MS5BcHBNZW1iZXIiSQoJQXBwTWVtYmVyEg4KBmFwcF9pZBgBIAEoCRIMCgR1c2VyGAIgASgJEh4KBHJvbGUYAyABKA4yEC5uYW5hc2hpLnYxLlJvbGUiZQoXQ3JlYXRlQWNjZXNzUnVsZVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIkCgRydWxlGAMgASgLMhYubmFuYXNoaS52MS5BY2Nlc3NSdWxlImUKF1VwZGF0ZUFjY2Vzc1J1bGVSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJAoEcnVsZRgDIAEoCzIWLm5hbmFzaGkudjEuQWNjZXNzUnVsZSJ2CgpBY2Nlc3NSdWxlEg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIeCgRyb2xlGAMgASgOMhAubmFuYXNoaS52MS5Sb2xlEgwKBGxpc3QYBCABKAkSDwoHbWVtYmVycxgFIAMoCRINCgV3cml0ZRgGIAEoCCJLChdEZWxldGVBY2Nlc3NSdWxlUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSFAoMY2xpZW50X29wX2lkGAMgASgJIlcKBkFjY2VzcxImCgdtZW1iZXJzGAEgAygLMhUubmFuYXNoaS52MS5BcHBNZW1iZXISJQoFcnVsZXMYAiADKAsyFi5uYW5hc2hpLnYxLkFjY2Vzc1J1bGUqZQoEUm9sZRIUChBST0xFX1VOU1BFQ0lGSUVEEAASDwoLUk9MRV9WSUVXRVIQARIUChBST0xFX0NPTlRSSUJVVE9SEAISEAoMUk9MRV9NT0RFTEVSEAMSDgoKUk9MRV9BRE1JThAEKokBCghMaXN0S2luZBIZChVMSVNUX0tJTkRfVU5TUEVDSUZJRUQQABIXChNMSVNUX0tJTkRfRElNRU5TSU9OEAESGQoVTElTVF9LSU5EX1RSQU5TQUNUSU9OEAISFgoSTElTVF9LSU5EX0NBTEVOREFSEAMSFgoSTElTVF9LSU5EX1NDRU5BUklPEAQqlwEKDFByb3BlcnR5VHlwZRIdChlQUk9QRVJUWV9UWVBFX1VOU1BFQ0lGSUVEEAASGwoXUFJPUEVSVFlfVFlQRV9ESU1FTlNJT04QARIYChRQUk9QRVJUWV9UWVBFX05VTUJFUhACEhkKFVBST1BFUlRZX1RZUEVfQk9PTEVBThADEhYKElBST1BFUlRZX1RZUEVfVEVYVBAEKm0KCVZhbHVlS2luZBIaChZWQUxVRV9LSU5EX1VOU1BFQ0lGSUVEEAASFQoRVkFMVUVfS0lORF9OVU1CRVIQARIWChJWQUxVRV9LSU5EX0JPT0xFQU4QAhIVChFWQUxVRV9LSU5EX01FTUJFUhADKpUBCgtBZ2dyZWdhdGlvbhIbChdBR0dSRUdBVElPTl9VTlNQRUNJRklFRBAAEhMKD0FHR1JFR0FUSU9OX1NVTRABEhMKD0FHR1JFR0FUSU9OX0FWRxACEhMKD0FHR1JFR0FUSU9OX01JThADEhMKD0FHR1JFR0FUSU9OX01BWBAEEhUKEUFHR1JFR0FUSU9OX0NPVU5UEAUqaAoHRGlzcGxheRIXChNESVNQTEFZX1VOU1BFQ0lGSUVEEAASEAoMRElTUExBWV9HUklEEAESEAoMRElTUExBWV9MSU5FEAISDwoLRElTUExBWV9CQVIQAxIPCgtESVNQTEFZX0tQSRAEKmMKCEl0ZW1UeXBlEhkKFUlURU1fVFlQRV9VTlNQRUNJRklFRBAAEhMKD0lURU1fVFlQRV9UQUJMRRABEhIKDklURU1fVFlQRV9WSUVXEAISEwoPSVRFTV9UWVBFX0JPQVJEEAMy6REKC1BsYW5TZXJ2aWNlEl8KEExpc3RBcHBsaWNhdGlvbnMSIy5uYW5hc2hpLnYxLkxpc3RBcHBsaWNhdGlvbnNSZXF1ZXN0GiQubmFuYXNoaS52MS5MaXN0QXBwbGljYXRpb25zUmVzcG9uc2UiABJUChFDcmVhdGVBcHBsaWNhdGlvbhIkLm5hbmFzaGkudjEuQ3JlYXRlQXBwbGljYXRpb25SZXF1ZXN0GhcubmFuYXNoaS52MS5BcHBsaWNhdGlvbiIAEj8KCEdldE1vZGVsEhsubmFuYXNoaS52MS5HZXRNb2RlbFJlcXVlc3QaFC5uYW5hc2hpLnYxLk1vZGVsRGVmIgASPgoKQ3JlYXRlTGlzdBIdLm5hbmFzaGkudjEuQ3JlYXRlTGlzdFJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC0FkZFByb3BlcnR5Eh4ubmFuYXNoaS52MS5BZGRQcm9wZXJ0eVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC0VkaXRNZW1iZXJzEh4ubmFuYXNoaS52MS5FZGl0TWVtYmVyc1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkYKDkNyZWF0ZUNhbGVuZGFyEiEubmFuYXNoaS52MS5DcmVhdGVDYWxlbmRhclJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkYKDkNyZWF0ZVNjZW5hcmlvEiEubmFuYXNoaS52MS5DcmVhdGVTY2VuYXJpb1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkIKDENyZWF0ZU1ldHJpYxIfLm5hbmFzaGkudjEuQ3JlYXRlTWV0cmljUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQgoMVXBkYXRlTWV0cmljEh8ubmFuYXNoaS52MS5VcGRhdGVNZXRyaWNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJCCgxSZW5hbWVNZXRyaWMSHy5uYW5hc2hpLnYxLlJlbmFtZU1ldHJpY1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkIKDERlbGV0ZU1ldHJpYxIfLm5hbmFzaGkudjEuRGVsZXRlTWV0cmljUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASPgoFUXVlcnkSGC5uYW5hc2hpLnYxLlF1ZXJ5UmVxdWVzdBoZLm5hbmFzaGkudjEuUXVlcnlSZXNwb25zZSIAEj4KCldyaXRlQ2VsbHMSHS5uYW5hc2hpLnYxLldyaXRlQ2VsbHNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJBCgZJbXBvcnQSGS5uYW5hc2hpLnYxLkltcG9ydFJlcXVlc3QaGi5uYW5hc2hpLnYxLkltcG9ydFJlc3BvbnNlIgASQAoLQ3JlYXRlVGFibGUSHi5uYW5hc2hpLnYxLkNyZWF0ZVRhYmxlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQAoLVXBkYXRlVGFibGUSHi5uYW5hc2hpLnYxLlVwZGF0ZVRhYmxlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASPgoKQ3JlYXRlVmlldxIdLm5hbmFzaGkudjEuQ3JlYXRlVmlld1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEj4KClVwZGF0ZVZpZXcSHS5uYW5hc2hpLnYxLlVwZGF0ZVZpZXdSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJACgtDcmVhdGVCb2FyZBIeLm5hbmFzaGkudjEuQ3JlYXRlQm9hcmRSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJACgtVcGRhdGVCb2FyZBIeLm5hbmFzaGkudjEuVXBkYXRlQm9hcmRSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABI+CgpEZWxldGVJdGVtEh0ubmFuYXNoaS52MS5EZWxldGVJdGVtUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASUwoMTGlzdENvbW1lbnRzEh8ubmFuYXNoaS52MS5MaXN0Q29tbWVudHNSZXF1ZXN0GiAubmFuYXNoaS52MS5MaXN0Q29tbWVudHNSZXNwb25zZSIAEkIKCkFkZENvbW1lbnQSHS5uYW5hc2hpLnYxLkFkZENvbW1lbnRSZXF1ZXN0GhMubmFuYXNoaS52MS5Db21tZW50IgASSgoJTGlzdEF1ZGl0EhwubmFuYXNoaS52MS5MaXN0QXVkaXRSZXF1ZXN0Gh0ubmFuYXNoaS52MS5MaXN0QXVkaXRSZXNwb25zZSIAElYKDUxpc3RTbmFwc2hvdHMSIC5uYW5hc2hpLnYxLkxpc3RTbmFwc2hvdHNSZXF1ZXN0GiEubmFuYXNoaS52MS5MaXN0U25hcHNob3RzUmVzcG9uc2UiABJLCg5DcmVhdGVTbmFwc2hvdBIhLm5hbmFzaGkudjEuQ3JlYXRlU25hcHNob3RSZXF1ZXN0GhQubmFuYXNoaS52MS5TbmFwc2hvdCIAEj8KCUdldEFjY2VzcxIcLm5hbmFzaGkudjEuR2V0QWNjZXNzUmVxdWVzdBoSLm5hbmFzaGkudjEuQWNjZXNzIgASRAoNU2V0TWVtYmVyUm9sZRIgLm5hbmFzaGkudjEuU2V0TWVtYmVyUm9sZVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkoKEENyZWF0ZUFjY2Vzc1J1bGUSIy5uYW5hc2hpLnYxLkNyZWF0ZUFjY2Vzc1J1bGVSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJKChBVcGRhdGVBY2Nlc3NSdWxlEiMubmFuYXNoaS52MS5VcGRhdGVBY2Nlc3NSdWxlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASSgoQRGVsZXRlQWNjZXNzUnVsZRIjLm5hbmFzaGkudjEuRGVsZXRlQWNjZXNzUnVsZVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAQjtaOWdpdGh1Yi5jb20va2F6dS0yMDIwL25hbmFzaGkvYXBpL2dlbi9uYW5hc2hpL3YxO25hbmFzaGl2MWIGcHJvdG8z");
+  fileDesc("ChVuYW5hc2hpL3YxL3BsYW4ucHJvdG8SCm5hbmFzaGkudjEiBQoDQWNrIkcKC0FwcGxpY2F0aW9uEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSHgoEcm9sZRgDIAEoDjIQLm5hbmFzaGkudjEuUm9sZSIZChdMaXN0QXBwbGljYXRpb25zUmVxdWVzdCJJChhMaXN0QXBwbGljYXRpb25zUmVzcG9uc2USLQoMYXBwbGljYXRpb25zGAEgAygLMhcubmFuYXNoaS52MS5BcHBsaWNhdGlvbiJfChhDcmVhdGVBcHBsaWNhdGlvblJlcXVlc3QSDAoEbmFtZRgBIAEoCRITCgtzbmFwc2hvdF9pZBgCIAEoCRIKCgJpZBgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkiIQoPR2V0TW9kZWxSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCSJfCgtQcm9wZXJ0eURlZhIKCgJpZBgEIAEoCRIMCgRuYW1lGAEgASgJEiYKBHR5cGUYAiABKA4yGC5uYW5hc2hpLnYxLlByb3BlcnR5VHlwZRIOCgZ0YXJnZXQYAyABKAkijQEKBk1lbWJlchIKCgJpZBgDIAEoCRIMCgRuYW1lGAEgASgJEjYKCnByb3BlcnRpZXMYAiADKAsyIi5uYW5hc2hpLnYxLk1lbWJlci5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEinwEKB0xpc3REZWYSCgoCaWQYBiABKAkSDAoEbmFtZRgBIAEoCRIiCgRraW5kGAIgASgOMhQubmFuYXNoaS52MS5MaXN0S2luZBIjCgdtZW1iZXJzGAQgAygLMhIubmFuYXNoaS52MS5NZW1iZXISKwoKcHJvcGVydGllcxgFIAMoCzIXLm5hbmFzaGkudjEuUHJvcGVydHlEZWZKBAgDEAQimQEKCU1ldHJpY0RlZhIKCgJpZBgHIAEoCRIMCgRuYW1lGAEgASgJEhIKCmRpbWVuc2lvbnMYAiADKAkSIwoEa2luZBgDIAEoDjIVLm5hbmFzaGkudjEuVmFsdWVLaW5kEhMKC21lbWJlcl9saXN0GAYgASgJEg8KB2Zvcm11bGEYBCABKAkSEwoLb3ZlcnJpZGFibGUYBSABKAgi8QEKCE1vZGVsRGVmEh4KBHJvbGUYAiABKA4yEC5uYW5hc2hpLnYxLlJvbGUSIgoFbGlzdHMYAyADKAsyEy5uYW5hc2hpLnYxLkxpc3REZWYSJgoHbWV0cmljcxgEIAMoCzIVLm5hbmFzaGkudjEuTWV0cmljRGVmEiQKBnRhYmxlcxgFIAMoCzIULm5hbmFzaGkudjEuVGFibGVEZWYSIgoFdmlld3MYBiADKAsyEy5uYW5hc2hpLnYxLlZpZXdEZWYSJAoGYm9hcmRzGAcgAygLMhQubmFuYXNoaS52MS5Cb2FyZERlZkoECAEQAlIDc2VxIiUKCU5ld01lbWJlchIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJIp8BChFDcmVhdGVMaXN0UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCgoCaWQYBiABKAkSDAoEbmFtZRgCIAEoCRIiCgRraW5kGAMgASgOMhQubmFuYXNoaS52MS5MaXN0S2luZBImCgdtZW1iZXJzGAQgAygLMhUubmFuYXNoaS52MS5OZXdNZW1iZXISFAoMY2xpZW50X29wX2lkGAUgASgJInMKEkFkZFByb3BlcnR5UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDAoEbGlzdBgCIAEoCRIpCghwcm9wZXJ0eRgDIAEoCzIXLm5hbmFzaGkudjEuUHJvcGVydHlEZWYSFAoMY2xpZW50X29wX2lkGAQgASgJIm8KEkVkaXRNZW1iZXJzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDAoEbGlzdBgCIAEoCRIlCgVlZGl0cxgDIAMoCzIWLm5hbmFzaGkudjEuTWVtYmVyRWRpdBIUCgxjbGllbnRfb3BfaWQYBCABKAki5AEKCk1lbWJlckVkaXQSJAoDYWRkGAEgASgLMhUubmFuYXNoaS52MS5BZGRNZW1iZXJIABIqCgZyZW5hbWUYAiABKAsyGC5uYW5hc2hpLnYxLlJlbmFtZU1lbWJlckgAEioKBnJlbW92ZRgDIAEoCzIYLm5hbmFzaGkudjEuUmVtb3ZlTWVtYmVySAASJgoEbW92ZRgEIAEoCzIWLm5hbmFzaGkudjEuTW92ZU1lbWJlckgAEigKA3NldBgFIAEoCzIZLm5hbmFzaGkudjEuU2V0UHJvcGVydGllc0gAQgYKBGVkaXQikwEKCUFkZE1lbWJlchIKCgJpZBgDIAEoCRIMCgRuYW1lGAEgASgJEjkKCnByb3BlcnRpZXMYAiADKAsyJS5uYW5hc2hpLnYxLkFkZE1lbWJlci5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiKAoMUmVuYW1lTWVtYmVyEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkiGgoMUmVtb3ZlTWVtYmVyEgoKAmlkGAEgASgJIioKCk1vdmVNZW1iZXISCgoCaWQYASABKAkSEAoIcG9zaXRpb24YAiABKAUijQEKDVNldFByb3BlcnRpZXMSCgoCaWQYASABKAkSPQoKcHJvcGVydGllcxgCIAMoCzIpLm5hbmFzaGkudjEuU2V0UHJvcGVydGllcy5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiYAoVQ3JlYXRlQ2FsZW5kYXJSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRISCgpzdGFydF95ZWFyGAIgASgFEg0KBXllYXJzGAMgASgFEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJqChVDcmVhdGVTY2VuYXJpb1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAUgASgJEgwKBG5hbWUYAiABKAkSEQoJY29weV9mcm9tGAMgASgJEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJiChNDcmVhdGVNZXRyaWNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJQoGbWV0cmljGAMgASgLMhUubmFuYXNoaS52MS5NZXRyaWNEZWYiYgoTVXBkYXRlTWV0cmljUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiUKBm1ldHJpYxgDIAEoCzIVLm5hbmFzaGkudjEuTWV0cmljRGVmIlUKE1JlbmFtZU1ldHJpY1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEgwKBG5hbWUYAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJIkcKE0RlbGV0ZU1ldHJpY1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEhQKDGNsaWVudF9vcF9pZBgDIAEoCSIWCgdNZW1iZXJzEgsKA2lkcxgBIAMoCSJHCgVWYWx1ZRIQCgZudW1iZXIYASABKAFIABIRCgdib29sZWFuGAIgASgISAASEAoGbWVtYmVyGAMgASgJSABCBwoFdmFsdWUi+QEKDFF1ZXJ5UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDwoHbWV0cmljcxgCIAMoCRIMCgRyb3dzGAMgAygJEg8KB2NvbHVtbnMYBCADKAkSNgoHZmlsdGVycxgFIAMoCzIlLm5hbmFzaGkudjEuUXVlcnlSZXF1ZXN0LkZpbHRlcnNFbnRyeRIsCgthZ2dyZWdhdGlvbhgGIAEoDjIXLm5hbmFzaGkudjEuQWdncmVnYXRpb24aQwoMRmlsdGVyc0VudHJ5EgsKA2tleRgBIAEoCRIiCgV2YWx1ZRgCIAEoCzITLm5hbmFzaGkudjEuTWVtYmVyczoCOAEiTQoJUXVlcnlDZWxsEg4KBm1ldHJpYxgBIAEoCRIOCgZjb29yZHMYAiADKAkSIAoFdmFsdWUYAyABKAsyES5uYW5hc2hpLnYxLlZhbHVlIk8KDVF1ZXJ5UmVzcG9uc2USEgoKZGltZW5zaW9ucxgCIAMoCRIkCgVjZWxscxgDIAMoCzIVLm5hbmFzaGkudjEuUXVlcnlDZWxsSgQIARACIp8BCglDZWxsV3JpdGUSDgoGbWV0cmljGAEgASgJEjEKBmNvb3JkcxgCIAMoCzIhLm5hbmFzaGkudjEuQ2VsbFdyaXRlLkNvb3Jkc0VudHJ5EiAKBXZhbHVlGAMgASgLMhEubmFuYXNoaS52MS5WYWx1ZRotCgtDb29yZHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBImAKEVdyaXRlQ2VsbHNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIlCgZ3cml0ZXMYAiADKAsyFS5uYW5hc2hpLnYxLkNlbGxXcml0ZRIUCgxjbGllbnRfb3BfaWQYAyABKAkioAEKDUltcG9ydFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgsKA2NzdhgCIAEoCRIUCgxjbGllbnRfb3BfaWQYBSABKAkSJgoEbGlzdBgDIAEoCzIWLm5hbmFzaGkudjEuTGlzdEltcG9ydEgAEioKBm1ldHJpYxgEIAEoCzIYLm5hbmFzaGkudjEuTWV0cmljSW1wb3J0SABCCAoGdGFyZ2V0IrABCgpMaXN0SW1wb3J0EgwKBGxpc3QYASABKAkSFQoNbWVtYmVyX2NvbHVtbhgCIAEoCRJFChBwcm9wZXJ0eV9jb2x1bW5zGAMgAygLMisubmFuYXNoaS52MS5MaXN0SW1wb3J0LlByb3BlcnR5Q29sdW1uc0VudHJ5GjYKFFByb3BlcnR5Q29sdW1uc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEizQEKDE1ldHJpY0ltcG9ydBIOCgZtZXRyaWMYASABKAkSSQoRZGltZW5zaW9uX2NvbHVtbnMYAiADKAsyLi5uYW5hc2hpLnYxLk1ldHJpY0ltcG9ydC5EaW1lbnNpb25Db2x1bW5zRW50cnkSFAoMdmFsdWVfY29sdW1uGAMgASgJEhMKC2FkZF9tZW1iZXJzGAQgASgIGjcKFURpbWVuc2lvbkNvbHVtbnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJvd3MYASABKAUiXwoSQ3JlYXRlVGFibGVSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIwoFdGFibGUYAyABKAsyFC5uYW5hc2hpLnYxLlRhYmxlRGVmIl8KElVwZGF0ZVRhYmxlUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiMKBXRhYmxlGAMgASgLMhQubmFuYXNoaS52MS5UYWJsZURlZiJFCghUYWJsZURlZhIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIPCgdtZXRyaWNzGAQgAygJIlwKEUNyZWF0ZVZpZXdSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIQoEdmlldxgDIAEoCzITLm5hbmFzaGkudjEuVmlld0RlZiJcChFVcGRhdGVWaWV3UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiEKBHZpZXcYAyABKAsyEy5uYW5hc2hpLnYxLlZpZXdEZWYirwIKB1ZpZXdEZWYSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEgwKBG5hbWUYAyABKAkSDwoHbWV0cmljcxgEIAMoCRIMCgRyb3dzGAUgAygJEg8KB2NvbHVtbnMYBiADKAkSMQoHZmlsdGVycxgHIAMoCzIgLm5hbmFzaGkudjEuVmlld0RlZi5GaWx0ZXJzRW50cnkSJAoHZGlzcGxheRgIIAEoDjITLm5hbmFzaGkudjEuRGlzcGxheRIsCgthZ2dyZWdhdGlvbhgJIAEoDjIXLm5hbmFzaGkudjEuQWdncmVnYXRpb24aQwoMRmlsdGVyc0VudHJ5EgsKA2tleRgBIAEoCRIiCgV2YWx1ZRgCIAEoCzITLm5hbmFzaGkudjEuTWVtYmVyczoCOAEiNgoGV2lkZ2V0EhEKB3ZpZXdfaWQYASABKAlIABIOCgR0ZXh0GAIgASgJSABCCQoHY29udGVudCJfChJDcmVhdGVCb2FyZFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIjCgVib2FyZBgDIAEoCzIULm5hbmFzaGkudjEuQm9hcmREZWYiXwoSVXBkYXRlQm9hcmRSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIwoFYm9hcmQYAyABKAsyFC5uYW5hc2hpLnYxLkJvYXJkRGVmInEKCEJvYXJkRGVmEg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIMCgRuYW1lGAMgASgJEiMKB3dpZGdldHMYBCADKAsyEi5uYW5hc2hpLnYxLldpZGdldBIWCg5wYWdlX3NlbGVjdG9ycxgFIAMoCSJpChFEZWxldGVJdGVtUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSIgoEdHlwZRgCIAEoDjIULm5hbmFzaGkudjEuSXRlbVR5cGUSCgoCaWQYAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJIl8KEUFkZENvbW1lbnRSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJAoHY29tbWVudBgDIAEoCzITLm5hbmFzaGkudjEuQ29tbWVudCK/AQoHQ29tbWVudBIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDgoGbWV0cmljGAMgASgJEisKBGNlbGwYBCADKAsyHS5uYW5hc2hpLnYxLkNvbW1lbnQuQ2VsbEVudHJ5EgwKBHVzZXIYBSABKAkSDAoEYm9keRgGIAEoCRISCgpjcmVhdGVkX2F0GAcgASgDGisKCUNlbGxFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIjUKE0xpc3RDb21tZW50c1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEg4KBm1ldHJpYxgCIAEoCSI9ChRMaXN0Q29tbWVudHNSZXNwb25zZRIlCghjb21tZW50cxgBIAMoCzITLm5hbmFzaGkudjEuQ29tbWVudCJaCgpBdWRpdEVudHJ5EgoKAmlkGAEgASgJEgwKBHVzZXIYAiABKAkSEgoKY3JlYXRlZF9hdBgDIAEoAxIOCgZhY3Rpb24YBCABKAkSDgoGZGV0YWlsGAUgASgJIjEKEExpc3RBdWRpdFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEg0KBWxpbWl0GAIgASgFIjwKEUxpc3RBdWRpdFJlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5uYW5hc2hpLnYxLkF1ZGl0RW50cnkiRgoIU25hcHNob3QSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgR1c2VyGAMgASgJEhIKCmNyZWF0ZWRfYXQYBCABKAMiJgoUTGlzdFNuYXBzaG90c1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJIkAKFUxpc3RTbmFwc2hvdHNSZXNwb25zZRInCglzbmFwc2hvdHMYASADKAsyFC5uYW5hc2hpLnYxLlNuYXBzaG90IlcKFUNyZWF0ZVNuYXBzaG90UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIKCgJpZBgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkiIgoQR2V0QWNjZXNzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkiYwoUU2V0TWVtYmVyUm9sZVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIlCgZtZW1iZXIYAyABKAsyFS5uYW5hc2hpLnYxLkFwcE1lbWJlciJJCglBcHBNZW1iZXISDgoGYXBwX2lkGAEgASgJEgwKBHVzZXIYAiABKAkSHgoEcm9sZRgDIAEoDjIQLm5hbmFzaGkudjEuUm9sZSJlChdDcmVhdGVBY2Nlc3NSdWxlUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiQKBHJ1bGUYAyABKAsyFi5uYW5hc2hpLnYxLkFjY2Vzc1J1bGUiZQoXVXBkYXRlQWNjZXNzUnVsZVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIkCgRydWxlGAMgASgLMhYubmFuYXNoaS52MS5BY2Nlc3NSdWxlInYKCkFjY2Vzc1J1bGUSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEh4KBHJvbGUYAyABKA4yEC5uYW5hc2hpLnYxLlJvbGUSDAoEbGlzdBgEIAEoCRIPCgdtZW1iZXJzGAUgAygJEg0KBXdyaXRlGAYgASgIIksKF0RlbGV0ZUFjY2Vzc1J1bGVSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIUCgxjbGllbnRfb3BfaWQYAyABKAkiVwoGQWNjZXNzEiYKB21lbWJlcnMYASADKAsyFS5uYW5hc2hpLnYxLkFwcE1lbWJlchIlCgVydWxlcxgCIAMoCzIWLm5hbmFzaGkudjEuQWNjZXNzUnVsZSplCgRSb2xlEhQKEFJPTEVfVU5TUEVDSUZJRUQQABIPCgtST0xFX1ZJRVdFUhABEhQKEFJPTEVfQ09OVFJJQlVUT1IQAhIQCgxST0xFX01PREVMRVIQAxIOCgpST0xFX0FETUlOEAQqiQEKCExpc3RLaW5kEhkKFUxJU1RfS0lORF9VTlNQRUNJRklFRBAAEhcKE0xJU1RfS0lORF9ESU1FTlNJT04QARIZChVMSVNUX0tJTkRfVFJBTlNBQ1RJT04QAhIWChJMSVNUX0tJTkRfQ0FMRU5EQVIQAxIWChJMSVNUX0tJTkRfU0NFTkFSSU8QBCqXAQoMUHJvcGVydHlUeXBlEh0KGVBST1BFUlRZX1RZUEVfVU5TUEVDSUZJRUQQABIbChdQUk9QRVJUWV9UWVBFX0RJTUVOU0lPThABEhgKFFBST1BFUlRZX1RZUEVfTlVNQkVSEAISGQoVUFJPUEVSVFlfVFlQRV9CT09MRUFOEAMSFgoSUFJPUEVSVFlfVFlQRV9URVhUEAQqbQoJVmFsdWVLaW5kEhoKFlZBTFVFX0tJTkRfVU5TUEVDSUZJRUQQABIVChFWQUxVRV9LSU5EX05VTUJFUhABEhYKElZBTFVFX0tJTkRfQk9PTEVBThACEhUKEVZBTFVFX0tJTkRfTUVNQkVSEAMqlQEKC0FnZ3JlZ2F0aW9uEhsKF0FHR1JFR0FUSU9OX1VOU1BFQ0lGSUVEEAASEwoPQUdHUkVHQVRJT05fU1VNEAESEwoPQUdHUkVHQVRJT05fQVZHEAISEwoPQUdHUkVHQVRJT05fTUlOEAMSEwoPQUdHUkVHQVRJT05fTUFYEAQSFQoRQUdHUkVHQVRJT05fQ09VTlQQBSpoCgdEaXNwbGF5EhcKE0RJU1BMQVlfVU5TUEVDSUZJRUQQABIQCgxESVNQTEFZX0dSSUQQARIQCgxESVNQTEFZX0xJTkUQAhIPCgtESVNQTEFZX0JBUhADEg8KC0RJU1BMQVlfS1BJEAQqYwoISXRlbVR5cGUSGQoVSVRFTV9UWVBFX1VOU1BFQ0lGSUVEEAASEwoPSVRFTV9UWVBFX1RBQkxFEAESEgoOSVRFTV9UWVBFX1ZJRVcQAhITCg9JVEVNX1RZUEVfQk9BUkQQAzLpEQoLUGxhblNlcnZpY2USXwoQTGlzdEFwcGxpY2F0aW9ucxIjLm5hbmFzaGkudjEuTGlzdEFwcGxpY2F0aW9uc1JlcXVlc3QaJC5uYW5hc2hpLnYxLkxpc3RBcHBsaWNhdGlvbnNSZXNwb25zZSIAElQKEUNyZWF0ZUFwcGxpY2F0aW9uEiQubmFuYXNoaS52MS5DcmVhdGVBcHBsaWNhdGlvblJlcXVlc3QaFy5uYW5hc2hpLnYxLkFwcGxpY2F0aW9uIgASPwoIR2V0TW9kZWwSGy5uYW5hc2hpLnYxLkdldE1vZGVsUmVxdWVzdBoULm5hbmFzaGkudjEuTW9kZWxEZWYiABI+CgpDcmVhdGVMaXN0Eh0ubmFuYXNoaS52MS5DcmVhdGVMaXN0UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQAoLQWRkUHJvcGVydHkSHi5uYW5hc2hpLnYxLkFkZFByb3BlcnR5UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQAoLRWRpdE1lbWJlcnMSHi5uYW5hc2hpLnYxLkVkaXRNZW1iZXJzUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASRgoOQ3JlYXRlQ2FsZW5kYXISIS5uYW5hc2hpLnYxLkNyZWF0ZUNhbGVuZGFyUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASRgoOQ3JlYXRlU2NlbmFyaW8SIS5uYW5hc2hpLnYxLkNyZWF0ZVNjZW5hcmlvUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQgoMQ3JlYXRlTWV0cmljEh8ubmFuYXNoaS52MS5DcmVhdGVNZXRyaWNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJCCgxVcGRhdGVNZXRyaWMSHy5uYW5hc2hpLnYxLlVwZGF0ZU1ldHJpY1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkIKDFJlbmFtZU1ldHJpYxIfLm5hbmFzaGkudjEuUmVuYW1lTWV0cmljUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQgoMRGVsZXRlTWV0cmljEh8ubmFuYXNoaS52MS5EZWxldGVNZXRyaWNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABI+CgVRdWVyeRIYLm5hbmFzaGkudjEuUXVlcnlSZXF1ZXN0GhkubmFuYXNoaS52MS5RdWVyeVJlc3BvbnNlIgASPgoKV3JpdGVDZWxscxIdLm5hbmFzaGkudjEuV3JpdGVDZWxsc1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkEKBkltcG9ydBIZLm5hbmFzaGkudjEuSW1wb3J0UmVxdWVzdBoaLm5hbmFzaGkudjEuSW1wb3J0UmVzcG9uc2UiABJACgtDcmVhdGVUYWJsZRIeLm5hbmFzaGkudjEuQ3JlYXRlVGFibGVSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJACgtVcGRhdGVUYWJsZRIeLm5hbmFzaGkudjEuVXBkYXRlVGFibGVSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABI+CgpDcmVhdGVWaWV3Eh0ubmFuYXNoaS52MS5DcmVhdGVWaWV3UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASPgoKVXBkYXRlVmlldxIdLm5hbmFzaGkudjEuVXBkYXRlVmlld1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC0NyZWF0ZUJvYXJkEh4ubmFuYXNoaS52MS5DcmVhdGVCb2FyZFJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC1VwZGF0ZUJvYXJkEh4ubmFuYXNoaS52MS5VcGRhdGVCb2FyZFJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEj4KCkRlbGV0ZUl0ZW0SHS5uYW5hc2hpLnYxLkRlbGV0ZUl0ZW1SZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJTCgxMaXN0Q29tbWVudHMSHy5uYW5hc2hpLnYxLkxpc3RDb21tZW50c1JlcXVlc3QaIC5uYW5hc2hpLnYxLkxpc3RDb21tZW50c1Jlc3BvbnNlIgASQgoKQWRkQ29tbWVudBIdLm5hbmFzaGkudjEuQWRkQ29tbWVudFJlcXVlc3QaEy5uYW5hc2hpLnYxLkNvbW1lbnQiABJKCglMaXN0QXVkaXQSHC5uYW5hc2hpLnYxLkxpc3RBdWRpdFJlcXVlc3QaHS5uYW5hc2hpLnYxLkxpc3RBdWRpdFJlc3BvbnNlIgASVgoNTGlzdFNuYXBzaG90cxIgLm5hbmFzaGkudjEuTGlzdFNuYXBzaG90c1JlcXVlc3QaIS5uYW5hc2hpLnYxLkxpc3RTbmFwc2hvdHNSZXNwb25zZSIAEksKDkNyZWF0ZVNuYXBzaG90EiEubmFuYXNoaS52MS5DcmVhdGVTbmFwc2hvdFJlcXVlc3QaFC5uYW5hc2hpLnYxLlNuYXBzaG90IgASPwoJR2V0QWNjZXNzEhwubmFuYXNoaS52MS5HZXRBY2Nlc3NSZXF1ZXN0GhIubmFuYXNoaS52MS5BY2Nlc3MiABJECg1TZXRNZW1iZXJSb2xlEiAubmFuYXNoaS52MS5TZXRNZW1iZXJSb2xlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASSgoQQ3JlYXRlQWNjZXNzUnVsZRIjLm5hbmFzaGkudjEuQ3JlYXRlQWNjZXNzUnVsZVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkoKEFVwZGF0ZUFjY2Vzc1J1bGUSIy5uYW5hc2hpLnYxLlVwZGF0ZUFjY2Vzc1J1bGVSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJKChBEZWxldGVBY2Nlc3NSdWxlEiMubmFuYXNoaS52MS5EZWxldGVBY2Nlc3NSdWxlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgBCO1o5Z2l0aHViLmNvbS9rYXp1LTIwMjAvbmFuYXNoaS9hcGkvZ2VuL25hbmFzaGkvdjE7bmFuYXNoaXYxYgZwcm90bzM");
 
 /**
  * @generated from message nanashi.v1.Ack
@@ -99,7 +99,7 @@ export type CreateApplicationRequest = Message<"nanashi.v1.CreateApplicationRequ
   snapshotId: string;
 
   /**
-   * The id of the new application (UUIDv7).
+   * The id of the new application.
    *
    * @generated from field: string id = 3;
    */
@@ -140,6 +140,11 @@ export const GetModelRequestSchema: GenMessage<GetModelRequest> = /*@__PURE__*/
  */
 export type PropertyDef = Message<"nanashi.v1.PropertyDef"> & {
   /**
+   * @generated from field: string id = 4;
+   */
+  id: string;
+
+  /**
    * @generated from field: string name = 1;
    */
   name: string;
@@ -150,7 +155,7 @@ export type PropertyDef = Message<"nanashi.v1.PropertyDef"> & {
   type: PropertyType;
 
   /**
-   * The target list of a DIMENSION property.
+   * The id of the target list of a DIMENSION property.
    *
    * @generated from field: string target = 3;
    */
@@ -169,12 +174,18 @@ export const PropertyDefSchema: GenMessage<PropertyDef> = /*@__PURE__*/
  */
 export type Member = Message<"nanashi.v1.Member"> & {
   /**
+   * @generated from field: string id = 3;
+   */
+  id: string;
+
+  /**
    * @generated from field: string name = 1;
    */
   name: string;
 
   /**
-   * The value of each property as text. A blank value is missing.
+   * The value of each property, by property id. The value of a DIMENSION property is a member id of the target
+   * list. The other values are text. A blank value is missing.
    *
    * @generated from field: map<string, string> properties = 2;
    */
@@ -192,6 +203,11 @@ export const MemberSchema: GenMessage<Member> = /*@__PURE__*/
  * @generated from message nanashi.v1.ListDef
  */
 export type ListDef = Message<"nanashi.v1.ListDef"> & {
+  /**
+   * @generated from field: string id = 6;
+   */
+  id: string;
+
   /**
    * @generated from field: string name = 1;
    */
@@ -227,11 +243,18 @@ export const ListDefSchema: GenMessage<ListDef> = /*@__PURE__*/
  */
 export type MetricDef = Message<"nanashi.v1.MetricDef"> & {
   /**
+   * @generated from field: string id = 7;
+   */
+  id: string;
+
+  /**
    * @generated from field: string name = 1;
    */
   name: string;
 
   /**
+   * The ids of the lists.
+   *
    * @generated from field: repeated string dimensions = 2;
    */
   dimensions: string[];
@@ -242,14 +265,14 @@ export type MetricDef = Message<"nanashi.v1.MetricDef"> & {
   kind: ValueKind;
 
   /**
-   * The list of a MEMBER Metric. Empty for the other kinds.
+   * The id of the list of a MEMBER Metric. Empty for the other kinds.
    *
    * @generated from field: string member_list = 6;
    */
   memberList: string;
 
   /**
-   * Empty for an input Metric.
+   * Empty for an input Metric. A formula names the Metrics, lists and members by their names.
    *
    * @generated from field: string formula = 4;
    */
@@ -313,6 +336,28 @@ export const ModelDefSchema: GenMessage<ModelDef> = /*@__PURE__*/
   messageDesc(file_nanashi_v1_plan, 10);
 
 /**
+ * @generated from message nanashi.v1.NewMember
+ */
+export type NewMember = Message<"nanashi.v1.NewMember"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string name = 2;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message nanashi.v1.NewMember.
+ * Use `create(NewMemberSchema)` to create a new message.
+ */
+export const NewMemberSchema: GenMessage<NewMember> = /*@__PURE__*/
+  messageDesc(file_nanashi_v1_plan, 11);
+
+/**
  * @generated from message nanashi.v1.CreateListRequest
  */
 export type CreateListRequest = Message<"nanashi.v1.CreateListRequest"> & {
@@ -320,6 +365,11 @@ export type CreateListRequest = Message<"nanashi.v1.CreateListRequest"> & {
    * @generated from field: string app_id = 1;
    */
   appId: string;
+
+  /**
+   * @generated from field: string id = 6;
+   */
+  id: string;
 
   /**
    * @generated from field: string name = 2;
@@ -332,9 +382,9 @@ export type CreateListRequest = Message<"nanashi.v1.CreateListRequest"> & {
   kind: ListKind;
 
   /**
-   * @generated from field: repeated string members = 4;
+   * @generated from field: repeated nanashi.v1.NewMember members = 4;
    */
-  members: string[];
+  members: NewMember[];
 
   /**
    * @generated from field: string client_op_id = 5;
@@ -347,7 +397,7 @@ export type CreateListRequest = Message<"nanashi.v1.CreateListRequest"> & {
  * Use `create(CreateListRequestSchema)` to create a new message.
  */
 export const CreateListRequestSchema: GenMessage<CreateListRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 11);
+  messageDesc(file_nanashi_v1_plan, 12);
 
 /**
  * @generated from message nanashi.v1.AddPropertyRequest
@@ -359,11 +409,15 @@ export type AddPropertyRequest = Message<"nanashi.v1.AddPropertyRequest"> & {
   appId: string;
 
   /**
+   * The id of the list.
+   *
    * @generated from field: string list = 2;
    */
   list: string;
 
   /**
+   * property.id is required. The api makes the id of the Metric of a NUMBER or BOOLEAN property.
+   *
    * @generated from field: nanashi.v1.PropertyDef property = 3;
    */
   property?: PropertyDef | undefined;
@@ -379,7 +433,7 @@ export type AddPropertyRequest = Message<"nanashi.v1.AddPropertyRequest"> & {
  * Use `create(AddPropertyRequestSchema)` to create a new message.
  */
 export const AddPropertyRequestSchema: GenMessage<AddPropertyRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 12);
+  messageDesc(file_nanashi_v1_plan, 13);
 
 /**
  * @generated from message nanashi.v1.EditMembersRequest
@@ -391,6 +445,8 @@ export type EditMembersRequest = Message<"nanashi.v1.EditMembersRequest"> & {
   appId: string;
 
   /**
+   * The id of the list.
+   *
    * @generated from field: string list = 2;
    */
   list: string;
@@ -411,7 +467,7 @@ export type EditMembersRequest = Message<"nanashi.v1.EditMembersRequest"> & {
  * Use `create(EditMembersRequestSchema)` to create a new message.
  */
 export const EditMembersRequestSchema: GenMessage<EditMembersRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 13);
+  messageDesc(file_nanashi_v1_plan, 14);
 
 /**
  * @generated from message nanashi.v1.MemberEdit
@@ -458,18 +514,25 @@ export type MemberEdit = Message<"nanashi.v1.MemberEdit"> & {
  * Use `create(MemberEditSchema)` to create a new message.
  */
 export const MemberEditSchema: GenMessage<MemberEdit> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 14);
+  messageDesc(file_nanashi_v1_plan, 15);
 
 /**
  * @generated from message nanashi.v1.AddMember
  */
 export type AddMember = Message<"nanashi.v1.AddMember"> & {
   /**
+   * @generated from field: string id = 3;
+   */
+  id: string;
+
+  /**
    * @generated from field: string name = 1;
    */
   name: string;
 
   /**
+   * Property id to value (see Member.properties).
+   *
    * @generated from field: map<string, string> properties = 2;
    */
   properties: { [key: string]: string };
@@ -480,21 +543,21 @@ export type AddMember = Message<"nanashi.v1.AddMember"> & {
  * Use `create(AddMemberSchema)` to create a new message.
  */
 export const AddMemberSchema: GenMessage<AddMember> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 15);
+  messageDesc(file_nanashi_v1_plan, 16);
 
 /**
  * @generated from message nanashi.v1.RenameMember
  */
 export type RenameMember = Message<"nanashi.v1.RenameMember"> & {
   /**
-   * @generated from field: string name = 1;
+   * @generated from field: string id = 1;
    */
-  name: string;
+  id: string;
 
   /**
-   * @generated from field: string new_name = 2;
+   * @generated from field: string name = 2;
    */
-  newName: string;
+  name: string;
 };
 
 /**
@@ -502,16 +565,16 @@ export type RenameMember = Message<"nanashi.v1.RenameMember"> & {
  * Use `create(RenameMemberSchema)` to create a new message.
  */
 export const RenameMemberSchema: GenMessage<RenameMember> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 16);
+  messageDesc(file_nanashi_v1_plan, 17);
 
 /**
  * @generated from message nanashi.v1.RemoveMember
  */
 export type RemoveMember = Message<"nanashi.v1.RemoveMember"> & {
   /**
-   * @generated from field: string name = 1;
+   * @generated from field: string id = 1;
    */
-  name: string;
+  id: string;
 };
 
 /**
@@ -519,16 +582,16 @@ export type RemoveMember = Message<"nanashi.v1.RemoveMember"> & {
  * Use `create(RemoveMemberSchema)` to create a new message.
  */
 export const RemoveMemberSchema: GenMessage<RemoveMember> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 17);
+  messageDesc(file_nanashi_v1_plan, 18);
 
 /**
  * @generated from message nanashi.v1.MoveMember
  */
 export type MoveMember = Message<"nanashi.v1.MoveMember"> & {
   /**
-   * @generated from field: string name = 1;
+   * @generated from field: string id = 1;
    */
-  name: string;
+  id: string;
 
   /**
    * @generated from field: int32 position = 2;
@@ -541,7 +604,7 @@ export type MoveMember = Message<"nanashi.v1.MoveMember"> & {
  * Use `create(MoveMemberSchema)` to create a new message.
  */
 export const MoveMemberSchema: GenMessage<MoveMember> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 18);
+  messageDesc(file_nanashi_v1_plan, 19);
 
 /**
  * SetProperties sets property values of a member. An empty value makes the value blank.
@@ -550,9 +613,9 @@ export const MoveMemberSchema: GenMessage<MoveMember> = /*@__PURE__*/
  */
 export type SetProperties = Message<"nanashi.v1.SetProperties"> & {
   /**
-   * @generated from field: string name = 1;
+   * @generated from field: string id = 1;
    */
-  name: string;
+  id: string;
 
   /**
    * @generated from field: map<string, string> properties = 2;
@@ -565,11 +628,12 @@ export type SetProperties = Message<"nanashi.v1.SetProperties"> & {
  * Use `create(SetPropertiesSchema)` to create a new message.
  */
 export const SetPropertiesSchema: GenMessage<SetProperties> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 19);
+  messageDesc(file_nanashi_v1_plan, 20);
 
 /**
  * CreateCalendar makes the ordered lists Year, Quarter and Month with the properties
  * Month.Quarter, Month.Year and Quarter.Year. Member names are "2026", "2026-Q1" and "2026-01".
+ * The api makes the ids.
  *
  * @generated from message nanashi.v1.CreateCalendarRequest
  */
@@ -600,7 +664,7 @@ export type CreateCalendarRequest = Message<"nanashi.v1.CreateCalendarRequest"> 
  * Use `create(CreateCalendarRequestSchema)` to create a new message.
  */
 export const CreateCalendarRequestSchema: GenMessage<CreateCalendarRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 20);
+  messageDesc(file_nanashi_v1_plan, 21);
 
 /**
  * @generated from message nanashi.v1.CreateScenarioRequest
@@ -612,12 +676,19 @@ export type CreateScenarioRequest = Message<"nanashi.v1.CreateScenarioRequest"> 
   appId: string;
 
   /**
+   * The id of the new member.
+   *
+   * @generated from field: string id = 5;
+   */
+  id: string;
+
+  /**
    * @generated from field: string name = 2;
    */
   name: string;
 
   /**
-   * An existing scenario. Empty gives an empty scenario.
+   * The id of an existing scenario member. Empty gives an empty scenario.
    *
    * @generated from field: string copy_from = 3;
    */
@@ -634,7 +705,7 @@ export type CreateScenarioRequest = Message<"nanashi.v1.CreateScenarioRequest"> 
  * Use `create(CreateScenarioRequestSchema)` to create a new message.
  */
 export const CreateScenarioRequestSchema: GenMessage<CreateScenarioRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 21);
+  messageDesc(file_nanashi_v1_plan, 22);
 
 /**
  * @generated from message nanashi.v1.CreateMetricRequest
@@ -651,6 +722,8 @@ export type CreateMetricRequest = Message<"nanashi.v1.CreateMetricRequest"> & {
   clientOpId: string;
 
   /**
+   * metric.id is required.
+   *
    * @generated from field: nanashi.v1.MetricDef metric = 3;
    */
   metric?: MetricDef | undefined;
@@ -661,7 +734,7 @@ export type CreateMetricRequest = Message<"nanashi.v1.CreateMetricRequest"> & {
  * Use `create(CreateMetricRequestSchema)` to create a new message.
  */
 export const CreateMetricRequestSchema: GenMessage<CreateMetricRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 22);
+  messageDesc(file_nanashi_v1_plan, 23);
 
 /**
  * @generated from message nanashi.v1.UpdateMetricRequest
@@ -688,7 +761,7 @@ export type UpdateMetricRequest = Message<"nanashi.v1.UpdateMetricRequest"> & {
  * Use `create(UpdateMetricRequestSchema)` to create a new message.
  */
 export const UpdateMetricRequestSchema: GenMessage<UpdateMetricRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 23);
+  messageDesc(file_nanashi_v1_plan, 24);
 
 /**
  * @generated from message nanashi.v1.RenameMetricRequest
@@ -700,14 +773,14 @@ export type RenameMetricRequest = Message<"nanashi.v1.RenameMetricRequest"> & {
   appId: string;
 
   /**
-   * @generated from field: string name = 2;
+   * @generated from field: string id = 2;
    */
-  name: string;
+  id: string;
 
   /**
-   * @generated from field: string new_name = 3;
+   * @generated from field: string name = 3;
    */
-  newName: string;
+  name: string;
 
   /**
    * @generated from field: string client_op_id = 4;
@@ -720,7 +793,7 @@ export type RenameMetricRequest = Message<"nanashi.v1.RenameMetricRequest"> & {
  * Use `create(RenameMetricRequestSchema)` to create a new message.
  */
 export const RenameMetricRequestSchema: GenMessage<RenameMetricRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 24);
+  messageDesc(file_nanashi_v1_plan, 25);
 
 /**
  * @generated from message nanashi.v1.DeleteMetricRequest
@@ -732,9 +805,9 @@ export type DeleteMetricRequest = Message<"nanashi.v1.DeleteMetricRequest"> & {
   appId: string;
 
   /**
-   * @generated from field: string name = 2;
+   * @generated from field: string id = 2;
    */
-  name: string;
+  id: string;
 
   /**
    * @generated from field: string client_op_id = 3;
@@ -747,16 +820,18 @@ export type DeleteMetricRequest = Message<"nanashi.v1.DeleteMetricRequest"> & {
  * Use `create(DeleteMetricRequestSchema)` to create a new message.
  */
 export const DeleteMetricRequestSchema: GenMessage<DeleteMetricRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 25);
+  messageDesc(file_nanashi_v1_plan, 26);
 
 /**
+ * Members is a set of member ids.
+ *
  * @generated from message nanashi.v1.Members
  */
 export type Members = Message<"nanashi.v1.Members"> & {
   /**
-   * @generated from field: repeated string names = 1;
+   * @generated from field: repeated string ids = 1;
    */
-  names: string[];
+  ids: string[];
 };
 
 /**
@@ -764,7 +839,7 @@ export type Members = Message<"nanashi.v1.Members"> & {
  * Use `create(MembersSchema)` to create a new message.
  */
 export const MembersSchema: GenMessage<Members> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 26);
+  messageDesc(file_nanashi_v1_plan, 27);
 
 /**
  * @generated from message nanashi.v1.Value
@@ -787,6 +862,8 @@ export type Value = Message<"nanashi.v1.Value"> & {
     case: "boolean";
   } | {
     /**
+     * A member id.
+     *
      * @generated from field: string member = 3;
      */
     value: string;
@@ -799,11 +876,11 @@ export type Value = Message<"nanashi.v1.Value"> & {
  * Use `create(ValueSchema)` to create a new message.
  */
 export const ValueSchema: GenMessage<Value> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 27);
+  messageDesc(file_nanashi_v1_plan, 28);
 
 /**
- * QueryRequest reads the cells of Metrics, aggregated to the dimensions in rows and columns.
- * The response ignores a dimension that a Metric does not have.
+ * QueryRequest reads the cells of Metrics, aggregated to the lists in rows and columns. All references are ids.
+ * The response ignores a list that a Metric does not have, and a Metric that the model does not have.
  *
  * @generated from message nanashi.v1.QueryRequest
  */
@@ -829,7 +906,7 @@ export type QueryRequest = Message<"nanashi.v1.QueryRequest"> & {
   columns: string[];
 
   /**
-   * Only these members. A missing dimension gives all members.
+   * Only these members, by list id. A missing list gives all members.
    *
    * @generated from field: map<string, nanashi.v1.Members> filters = 5;
    */
@@ -848,7 +925,7 @@ export type QueryRequest = Message<"nanashi.v1.QueryRequest"> & {
  * Use `create(QueryRequestSchema)` to create a new message.
  */
 export const QueryRequestSchema: GenMessage<QueryRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 28);
+  messageDesc(file_nanashi_v1_plan, 29);
 
 /**
  * @generated from message nanashi.v1.QueryCell
@@ -860,7 +937,7 @@ export type QueryCell = Message<"nanashi.v1.QueryCell"> & {
   metric: string;
 
   /**
-   * The member of each dimension in QueryResponse.dimensions. Empty if the Metric does not have the dimension.
+   * The member id of each list in QueryResponse.dimensions. Empty if the Metric does not have the list.
    *
    * @generated from field: repeated string coords = 2;
    */
@@ -877,14 +954,14 @@ export type QueryCell = Message<"nanashi.v1.QueryCell"> & {
  * Use `create(QueryCellSchema)` to create a new message.
  */
 export const QueryCellSchema: GenMessage<QueryCell> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 29);
+  messageDesc(file_nanashi_v1_plan, 30);
 
 /**
  * @generated from message nanashi.v1.QueryResponse
  */
 export type QueryResponse = Message<"nanashi.v1.QueryResponse"> & {
   /**
-   * The dimensions of QueryCell.coords: the rows, then the columns.
+   * The list ids of QueryCell.coords: the rows, then the columns.
    *
    * @generated from field: repeated string dimensions = 2;
    */
@@ -901,7 +978,7 @@ export type QueryResponse = Message<"nanashi.v1.QueryResponse"> & {
  * Use `create(QueryResponseSchema)` to create a new message.
  */
 export const QueryResponseSchema: GenMessage<QueryResponse> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 30);
+  messageDesc(file_nanashi_v1_plan, 31);
 
 /**
  * @generated from message nanashi.v1.CellWrite
@@ -913,6 +990,8 @@ export type CellWrite = Message<"nanashi.v1.CellWrite"> & {
   metric: string;
 
   /**
+   * List id to member id.
+   *
    * @generated from field: map<string, string> coords = 2;
    */
   coords: { [key: string]: string };
@@ -930,7 +1009,7 @@ export type CellWrite = Message<"nanashi.v1.CellWrite"> & {
  * Use `create(CellWriteSchema)` to create a new message.
  */
 export const CellWriteSchema: GenMessage<CellWrite> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 31);
+  messageDesc(file_nanashi_v1_plan, 32);
 
 /**
  * @generated from message nanashi.v1.WriteCellsRequest
@@ -957,7 +1036,7 @@ export type WriteCellsRequest = Message<"nanashi.v1.WriteCellsRequest"> & {
  * Use `create(WriteCellsRequestSchema)` to create a new message.
  */
 export const WriteCellsRequestSchema: GenMessage<WriteCellsRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 32);
+  messageDesc(file_nanashi_v1_plan, 33);
 
 /**
  * ImportRequest loads a CSV file (with a header row) into a list or a Metric.
@@ -1003,13 +1082,15 @@ export type ImportRequest = Message<"nanashi.v1.ImportRequest"> & {
  * Use `create(ImportRequestSchema)` to create a new message.
  */
 export const ImportRequestSchema: GenMessage<ImportRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 33);
+  messageDesc(file_nanashi_v1_plan, 34);
 
 /**
  * @generated from message nanashi.v1.ListImport
  */
 export type ListImport = Message<"nanashi.v1.ListImport"> & {
   /**
+   * The id of the list.
+   *
    * @generated from field: string list = 1;
    */
   list: string;
@@ -1022,7 +1103,7 @@ export type ListImport = Message<"nanashi.v1.ListImport"> & {
   memberColumn: string;
 
   /**
-   * Property name to column name.
+   * Property id to column name. The column of a DIMENSION property has member names of the target list.
    *
    * @generated from field: map<string, string> property_columns = 3;
    */
@@ -1034,19 +1115,21 @@ export type ListImport = Message<"nanashi.v1.ListImport"> & {
  * Use `create(ListImportSchema)` to create a new message.
  */
 export const ListImportSchema: GenMessage<ListImport> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 34);
+  messageDesc(file_nanashi_v1_plan, 35);
 
 /**
  * @generated from message nanashi.v1.MetricImport
  */
 export type MetricImport = Message<"nanashi.v1.MetricImport"> & {
   /**
+   * The id of the Metric.
+   *
    * @generated from field: string metric = 1;
    */
   metric: string;
 
   /**
-   * Dimension name to column name.
+   * List id to column name. The column has member names.
    *
    * @generated from field: map<string, string> dimension_columns = 2;
    */
@@ -1070,7 +1153,7 @@ export type MetricImport = Message<"nanashi.v1.MetricImport"> & {
  * Use `create(MetricImportSchema)` to create a new message.
  */
 export const MetricImportSchema: GenMessage<MetricImport> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 35);
+  messageDesc(file_nanashi_v1_plan, 36);
 
 /**
  * @generated from message nanashi.v1.ImportResponse
@@ -1087,7 +1170,7 @@ export type ImportResponse = Message<"nanashi.v1.ImportResponse"> & {
  * Use `create(ImportResponseSchema)` to create a new message.
  */
 export const ImportResponseSchema: GenMessage<ImportResponse> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 36);
+  messageDesc(file_nanashi_v1_plan, 37);
 
 /**
  * @generated from message nanashi.v1.CreateTableRequest
@@ -1104,7 +1187,7 @@ export type CreateTableRequest = Message<"nanashi.v1.CreateTableRequest"> & {
   clientOpId: string;
 
   /**
-   * table.id is required (UUIDv7).
+   * table.id is required.
    *
    * @generated from field: nanashi.v1.TableDef table = 3;
    */
@@ -1116,7 +1199,7 @@ export type CreateTableRequest = Message<"nanashi.v1.CreateTableRequest"> & {
  * Use `create(CreateTableRequestSchema)` to create a new message.
  */
 export const CreateTableRequestSchema: GenMessage<CreateTableRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 37);
+  messageDesc(file_nanashi_v1_plan, 38);
 
 /**
  * @generated from message nanashi.v1.UpdateTableRequest
@@ -1143,7 +1226,7 @@ export type UpdateTableRequest = Message<"nanashi.v1.UpdateTableRequest"> & {
  * Use `create(UpdateTableRequestSchema)` to create a new message.
  */
 export const UpdateTableRequestSchema: GenMessage<UpdateTableRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 38);
+  messageDesc(file_nanashi_v1_plan, 39);
 
 /**
  * @generated from message nanashi.v1.TableDef
@@ -1165,6 +1248,8 @@ export type TableDef = Message<"nanashi.v1.TableDef"> & {
   name: string;
 
   /**
+   * Metric ids.
+   *
    * @generated from field: repeated string metrics = 4;
    */
   metrics: string[];
@@ -1175,7 +1260,7 @@ export type TableDef = Message<"nanashi.v1.TableDef"> & {
  * Use `create(TableDefSchema)` to create a new message.
  */
 export const TableDefSchema: GenMessage<TableDef> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 39);
+  messageDesc(file_nanashi_v1_plan, 40);
 
 /**
  * ViewDef is a saved pivot of Metrics.
@@ -1194,7 +1279,7 @@ export type CreateViewRequest = Message<"nanashi.v1.CreateViewRequest"> & {
   clientOpId: string;
 
   /**
-   * view.id is required (UUIDv7).
+   * view.id is required.
    *
    * @generated from field: nanashi.v1.ViewDef view = 3;
    */
@@ -1206,7 +1291,7 @@ export type CreateViewRequest = Message<"nanashi.v1.CreateViewRequest"> & {
  * Use `create(CreateViewRequestSchema)` to create a new message.
  */
 export const CreateViewRequestSchema: GenMessage<CreateViewRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 40);
+  messageDesc(file_nanashi_v1_plan, 41);
 
 /**
  * @generated from message nanashi.v1.UpdateViewRequest
@@ -1233,7 +1318,7 @@ export type UpdateViewRequest = Message<"nanashi.v1.UpdateViewRequest"> & {
  * Use `create(UpdateViewRequestSchema)` to create a new message.
  */
 export const UpdateViewRequestSchema: GenMessage<UpdateViewRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 41);
+  messageDesc(file_nanashi_v1_plan, 42);
 
 /**
  * @generated from message nanashi.v1.ViewDef
@@ -1290,7 +1375,7 @@ export type ViewDef = Message<"nanashi.v1.ViewDef"> & {
  * Use `create(ViewDefSchema)` to create a new message.
  */
 export const ViewDefSchema: GenMessage<ViewDef> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 42);
+  messageDesc(file_nanashi_v1_plan, 43);
 
 /**
  * @generated from message nanashi.v1.Widget
@@ -1319,7 +1404,7 @@ export type Widget = Message<"nanashi.v1.Widget"> & {
  * Use `create(WidgetSchema)` to create a new message.
  */
 export const WidgetSchema: GenMessage<Widget> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 43);
+  messageDesc(file_nanashi_v1_plan, 44);
 
 /**
  * @generated from message nanashi.v1.CreateBoardRequest
@@ -1336,7 +1421,7 @@ export type CreateBoardRequest = Message<"nanashi.v1.CreateBoardRequest"> & {
   clientOpId: string;
 
   /**
-   * board.id is required (UUIDv7).
+   * board.id is required.
    *
    * @generated from field: nanashi.v1.BoardDef board = 3;
    */
@@ -1348,7 +1433,7 @@ export type CreateBoardRequest = Message<"nanashi.v1.CreateBoardRequest"> & {
  * Use `create(CreateBoardRequestSchema)` to create a new message.
  */
 export const CreateBoardRequestSchema: GenMessage<CreateBoardRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 44);
+  messageDesc(file_nanashi_v1_plan, 45);
 
 /**
  * @generated from message nanashi.v1.UpdateBoardRequest
@@ -1375,7 +1460,7 @@ export type UpdateBoardRequest = Message<"nanashi.v1.UpdateBoardRequest"> & {
  * Use `create(UpdateBoardRequestSchema)` to create a new message.
  */
 export const UpdateBoardRequestSchema: GenMessage<UpdateBoardRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 45);
+  messageDesc(file_nanashi_v1_plan, 46);
 
 /**
  * @generated from message nanashi.v1.BoardDef
@@ -1402,7 +1487,7 @@ export type BoardDef = Message<"nanashi.v1.BoardDef"> & {
   widgets: Widget[];
 
   /**
-   * Dimensions with a page selector. The selected member filters all the widgets.
+   * Lists with a page selector. The selected member filters all the widgets.
    *
    * @generated from field: repeated string page_selectors = 5;
    */
@@ -1414,7 +1499,7 @@ export type BoardDef = Message<"nanashi.v1.BoardDef"> & {
  * Use `create(BoardDefSchema)` to create a new message.
  */
 export const BoardDefSchema: GenMessage<BoardDef> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 46);
+  messageDesc(file_nanashi_v1_plan, 47);
 
 /**
  * @generated from message nanashi.v1.DeleteItemRequest
@@ -1446,7 +1531,7 @@ export type DeleteItemRequest = Message<"nanashi.v1.DeleteItemRequest"> & {
  * Use `create(DeleteItemRequestSchema)` to create a new message.
  */
 export const DeleteItemRequestSchema: GenMessage<DeleteItemRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 47);
+  messageDesc(file_nanashi_v1_plan, 48);
 
 /**
  * @generated from message nanashi.v1.AddCommentRequest
@@ -1463,6 +1548,8 @@ export type AddCommentRequest = Message<"nanashi.v1.AddCommentRequest"> & {
   clientOpId: string;
 
   /**
+   * comment.id is required.
+   *
    * @generated from field: nanashi.v1.Comment comment = 3;
    */
   comment?: Comment | undefined;
@@ -1473,7 +1560,7 @@ export type AddCommentRequest = Message<"nanashi.v1.AddCommentRequest"> & {
  * Use `create(AddCommentRequestSchema)` to create a new message.
  */
 export const AddCommentRequestSchema: GenMessage<AddCommentRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 48);
+  messageDesc(file_nanashi_v1_plan, 49);
 
 /**
  * @generated from message nanashi.v1.Comment
@@ -1490,14 +1577,14 @@ export type Comment = Message<"nanashi.v1.Comment"> & {
   id: string;
 
   /**
-   * The Metric of the comment.
+   * The id of the Metric of the comment.
    *
    * @generated from field: string metric = 3;
    */
   metric: string;
 
   /**
-   * The cell, as dimension name to member. Empty for the whole Metric.
+   * The cell, as list id to member id. Empty for the whole Metric.
    *
    * @generated from field: map<string, string> cell = 4;
    */
@@ -1526,7 +1613,7 @@ export type Comment = Message<"nanashi.v1.Comment"> & {
  * Use `create(CommentSchema)` to create a new message.
  */
 export const CommentSchema: GenMessage<Comment> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 49);
+  messageDesc(file_nanashi_v1_plan, 50);
 
 /**
  * @generated from message nanashi.v1.ListCommentsRequest
@@ -1550,7 +1637,7 @@ export type ListCommentsRequest = Message<"nanashi.v1.ListCommentsRequest"> & {
  * Use `create(ListCommentsRequestSchema)` to create a new message.
  */
 export const ListCommentsRequestSchema: GenMessage<ListCommentsRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 50);
+  messageDesc(file_nanashi_v1_plan, 51);
 
 /**
  * @generated from message nanashi.v1.ListCommentsResponse
@@ -1567,7 +1654,7 @@ export type ListCommentsResponse = Message<"nanashi.v1.ListCommentsResponse"> & 
  * Use `create(ListCommentsResponseSchema)` to create a new message.
  */
 export const ListCommentsResponseSchema: GenMessage<ListCommentsResponse> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 51);
+  messageDesc(file_nanashi_v1_plan, 52);
 
 /**
  * @generated from message nanashi.v1.AuditEntry
@@ -1608,7 +1695,7 @@ export type AuditEntry = Message<"nanashi.v1.AuditEntry"> & {
  * Use `create(AuditEntrySchema)` to create a new message.
  */
 export const AuditEntrySchema: GenMessage<AuditEntry> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 52);
+  messageDesc(file_nanashi_v1_plan, 53);
 
 /**
  * @generated from message nanashi.v1.ListAuditRequest
@@ -1630,7 +1717,7 @@ export type ListAuditRequest = Message<"nanashi.v1.ListAuditRequest"> & {
  * Use `create(ListAuditRequestSchema)` to create a new message.
  */
 export const ListAuditRequestSchema: GenMessage<ListAuditRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 53);
+  messageDesc(file_nanashi_v1_plan, 54);
 
 /**
  * @generated from message nanashi.v1.ListAuditResponse
@@ -1647,7 +1734,7 @@ export type ListAuditResponse = Message<"nanashi.v1.ListAuditResponse"> & {
  * Use `create(ListAuditResponseSchema)` to create a new message.
  */
 export const ListAuditResponseSchema: GenMessage<ListAuditResponse> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 54);
+  messageDesc(file_nanashi_v1_plan, 55);
 
 /**
  * @generated from message nanashi.v1.Snapshot
@@ -1679,7 +1766,7 @@ export type Snapshot = Message<"nanashi.v1.Snapshot"> & {
  * Use `create(SnapshotSchema)` to create a new message.
  */
 export const SnapshotSchema: GenMessage<Snapshot> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 55);
+  messageDesc(file_nanashi_v1_plan, 56);
 
 /**
  * @generated from message nanashi.v1.ListSnapshotsRequest
@@ -1696,7 +1783,7 @@ export type ListSnapshotsRequest = Message<"nanashi.v1.ListSnapshotsRequest"> & 
  * Use `create(ListSnapshotsRequestSchema)` to create a new message.
  */
 export const ListSnapshotsRequestSchema: GenMessage<ListSnapshotsRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 56);
+  messageDesc(file_nanashi_v1_plan, 57);
 
 /**
  * @generated from message nanashi.v1.ListSnapshotsResponse
@@ -1713,7 +1800,7 @@ export type ListSnapshotsResponse = Message<"nanashi.v1.ListSnapshotsResponse"> 
  * Use `create(ListSnapshotsResponseSchema)` to create a new message.
  */
 export const ListSnapshotsResponseSchema: GenMessage<ListSnapshotsResponse> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 57);
+  messageDesc(file_nanashi_v1_plan, 58);
 
 /**
  * @generated from message nanashi.v1.CreateSnapshotRequest
@@ -1730,7 +1817,7 @@ export type CreateSnapshotRequest = Message<"nanashi.v1.CreateSnapshotRequest"> 
   name: string;
 
   /**
-   * The id of the new snapshot (UUIDv7).
+   * The id of the new snapshot.
    *
    * @generated from field: string id = 3;
    */
@@ -1747,7 +1834,7 @@ export type CreateSnapshotRequest = Message<"nanashi.v1.CreateSnapshotRequest"> 
  * Use `create(CreateSnapshotRequestSchema)` to create a new message.
  */
 export const CreateSnapshotRequestSchema: GenMessage<CreateSnapshotRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 58);
+  messageDesc(file_nanashi_v1_plan, 59);
 
 /**
  * @generated from message nanashi.v1.GetAccessRequest
@@ -1764,7 +1851,7 @@ export type GetAccessRequest = Message<"nanashi.v1.GetAccessRequest"> & {
  * Use `create(GetAccessRequestSchema)` to create a new message.
  */
 export const GetAccessRequestSchema: GenMessage<GetAccessRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 59);
+  messageDesc(file_nanashi_v1_plan, 60);
 
 /**
  * @generated from message nanashi.v1.SetMemberRoleRequest
@@ -1791,7 +1878,7 @@ export type SetMemberRoleRequest = Message<"nanashi.v1.SetMemberRoleRequest"> & 
  * Use `create(SetMemberRoleRequestSchema)` to create a new message.
  */
 export const SetMemberRoleRequestSchema: GenMessage<SetMemberRoleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 60);
+  messageDesc(file_nanashi_v1_plan, 61);
 
 /**
  * @generated from message nanashi.v1.AppMember
@@ -1820,7 +1907,7 @@ export type AppMember = Message<"nanashi.v1.AppMember"> & {
  * Use `create(AppMemberSchema)` to create a new message.
  */
 export const AppMemberSchema: GenMessage<AppMember> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 61);
+  messageDesc(file_nanashi_v1_plan, 62);
 
 /**
  * @generated from message nanashi.v1.CreateAccessRuleRequest
@@ -1837,7 +1924,7 @@ export type CreateAccessRuleRequest = Message<"nanashi.v1.CreateAccessRuleReques
   clientOpId: string;
 
   /**
-   * rule.id is required (UUIDv7).
+   * rule.id is required.
    *
    * @generated from field: nanashi.v1.AccessRule rule = 3;
    */
@@ -1849,7 +1936,7 @@ export type CreateAccessRuleRequest = Message<"nanashi.v1.CreateAccessRuleReques
  * Use `create(CreateAccessRuleRequestSchema)` to create a new message.
  */
 export const CreateAccessRuleRequestSchema: GenMessage<CreateAccessRuleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 62);
+  messageDesc(file_nanashi_v1_plan, 63);
 
 /**
  * @generated from message nanashi.v1.UpdateAccessRuleRequest
@@ -1876,11 +1963,13 @@ export type UpdateAccessRuleRequest = Message<"nanashi.v1.UpdateAccessRuleReques
  * Use `create(UpdateAccessRuleRequestSchema)` to create a new message.
  */
 export const UpdateAccessRuleRequestSchema: GenMessage<UpdateAccessRuleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 63);
+  messageDesc(file_nanashi_v1_plan, 64);
 
 /**
  * AccessRule limits the members of a list that the users with a role can read and write.
  * A user with more than one rule must agree with all of them. MODELER and ADMIN ignore rules.
+ * A member that the model does not have is not readable. A list that the model does not have makes the rule
+ * inactive.
  *
  * @generated from message nanashi.v1.AccessRule
  */
@@ -1901,11 +1990,15 @@ export type AccessRule = Message<"nanashi.v1.AccessRule"> & {
   role: Role;
 
   /**
+   * The id of the list.
+   *
    * @generated from field: string list = 4;
    */
   list: string;
 
   /**
+   * Member ids.
+   *
    * @generated from field: repeated string members = 5;
    */
   members: string[];
@@ -1923,7 +2016,7 @@ export type AccessRule = Message<"nanashi.v1.AccessRule"> & {
  * Use `create(AccessRuleSchema)` to create a new message.
  */
 export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 64);
+  messageDesc(file_nanashi_v1_plan, 65);
 
 /**
  * @generated from message nanashi.v1.DeleteAccessRuleRequest
@@ -1950,7 +2043,7 @@ export type DeleteAccessRuleRequest = Message<"nanashi.v1.DeleteAccessRuleReques
  * Use `create(DeleteAccessRuleRequestSchema)` to create a new message.
  */
 export const DeleteAccessRuleRequestSchema: GenMessage<DeleteAccessRuleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 65);
+  messageDesc(file_nanashi_v1_plan, 66);
 
 /**
  * @generated from message nanashi.v1.Access
@@ -1972,7 +2065,7 @@ export type Access = Message<"nanashi.v1.Access"> & {
  * Use `create(AccessSchema)` to create a new message.
  */
 export const AccessSchema: GenMessage<Access> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 66);
+  messageDesc(file_nanashi_v1_plan, 67);
 
 /**
  * Role is the role of a user in an application. A higher role has all the rights of a lower role.
@@ -2258,9 +2351,17 @@ export const ItemTypeSchema: GenEnum<ItemType> = /*@__PURE__*/
  * The header X-Nanashi-User identifies the user. The API trusts it only on a connection from this host
  * (local development) or from an authenticating proxy that sets it again (--trusted-proxy).
  * Each application is one engine model.
+ *
+ * Identifiers (docs/ids.md). Each id that a request or a response carries is a UUIDv7. The frontend makes the id
+ * of each new object (list, member, property, Metric, table, view, board, comment, access rule, snapshot,
+ * application). The api makes the ids of the objects that it makes for the user (the calendar, the scenario
+ * list, the members of an import, the Metric of a NUMBER or BOOLEAN property). A name is an attribute.
+ * Every reference (the dimensions of a Metric, a filter, a cell, a rule) is an id. The api changes each id to
+ * the canonical form (lower case, with hyphens) and refuses a value that is not a UUID with INVALID_ARGUMENT.
+ *
  * Each request that changes data has client_op_id: a UUID that the frontend makes once for each user action.
- * The api sends it to the engine, so that a resent write is not committed two times.
- * The ids of new tables, views, boards, access rules, applications and snapshots are UUIDv7 values from the frontend.
+ * A request sent again with the same client_op_id gives the stored result of the first send. A request with the
+ * same client_op_id and a different content gives INVALID_ARGUMENT.
  *
  * @generated from service nanashi.v1.PlanService
  */
@@ -2328,7 +2429,8 @@ export const PlanService: GenService<{
     output: typeof AckSchema;
   },
   /**
-   * CreateScenario adds a member to the dimension "Scenario" and copies the input cells of copy_from.
+   * CreateScenario adds a member to the scenario list (it makes the list on the first call) and copies the
+   * input cells of copy_from.
    *
    * @generated from rpc nanashi.v1.PlanService.CreateScenario
    */
@@ -2338,7 +2440,7 @@ export const PlanService: GenService<{
     output: typeof AckSchema;
   },
   /**
-   * CreateMetric makes a Metric. An empty formula makes an input Metric. An existing name gives ALREADY_EXISTS.
+   * CreateMetric makes a Metric. An empty formula makes an input Metric. An existing id gives ALREADY_EXISTS.
    *
    * @generated from rpc nanashi.v1.PlanService.CreateMetric
    */
@@ -2348,7 +2450,7 @@ export const PlanService: GenService<{
     output: typeof AckSchema;
   },
   /**
-   * UpdateMetric changes a Metric. A missing name gives NOT_FOUND.
+   * UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
    * A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
    *
    * @generated from rpc nanashi.v1.PlanService.UpdateMetric

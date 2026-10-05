@@ -2,10 +2,10 @@ import type { MessageInitShape } from "@bufbuild/protobuf";
 import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
 import { FileTrigger } from "react-aria-components";
-import { api } from "../api";
+import { api, newId } from "../api";
 import { ListKind, type MemberEditSchema, PropertyType, Role } from "../gen/nanashi/v1/plan_pb";
-import { parseCsv } from "../logic";
-import { cls, memberNames, useApp, useMutate } from "../state";
+import { label, parseCsv } from "../logic";
+import { cls, listOptions, memberOptions, useApp, useMutate } from "../state";
 import { Check, Section, Sel } from "../ui";
 
 const KINDS: [string, string][] = [
@@ -25,13 +25,13 @@ const lines = (s: string) =>
     .filter(Boolean);
 
 export function ListsPage() {
-  const { appId, model, can } = useApp();
+  const { appId, model, names, can } = useApp();
   const mutate = useMutate();
-  const [sel, setSel] = useState(model.lists[0]?.name ?? "");
+  const [sel, setSel] = useState(model.lists[0]?.id ?? "");
   const [form, setForm] = useState({ name: "", kind: String(ListKind.DIMENSION), members: "" });
   const [prop, setProp] = useState({ name: "", type: String(PropertyType.NUMBER), target: "" });
   const [newMember, setNewMember] = useState("");
-  const list = model.lists.find((l) => l.name === sel);
+  const list = model.lists.find((l) => l.id === sel);
   const modeler = can(Role.MODELER);
   const edit = (edits: MessageInitShape<typeof MemberEditSchema>[]) =>
     mutate((clientOpId) => api.editMembers({ appId, clientOpId, list: sel, edits }));
@@ -60,19 +60,23 @@ export function ListsPage() {
               onChange={(e) => setForm({ ...form, members: e.target.value })}
             />
             <Button
-              onPress={() =>
-                mutate(async (clientOpId) => {
+              onPress={() => {
+                // The ids of the list and its members: one set for each user action.
+                const id = newId();
+                const members = lines(form.members).map((name) => ({ id: newId(), name }));
+                return mutate(async (clientOpId) => {
                   await api.createList({
                     clientOpId,
                     appId,
+                    id,
                     name: form.name,
                     kind: Number(form.kind),
-                    members: lines(form.members),
+                    members,
                   });
-                  setSel(form.name);
+                  setSel(id);
                   setForm({ ...form, name: "", members: "" });
-                })
-              }
+                });
+              }}
             >
               作成
             </Button>
@@ -80,12 +84,7 @@ export function ListsPage() {
         </Section>
       )}
       <Section title="リスト">
-        <Sel
-          label="リスト"
-          value={sel}
-          onChange={setSel}
-          options={model.lists.map((l) => l.name)}
-        />
+        <Sel label="リスト" value={sel} onChange={setSel} options={listOptions(model)} />
       </Section>
       {list && (
         <Section title={`${list.name} のメンバー（${list.members.length}）`}>
@@ -94,9 +93,9 @@ export function ListsPage() {
               <tr>
                 <th>名前</th>
                 {list.properties.map((p) => (
-                  <th key={p.name}>
+                  <th key={p.id}>
                     {p.name}
-                    {p.target && ` → ${p.target}`}
+                    {p.target && ` → ${label(names, p.target)}`}
                   </th>
                 ))}
                 {modeler && <th>操作</th>}
@@ -104,7 +103,7 @@ export function ListsPage() {
             </thead>
             <tbody>
               {list.members.map((m, i) => (
-                <tr key={m.name}>
+                <tr key={m.id}>
                   <td>
                     <Input
                       key={m.name}
@@ -114,37 +113,32 @@ export function ListsPage() {
                       onBlur={(e) =>
                         e.target.value !== m.name &&
                         edit([
-                          {
-                            edit: {
-                              case: "rename",
-                              value: { name: m.name, newName: e.target.value },
-                            },
-                          },
+                          { edit: { case: "rename", value: { id: m.id, name: e.target.value } } },
                         ])
                       }
                     />
                   </td>
                   {list.properties.map((p) => {
-                    const v = m.properties[p.name] ?? "";
+                    const v = m.properties[p.id] ?? "";
                     const set = (value: string) =>
                       value !== v &&
                       edit([
                         {
                           edit: {
                             case: "set",
-                            value: { name: m.name, properties: { [p.name]: value } },
+                            value: { id: m.id, properties: { [p.id]: value } },
                           },
                         },
                       ]);
                     return (
-                      <td key={p.name}>
+                      <td key={p.id}>
                         {p.type === PropertyType.DIMENSION ? (
                           <Sel
                             ariaLabel={p.name}
                             value={v}
                             onChange={set}
                             empty=""
-                            options={memberNames(model, p.target)}
+                            options={memberOptions(model, p.target)}
                           />
                         ) : (
                           <Input
@@ -174,7 +168,7 @@ export function ListsPage() {
                           onPress={() =>
                             edit([
                               {
-                                edit: { case: "move", value: { name: m.name, position: i + step } },
+                                edit: { case: "move", value: { id: m.id, position: i + step } },
                               },
                             ])
                           }
@@ -185,9 +179,7 @@ export function ListsPage() {
                       <Button
                         size="sm"
                         variant="danger-soft"
-                        onPress={() =>
-                          edit([{ edit: { case: "remove", value: { name: m.name } } }])
-                        }
+                        onPress={() => edit([{ edit: { case: "remove", value: { id: m.id } } }])}
                       >
                         削除
                       </Button>
@@ -208,7 +200,7 @@ export function ListsPage() {
                 />
                 <Button
                   onPress={() =>
-                    edit([{ edit: { case: "add", value: { name: newMember } } }]).then(
+                    edit([{ edit: { case: "add", value: { id: newId(), name: newMember } } }]).then(
                       (ok) => ok && setNewMember(""),
                     )
                   }
@@ -235,21 +227,27 @@ export function ListsPage() {
                     value={prop.target}
                     onChange={(target) => setProp({ ...prop, target })}
                     empty=""
-                    options={model.lists.map((l) => l.name)}
+                    options={listOptions(model)}
                   />
                 )}
                 <Button
-                  onPress={() =>
-                    mutate(async (clientOpId) => {
+                  onPress={() => {
+                    const id = newId();
+                    return mutate(async (clientOpId) => {
                       await api.addProperty({
                         clientOpId,
                         appId,
                         list: sel,
-                        property: { name: prop.name, type: Number(prop.type), target: prop.target },
+                        property: {
+                          id,
+                          name: prop.name,
+                          type: Number(prop.type),
+                          target: prop.target,
+                        },
                       });
                       setProp({ ...prop, name: "" });
-                    })
-                  }
+                    });
+                  }}
                 >
                   プロパティを追加
                 </Button>
@@ -319,7 +317,7 @@ export function ScenariosPage() {
     <Section title="シナリオ">
       <ul className="list-disc pl-6 text-sm">
         {members.map((m) => (
-          <li key={m.name}>{m.name}</li>
+          <li key={m.id}>{m.name}</li>
         ))}
       </ul>
       <p className="text-sm">
@@ -339,14 +337,15 @@ export function ScenariosPage() {
             value={from}
             onChange={setFrom}
             empty="（空）"
-            options={members.map((m) => m.name)}
+            options={members.map((m): [string, string] => [m.id, m.name])}
           />
           <Button
-            onPress={() =>
-              mutate((clientOpId) =>
-                api.createScenario({ appId, clientOpId, name, copyFrom: from }),
-              )
-            }
+            onPress={() => {
+              const id = newId();
+              return mutate((clientOpId) =>
+                api.createScenario({ appId, clientOpId, id, name, copyFrom: from }),
+              );
+            }}
           >
             シナリオを作成
           </Button>
@@ -402,8 +401,9 @@ const colSel = (header: string[], label: string, value: string, onChange: (v: st
   <Sel key={label} label={label} value={value} onChange={onChange} empty="" options={header} />
 );
 
-const mappedColumns = (map: Record<string, string>, fields: string[]) =>
-  Object.fromEntries(Object.entries(map).filter(([k, v]) => v && fields.includes(k)));
+// mappedColumns keeps the chosen column of each field (an id) that the target has.
+const mappedColumns = (map: Record<string, string>, fields: [string, string][]) =>
+  Object.fromEntries(Object.entries(map).filter(([k, v]) => v && fields.some(([id]) => id === k)));
 
 function ImportListForm(props: { csv: string; header: string[] }) {
   const { appId, model } = useApp();
@@ -412,7 +412,10 @@ function ImportListForm(props: { csv: string; header: string[] }) {
   const [memberColumn, setMemberColumn] = useState("");
   const [map, setMap] = useState<Record<string, string>>({});
   const [result, setResult] = useState("");
-  const fields = model.lists.find((l) => l.name === target)?.properties.map((p) => p.name) ?? [];
+  const fields =
+    model.lists
+      .find((l) => l.id === target)
+      ?.properties.map((p): [string, string] => [p.id, p.name]) ?? [];
   return (
     <>
       <div className="flex flex-wrap gap-2">
@@ -421,13 +424,13 @@ function ImportListForm(props: { csv: string; header: string[] }) {
           value={target}
           onChange={setTarget}
           empty=""
-          options={model.lists.map((l) => l.name)}
+          options={listOptions(model)}
         />
       </div>
       <div className="flex flex-wrap gap-2">
         {colSel(props.header, "メンバーの列", memberColumn, setMemberColumn)}
-        {fields.map((f) =>
-          colSel(props.header, `${f} の列`, map[f] ?? "", (v) => setMap({ ...map, [f]: v })),
+        {fields.map(([id, name]) =>
+          colSel(props.header, `${name} の列`, map[id] ?? "", (v) => setMap({ ...map, [id]: v })),
         )}
       </div>
       <Button
@@ -454,14 +457,17 @@ function ImportListForm(props: { csv: string; header: string[] }) {
 }
 
 function ImportMetricForm(props: { csv: string; header: string[] }) {
-  const { appId, model } = useApp();
+  const { appId, model, names } = useApp();
   const mutate = useMutate();
   const [target, setTarget] = useState("");
   const [map, setMap] = useState<Record<string, string>>({});
   const [valueColumn, setValueColumn] = useState("");
   const [addMembers, setAddMembers] = useState(true);
   const [result, setResult] = useState("");
-  const fields = model.metrics.find((m) => m.name === target)?.dimensions ?? [];
+  const fields =
+    model.metrics
+      .find((m) => m.id === target)
+      ?.dimensions.map((d): [string, string] => [d, label(names, d)]) ?? [];
   return (
     <>
       <div className="flex flex-wrap gap-2">
@@ -470,12 +476,12 @@ function ImportMetricForm(props: { csv: string; header: string[] }) {
           value={target}
           onChange={setTarget}
           empty=""
-          options={model.metrics.map((m) => m.name)}
+          options={model.metrics.map((m): [string, string] => [m.id, m.name])}
         />
       </div>
       <div className="flex flex-wrap gap-2">
-        {fields.map((f) =>
-          colSel(props.header, `${f} の列`, map[f] ?? "", (v) => setMap({ ...map, [f]: v })),
+        {fields.map(([id, name]) =>
+          colSel(props.header, `${name} の列`, map[id] ?? "", (v) => setMap({ ...map, [id]: v })),
         )}
         {colSel(props.header, "値の列", valueColumn, setValueColumn)}
         <Check isSelected={addMembers} onChange={setAddMembers}>

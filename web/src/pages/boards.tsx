@@ -3,13 +3,13 @@ import { Button, Input } from "@heroui/react";
 import { useState } from "react";
 import { api, newId } from "../api";
 import { type BoardDef, ItemType, type WidgetSchema, Role } from "../gen/nanashi/v1/plan_pb";
-import { toFilters } from "../logic";
+import { label, toFilters } from "../logic";
 import { PivotWidget } from "../Pivot";
-import { createOrUpdate, memberNames, useApp, useMutate } from "../state";
+import { createOrUpdate, listOptions, memberOptions, useApp, useMutate } from "../state";
 import { Sel } from "../ui";
 
 export function BoardsPage() {
-  const { appId, model, can } = useApp();
+  const { appId, model, names, can } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.boards[0]?.id ?? "");
   const [name, setName] = useState("");
@@ -70,8 +70,7 @@ export function BoardsPage() {
                     () => api.updateBoard(req),
                   );
                   choose(draftId);
-                  setDraftId(newId());
-                })
+                }).then(() => setDraftId(newId()))
               }
             >
               ボードを作成
@@ -85,11 +84,11 @@ export function BoardsPage() {
             {b.pageSelectors.map((d) => (
               <Sel
                 key={d}
-                label={d}
+                label={label(names, d)}
                 value={page[d] ?? ""}
                 onChange={(m) => setPage({ ...page, [d]: m })}
                 empty="すべて"
-                options={memberNames(model, d)}
+                options={memberOptions(model, d)}
               />
             ))}
             {modeler && (
@@ -98,7 +97,7 @@ export function BoardsPage() {
                 value=""
                 onChange={(d) => d && save(b, { pageSelectors: [...b.pageSelectors, d] })}
                 empty=""
-                options={model.lists.map((l) => l.name).filter((n) => !b.pageSelectors.includes(n))}
+                options={listOptions(model).filter(([id]) => !b.pageSelectors.includes(id))}
               />
             )}
           </div>

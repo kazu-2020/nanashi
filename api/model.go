@@ -16,51 +16,38 @@ import (
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
 
-// memberRefs are the places in the api tables that name a member of a list. The arguments of each statement
-// are (app, list, old name, new name). A null new name removes the old name (app_rename in schema.sql).
-// If a later edit adds the name again, an old rule must not give access to it.
-// A cell comment of a removed member stays as it is. The comments list still shows it.
-var memberRefs = []string{
-	`update app_property set text_values = case when $4::text is null then text_values - $3
-		else jsonb_set(text_values - $3, array[$4::text], text_values->$3) end where app_id = $1 and list = $2 and text_values ? $3`,
-	`update app_access_rule set members = app_rename(members, $3, $4) where app_id = $1 and list = $2 and members ? $3`,
-	`update app_item set def = jsonb_set(def, array['filters', $2, 'names'], app_rename(def->'filters'->$2->'names', $3, $4))
-		where app_id = $1 and def->'filters'->$2->'names' ? $3`,
-	`update app_comment set cell = jsonb_set(cell, array[$2], to_jsonb($4::text)) where app_id = $1 and cell->>$2 = $3 and $4::text is not null`,
-}
-
-// memberRenames gives the statements that rename a member in the api tables, or remove it when name is nil.
-func memberRenames(app, list, old string, name *string) []stmt {
-	return statements(memberRefs, app, list, old, name)
-}
-
-func statements(sqls []string, args ...any) []stmt {
-	out := make([]stmt, len(sqls))
-	for i, sql := range sqls {
-		out[i] = stmt{sql, args}
-	}
-	return out
-}
-
-// propRow is a NUMBER, BOOLEAN or TEXT property, which the api keeps. The engine keeps DIMENSION properties.
+// propRow is a row of app_property. The api keeps the name of each property. The engine keeps the values of a
+// DIMENSION property. MetricID is the input Metric that keeps the values of a NUMBER or BOOLEAN property.
 type propRow struct {
-	List string                 `json:"list"`
-	Name string                 `json:"name"`
-	Type nanashiv1.PropertyType `json:"type"`
-	Text map[string]string      `json:"text,omitempty"` // Member to value, for TEXT only.
+	ListID   string                 `json:"list_id"`
+	ID       string                 `json:"id"`
+	Name     string                 `json:"name"`
+	Type     nanashiv1.PropertyType `json:"type"`
+	MetricID string                 `json:"metric_id,omitempty"`
+	Text     map[string]string      `json:"text,omitempty"` // Member id to value, for TEXT only.
 }
 
 // appMeta is the api data of an application that the engine does not know.
 type appMeta struct {
-	Kinds map[string]nanashiv1.ListKind
+	Kinds map[string]nanashiv1.ListKind // By list id.
 	Props []propRow
 }
 
-// refuseProperty refuses a change to a Metric with the name of a property Metric. GetModel needs that Metric.
-func (m appMeta) refuseProperty(names ...string) error {
-	for _, n := range names {
-		if slices.ContainsFunc(m.Props, func(p propRow) bool { return propMetric(p.List, p.Name) == n }) {
-			return tag(errPrecondition, "%s はプロパティの値を持つ Metric なので、変更できない", n)
+// listOfKind gives the id of the first list of the kind.
+func (m appMeta) listOfKind(kind nanashiv1.ListKind) (string, bool) {
+	for id, k := range m.Kinds {
+		if k == kind {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// refuseProperty refuses a change to the Metric of a property. GetModel needs that Metric.
+func (m appMeta) refuseProperty(metricIDs ...string) error {
+	for _, id := range metricIDs {
+		if slices.ContainsFunc(m.Props, func(p propRow) bool { return p.MetricID == id }) {
+			return tag(errPrecondition, "プロパティの値を持つ Metric なので、変更できない")
 		}
 	}
 	return nil
@@ -72,48 +59,45 @@ var propKind = map[nanashiv1.PropertyType]string{
 	nanashiv1.PropertyType_PROPERTY_TYPE_BOOLEAN: "boolean",
 }
 
-// propMetric is the input Metric that holds a NUMBER or BOOLEAN property.
+// propMetric is the name of the input Metric that holds a NUMBER or BOOLEAN property.
 func propMetric(list, prop string) string { return list + "." + prop }
 
-// editOps changes member edits into engine operations and the statements for the api tables (TEXT values and
-// the name references). The engine keeps the DIMENSION property values and follows a rename or a removal itself.
-func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.MemberEdit) ([]op, []stmt, error) {
-	dim, ok := em.dim(list)
-	if !ok {
-		return nil, nil, fmt.Errorf("リスト %s がない", list)
-	}
-	members := map[string]bool{}
+// coords makes the coordinates of a cell: list id to member id.
+func coords(list, member string) map[string]any { return map[string]any{list: member} }
+
+// editOps changes member edits into engine operations and the statements for the TEXT values. The engine keeps
+// the DIMENSION property values and the member names. Every reference is an id, so a rename changes no api row.
+func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*nanashiv1.MemberEdit) ([]op, []stmt, error) {
+	members := map[string]string{} // Id to name.
+	names := map[string]bool{}
 	for _, m := range dim.Members {
-		members[m] = true
+		members[m.ID] = m.Name
+		names[m.Name] = true
 	}
-	targets := map[string]string{} // DIMENSION property to its target list.
-	for _, p := range dim.Props {
-		targets[p.Name] = p.Target
-	}
-	types := map[string]nanashiv1.PropertyType{}
+	props := map[string]propRow{} // By property id.
 	for _, p := range meta.Props {
-		if p.List == list {
-			types[p.Name] = p.Type
+		if p.ListID == dim.ID {
+			props[p.ID] = p
 		}
 	}
 	var ops []op
 	var stmts []stmt
-	exists := func(name string) error {
-		if !members[name] {
-			return fmt.Errorf("%s にメンバー %q がない", list, name)
+	exists := func(id string) error {
+		if _, ok := members[id]; !ok {
+			return fmt.Errorf("%s にメンバー %s がない", dim.Name, id)
 		}
 		return nil
 	}
 	// values keeps the DIMENSION and TEXT property values until the end, so that one operation or statement sets
 	// the values of all members of an import. A nil value removes the value.
 	values := map[string]map[string]*string{}
-	// send sends the kept values that touch member (all values if member is nil). A rename or a removal of a member
-	// first sends the values that name it, because the engine and memberRefs then follow the rename or the removal.
+	// send sends the kept values that touch member (all values if member is nil). A removal of a member first
+	// sends the values that name it, because the engine then follows the removal.
 	send := func(member *string) {
 		for _, prop := range slices.Sorted(maps.Keys(values)) {
 			touched := map[string]*string{}
 			for k, v := range values[prop] {
-				if member == nil || k == *member || targets[prop] == list && v != nil && *v == *member {
+				if member == nil || k == *member || v != nil && *v == *member {
 					touched[k] = v
 					delete(values[prop], k)
 				}
@@ -121,18 +105,33 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			if len(touched) == 0 {
 				continue
 			}
-			if _, ok := targets[prop]; ok {
-				ops = append(ops, newOp("set_property_values", list, prop, touched))
+			if _, ok := dim.prop(prop); ok {
+				ops = append(ops, newOp("set_property_values", map[string]any{"dim": dim.ID, "prop": prop, "values": touched}))
 			} else {
-				stmts = append(stmts, textValues(app, list, prop, touched))
+				stmts = append(stmts, textValues(app, dim.ID, prop, touched))
 			}
 		}
 	}
-	setProps := func(member string, props map[string]string) error {
-		for _, prop := range slices.Sorted(maps.Keys(props)) {
-			v := strings.TrimSpace(props[prop])
-			switch kind, isMetric := propKind[types[prop]]; {
-			case targets[prop] != "" || types[prop] == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+	setProps := func(member string, in map[string]string) error {
+		for _, prop := range slices.Sorted(maps.Keys(in)) {
+			v := strings.TrimSpace(in[prop])
+			p, known := props[prop]
+			ep, isDim := dim.prop(prop)
+			switch kind, isMetric := propKind[p.Type]; {
+			case isDim, known && p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+				if isDim && v != "" {
+					// The value is a member id of the target list. On a list that refers to itself, the member can be
+					// one that this edit adds.
+					if _, err := parseID(ep.Name, v); err != nil {
+						return err
+					}
+					target, _ := em.dim(ep.Target)
+					_, inTarget := target.member(v)
+					_, inEdit := members[v]
+					if !inTarget && !(ep.Target == dim.ID && inEdit) {
+						return fmt.Errorf("%s に %s がない", target.Name, v)
+					}
+				}
 				if values[prop] == nil {
 					values[prop] = map[string]*string{}
 				}
@@ -143,11 +142,11 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 			case isMetric:
 				val, err := parseValue(kind, v)
 				if err != nil {
-					return fmt.Errorf("%s.%s: %w", list, prop, err)
+					return fmt.Errorf("%s.%s: %w", dim.Name, p.Name, err)
 				}
-				ops = append(ops, newOp("set_cell", propMetric(list, prop), val).with(map[string]any{list: member}))
+				ops = append(ops, newOp("set_cell", map[string]any{"metric": p.MetricID, "value": val, "coords": coords(dim.ID, member)}))
 			default:
-				return fmt.Errorf("%s にプロパティ %s がない", list, prop)
+				return fmt.Errorf("%s にプロパティ %s がない", dim.Name, prop)
 			}
 		}
 		return nil
@@ -156,50 +155,48 @@ func editOps(app, list string, em engineModel, meta appMeta, edits []*nanashiv1.
 		switch x := e.Edit.(type) {
 		case *nanashiv1.MemberEdit_Add:
 			name := strings.TrimSpace(x.Add.Name)
-			if name == "" {
-				return nil, nil, errors.New("メンバーの名前が空")
+			if name == "" || x.Add.Id == "" {
+				return nil, nil, errors.New("メンバーの id と名前が要る")
 			}
-			if members[name] {
-				return nil, nil, fmt.Errorf("%s にメンバー %q はすでにある", list, name)
+			if _, ok := members[x.Add.Id]; ok || names[name] {
+				return nil, nil, tag(errExists, "%s にメンバー %q はすでにある", dim.Name, name)
 			}
-			ops = append(ops, newOp("add_member", list, name))
-			members[name] = true
-			if err := setProps(name, x.Add.Properties); err != nil {
+			ops = append(ops, newOp("add_member", map[string]any{"dim": dim.ID, "id": x.Add.Id, "name": name}))
+			members[x.Add.Id], names[name] = name, true
+			if err := setProps(x.Add.Id, x.Add.Properties); err != nil {
 				return nil, nil, err
 			}
 		case *nanashiv1.MemberEdit_Set:
-			if err := exists(x.Set.Name); err != nil {
+			if err := exists(x.Set.Id); err != nil {
 				return nil, nil, err
 			}
-			if err := setProps(x.Set.Name, x.Set.Properties); err != nil {
+			if err := setProps(x.Set.Id, x.Set.Properties); err != nil {
 				return nil, nil, err
 			}
 		case *nanashiv1.MemberEdit_Rename:
-			old, name := x.Rename.Name, strings.TrimSpace(x.Rename.NewName)
-			if err := exists(old); err != nil {
+			name := strings.TrimSpace(x.Rename.Name)
+			if err := exists(x.Rename.Id); err != nil {
 				return nil, nil, err
 			}
-			if name == "" || members[name] {
-				return nil, nil, fmt.Errorf("%s に %q という名前は付けられない", list, name)
+			if name == "" || names[name] {
+				return nil, nil, fmt.Errorf("%s に %q という名前は付けられない", dim.Name, name)
 			}
-			send(&old)
-			ops = append(ops, newOp("rename_member", list, old, name))
-			stmts = append(stmts, memberRenames(app, list, old, &name)...)
-			delete(members, old)
-			members[name] = true
+			ops = append(ops, newOp("rename_member", map[string]any{"dim": dim.ID, "id": x.Rename.Id, "name": name}))
+			delete(names, members[x.Rename.Id])
+			members[x.Rename.Id], names[name] = name, true
 		case *nanashiv1.MemberEdit_Remove:
-			if err := exists(x.Remove.Name); err != nil {
+			if err := exists(x.Remove.Id); err != nil {
 				return nil, nil, err
 			}
-			send(&x.Remove.Name)
-			ops = append(ops, newOp("remove_member", list, x.Remove.Name))
-			stmts = append(stmts, memberRenames(app, list, x.Remove.Name, nil)...)
-			delete(members, x.Remove.Name)
+			send(&x.Remove.Id)
+			ops = append(ops, newOp("remove_member", map[string]any{"dim": dim.ID, "id": x.Remove.Id}))
+			delete(names, members[x.Remove.Id])
+			delete(members, x.Remove.Id)
 		case *nanashiv1.MemberEdit_Move:
-			if err := exists(x.Move.Name); err != nil {
+			if err := exists(x.Move.Id); err != nil {
 				return nil, nil, err
 			}
-			ops = append(ops, newOp("move_member", list, x.Move.Name, x.Move.Position))
+			ops = append(ops, newOp("move_member", map[string]any{"dim": dim.ID, "id": x.Move.Id, "at": x.Move.Position}))
 		default:
 			return nil, nil, errors.New("メンバーの変更が空")
 		}
@@ -220,44 +217,94 @@ func textValues(app, list, prop string, values map[string]*string) stmt {
 		}
 	}
 	slices.Sort(removed)
-	return stmt{"update app_property set text_values = (text_values - $4::text[]) || $5::jsonb where app_id = $1 and list = $2 and name = $3",
-		[]any{app, list, prop, removed, textJSON(set)}}
+	return stmt{sql: "update app_property set text_values = (text_values - $4::text[]) || $5::jsonb where app_id = $1 and list_id = $2 and id = $3",
+		args: []any{app, list, prop, removed, textJSON(set)}}
+}
+
+// calendar is the plan of a calendar: the ids come from newID, one time for each plan.
+type calendar struct {
+	ops   []op
+	lists []string // The ids of Year, Quarter and Month.
 }
 
 // calendarOps makes the ordered lists Year, Quarter and Month and the properties between them.
-func calendarOps(start, years int) ([]op, error) {
+func calendarOps(start, years int) (calendar, error) {
 	if years < 1 || years > 50 || start < 1900 || start > 2200 {
-		return nil, errors.New("暦は 1900 年から 2200 年まで、1 年から 50 年まで")
+		return calendar{}, errors.New("暦は 1900 年から 2200 年まで、1 年から 50 年まで")
 	}
-	var ys, qs, ms []string
-	monthQuarter, monthYear, quarterYear := map[string]string{}, map[string]string{}, map[string]string{}
+	ids := [3]string{newID(), newID(), newID()}
+	var out calendar
+	out.lists = ids[:]
+	for i, name := range []string{"Year", "Quarter", "Month"} {
+		out.ops = append(out.ops, newOp("add_dimension", map[string]any{"id": ids[i], "name": name, "ordered": true}))
+	}
+	member := func(dim int, name string) string {
+		id := newID()
+		out.ops = append(out.ops, newOp("add_member", map[string]any{"dim": ids[dim], "id": id, "name": name}))
+		return id
+	}
+	monthQuarter, monthYear, quarterYear := map[string]*string{}, map[string]*string{}, map[string]*string{}
 	for y := start; y < start+years; y++ {
-		year := strconv.Itoa(y)
-		ys = append(ys, year)
+		year := member(0, strconv.Itoa(y))
 		for q := 1; q <= 4; q++ {
-			quarter := fmt.Sprintf("%d-Q%d", y, q)
-			qs = append(qs, quarter)
-			quarterYear[quarter] = year
+			quarter := member(1, fmt.Sprintf("%d-Q%d", y, q))
+			quarterYear[quarter] = &year
 			for m := 3*q - 2; m <= 3*q; m++ {
-				month := fmt.Sprintf("%d-%02d", y, m)
-				ms = append(ms, month)
-				monthQuarter[month], monthYear[month] = quarter, year
+				month := member(2, fmt.Sprintf("%d-%02d", y, m))
+				monthQuarter[month], monthYear[month] = &quarter, &year
 			}
 		}
 	}
-	ordered := map[string]any{"ordered": true}
-	return []op{
-		newOp("add_dimension", "Year", ys).with(ordered),
-		newOp("add_dimension", "Quarter", qs).with(ordered),
-		newOp("add_dimension", "Month", ms).with(ordered),
-		newOp("add_property", "Month", "Quarter", "Quarter", monthQuarter),
-		newOp("add_property", "Month", "Year", "Year", monthYear),
-		newOp("add_property", "Quarter", "Year", "Year", quarterYear),
-	}, nil
+	for _, p := range []struct {
+		dim, target int
+		name        string
+		values      map[string]*string
+	}{{2, 1, "Quarter", monthQuarter}, {2, 0, "Year", monthYear}, {1, 0, "Year", quarterYear}} {
+		id := newID()
+		out.ops = append(out.ops,
+			newOp("add_property", map[string]any{"dim": ids[p.dim], "id": id, "name": p.name, "target": ids[p.target]}),
+			newOp("set_property_values", map[string]any{"dim": ids[p.dim], "prop": id, "values": p.values}))
+	}
+	return out, nil
 }
 
-// copyCellOps copies the cells of a slice to the member to of the dimension dim. If dim is empty, it sets the cells as they are.
-func copyCellOps(metric, dim, to string, cube engineCube) []op {
+// calendarStmts gives the rows of the calendar lists and their properties.
+func calendarStmts(app string, cal calendar) ([]stmt, []madeRow) {
+	stmts, made := listKinds(app, nanashiv1.ListKind_LIST_KIND_CALENDAR, cal.lists...)
+	for _, o := range cal.ops {
+		if o["op"] == "add_property" {
+			st, m := propertyStmt(app, o["dim"].(string), o["id"].(string), o["name"].(string), nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION, "")
+			stmts, made = append(stmts, st), append(made, m)
+		}
+	}
+	return stmts, made
+}
+
+// listKinds gives the statements that record the kind of each new list in app_list.
+func listKinds(app string, kind nanashiv1.ListKind, lists ...string) ([]stmt, []madeRow) {
+	var stmts []stmt
+	var made []madeRow
+	for _, list := range lists {
+		stmts = append(stmts, stmt{`insert into app_list (app_id, id, kind) values ($1, $2, $3) on conflict do nothing`,
+			[]any{app, list, kind}, tag(errExists, "同じ id のリストがすでにある")})
+		made = append(made, madeRow{Table: "app_list", ID: list})
+	}
+	return stmts, made
+}
+
+// propertyStmt gives the statement that makes the row of a property.
+func propertyStmt(app, list, id, name string, typ nanashiv1.PropertyType, metricID string) (stmt, madeRow) {
+	var metric *string
+	if metricID != "" {
+		metric = &metricID
+	}
+	return stmt{`insert into app_property (app_id, list_id, id, name, type, metric_id) values ($1, $2, $3, $4, $5, $6) on conflict do nothing`,
+		[]any{app, list, id, name, typ, metric}, tag(errExists, "同じ id のプロパティがすでにある")}, madeRow{Table: "app_property", ID: id, ListID: list}
+}
+
+// copyCellOps copies the cells of a slice to the member to of the dimension dim. If dim is empty, it sets the
+// cells as they are. With override, the cells go to the hidden override input of a formula Metric.
+func copyCellOps(metric, dim, to string, cube engineCube, override bool) []op {
 	var ops []op
 	for _, c := range cube.Cells {
 		coords := map[string]any{}
@@ -267,87 +314,135 @@ func copyCellOps(metric, dim, to string, cube engineCube) []op {
 		if dim != "" {
 			coords[dim] = to
 		}
-		ops = append(ops, newOp("set_cell", metric, c[len(c)-1]).with(coords))
+		o := newOp("set_cell", map[string]any{"metric": metric, "value": c[len(c)-1], "coords": coords})
+		if override {
+			o["override"] = true
+		}
+		ops = append(ops, o)
 	}
 	return ops
 }
 
-// modelDef builds the lists and Metrics of ModelDef. propCells has the cells of each NUMBER or BOOLEAN property Metric.
+// modelDef builds the lists and Metrics of ModelDef. propCells has the cells of each NUMBER or BOOLEAN property
+// Metric, by Metric id. A property whose engine object is missing (a pending change) is left out.
 func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l limits) ([]*nanashiv1.ListDef, []*nanashiv1.MetricDef) {
 	hidden := map[string]bool{}
 	var lists []*nanashiv1.ListDef
 	for _, d := range em.Dims {
-		kind, ok := meta.Kinds[d.Name]
+		kind, ok := meta.Kinds[d.ID]
 		if !ok {
 			kind = nanashiv1.ListKind_LIST_KIND_DIMENSION
 		}
-		ld := &nanashiv1.ListDef{Name: d.Name, Kind: kind}
-		values := map[string]map[string]string{} // member -> property -> text
+		ld := &nanashiv1.ListDef{Id: d.ID, Name: d.Name, Kind: kind}
+		values := map[string]map[string]string{} // member -> property -> value
 		set := func(member, prop, v string) {
 			if values[member] == nil {
 				values[member] = map[string]string{}
 			}
 			values[member][prop] = v
 		}
-		for _, p := range d.Props {
-			ld.Properties = append(ld.Properties, &nanashiv1.PropertyDef{Name: p.Name, Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION, Target: p.Target})
-			for member, v := range p.Values {
-				if l.visible(p.Target, v) { // A property value can name a hidden member, for example on a list that refers to itself.
-					set(member, p.Name, v)
-				}
-			}
-		}
 		for _, p := range meta.Props {
-			if p.List != d.Name {
+			if p.ListID != d.ID {
 				continue
 			}
-			ld.Properties = append(ld.Properties, &nanashiv1.PropertyDef{Name: p.Name, Type: p.Type})
-			for member, v := range p.Text {
-				set(member, p.Name, v)
+			def := &nanashiv1.PropertyDef{Id: p.ID, Name: p.Name, Type: p.Type}
+			switch p.Type {
+			case nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION:
+				ep, ok := d.prop(p.ID)
+				if !ok {
+					continue
+				}
+				def.Target = ep.Target
+				for member, v := range ep.Values {
+					if l.visible(ep.Target, v) { // A property value can name a hidden member, for example on a list that refers to itself.
+						set(member, p.ID, v)
+					}
+				}
+			case nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+				for member, v := range p.Text {
+					set(member, p.ID, v)
+				}
+			default:
+				if _, ok := em.metric(p.MetricID); !ok {
+					continue
+				}
+				hidden[p.MetricID] = true
+				for _, c := range propCells[p.MetricID].Cells {
+					member, _ := c[0].(string)
+					set(member, p.ID, formatValue(c[len(c)-1]))
+				}
 			}
-			name := propMetric(p.List, p.Name)
-			hidden[name] = true
-			for _, c := range propCells[name].Cells {
-				member, _ := c[0].(string)
-				set(member, p.Name, formatValue(c[len(c)-1]))
-			}
+			ld.Properties = append(ld.Properties, def)
 		}
 		for _, m := range d.Members {
-			if l.visible(d.Name, m) {
-				ld.Members = append(ld.Members, &nanashiv1.Member{Name: m, Properties: values[m]})
+			if l.visible(d.ID, m.ID) {
+				ld.Members = append(ld.Members, &nanashiv1.Member{Id: m.ID, Name: m.Name, Properties: values[m.ID]})
 			}
 		}
 		lists = append(lists, ld)
 	}
 	var metrics []*nanashiv1.MetricDef
 	for _, m := range em.Metrics {
-		if !hidden[m.Name] && !l.hides(m) {
+		if !hidden[m.ID] && !l.hides(m) {
 			kind, list := valueKind(m.Kind)
-			metrics = append(metrics, &nanashiv1.MetricDef{Name: m.Name, Dimensions: m.Dims, Kind: kind, MemberList: list, Formula: m.Formula, Overridable: m.Overridable})
+			metrics = append(metrics, &nanashiv1.MetricDef{Id: m.ID, Name: m.Name, Dimensions: m.Dims, Kind: kind, MemberList: list, Formula: m.Formula, Overridable: m.Overridable})
 		}
 	}
 	return lists, metrics
 }
 
-const scenarioList = "Scenario"
+// pruneItems removes the references that the model does not have from the tables, views and boards: a deleted
+// Metric or list, or a deleted view in a widget. The rows do not change (the reader rules of issue #6).
+func pruneItems(out *nanashiv1.ModelDef, em engineModel) {
+	hasMetric := func(id string) bool { _, ok := em.metric(id); return ok }
+	hasDim := func(id string) bool { _, ok := em.dim(id); return ok }
+	keep := func(ids []string, has func(string) bool) []string {
+		return slices.DeleteFunc(ids, func(id string) bool { return !has(id) })
+	}
+	for _, t := range out.Tables {
+		t.Metrics = keep(t.Metrics, hasMetric)
+	}
+	for _, v := range out.Views {
+		v.Metrics, v.Rows, v.Columns = keep(v.Metrics, hasMetric), keep(v.Rows, hasDim), keep(v.Columns, hasDim)
+	}
+	views := map[string]bool{}
+	for _, v := range out.Views {
+		views[v.Id] = true
+	}
+	for _, b := range out.Boards {
+		b.PageSelectors = keep(b.PageSelectors, hasDim)
+		b.Widgets = slices.DeleteFunc(b.Widgets, func(w *nanashiv1.Widget) bool {
+			return w.GetViewId() != "" && !views[w.GetViewId()]
+		})
+	}
+}
 
 // The actions follow.
 
+// querier is a pool or a transaction.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 func (s *PlanServer) meta(ctx context.Context, app string) (appMeta, error) {
+	return metaIn(ctx, s.Pool, app)
+}
+
+func metaIn(ctx context.Context, q querier, app string) (appMeta, error) {
 	meta := appMeta{Kinds: map[string]nanashiv1.ListKind{}}
-	rows, _ := s.Pool.Query(ctx, "select name, kind from app_list where app_id = $1", app)
-	var name string
+	rows, _ := q.Query(ctx, "select id, kind from app_list where app_id = $1", app)
+	var id string
 	var kind int32
-	if _, err := pgx.ForEachRow(rows, []any{&name, &kind}, func() error {
-		meta.Kinds[name] = nanashiv1.ListKind(kind)
+	if _, err := pgx.ForEachRow(rows, []any{&id, &kind}, func() error {
+		meta.Kinds[id] = nanashiv1.ListKind(kind)
 		return nil
 	}); err != nil {
 		return meta, dbError(err)
 	}
-	rows, _ = s.Pool.Query(ctx, "select list, name, type, text_values from app_property where app_id = $1 order by ord", app)
+	rows, _ = q.Query(ctx, "select list_id, id, name, type, coalesce(metric_id::text, ''), text_values from app_property where app_id = $1 and not deleted order by ord", app)
 	props, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (propRow, error) {
 		var p propRow
-		return p, row.Scan(&p.List, &p.Name, &p.Type, &p.Text)
+		return p, row.Scan(&p.ListID, &p.ID, &p.Name, &p.Type, &p.MetricID, &p.Text)
 	})
 	if err != nil {
 		return meta, dbError(err)
@@ -368,9 +463,8 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 	}
 	propCells := map[string]engineCube{}
 	for _, p := range meta.Props {
-		if p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_TEXT {
-			name := propMetric(p.List, p.Name)
-			if propCells[name], err = s.Engines.read(ctx, app, engineRead{Metric: name, Path: "slice"}); err != nil {
+		if _, ok := em.metric(p.MetricID); p.MetricID != "" && ok {
+			if propCells[p.MetricID], err = s.Engines.read(ctx, app, engineRead{Metric: p.MetricID, Path: "slice"}); err != nil {
 				return nil, err
 			}
 		}
@@ -404,6 +498,7 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 			return nil, dbError(err)
 		}
 	}
+	pruneItems(out, em)
 	return connect.NewResponse(out), nil
 }
 
@@ -412,95 +507,141 @@ func (s *PlanServer) CreateList(ctx context.Context, req *connect.Request[nanash
 	if m.Kind != nanashiv1.ListKind_LIST_KIND_DIMENSION && m.Kind != nanashiv1.ListKind_LIST_KIND_TRANSACTION {
 		return nil, invalid(errors.New("作れるリストは DIMENSION か TRANSACTION"))
 	}
-	if strings.TrimSpace(m.Name) == "" {
-		return nil, invalid(errors.New("リストの名前が空"))
+	name := strings.TrimSpace(m.Name)
+	if name == "" || m.Id == "" {
+		return nil, invalid(errors.New("リストの id と名前が要る"))
 	}
-	members := m.Members
-	if members == nil {
-		members = []string{}
-	}
-	return s.change(ctx, m.AppId, func(engineModel, appMeta) (plan, error) {
-		return plan{[]op{newOp("add_dimension", m.Name, members)}, listKinds(m.AppId, m.Kind, m.Name)}, nil
-	})
+	return ackOf(s.change(ctx, m.AppId, m, func(em engineModel, _ appMeta) (plan, error) {
+		if _, ok := em.dim(m.Id); ok {
+			return plan{}, tag(errExists, "リスト %s はすでにある", name)
+		}
+		ops := []op{newOp("add_dimension", map[string]any{"id": m.Id, "name": name})}
+		for _, x := range m.Members {
+			if x.Id == "" || strings.TrimSpace(x.Name) == "" {
+				return plan{}, errors.New("メンバーの id と名前が要る")
+			}
+			ops = append(ops, newOp("add_member", map[string]any{"dim": m.Id, "id": x.Id, "name": strings.TrimSpace(x.Name)}))
+		}
+		stmts, made := listKinds(m.AppId, m.Kind, m.Id)
+		return plan{ops: ops, stmts: stmts, made: made}, nil
+	}))
 }
 
 func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanashiv1.AddPropertyRequest]) (*ack, error) {
 	app, list, p := req.Msg.AppId, req.Msg.List, req.Msg.Property
-	if p == nil || strings.TrimSpace(p.Name) == "" {
-		return nil, invalid(errors.New("プロパティの名前が空"))
+	if p == nil || strings.TrimSpace(p.Name) == "" || p.Id == "" {
+		return nil, invalid(errors.New("プロパティの id と名前が要る"))
 	}
-	return s.change(ctx, app, func(em engineModel, meta appMeta) (plan, error) {
+	name := strings.TrimSpace(p.Name)
+	if p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_TEXT {
+		// A TEXT property has no engine object, so the api tables take it alone.
+		return ackOf(s.apiOnly(ctx, app, req.Msg, func(tx pgx.Tx) (any, error) {
+			st, _ := propertyStmt(app, list, p.Id, name, p.Type, "")
+			tag, err := tx.Exec(ctx, st.sql, st.args...)
+			if err == nil && tag.RowsAffected() == 0 {
+				err = st.zero
+			}
+			if err == nil {
+				_, err = tx.Exec(ctx, "update app_application set version = version + 1 where id = $1", app)
+			}
+			return nil, err
+		}))
+	}
+	return ackOf(s.change(ctx, app, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
 		dim, found := em.dim(list)
 		if !found {
 			return plan{}, fmt.Errorf("リスト %s がない", list)
 		}
-		// The engine knows only the DIMENSION properties. The api tables have the other types.
-		exists := slices.ContainsFunc(dim.Props, func(x engineProp) bool { return x.Name == p.Name }) ||
-			slices.ContainsFunc(meta.Props, func(x propRow) bool { return x.List == list && x.Name == p.Name })
-		if exists {
-			return plan{}, tag(errExists, "%s にプロパティ %s はすでにある", list, p.Name)
+		if slices.ContainsFunc(meta.Props, func(x propRow) bool { return x.ListID == list && (x.ID == p.Id || x.Name == name) }) {
+			return plan{}, tag(errExists, "%s にプロパティ %s はすでにある", dim.Name, name)
 		}
-		switch kind, isMetric := propKind[p.Type]; {
+		kind, isMetric := propKind[p.Type]
+		switch {
 		case p.Type == nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION:
-			return plan{ops: []op{newOp("add_property", list, p.Name, p.Target, map[string]string{})}}, nil
-		case !isMetric && p.Type != nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
+			if _, ok := em.dim(p.Target); !ok {
+				return plan{}, fmt.Errorf("対象のリスト %s がない", p.Target)
+			}
+			st, made := propertyStmt(app, list, p.Id, name, p.Type, "")
+			return plan{ops: []op{newOp("add_property", map[string]any{"dim": list, "id": p.Id, "name": name, "target": p.Target})},
+				stmts: []stmt{st}, made: []madeRow{made}}, nil
+		case !isMetric:
 			return plan{}, errors.New("プロパティの型を指定する")
-		default:
-			// The property Metric must not replace a Metric of the user. add_input replaces the cells.
-			if _, err := em.metric(propMetric(list, p.Name)); err == nil {
-				return plan{}, tag(errExists, "Metric %s があるので、プロパティ %s を作れない", propMetric(list, p.Name), p.Name)
-			}
-			out := plan{stmts: []stmt{{"insert into app_property (app_id, list, name, type) values ($1, $2, $3, $4)", []any{app, list, p.Name, p.Type}}}}
-			if isMetric {
-				out.ops = []op{newOp("add_input", propMetric(list, p.Name), []string{list}, []any{}).with(map[string]any{"kind": kind})}
-			}
-			return out, nil
 		}
-	})
+		// The Metric gets an id here, one time for each plan. The engine refuses its name if a Metric of the user has it.
+		metric := newID()
+		st, made := propertyStmt(app, list, p.Id, name, p.Type, metric)
+		return plan{ops: []op{newOp("add_input", map[string]any{"id": metric, "name": propMetric(dim.Name, name), "dims": []string{list}, "kind": kind, "cells": []any{}})},
+			stmts: []stmt{st}, made: []madeRow{made}}, nil
+	}))
 }
 
 func (s *PlanServer) EditMembers(ctx context.Context, req *connect.Request[nanashiv1.EditMembersRequest]) (*ack, error) {
 	app, list := req.Msg.AppId, req.Msg.List
-	return s.change(ctx, app, func(em engineModel, meta appMeta) (plan, error) {
-		ops, stmts, err := editOps(app, list, em, meta, req.Msg.Edits)
-		return plan{ops, stmts}, err
-	})
+	return ackOf(s.change(ctx, app, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
+		dim, ok := em.dim(list)
+		if !ok {
+			return plan{}, fmt.Errorf("リスト %s がない", list)
+		}
+		ops, stmts, err := editOps(app, em, dim, meta, req.Msg.Edits)
+		return plan{ops: ops, stmts: stmts}, err
+	}))
 }
 
 func (s *PlanServer) CreateCalendar(ctx context.Context, req *connect.Request[nanashiv1.CreateCalendarRequest]) (*ack, error) {
 	app := req.Msg.AppId
-	return s.change(ctx, app, func(engineModel, appMeta) (plan, error) {
-		ops, err := calendarOps(int(req.Msg.StartYear), int(req.Msg.Years))
-		return plan{ops, listKinds(app, nanashiv1.ListKind_LIST_KIND_CALENDAR, "Year", "Quarter", "Month")}, err
-	})
+	return ackOf(s.change(ctx, app, req.Msg, func(_ engineModel, meta appMeta) (plan, error) {
+		if _, ok := meta.listOfKind(nanashiv1.ListKind_LIST_KIND_CALENDAR); ok {
+			return plan{}, tag(errExists, "カレンダーはすでにある")
+		}
+		cal, err := calendarOps(int(req.Msg.StartYear), int(req.Msg.Years))
+		if err != nil {
+			return plan{}, err
+		}
+		stmts, made := calendarStmts(app, cal)
+		return plan{ops: cal.ops, stmts: stmts, made: made}, nil
+	}))
 }
 
 func (s *PlanServer) CreateScenario(ctx context.Context, req *connect.Request[nanashiv1.CreateScenarioRequest]) (*ack, error) {
 	app, name, from := req.Msg.AppId, strings.TrimSpace(req.Msg.Name), req.Msg.CopyFrom
-	if name == "" {
-		return nil, invalid(errors.New("シナリオの名前が空"))
+	if name == "" || req.Msg.Id == "" {
+		return nil, invalid(errors.New("シナリオの id と名前が要る"))
 	}
-	return s.change(ctx, app, func(em engineModel, _ appMeta) (plan, error) {
-		if _, found := em.dim(scenarioList); !found {
+	return ackOf(s.change(ctx, app, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
+		list, found := meta.listOfKind(nanashiv1.ListKind_LIST_KIND_SCENARIO)
+		if !found {
 			if from != "" {
 				return plan{}, fmt.Errorf("シナリオ %s がない", from)
 			}
-			return plan{[]op{newOp("add_dimension", scenarioList, []string{name})}, listKinds(app, nanashiv1.ListKind_LIST_KIND_SCENARIO, scenarioList)}, nil
+			// The list gets an id here, one time for each plan.
+			list = newID()
+			stmts, made := listKinds(app, nanashiv1.ListKind_LIST_KIND_SCENARIO, list)
+			return plan{ops: []op{newOp("add_dimension", map[string]any{"id": list, "name": "Scenario"}),
+				newOp("add_member", map[string]any{"dim": list, "id": req.Msg.Id, "name": name})}, stmts: stmts, made: made}, nil
 		}
-		ops := []op{newOp("add_member", scenarioList, name)}
-		if from != "" {
-			// The reads are under the lock, so they see the model that the write changes.
-			for _, m := range em.Metrics {
-				if m.Formula != "" || !slices.Contains(m.Dims, scenarioList) {
-					continue
-				}
-				cube, err := s.Engines.read(ctx, app, engineRead{Metric: m.Name, Path: "slice", Query: map[string][]string{scenarioList: {from}}})
-				if err != nil {
-					return plan{}, err
-				}
-				ops = append(ops, copyCellOps(m.Name, scenarioList, name, cube)...)
+		dim, _ := em.dim(list)
+		if _, ok := dim.member(req.Msg.Id); ok {
+			return plan{}, tag(errExists, "シナリオ %s はすでにある", name)
+		}
+		ops := []op{newOp("add_member", map[string]any{"dim": list, "id": req.Msg.Id, "name": name})}
+		if from == "" {
+			return plan{ops: ops}, nil
+		}
+		if _, ok := dim.member(from); !ok {
+			return plan{}, fmt.Errorf("シナリオ %s がない", from)
+		}
+		// The copy reads cells of the version seq. expect makes the engine refuse the write if a write in between
+		// changed these cells. Then the client tries again.
+		for _, m := range em.Metrics {
+			if m.Formula != "" || !slices.Contains(m.Dims, list) {
+				continue
 			}
+			cube, err := s.Engines.read(ctx, app, engineRead{Metric: m.ID, Path: "slice", Query: map[string][]string{list: {from}}})
+			if err != nil {
+				return plan{}, err
+			}
+			ops = append(ops, copyCellOps(m.ID, list, req.Msg.Id, cube, false)...)
 		}
-		return plan{ops: ops}, nil
-	})
+		return plan{ops: ops, expect: true}, nil
+	}))
 }

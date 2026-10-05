@@ -20,20 +20,21 @@ import {
   buildGrid,
   chartRows,
   editable,
-  dimLabel,
   formatValue,
   gridToCsv,
   keyLabel,
+  label,
   METRIC,
   mergeFilters,
   parseValue,
   total,
   writeCoords,
   type Grid,
+  type Names,
   type Spec,
   toProtoFilters,
 } from "./logic";
-import { cls, createOrUpdate, time, useApp, useMutate } from "./state";
+import { cls, createOrUpdate, memberOptions, time, useApp, useMutate } from "./state";
 import { Checks, Sel } from "./ui";
 
 const DISPLAYS: [string, string][] = [
@@ -54,10 +55,10 @@ const AGGS = [
 function usePivot(spec: Spec, page?: Record<string, string>) {
   const { appId, model } = useApp();
   const order = useMemo(
-    () => Object.fromEntries(model.lists.map((l) => [l.name, l.members.map((m) => m.name)])),
+    () => Object.fromEntries(model.lists.map((l) => [l.id, l.members.map((m) => m.id)])),
     [model],
   );
-  const defs = new Map(model.metrics.map((m) => [m.name, m]));
+  const defs = new Map(model.metrics.map((m) => [m.id, m]));
   const dims = [...new Set(spec.metrics.flatMap((m) => defs.get(m)?.dimensions ?? []))];
   const filters = mergeFilters(spec.filters, page ?? {});
   const strip = (ds: string[]) => ds.filter((d) => d !== METRIC);
@@ -82,19 +83,21 @@ function usePivot(spec: Spec, page?: Record<string, string>) {
 }
 
 export function PivotWidget(props: { spec: Spec; page: Record<string, string> }) {
+  const { names } = useApp();
   const { grid } = usePivot(props.spec, props.page);
   if (!grid) return <p className="text-sm">読み込み中…</p>;
-  return <Body grid={grid} display={props.spec.display} editable={() => false} />;
+  return <Body grid={grid} names={names} display={props.spec.display} editable={() => false} />;
 }
 
 export function PivotEditor(props: { initial: Spec; view?: { id: string; name: string } }) {
-  const { appId, can } = useApp();
+  const { appId, can, names } = useApp();
   const mutate = useMutate();
   const writeCells = useMutate("query");
   const [spec, setSpec] = useState(props.initial);
   const [cell, setCell] = useState<{ metric: string; coords: Record<string, string> }>();
   const view = props.view;
   const [viewName, setViewName] = useState(view?.name ?? "");
+  const { model } = useApp();
   const { grid, filters, defs, dims, order, isPlaceholderData } = usePivot(spec);
   const axisDims = spec.metrics.length > 1 ? [METRIC, ...dims] : dims;
 
@@ -113,7 +116,13 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
     const def = defs.get(metric)!;
     const coords = writeCoords(def.dimensions, g, r, c, filters);
     return writeCells(async (clientOpId) => {
-      const v = parseValue(def.kind, text);
+      let v = parseValue(def.kind, text);
+      // The user types the name of a member. The api takes its id.
+      if (v?.case === "member") {
+        const id = memberOptions(model, def.memberList).find(([, n]) => n === v?.value)?.[0];
+        if (!id) throw new Error(`メンバーがありません: ${v.value}`);
+        v = { case: "member", value: id };
+      }
       await api.writeCells({
         appId,
         clientOpId,
@@ -142,13 +151,12 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
         () => api.createView(req),
         () => api.updateView(req),
       );
-      setDraftId(newId());
-    });
+    }).then(() => id || setDraftId(newId()));
 
   const exportCsv = (g: Grid) => {
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([gridToCsv(g)], { type: "text/csv" }));
-    a.download = `${spec.metrics.join("_")}.csv`;
+    a.href = URL.createObjectURL(new Blob([gridToCsv(g, names)], { type: "text/csv" }));
+    a.download = `${spec.metrics.map((m) => label(names, m)).join("_")}.csv`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 0);
   };
@@ -160,7 +168,7 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
           {axisDims.map((d) => (
             <Sel
               key={d}
-              label={dimLabel(d)}
+              label={label(names, d)}
               value={axisOf(d)}
               onChange={(a) => setAxis(d, a)}
               empty="なし"
@@ -187,10 +195,10 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
           <summary className="cursor-pointer text-sm">フィルター（ページセレクター）</summary>
           {dims.map((d) => (
             <div key={d} className="flex gap-2">
-              <span className="w-24 text-sm font-bold">{d}</span>
+              <span className="w-24 text-sm font-bold">{label(names, d)}</span>
               <Checks
-                label={d}
-                options={order[d] ?? []}
+                label={label(names, d)}
+                options={(order[d] ?? []).map((m): [string, string] => [m, label(names, m)])}
                 value={spec.filters[d] ?? []}
                 onChange={(v) => setSpec({ ...spec, filters: { ...spec.filters, [d]: v } })}
               />
@@ -228,6 +236,7 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
       ) : (
         <Body
           grid={grid}
+          names={names}
           display={spec.display}
           editable={(m) =>
             !isPlaceholderData &&
@@ -249,16 +258,18 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
 
 function Body(props: {
   grid: Grid;
+  names: Names;
   display: Display;
   editable: (metric: string) => boolean;
   onWrite?: (r: string[], c: string[], text: string) => Promise<boolean>;
   onSelect?: (r: string[], c: string[]) => void;
 }) {
   const g = props.grid;
+  const names = props.names;
   if (props.display === Display.KPI)
     return <p className="text-4xl font-bold">{total(g).toLocaleString("ja-JP")}</p>;
   if (props.display === Display.LINE || props.display === Display.BAR) {
-    const { series, data } = chartRows(g);
+    const { series, data } = chartRows(g, names);
     const Chart = props.display === Display.LINE ? LineChart : BarChart;
     const colors = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"];
     return (
@@ -288,10 +299,10 @@ function Body(props: {
         <thead>
           <tr>
             {g.rowDims.map((d) => (
-              <th key={d}>{dimLabel(d)}</th>
+              <th key={d}>{label(names, d)}</th>
             ))}
             {g.colKeys.map((c) => (
-              <th key={JSON.stringify(c)}>{keyLabel(c) || "値"}</th>
+              <th key={JSON.stringify(c)}>{keyLabel(c, names) || "値"}</th>
             ))}
           </tr>
         </thead>
@@ -300,11 +311,14 @@ function Body(props: {
             <tr key={JSON.stringify(r)}>
               {r.map((m, i) => (
                 <th key={i} className="text-left">
-                  {m || "(なし)"}
+                  {m ? label(names, m) : "(なし)"}
                 </th>
               ))}
               {g.colKeys.map((c) => {
-                const text = formatValue(g.value(r, c));
+                const v = g.value(r, c);
+                // A member value is an id: show its name. An edit of a member cell takes a name.
+                const text =
+                  v?.value.case === "member" ? label(names, v.value.value) : formatValue(v);
                 return (
                   <td
                     key={JSON.stringify(c)}
@@ -314,7 +328,7 @@ function Body(props: {
                     {props.editable(g.metric(r, c)) ? (
                       <Input
                         key={text}
-                        aria-label={`${keyLabel(r)} ${keyLabel(c) || "値"}`}
+                        aria-label={`${keyLabel(r, names)} ${keyLabel(c, names) || "値"}`}
                         className="h-7 w-24 px-1 py-0 text-right"
                         defaultValue={text}
                         onBlur={(e) => {
@@ -346,7 +360,7 @@ const sameCell = (a: Record<string, string>, b: Record<string, string>) =>
   Object.entries(a).every(([k, v]) => b[k] === v);
 
 function CellComments(props: { metric: string; coords: Record<string, string> }) {
-  const { appId } = useApp();
+  const { appId, names } = useApp();
   const mutate = useMutate("comments");
   const [body, setBody] = useState("");
   const { data: resp } = useQuery({
@@ -357,7 +371,10 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
   return (
     <div className="rounded border p-2 text-sm">
       <p className="font-bold">
-        コメント: {props.metric} {JSON.stringify(props.coords)}
+        コメント: {label(names, props.metric)}{" "}
+        {Object.entries(props.coords)
+          .map(([d, m]) => `${label(names, d)}=${label(names, m)}`)
+          .join(", ")}
       </p>
       {list.map((c) => (
         <p key={c.id}>
@@ -378,7 +395,7 @@ function CellComments(props: { metric: string; coords: Record<string, string> })
               await api.addComment({
                 appId,
                 clientOpId,
-                comment: { metric: props.metric, cell: props.coords, body },
+                comment: { id: newId(), metric: props.metric, cell: props.coords, body },
               });
               setBody("");
             })

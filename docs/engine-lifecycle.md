@@ -10,7 +10,7 @@ This has 3 effects:
 
 - Each engine keeps 1 to 3 PostgreSQL connections. The count grows with the number of applications, not with the number of applications in use.
 - If an engine stops with an error, nothing starts it again. Requests for that application get 503 `no_leader` after the router deadline of 90 seconds.
-- `PlanServer.lock` is a `sync.Mutex` in one api process. A second api process breaks it.
+- `PlanServer.lock` was a `sync.Mutex` in one api process. A second api process breaks it. Issue #6 removed it (see "Why the lock went away").
 
 The goal is that the api uses the engine as it uses a database: one address, read and write calls, and a conflict error.
 The api must not know the engine processes, the path to `tessera/`, or the DSN of the engine.
@@ -22,11 +22,11 @@ The api must not know the engine processes, the path to `tessera/`, or the DSN o
 | Who starts an engine | The router, when a request comes for a model that has no live leader. | The router is the one address, and it already finds the writer in the lease. The `Resolver` interface is the seam. |
 | Who stops an idle engine | The engine itself, with a new option `--idle-exit`. | Only the engine knows the requests in progress. The router caches the leader address, so it does not see each request. |
 | A stopped engine | Stays stopped until the next request. The router never starts an engine on its own. | No request, no process. This also holds after an idle stop, after a crash, and after a second router started a duplicate. |
-| Crash loop | Exponential backoff, 1 s to 60 s. After 3 crashes in a row, the router returns 503 `engine_failing` at once. | The api holds its lock while it waits. It must not wait 90 seconds for an engine that cannot start. |
+| Crash loop | Exponential backoff, 1 s to 60 s. After 3 crashes in a row, the router returns 503 `engine_failing` at once. | The api waits for the engine answer while an outbox row is pending. It must not wait 90 seconds for an engine that cannot start. |
 | A process that holds no lease for too long | The router kills it after 60 s without a lease. The kill counts as a failure. The next request starts a new one. | This is the one state that otherwise blocks a model for ever. |
 | Model creation | Explicit: `PUT /models/<id>` inserts the `nanashi_model` row and starts no engine. An unknown id still gets 404. | A wrong id must not make a process, a row, and a directory. |
 | Spawn backend | `exec` of the Python server on the router host. No `Backend` interface. | One implementation. An ECS backend is a different `Resolver` that wraps `PgResolver`. |
-| The api lock | Stays as it is. | See "Why the lock stays". |
+| The api lock | Removed by issue #6. | See "Why the lock went away". |
 | The Go client | Stays in `api/engine.go`. | The api is the only client. |
 
 ## What does not change
@@ -139,27 +139,32 @@ The engine listens on 127.0.0.1 and advertises the port that it got in the lease
 - `Engines` becomes `{Router, HTTP}` plus `Create`. `Start`, `StopAll`, `engineProc`, `Tessera`, `Dir`, `DSN`, and the `exec`, `syscall`, and `filepath` imports go away.
 - `CreateApplication` calls `Create`, then writes as before. The first write starts the engine.
 - `StartAll` and the flags `--tessera` and `--engine-dir` go away. `dev.sh` gives them to the router.
-- `lock` stays. Its comment gets the shape for a second api process (below).
+- `lock` stayed at that time. Issue #6 removed it (below).
 
 ### Expected size
 
 api about -130 lines. router about +230 lines, half tests and README. tessera about +50 lines. No file is deleted.
 
-## Why the lock stays
+## Why the lock went away (issue #6)
 
-Two designs tried to remove `PlanServer.lock`. Both lose.
+`PlanServer.lock` was a `sync.Mutex` in one api process. Issue #6 replaced it with an outbox, and the api has no lock.
+The serialization points are the engine (one writer, with the lease and the `head_seq` CAS) and the PostgreSQL constraints (primary keys, unique indexes, row locks).
+A change that the engine and the api tables both take goes through `app_operation` (`change` in `api/server.go`):
 
-**A strict `expect` in the engine, with a retry loop in the api.**
-The lock protects a read-modify-write that spans the engine and the `app_*` tables.
-`editMembers` writes `app_property.text_values` after the engine write, from the `meta` that it read before.
-`Engines.write` returns at once when `ops` is empty (`api/engine.go`), so an edit of text values only never reaches the engine, and no engine check runs.
-Two such edits at the same time give a lost update. Today the lock prevents it. The strict `expect` would make this a regression.
-A strict `expect` also conflicts with every unrelated cell write, so a definition change could retry without end.
+1. The api looks the `client_op_id` up. A `done` row gives the stored result, a `failed` row the stored error. A `pending` row is settled first.
+2. The api settles the other `pending` rows of the application in their order.
+3. The api reads the model and the api rows, and makes the plan. The ids that the api makes come from here, one time for each plan.
+   A name that the api makes from a count (the rows of a TRANSACTION list) does not come from the model it read: concurrent plans read the same model. `Import` reserves the row numbers in `app_list.next_row` with one `update ... returning`, so the stored operations hold the final names.
+4. The first transaction inserts the `pending` row and runs the api statements. A constraint violation rolls back before the engine sees anything.
+5. The api sends the operations to the engine. 200 is `done`. 400 and 409 `duplicate_id` are `failed`, and the engine records the refusal for the `client_op_id`. Any other answer leaves the row `pending`.
+6. The second transaction flips the row with `where status = 'pending'`. A `failed` row deletes the rows that the first transaction made.
 
-**A PostgreSQL advisory lock now.**
-This is the correct shape for 2 api processes. But today the api is one process, so the lock gives nothing.
-With the default pool (`MaxConns = max(4, CPU count)`), a lock that holds a pool connection for the engine write (up to 70 seconds) plus the second connection of the handler can empty the pool.
-When a second api process comes, change only the body of `lock`: `pg_advisory_xact_lock(<2-key>, hashtext(app))` in a transaction on a dedicated connection outside the pool. `tessera` uses the 1-key form (`hashtextextended`), so the keys do not collide. The handlers do not change.
+Two api processes can settle the same row. The flip of the second one changes 0 rows, and the engine gives both the same result.
+A process that stops after the engine write leaves a `pending` row. The next change of the application settles it.
+
+The lock also kept `CreateSnapshot` consistent. Now `CreateSnapshot` settles the pending rows, reads the engine, and reads the api rows in one REPEATABLE READ transaction. If `app_application.version` changed, or a row is pending, it reads again.
+
+The engine starts in the router while the api waits for the engine answer of step 5. If the engine cannot start, the router answers 503 `engine_failing` at once, and the row stays `pending`.
 
 ## Tradeoffs accepted
 
@@ -183,7 +188,7 @@ Three candidate designs were made in parallel and judged by a fourth reviewer ag
 All three agreed on the core shape: a `Supervisor` that wraps `PgResolver`, a start inside `Leader` that returns "", an idle stop in the engine, exit code 0 as a clean stop, exponential backoff, and no Spawner interface.
 The base is the candidate with the smallest api diff and pure `plan` and `afterExit`.
 Grafted: `Router.Create` as a function field instead of a new method on `Resolver` (so the test fakes do not change), and the kill of a process that holds no lease for `bootBudget`.
-Rejected: implicit creation, the strict `expect`, and the advisory lock now, for the reasons above.
+Rejected: implicit creation, the strict `expect`, and the advisory lock. Issue #6 later removed the lock with the outbox.
 
 ## Open questions
 

@@ -3,29 +3,53 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext } from "react";
 import { errorText, newId } from "./api";
 import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
+import { METRIC, type Names } from "./logic";
 
 export const Report = createContext<(e: unknown) => void>(() => {});
 
 export type AppState = {
   appId: string;
   model: ModelDef;
+  // The name of each list, member and Metric, by id.
+  names: Names;
   can: (r: Role) => boolean;
 };
 export const AppCtx = createContext<AppState | null>(null);
 export const useApp = () => useContext(AppCtx)!;
 
+// modelNames gives the name of each list, member and Metric of the model, by id.
+export function modelNames(model: ModelDef): Names {
+  const out: Record<string, string> = { [METRIC]: "メトリック" };
+  for (const l of model.lists) {
+    out[l.id] = l.name;
+    for (const m of l.members) out[m.id] = m.name;
+  }
+  for (const m of model.metrics) out[m.id] = m.name;
+  return out;
+}
+
+// An error after which the api may have applied the write: send the same client_op_id again.
+const ambiguous = (e: unknown) =>
+  e instanceof ConnectError && (e.code === Code.Unavailable || e.code === Code.DeadlineExceeded);
+
 // useRun gives a function that runs an action and shows its error. It returns true on success.
 // It gives f one new client_op_id for the user action. Send it with each write of the action.
+// After an ambiguous error, it runs f again with the same client_op_id (up to 3 times). After a definite error,
+// the next user action gets new ids.
 export function useRun() {
   const report = useContext(Report);
   return useCallback(
     async (f: (clientOpId: string) => Promise<unknown>) => {
-      try {
-        await f(newId());
-        return true;
-      } catch (e) {
-        report(errorText(e));
-        return false;
+      const clientOpId = newId();
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await f(clientOpId);
+          return true;
+        } catch (e) {
+          if (ambiguous(e) && attempt < 3) continue;
+          report(errorText(e));
+          return false;
+        }
       }
     },
     [report],
@@ -62,8 +86,13 @@ export async function createOrUpdate(
   }
 }
 
-export const memberNames = (model: ModelDef, list: string) =>
-  model.lists.find((l) => l.name === list)?.members.map((m) => m.name) ?? [];
+export const listOptions = (model: ModelDef) =>
+  model.lists.map((l): [string, string] => [l.id, l.name]);
+
+// memberOptions gives the members of the list, as [id, name].
+export const memberOptions = (model: ModelDef, list: string) =>
+  model.lists.find((l) => l.id === list)?.members.map((m): [string, string] => [m.id, m.name]) ??
+  [];
 
 export const cls = {
   table:

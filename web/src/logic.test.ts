@@ -31,7 +31,8 @@ test("grid follows member order and puts Metrics on an axis", () => {
   expect(g.colKeys).toEqual([["B"], ["A"], [""]]);
   expect(formatValue(g.value(["Sales"], ["A"]))).toBe("1");
   expect(formatValue(g.value(["Rate"], [""]))).toBe("9");
-  expect(gridToCsv(g)).toBe("メトリック,B,A,(なし)\nSales,2,1,\nRate,,,9\n");
+  const names = { [METRIC]: "メトリック", Sales: "売上", Rate: "率", A: "a", B: "b" };
+  expect(gridToCsv(g, names)).toBe("メトリック,b,a,(なし)\n売上,2,1,\n率,,,9\n");
 });
 
 test("edit coords leave unshown dimensions open for a spread", () => {

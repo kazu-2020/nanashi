@@ -8,9 +8,17 @@ option go_package = "github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1";
 // The header X-Nanashi-User identifies the user. The API trusts it only on a connection from this host
 // (local development) or from an authenticating proxy that sets it again (--trusted-proxy).
 // Each application is one engine model.
+//
+// Identifiers (docs/ids.md). Each id that a request or a response carries is a UUIDv7. The frontend makes the id
+// of each new object (list, member, property, Metric, table, view, board, comment, access rule, snapshot,
+// application). The api makes the ids of the objects that it makes for the user (the calendar, the scenario
+// list, the members of an import, the Metric of a NUMBER or BOOLEAN property). A name is an attribute.
+// Every reference (the dimensions of a Metric, a filter, a cell, a rule) is an id. The api changes each id to
+// the canonical form (lower case, with hyphens) and refuses a value that is not a UUID with INVALID_ARGUMENT.
+//
 // Each request that changes data has client_op_id: a UUID that the frontend makes once for each user action.
-// The api sends it to the engine, so that a resent write is not committed two times.
-// The ids of new tables, views, boards, access rules, applications and snapshots are UUIDv7 values from the frontend.
+// A request sent again with the same client_op_id gives the stored result of the first send. A request with the
+// same client_op_id and a different content gives INVALID_ARGUMENT.
 service PlanService {
   // Applications.
   rpc ListApplications(ListApplicationsRequest) returns (ListApplicationsResponse) {}
@@ -23,11 +31,12 @@ service PlanService {
   rpc AddProperty(AddPropertyRequest) returns (Ack) {}
   rpc EditMembers(EditMembersRequest) returns (Ack) {}
   rpc CreateCalendar(CreateCalendarRequest) returns (Ack) {}
-  // CreateScenario adds a member to the dimension "Scenario" and copies the input cells of copy_from.
+  // CreateScenario adds a member to the scenario list (it makes the list on the first call) and copies the
+  // input cells of copy_from.
   rpc CreateScenario(CreateScenarioRequest) returns (Ack) {}
-  // CreateMetric makes a Metric. An empty formula makes an input Metric. An existing name gives ALREADY_EXISTS.
+  // CreateMetric makes a Metric. An empty formula makes an input Metric. An existing id gives ALREADY_EXISTS.
   rpc CreateMetric(CreateMetricRequest) returns (Ack) {}
-  // UpdateMetric changes a Metric. A missing name gives NOT_FOUND.
+  // UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
   // A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
   rpc UpdateMetric(UpdateMetricRequest) returns (Ack) {}
   rpc RenameMetric(RenameMetricRequest) returns (Ack) {}
@@ -91,7 +100,7 @@ message CreateApplicationRequest {
   string name = 1;
   // If set, the new application starts with the content of this snapshot.
   string snapshot_id = 2;
-  // The id of the new application (UUIDv7).
+  // The id of the new application.
   string id = 3;
   string client_op_id = 4;
 }
@@ -121,19 +130,23 @@ enum PropertyType {
 }
 
 message PropertyDef {
+  string id = 4;
   string name = 1;
   PropertyType type = 2;
-  // The target list of a DIMENSION property.
+  // The id of the target list of a DIMENSION property.
   string target = 3;
 }
 
 message Member {
+  string id = 3;
   string name = 1;
-  // The value of each property as text. A blank value is missing.
+  // The value of each property, by property id. The value of a DIMENSION property is a member id of the target
+  // list. The other values are text. A blank value is missing.
   map<string, string> properties = 2;
 }
 
 message ListDef {
+  string id = 6;
   string name = 1;
   ListKind kind = 2;
   reserved 3;
@@ -151,12 +164,14 @@ enum ValueKind {
 }
 
 message MetricDef {
+  string id = 7;
   string name = 1;
+  // The ids of the lists.
   repeated string dimensions = 2;
   ValueKind kind = 3;
-  // The list of a MEMBER Metric. Empty for the other kinds.
+  // The id of the list of a MEMBER Metric. Empty for the other kinds.
   string member_list = 6;
-  // Empty for an input Metric.
+  // Empty for an input Metric. A formula names the Metrics, lists and members by their names.
   string formula = 4;
   // True if a user can type over the formula result.
   bool overridable = 5;
@@ -173,23 +188,32 @@ message ModelDef {
   repeated BoardDef boards = 7;
 }
 
+message NewMember {
+  string id = 1;
+  string name = 2;
+}
+
 message CreateListRequest {
   string app_id = 1;
+  string id = 6;
   string name = 2;
   ListKind kind = 3;
-  repeated string members = 4;
+  repeated NewMember members = 4;
   string client_op_id = 5;
 }
 
 message AddPropertyRequest {
   string app_id = 1;
+  // The id of the list.
   string list = 2;
+  // property.id is required. The api makes the id of the Metric of a NUMBER or BOOLEAN property.
   PropertyDef property = 3;
   string client_op_id = 4;
 }
 
 message EditMembersRequest {
   string app_id = 1;
+  // The id of the list.
   string list = 2;
   repeated MemberEdit edits = 3;
   string client_op_id = 4;
@@ -206,32 +230,35 @@ message MemberEdit {
 }
 
 message AddMember {
+  string id = 3;
   string name = 1;
+  // Property id to value (see Member.properties).
   map<string, string> properties = 2;
 }
 
 message RenameMember {
-  string name = 1;
-  string new_name = 2;
+  string id = 1;
+  string name = 2;
 }
 
 message RemoveMember {
-  string name = 1;
+  string id = 1;
 }
 
 message MoveMember {
-  string name = 1;
+  string id = 1;
   int32 position = 2;
 }
 
 // SetProperties sets property values of a member. An empty value makes the value blank.
 message SetProperties {
-  string name = 1;
+  string id = 1;
   map<string, string> properties = 2;
 }
 
 // CreateCalendar makes the ordered lists Year, Quarter and Month with the properties
 // Month.Quarter, Month.Year and Quarter.Year. Member names are "2026", "2026-Q1" and "2026-01".
+// The api makes the ids.
 message CreateCalendarRequest {
   string app_id = 1;
   int32 start_year = 2;
@@ -241,8 +268,10 @@ message CreateCalendarRequest {
 
 message CreateScenarioRequest {
   string app_id = 1;
+  // The id of the new member.
+  string id = 5;
   string name = 2;
-  // An existing scenario. Empty gives an empty scenario.
+  // The id of an existing scenario member. Empty gives an empty scenario.
   string copy_from = 3;
   string client_op_id = 4;
 }
@@ -250,6 +279,7 @@ message CreateScenarioRequest {
 message CreateMetricRequest {
   string app_id = 1;
   string client_op_id = 2;
+  // metric.id is required.
   MetricDef metric = 3;
 }
 
@@ -261,25 +291,27 @@ message UpdateMetricRequest {
 
 message RenameMetricRequest {
   string app_id = 1;
-  string name = 2;
-  string new_name = 3;
+  string id = 2;
+  string name = 3;
   string client_op_id = 4;
 }
 
 message DeleteMetricRequest {
   string app_id = 1;
-  string name = 2;
+  string id = 2;
   string client_op_id = 3;
 }
 
+// Members is a set of member ids.
 message Members {
-  repeated string names = 1;
+  repeated string ids = 1;
 }
 
 message Value {
   oneof value {
     double number = 1;
     bool boolean = 2;
+    // A member id.
     string member = 3;
   }
 }
@@ -294,14 +326,14 @@ enum Aggregation {
   AGGREGATION_COUNT = 5;
 }
 
-// QueryRequest reads the cells of Metrics, aggregated to the dimensions in rows and columns.
-// The response ignores a dimension that a Metric does not have.
+// QueryRequest reads the cells of Metrics, aggregated to the lists in rows and columns. All references are ids.
+// The response ignores a list that a Metric does not have, and a Metric that the model does not have.
 message QueryRequest {
   string app_id = 1;
   repeated string metrics = 2;
   repeated string rows = 3;
   repeated string columns = 4;
-  // Only these members. A missing dimension gives all members.
+  // Only these members, by list id. A missing list gives all members.
   map<string, Members> filters = 5;
   // It is used only for number Metrics.
   Aggregation aggregation = 6;
@@ -309,20 +341,21 @@ message QueryRequest {
 
 message QueryCell {
   string metric = 1;
-  // The member of each dimension in QueryResponse.dimensions. Empty if the Metric does not have the dimension.
+  // The member id of each list in QueryResponse.dimensions. Empty if the Metric does not have the list.
   repeated string coords = 2;
   Value value = 3;
 }
 
 message QueryResponse {
   reserved 1;
-  // The dimensions of QueryCell.coords: the rows, then the columns.
+  // The list ids of QueryCell.coords: the rows, then the columns.
   repeated string dimensions = 2;
   repeated QueryCell cells = 3;
 }
 
 message CellWrite {
   string metric = 1;
+  // List id to member id.
   map<string, string> coords = 2;
   // Missing makes the cell blank.
   Value value = 3;
@@ -346,16 +379,18 @@ message ImportRequest {
 }
 
 message ListImport {
+  // The id of the list.
   string list = 1;
   // The column with the member names. Empty for a transaction list gives the row numbers.
   string member_column = 2;
-  // Property name to column name.
+  // Property id to column name. The column of a DIMENSION property has member names of the target list.
   map<string, string> property_columns = 3;
 }
 
 message MetricImport {
+  // The id of the Metric.
   string metric = 1;
-  // Dimension name to column name.
+  // List id to column name. The column has member names.
   map<string, string> dimension_columns = 2;
   string value_column = 3;
   // If true, add the members that are not in the lists. If false, such rows are errors.
@@ -369,7 +404,7 @@ message ImportResponse {
 message CreateTableRequest {
   string app_id = 1;
   string client_op_id = 2;
-  // table.id is required (UUIDv7).
+  // table.id is required.
   TableDef table = 3;
 }
 
@@ -383,6 +418,7 @@ message TableDef {
   string app_id = 1;
   string id = 2;
   string name = 3;
+  // Metric ids.
   repeated string metrics = 4;
 }
 
@@ -398,7 +434,7 @@ enum Display {
 message CreateViewRequest {
   string app_id = 1;
   string client_op_id = 2;
-  // view.id is required (UUIDv7).
+  // view.id is required.
   ViewDef view = 3;
 }
 
@@ -430,7 +466,7 @@ message Widget {
 message CreateBoardRequest {
   string app_id = 1;
   string client_op_id = 2;
-  // board.id is required (UUIDv7).
+  // board.id is required.
   BoardDef board = 3;
 }
 
@@ -445,7 +481,7 @@ message BoardDef {
   string id = 2;
   string name = 3;
   repeated Widget widgets = 4;
-  // Dimensions with a page selector. The selected member filters all the widgets.
+  // Lists with a page selector. The selected member filters all the widgets.
   repeated string page_selectors = 5;
 }
 
@@ -466,15 +502,16 @@ message DeleteItemRequest {
 message AddCommentRequest {
   string app_id = 1;
   string client_op_id = 2;
+  // comment.id is required.
   Comment comment = 3;
 }
 
 message Comment {
   string app_id = 1;
   string id = 2;
-  // The Metric of the comment.
+  // The id of the Metric of the comment.
   string metric = 3;
-  // The cell, as dimension name to member. Empty for the whole Metric.
+  // The cell, as list id to member id. Empty for the whole Metric.
   map<string, string> cell = 4;
   string user = 5;
   string body = 6;
@@ -529,7 +566,7 @@ message ListSnapshotsResponse {
 message CreateSnapshotRequest {
   string app_id = 1;
   string name = 2;
-  // The id of the new snapshot (UUIDv7).
+  // The id of the new snapshot.
   string id = 3;
   string client_op_id = 4;
 }
@@ -554,7 +591,7 @@ message AppMember {
 message CreateAccessRuleRequest {
   string app_id = 1;
   string client_op_id = 2;
-  // rule.id is required (UUIDv7).
+  // rule.id is required.
   AccessRule rule = 3;
 }
 
@@ -566,11 +603,15 @@ message UpdateAccessRuleRequest {
 
 // AccessRule limits the members of a list that the users with a role can read and write.
 // A user with more than one rule must agree with all of them. MODELER and ADMIN ignore rules.
+// A member that the model does not have is not readable. A list that the model does not have makes the rule
+// inactive.
 message AccessRule {
   string app_id = 1;
   string id = 2;
   Role role = 3;
+  // The id of the list.
   string list = 4;
+  // Member ids.
   repeated string members = 5;
   // If false, the users can read the members but cannot write.
   bool write = 6;

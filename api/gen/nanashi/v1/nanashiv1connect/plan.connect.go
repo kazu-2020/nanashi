@@ -126,11 +126,12 @@ type PlanServiceClient interface {
 	AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error)
 	EditMembers(context.Context, *connect.Request[v1.EditMembersRequest]) (*connect.Response[v1.Ack], error)
 	CreateCalendar(context.Context, *connect.Request[v1.CreateCalendarRequest]) (*connect.Response[v1.Ack], error)
-	// CreateScenario adds a member to the dimension "Scenario" and copies the input cells of copy_from.
+	// CreateScenario adds a member to the scenario list (it makes the list on the first call) and copies the
+	// input cells of copy_from.
 	CreateScenario(context.Context, *connect.Request[v1.CreateScenarioRequest]) (*connect.Response[v1.Ack], error)
-	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing name gives ALREADY_EXISTS.
+	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing id gives ALREADY_EXISTS.
 	CreateMetric(context.Context, *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error)
-	// UpdateMetric changes a Metric. A missing name gives NOT_FOUND.
+	// UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
 	// A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
 	UpdateMetric(context.Context, *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error)
 	RenameMetric(context.Context, *connect.Request[v1.RenameMetricRequest]) (*connect.Response[v1.Ack], error)
@@ -577,11 +578,12 @@ type PlanServiceHandler interface {
 	AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error)
 	EditMembers(context.Context, *connect.Request[v1.EditMembersRequest]) (*connect.Response[v1.Ack], error)
 	CreateCalendar(context.Context, *connect.Request[v1.CreateCalendarRequest]) (*connect.Response[v1.Ack], error)
-	// CreateScenario adds a member to the dimension "Scenario" and copies the input cells of copy_from.
+	// CreateScenario adds a member to the scenario list (it makes the list on the first call) and copies the
+	// input cells of copy_from.
 	CreateScenario(context.Context, *connect.Request[v1.CreateScenarioRequest]) (*connect.Response[v1.Ack], error)
-	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing name gives ALREADY_EXISTS.
+	// CreateMetric makes a Metric. An empty formula makes an input Metric. An existing id gives ALREADY_EXISTS.
 	CreateMetric(context.Context, *connect.Request[v1.CreateMetricRequest]) (*connect.Response[v1.Ack], error)
-	// UpdateMetric changes a Metric. A missing name gives NOT_FOUND.
+	// UpdateMetric changes a Metric. A missing id gives NOT_FOUND.
 	// A change to the dimensions, the kind or the formula of an input Metric deletes its cells.
 	UpdateMetric(context.Context, *connect.Request[v1.UpdateMetricRequest]) (*connect.Response[v1.Ack], error)
 	RenameMetric(context.Context, *connect.Request[v1.RenameMetricRequest]) (*connect.Response[v1.Ack], error)

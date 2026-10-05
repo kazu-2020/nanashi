@@ -4,7 +4,7 @@ import { api, newId } from "../api";
 import { ItemType, type MetricDef, Role, ValueKind } from "../gen/nanashi/v1/plan_pb";
 import { defaultSpec, dropsInputCells, toFilters } from "../logic";
 import { PivotEditor } from "../Pivot";
-import { cls, createOrUpdate, useApp, useMutate } from "../state";
+import { cls, createOrUpdate, listOptions, useApp, useMutate } from "../state";
 import { Check, Checks, Sel } from "../ui";
 
 const FORMULA_HELP: [string, string][] = [
@@ -22,11 +22,13 @@ const FORMULA_HELP: [string, string][] = [
   ["トランザクション", "'Sales.Amount'[BY SUM: Sales.Product]"],
 ];
 
-function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void }) {
+function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void }) {
   const { appId, model } = useApp();
   const mutate = useMutate();
   const d = props.def;
+  // The id of a new Metric: the form makes it when it becomes a new Metric.
   const [f, setF] = useState({
+    id: d?.id ?? newId(),
     name: d?.name ?? "",
     dimensions: d?.dimensions ?? [],
     kind: d?.kind ?? ValueKind.NUMBER,
@@ -40,7 +42,7 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
     { kind: ValueKind.BOOLEAN, memberList: "", label: "真偽値" },
     ...model.lists.map((l) => ({
       kind: ValueKind.MEMBER,
-      memberList: l.name,
+      memberList: l.id,
       label: `メンバー: ${l.name}`,
     })),
   ];
@@ -71,7 +73,7 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
         ディメンション:{" "}
         <Checks
           label="ディメンション"
-          options={model.lists.map((l) => l.name)}
+          options={listOptions(model)}
           value={f.dimensions}
           onChange={(dimensions) => setF({ ...f, dimensions })}
         />
@@ -111,9 +113,14 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
               )) &&
             mutate(async (clientOpId) => {
               const req = { appId, clientOpId, metric: f };
-              await (d ? api.updateMetric(req) : api.createMetric(req));
-              props.onSaved(f.name);
-            })
+              if (d) await api.updateMetric(req);
+              else
+                await createOrUpdate(
+                  () => api.createMetric(req),
+                  () => api.updateMetric(req),
+                );
+              props.onSaved(f.id);
+            }).then((ok) => ok || d || setF((x) => ({ ...x, id: newId() })))
           }
         >
           保存
@@ -130,8 +137,8 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
               variant="secondary"
               onPress={() =>
                 mutate(async (clientOpId) => {
-                  await api.renameMetric({ appId, clientOpId, name: d.name, newName });
-                  props.onSaved(newName);
+                  await api.renameMetric({ appId, clientOpId, id: d.id, name: newName });
+                  props.onSaved(d.id);
                 })
               }
             >
@@ -142,7 +149,7 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
               onPress={() =>
                 confirm(`${d.name} を削除しますか？`) &&
                 mutate(async (clientOpId) => {
-                  await api.deleteMetric({ appId, clientOpId, name: d.name });
+                  await api.deleteMetric({ appId, clientOpId, id: d.id });
                   props.onSaved("");
                 })
               }
@@ -159,8 +166,8 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (name: string) => void 
 export function MetricsPage() {
   const { model, can } = useApp();
   // "" shows the form for a new Metric.
-  const [sel, setSel] = useState(model.metrics[0]?.name ?? "");
-  const def = model.metrics.find((m) => m.name === sel);
+  const [sel, setSel] = useState(model.metrics[0]?.id ?? "");
+  const def = model.metrics.find((m) => m.id === sel);
   return (
     <div className="flex gap-4">
       <ul className="flex w-48 shrink-0 flex-col gap-1 text-sm">
@@ -172,11 +179,11 @@ export function MetricsPage() {
           </li>
         )}
         {model.metrics.map((m) => (
-          <li key={m.name}>
+          <li key={m.id}>
             <Button
               size="sm"
-              variant={m.name === sel ? "primary" : "ghost"}
-              onPress={() => setSel(m.name)}
+              variant={m.id === sel ? "primary" : "ghost"}
+              onPress={() => setSel(m.id)}
             >
               {m.name}
               {m.formula ? " ƒ" : ""}
@@ -190,8 +197,8 @@ export function MetricsPage() {
         )}
         {def && (
           <PivotEditor
-            key={`${def.name}:${def.dimensions.join()}`}
-            initial={defaultSpec([def.name], def.dimensions)}
+            key={`${def.id}:${def.dimensions.join()}`}
+            initial={defaultSpec([def.id], def.dimensions)}
           />
         )}
       </div>
@@ -215,7 +222,7 @@ export function TablesPage() {
   };
   const dims = [
     ...new Set(
-      (t?.metrics ?? []).flatMap((m) => model.metrics.find((d) => d.name === m)?.dimensions ?? []),
+      (t?.metrics ?? []).flatMap((m) => model.metrics.find((d) => d.id === m)?.dimensions ?? []),
     ),
   ];
   return (
@@ -237,7 +244,7 @@ export function TablesPage() {
           />
           <Checks
             label="メトリック"
-            options={model.metrics.map((m) => m.name)}
+            options={model.metrics.map((m): [string, string] => [m.id, m.name])}
             value={f.metrics}
             onChange={(metrics) => setF({ ...f, metrics })}
           />
@@ -252,7 +259,7 @@ export function TablesPage() {
                     () => api.updateTable(req),
                   );
                   setSel(draftId);
-                })
+                }).then(() => !t && setDraftId(newId()))
               }
             >
               保存

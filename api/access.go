@@ -15,24 +15,30 @@ import (
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
 
-// limit is the members of one list that a user can read and write.
+// limit is the members (ids) of one list that a user can read and write.
 type limit struct{ read, write map[string]bool }
 
-// limits is list name to limit. A list without an entry has no limit.
+// limits is list id to limit. A list without an entry has no limit.
 type limits map[string]limit
 
-func accessLimits(role nanashiv1.Role, rules []*nanashiv1.AccessRule) limits {
+// accessLimits gives the limits of the rules of the role. The rules are fail-closed: a member that the model
+// does not have is dropped from the rule, so an empty rule shows nothing. A rule on a list that the model does
+// not have is inactive.
+func accessLimits(role nanashiv1.Role, rules []*nanashiv1.AccessRule, em engineModel) limits {
 	out := limits{}
 	if role >= nanashiv1.Role_ROLE_MODELER {
 		return out
 	}
 	for _, r := range rules {
-		if r.Role != role {
+		d, ok := em.dim(r.List)
+		if r.Role != role || !ok {
 			continue
 		}
 		read := map[string]bool{}
 		for _, m := range r.Members {
-			read[m] = true
+			if _, ok := d.member(m); ok {
+				read[m] = true
+			}
 		}
 		write := map[string]bool{}
 		if r.Write {
@@ -55,19 +61,19 @@ func (l limits) through(em engineModel) limits {
 	out := maps.Clone(l)
 	for range em.Dims { // Each pass follows one more property step, so len(Dims) passes reach all chains.
 		for _, d := range em.Dims {
-			lim, limited := l[d.Name]
+			lim, limited := l[d.ID]
 			for _, p := range d.Props {
 				target, ok := out[p.Target]
-				if !ok || p.Target == d.Name {
+				if !ok || p.Target == d.ID {
 					continue
 				}
 				derived := limit{read: map[string]bool{}, write: map[string]bool{}}
 				for _, m := range d.Members {
-					if target.read[p.Values[m]] {
-						derived.read[m] = true
+					if target.read[p.Values[m.ID]] {
+						derived.read[m.ID] = true
 					}
-					if target.write[p.Values[m]] {
-						derived.write[m] = true
+					if target.write[p.Values[m.ID]] {
+						derived.write[m.ID] = true
 					}
 				}
 				if limited {
@@ -76,7 +82,7 @@ func (l limits) through(em engineModel) limits {
 				lim, limited = derived, true
 			}
 			if limited {
-				out[d.Name] = lim
+				out[d.ID] = lim
 			}
 		}
 	}
@@ -110,7 +116,7 @@ func (l limits) visible(list, member string) bool {
 }
 
 // checkWrite refuses a write to a cell outside the write members, or a write that leaves a ruled list open.
-func (l limits) checkWrite(metric string, dims []string, coords map[string]string) error {
+func (l limits) checkWrite(metric string, dims []string, coords map[string]string, em engineModel) error {
 	for _, d := range dims {
 		lim, ok := l[d]
 		if !ok {
@@ -118,10 +124,10 @@ func (l limits) checkWrite(metric string, dims []string, coords map[string]strin
 		}
 		c, set := coords[d]
 		if !set {
-			return tag(errDenied, "%s: 権限の制限がある %s のメンバーを指定せずに書き込めない", metric, d)
+			return tag(errDenied, "%s: 権限の制限がある %s のメンバーを指定せずに書き込めない", metric, em.name(d))
 		}
 		if !lim.write[c] {
-			return tag(errDenied, "%s: %s の %q に書き込む権限がない", metric, d, c)
+			return tag(errDenied, "%s: %s の %q に書き込む権限がない", metric, em.name(d), c)
 		}
 	}
 	return nil
@@ -130,9 +136,11 @@ func (l limits) checkWrite(metric string, dims []string, coords map[string]strin
 // The actions follow.
 
 // rights gives the role of the user in the application and, for a role under MODELER, the access rules.
+// An application whose creation is not done has no members.
 func (s *PlanServer) rights(ctx context.Context, app, user string) (role, []*nanashiv1.AccessRule, error) {
 	var r int32
-	err := s.Pool.QueryRow(ctx, "select role from app_member where app_id = $1 and user_name = $2", app, user).Scan(&r)
+	err := s.Pool.QueryRow(ctx, `select m.role from app_member m join app_application a on a.id = m.app_id
+		where m.app_id = $1 and m.user_name = $2 and `+doneApps, app, user).Scan(&r)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil, nil
 	}
@@ -200,10 +208,10 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 	if strings.TrimSpace(m.GetUser()) == "" {
 		return nil, invalid(errors.New("利用者が空"))
 	}
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	return ackOf(s.apiOnly(ctx, app, req.Msg, func(tx pgx.Tx) (any, error) {
 		// Lock the members of the application, so that two ADMINs cannot remove each other at the same time.
 		if _, err := tx.Exec(ctx, "select 1 from app_member where app_id = $1 for update", app); err != nil {
-			return err
+			return nil, err
 		}
 		var err error
 		if m.Role == nanashiv1.Role_ROLE_UNSPECIFIED {
@@ -213,43 +221,36 @@ func (s *PlanServer) SetMemberRole(ctx context.Context, req *connect.Request[nan
 				on conflict (app_id, user_name) do update set role = excluded.role`, app, m.User, m.Role)
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var admins int
 		if err := tx.QueryRow(ctx, "select count(*) from app_member where app_id = $1 and role = $2", app, admin).Scan(&admins); err != nil {
-			return err
+			return nil, err
 		}
 		if admins == 0 {
-			return connect.NewError(connect.CodeFailedPrecondition, errors.New("最後の ADMIN は外せない"))
+			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("最後の ADMIN は外せない"))
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, dbError(err)
-	}
-	return ok()
+		return nil, nil
+	}))
 }
 
 func (s *PlanServer) CreateAccessRule(ctx context.Context, req *connect.Request[nanashiv1.CreateAccessRuleRequest]) (*ack, error) {
-	return s.saveAccessRule(ctx, req.Msg.AppId, req.Msg.Rule, true)
+	return s.saveAccessRule(ctx, req.Msg.AppId, req.Msg, req.Msg.Rule, true)
 }
 
 func (s *PlanServer) UpdateAccessRule(ctx context.Context, req *connect.Request[nanashiv1.UpdateAccessRuleRequest]) (*ack, error) {
-	return s.saveAccessRule(ctx, req.Msg.AppId, req.Msg.Rule, false)
+	return s.saveAccessRule(ctx, req.Msg.AppId, req.Msg, req.Msg.Rule, false)
 }
 
 // saveAccessRule makes the rule r (create) or changes it. If create is true, an existing id gives AlreadyExists.
 // If create is false, a missing id gives NotFound.
-func (s *PlanServer) saveAccessRule(ctx context.Context, app string, r *nanashiv1.AccessRule, create bool) (*ack, error) {
-	id, err := parseID("id", r.GetId())
-	if err != nil {
-		return nil, err
+func (s *PlanServer) saveAccessRule(ctx context.Context, app string, req message, r *nanashiv1.AccessRule, create bool) (*ack, error) {
+	if r.GetId() == "" || r.GetList() == "" {
+		return nil, invalid(errors.New("ルールの id とリストが要る"))
 	}
 	if r.Role != viewer && r.Role != contributor {
 		return nil, invalid(errors.New("ルールは VIEWER か CONTRIBUTOR に付ける（MODELER と ADMIN はルールを無視する）"))
 	}
-	// A rename between the member check and the write would leave the old name in the rule.
-	defer s.lock(app)()
 	em, _, err := s.Engines.model(ctx, app)
 	if err != nil {
 		return nil, err
@@ -259,8 +260,8 @@ func (s *PlanServer) saveAccessRule(ctx context.Context, app string, r *nanashiv
 		return nil, invalid(fmt.Errorf("リスト %s がない", r.List))
 	}
 	for _, x := range r.Members {
-		if !slices.Contains(d.Members, x) {
-			return nil, invalid(fmt.Errorf("%s に %q がない", r.List, x))
+		if _, ok := d.member(x); !ok {
+			return nil, invalid(fmt.Errorf("%s に %s がない", d.Name, x))
 		}
 	}
 	members := r.Members
@@ -268,30 +269,24 @@ func (s *PlanServer) saveAccessRule(ctx context.Context, app string, r *nanashiv
 		members = []string{}
 	}
 	sql := "update app_access_rule set role = $3, list = $4, members = $5, write = $6 where app_id = $1 and id = $2"
+	zero := tag(errNotFound, "変更するルールがない")
 	if create {
 		sql = `insert into app_access_rule (app_id, id, role, list, members, write) values ($1, $2, $3, $4, $5, $6)
 			on conflict (app_id, id) do nothing`
+		zero = tag(errExists, "同じ id のルールがすでにある")
 	}
-	res, err := s.Pool.Exec(ctx, sql, app, id, r.Role, r.List, members, r.Write)
-	if err != nil {
-		return nil, dbError(err)
-	}
-	if res.RowsAffected() == 0 && create {
-		return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("同じ id のルールがすでにある"))
-	}
-	if res.RowsAffected() == 0 {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("変更するルールがない"))
-	}
-	return ok()
+	return ackOf(s.apiOnly(ctx, app, req, func(tx pgx.Tx) (any, error) {
+		res, err := tx.Exec(ctx, sql, app, r.Id, r.Role, r.List, members, r.Write)
+		if err == nil && res.RowsAffected() == 0 {
+			err = zero
+		}
+		return nil, err
+	}))
 }
 
 func (s *PlanServer) DeleteAccessRule(ctx context.Context, req *connect.Request[nanashiv1.DeleteAccessRuleRequest]) (*ack, error) {
-	id, err := parseID("id", req.Msg.Id)
-	if err != nil {
+	return ackOf(s.apiOnly(ctx, req.Msg.AppId, req.Msg, func(tx pgx.Tx) (any, error) {
+		_, err := tx.Exec(ctx, "delete from app_access_rule where app_id = $1 and id = $2", req.Msg.AppId, req.Msg.Id)
 		return nil, err
-	}
-	if _, err := s.Pool.Exec(ctx, "delete from app_access_rule where app_id = $1 and id = $2", req.Msg.AppId, id); err != nil {
-		return nil, dbError(err)
-	}
-	return ok()
+	}))
 }

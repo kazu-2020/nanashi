@@ -2,6 +2,7 @@ package api
 
 import (
 	"cmp"
+	"fmt"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -11,37 +12,43 @@ import (
 
 func TestMetricOpCreateAndUpdate(t *testing.T) {
 	em := model(t)
-	budget := func(dims ...string) *nanashiv1.MetricDef {
-		return &nanashiv1.MetricDef{Name: "Budget", Dimensions: dims}
+	budgetDef := func(dims ...string) *nanashiv1.MetricDef {
+		return &nanashiv1.MetricDef{Id: budget, Name: "Budget", Dimensions: dims}
 	}
-	if _, err := metricOp(em, budget("Product"), "number", true); connect.CodeOf(connectError(err)) != connect.CodeAlreadyExists {
+	if _, err := metricOp(em, budgetDef(product), "number", true); connect.CodeOf(connectError(err)) != connect.CodeAlreadyExists {
 		t.Errorf("create of an existing Metric: got %v, want AlreadyExists", err)
 	}
-	if _, err := metricOp(em, &nanashiv1.MetricDef{Name: "New"}, "number", false); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
+	if _, err := metricOp(em, &nanashiv1.MetricDef{Id: newMember, Name: "New"}, "number", false); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
 		t.Errorf("update of a missing Metric: got %v, want NotFound", err)
 	}
-	if ops, err := metricOp(em, &nanashiv1.MetricDef{Name: "New"}, "number", true); err != nil ||
-		opsJSON(t, ops) != `[{"op":"add_input","args":["New",[],[]],"kwargs":{"kind":"number"}}]` {
+	if _, err := metricOp(em, &nanashiv1.MetricDef{Id: newMember, Name: "Budget"}, "number", true); connect.CodeOf(connectError(err)) != connect.CodeAlreadyExists {
+		t.Errorf("create with the name of another Metric: got %v, want AlreadyExists", err)
+	}
+	if ops, err := metricOp(em, &nanashiv1.MetricDef{Id: newMember, Name: "New"}, "number", true); err != nil ||
+		opsJSON(t, ops) != fmt.Sprintf(`[{"cells":[],"dims":[],"id":%q,"kind":"number","name":"New","op":"add_input"}]`, newMember) {
 		t.Errorf("create: got %s, %v", opsJSON(t, ops), err)
 	}
-	if ops, err := metricOp(em, budget("Product", "Region"), "number", false); err != nil || len(ops) != 0 {
+	if ops, err := metricOp(em, budgetDef(product, region), "number", false); err != nil || len(ops) != 0 {
 		t.Errorf("same input Metric: got %v, %v, want no operation", ops, err)
 	}
 	for _, c := range []struct {
 		m    *nanashiv1.MetricDef
 		kind string
 	}{
-		{budget("Product"), "number"},
-		{budget("Product", "Region"), "boolean"},
-		{&nanashiv1.MetricDef{Name: "Budget", Dimensions: []string{"Product", "Region"}, Formula: "1"}, "number"},
+		{budgetDef(product), "number"},
+		{budgetDef(product, region), "boolean"},
+		{&nanashiv1.MetricDef{Id: budget, Name: "Budget", Dimensions: []string{product, region}, Formula: "1"}, "number"},
 	} {
 		if ops, err := metricOp(em, c.m, c.kind, false); err != nil || len(ops) != 1 {
 			t.Errorf("update %v: got %v, %v", c.m, ops, err)
 		}
 	}
-	if ops, err := metricOp(em, &nanashiv1.MetricDef{Name: "Revenue", Dimensions: []string{"Product"}, Formula: "2"}, "number", false); err != nil ||
-		opsJSON(t, ops) != `[{"op":"add_formula","args":["Revenue",["Product"],"2"],"kwargs":{"kind":"number","overridable":false}}]` {
+	if ops, err := metricOp(em, &nanashiv1.MetricDef{Id: revenue, Name: "Revenue", Dimensions: []string{product}, Formula: "2"}, "number", false); err != nil ||
+		opsJSON(t, ops) != fmt.Sprintf(`[{"dims":[%q],"formula":"2","id":%q,"kind":"number","name":"Revenue","op":"add_formula","overridable":false}]`, product, revenue) {
 		t.Errorf("formula change: got %s, %v", opsJSON(t, ops), err)
+	}
+	if _, err := metricOp(em, &nanashiv1.MetricDef{Id: newMember, Name: "New", Dimensions: []string{newMember}}, "number", true); err == nil {
+		t.Error("an unknown list must be an error")
 	}
 }
 
@@ -54,10 +61,10 @@ func TestEngineKind(t *testing.T) {
 	}{
 		{&nanashiv1.MetricDef{}, "number"},
 		{&nanashiv1.MetricDef{Kind: boolean}, "boolean"},
-		{&nanashiv1.MetricDef{Kind: member, MemberList: "Region"}, "member:Region"},
-		{&nanashiv1.MetricDef{Kind: member, MemberList: "Nothing"}, ""},
+		{&nanashiv1.MetricDef{Kind: member, MemberList: region}, "member:" + region},
+		{&nanashiv1.MetricDef{Kind: member, MemberList: newMember}, ""},
 		{&nanashiv1.MetricDef{Kind: member}, ""},
-		{&nanashiv1.MetricDef{Kind: boolean, MemberList: "Region"}, ""},
+		{&nanashiv1.MetricDef{Kind: boolean, MemberList: region}, ""},
 	} {
 		got, err := engineKind(em, c.m)
 		if got != c.want || (err == nil) != (c.want != "") {

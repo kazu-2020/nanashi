@@ -3,12 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, newId } from "../api";
 import { Role } from "../gen/nanashi/v1/plan_pb";
-import { ROLES, roleName } from "../logic";
-import { cls, createOrUpdate, memberNames, time, useApp, useMutate } from "../state";
+import { label, ROLES, roleName } from "../logic";
+import { cls, createOrUpdate, listOptions, memberOptions, time, useApp, useMutate } from "../state";
 import { Check, Checks, Section, Sel } from "../ui";
 
 export function CommentsPage() {
-  const { appId } = useApp();
+  const { appId, names } = useApp();
   const { data: r } = useQuery({
     queryKey: ["app", appId, "comments"],
     queryFn: () => api.listComments({ appId }),
@@ -30,10 +30,10 @@ export function CommentsPage() {
             <tr key={c.id}>
               <td>{time(c.createdAt)}</td>
               <td>{c.user}</td>
-              <td>{c.metric}</td>
+              <td>{label(names, c.metric)}</td>
               <td>
                 {Object.entries(c.cell)
-                  .map(([k, v]) => `${k}=${v}`)
+                  .map(([k, v]) => `${label(names, k)}=${label(names, v)}`)
                   .join(", ")}
               </td>
               <td>{c.body}</td>
@@ -102,8 +102,7 @@ export function SnapshotsPage() {
               mutate(async (clientOpId) => {
                 await api.createSnapshot({ appId, clientOpId, id, name });
                 setName("");
-                setId(newId());
-              })
+              }).then(() => setId(newId()))
             }
           >
             作成
@@ -125,7 +124,7 @@ export function SnapshotsPage() {
 }
 
 export function AccessPage() {
-  const { appId, model } = useApp();
+  const { appId, model, names } = useApp();
   const mutate = useMutate();
   const { data: r } = useQuery({
     queryKey: ["app", appId, "access"],
@@ -195,8 +194,8 @@ export function AccessPage() {
             {r?.rules.map((x) => (
               <tr key={x.id}>
                 <td>{roleName(x.role)}</td>
-                <td>{x.list}</td>
-                <td>{x.members.join(", ")}</td>
+                <td>{label(names, x.list)}</td>
+                <td>{x.members.map((m) => label(names, m)).join(", ")}</td>
                 <td>{x.write ? "書き込み可" : "読み取りのみ"}</td>
                 <td>
                   <Button
@@ -225,11 +224,11 @@ export function AccessPage() {
             value={rule.list}
             onChange={(list) => setRule({ ...rule, list, members: [] })}
             empty=""
-            options={model.lists.map((l) => l.name)}
+            options={listOptions(model)}
           />
           <Checks
             label="メンバー"
-            options={memberNames(model, rule.list)}
+            options={memberOptions(model, rule.list)}
             value={rule.members}
             onChange={(members) => setRule({ ...rule, members })}
           />
@@ -248,8 +247,7 @@ export function AccessPage() {
                   () => api.createAccessRule(req),
                   () => api.updateAccessRule(req),
                 );
-                setRuleId(newId());
-              })
+              }).then(() => setRuleId(newId()))
             }
           >
             ルールを追加
