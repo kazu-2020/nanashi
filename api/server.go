@@ -77,7 +77,7 @@ var rpcRules = map[string]rpcRule{
 type caller struct {
 	user   string
 	method string // The RPC name, for example "CreateList".
-	opID   string // The client_op_id of a request that changes data, in canonical form. Empty for a read.
+	opID   string // The client_op_id of a request that changes data. Empty for a read.
 	role   role
 	rules  []*nanashiv1.AccessRule // The access rules of the application. Empty when role >= MODELER.
 }
@@ -130,20 +130,19 @@ func isDeadlock(err error) bool {
 
 func invalid(err error) error { return connect.NewError(connect.CodeInvalidArgument, err) }
 
-// parseID gives the canonical form (lower case, with hyphens) of a UUID from a request.
-// If s is not a UUID, it gives an InvalidArgument error.
-func parseID(field, s string) (string, error) {
-	u, err := uuid.Parse(s)
-	if err != nil || len(s) != 36 {
-		return "", invalid(fmt.Errorf("%s が UUID ではない: %q", field, s))
+// checkID gives an InvalidArgument error if s is not a UUID in the canonical form (lower case, with hyphens).
+// The engine and the jsonb columns compare ids as strings, so each id has one spelling only.
+func checkID(field, s string) error {
+	if u, err := uuid.Parse(s); err != nil || u.String() != s {
+		return invalid(fmt.Errorf("%s が正規形の UUID ではない: %q", field, s))
 	}
-	return u.String(), nil
+	return nil
 }
 
 func newID() string { return uuid.Must(uuid.NewV7()).String() }
 
 // Request fields that hold ids: every string field with one of these names, the keys of these map fields, and
-// the values of these map fields. canonicalize changes them to the canonical form.
+// the values of these map fields. checkIDs checks them.
 var (
 	idFields = map[string]bool{"id": true, "app_id": true, "client_op_id": true, "snapshot_id": true, "metric": true,
 		"list": true, "target": true, "member_list": true, "dimensions": true, "rows": true, "columns": true,
@@ -152,83 +151,44 @@ var (
 	idValues = map[string]bool{"coords": true, "cell": true}
 )
 
-// canonicalize changes each id in a request to the canonical form. An id that is not a UUID gives InvalidArgument.
-// An empty string field is not set, so an optional reference stays empty.
-func canonicalize(m protoreflect.Message) error {
+// checkIDs checks each id in a request with checkID. An empty string field is not set, so an optional reference
+// stays empty.
+func checkIDs(m protoreflect.Message) error {
 	var fail error
 	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
 		name := string(fd.Name())
-		var err error
 		switch {
 		case fd.IsMap():
-			err = canonicalizeMap(name, fd, v.Map())
-		case fd.IsList() && fd.Kind() == protoreflect.StringKind && idFields[name]:
-			l := v.List()
-			for i := 0; i < l.Len() && err == nil; i++ {
-				var s string
-				if s, err = parseID(name, l.Get(i).String()); err == nil {
-					l.Set(i, protoreflect.ValueOfString(s))
+			keys, values := idKeys[name], idValues[name]
+			messages := fd.MapValue().Kind() == protoreflect.MessageKind
+			v.Map().Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
+				if keys {
+					fail = checkID(name, k.String())
 				}
+				if fail == nil && values {
+					fail = checkID(name, v.String())
+				}
+				if fail == nil && messages {
+					fail = checkIDs(v.Message())
+				}
+				return fail == nil
+			})
+		case fd.IsList() && fd.Kind() == protoreflect.StringKind && idFields[name]:
+			for i, l := 0, v.List(); i < l.Len() && fail == nil; i++ {
+				fail = checkID(name, l.Get(i).String())
 			}
 		case fd.IsList() && fd.Kind() == protoreflect.MessageKind:
-			l := v.List()
-			for i := 0; i < l.Len() && err == nil; i++ {
-				err = canonicalize(l.Get(i).Message())
+			for i, l := 0, v.List(); i < l.Len() && fail == nil; i++ {
+				fail = checkIDs(l.Get(i).Message())
 			}
 		case fd.Kind() == protoreflect.MessageKind:
-			err = canonicalize(v.Message())
+			fail = checkIDs(v.Message())
 		case fd.Kind() == protoreflect.StringKind && idFields[name]:
-			var s string
-			if s, err = parseID(name, v.String()); err == nil {
-				m.Set(fd, protoreflect.ValueOfString(s))
-			}
+			fail = checkID(name, v.String())
 		}
-		fail = err
-		return err == nil
+		return fail == nil
 	})
 	return fail
-}
-
-func canonicalizeMap(name string, fd protoreflect.FieldDescriptor, mv protoreflect.Map) error {
-	keys, values := idKeys[name], idValues[name]
-	messages := fd.MapValue().Kind() == protoreflect.MessageKind
-	if !keys && !values && !messages {
-		return nil
-	}
-	type entry struct {
-		k protoreflect.MapKey
-		v protoreflect.Value
-	}
-	var entries []entry
-	mv.Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
-		entries = append(entries, entry{k, v})
-		return true
-	})
-	for _, e := range entries {
-		k, v := e.k, e.v
-		if keys {
-			s, err := parseID(name, k.String())
-			if err != nil {
-				return err
-			}
-			k = protoreflect.ValueOfString(s).MapKey()
-		}
-		if values {
-			s, err := parseID(name, v.String())
-			if err != nil {
-				return err
-			}
-			v = protoreflect.ValueOfString(s)
-		}
-		if messages {
-			if err := canonicalize(v.Message()); err != nil {
-				return err
-			}
-		}
-		mv.Clear(e.k)
-		mv.Set(k, v)
-	}
-	return nil
 }
 
 // requestHash identifies the content of a request without its client_op_id. A resend with the same client_op_id
@@ -404,7 +364,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return err
 }
 
-// Interceptor identifies the user, changes the ids to the canonical form, checks the role for the RPC, and
+// Interceptor identifies the user, checks the ids, checks the role for the RPC, and
 // records the audit trail.
 func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
@@ -420,7 +380,7 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 				return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("%s は使えない", method))
 			}
 			msg := req.Any().(proto.Message)
-			if err := canonicalize(msg.ProtoReflect()); err != nil {
+			if err := checkIDs(msg.ProtoReflect()); err != nil {
 				return nil, err
 			}
 			c := caller{user: user, method: method}
@@ -440,7 +400,7 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 					return nil, connect.NewError(connect.CodePermissionDenied, errors.New("この操作をする権限がない"))
 				}
 			}
-			// Each request that changes data has a client_op_id. canonicalize checked its form.
+			// Each request that changes data has a client_op_id. checkIDs checked its form.
 			if r, ok := req.Any().(interface{ GetClientOpId() string }); ok {
 				if c.opID = r.GetClientOpId(); c.opID == "" {
 					return nil, invalid(errors.New("client_op_id が要る"))

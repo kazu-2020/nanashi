@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -142,45 +143,50 @@ func TestDBErrorGivesAlreadyExistsByConstraint(t *testing.T) {
 	}
 }
 
-func TestParseID(t *testing.T) {
-	got, err := parseID("id", "0192F3A4-5B6C-7D8E-9F01-23456789ABCD")
-	if err != nil || got != "0192f3a4-5b6c-7d8e-9f01-23456789abcd" {
-		t.Errorf("upper case: got %q, %v, want the lower case form", got, err)
+func TestCheckID(t *testing.T) {
+	if err := checkID("id", "0192f3a4-5b6c-7d8e-9f01-23456789abcd"); err != nil {
+		t.Errorf("canonical form: got %v", err)
 	}
-	for _, s := range []string{"", "app-1a2b3c4d5e6f7a8b", "0192f3a4-5b6c-7d8e-9f01", "0192f3a4-5b6c-7d8e-9f01-23456789abcz", "0192f3a45b6c7d8e9f0123456789abcd"} {
-		if _, err := parseID("id", s); connect.CodeOf(err) != connect.CodeInvalidArgument {
+	for _, s := range []string{"", "app-1a2b3c4d5e6f7a8b", "0192f3a4-5b6c-7d8e-9f01", "0192f3a4-5b6c-7d8e-9f01-23456789abcz",
+		"0192f3a45b6c7d8e9f0123456789abcd", "0192F3A4-5B6C-7D8E-9F01-23456789ABCD", "{0192f3a4-5b6c-7d8e-9f01-23456789abcd}",
+		"urn:uuid:0192f3a4-5b6c-7d8e-9f01-23456789abcd"} {
+		if err := checkID("id", s); connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Errorf("%q: got %v, want InvalidArgument", s, err)
 		}
 	}
 }
 
-func TestCanonicalize(t *testing.T) {
+func TestCheckIDs(t *testing.T) {
 	up := strings.ToUpper
-	req := &nanashiv1.QueryRequest{AppId: up(product), Metrics: []string{up(budget)}, Rows: []string{up(product)},
-		Filters: map[string]*nanashiv1.Members{up(region): {Ids: []string{up(east)}}}}
-	if err := canonicalize(req.ProtoReflect()); err != nil {
-		t.Fatal(err)
+	ok := []proto.Message{
+		&nanashiv1.QueryRequest{AppId: product, Metrics: []string{budget}, Rows: []string{product},
+			Filters: map[string]*nanashiv1.Members{region: {Ids: []string{east}}}},
+		// A name is not an id, and an optional reference stays empty.
+		&nanashiv1.EditMembersRequest{AppId: product, List: sales, Edits: []*nanashiv1.MemberEdit{
+			{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: sale1, Name: "Not An Id", Properties: map[string]string{salesProduct: "text"}}}}}},
+		&nanashiv1.WriteCellsRequest{Writes: []*nanashiv1.CellWrite{{Metric: budget, Coords: map[string]string{product: memberA}}}},
 	}
-	if req.AppId != product || req.Metrics[0] != budget || req.Rows[0] != product || req.Filters[region].Ids[0] != east || len(req.Filters) != 1 {
-		t.Errorf("got %v", req)
+	for _, m := range ok {
+		before := proto.Clone(m)
+		if err := checkIDs(m.ProtoReflect()); err != nil || !proto.Equal(m, before) {
+			t.Errorf("%T: got %v, want no error and no change", m, err)
+		}
 	}
-	// A name is not an id. An optional reference stays empty. Map values of coordinates are ids.
-	edit := &nanashiv1.EditMembersRequest{AppId: product, List: up(sales), Edits: []*nanashiv1.MemberEdit{
-		{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: up(sale1), Name: "Not An Id", Properties: map[string]string{up(salesProduct): "text"}}}}}}
-	if err := canonicalize(edit.ProtoReflect()); err != nil {
-		t.Fatal(err)
+	// Each place that holds an id refuses an id that is not in the canonical form.
+	bad := []proto.Message{
+		&nanashiv1.CreateMetricRequest{Metric: &nanashiv1.MetricDef{Id: "nope"}},
+		&nanashiv1.QueryRequest{AppId: up(product)},
+		&nanashiv1.QueryRequest{AppId: product, Metrics: []string{up(budget)}},
+		&nanashiv1.QueryRequest{AppId: product, Filters: map[string]*nanashiv1.Members{up(region): {Ids: []string{east}}}},
+		&nanashiv1.QueryRequest{AppId: product, Filters: map[string]*nanashiv1.Members{region: {Ids: []string{up(east)}}}},
+		&nanashiv1.WriteCellsRequest{Writes: []*nanashiv1.CellWrite{{Metric: budget, Coords: map[string]string{product: up(memberA)}}}},
+		&nanashiv1.EditMembersRequest{AppId: product, List: sales, Edits: []*nanashiv1.MemberEdit{
+			{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: sale1, Name: "x", Properties: map[string]string{up(salesProduct): "text"}}}}}},
 	}
-	add := edit.Edits[0].GetAdd()
-	if edit.List != sales || add.Id != sale1 || add.Name != "Not An Id" || add.Properties[salesProduct] != "text" {
-		t.Errorf("got %v", edit)
-	}
-	write := &nanashiv1.WriteCellsRequest{Writes: []*nanashiv1.CellWrite{{Metric: budget, Coords: map[string]string{up(product): up(memberA)}}}}
-	if err := canonicalize(write.ProtoReflect()); err != nil || write.Writes[0].Coords[product] != memberA {
-		t.Errorf("coords: got %v, %v", write.Writes[0].Coords, err)
-	}
-	bad := &nanashiv1.CreateMetricRequest{Metric: &nanashiv1.MetricDef{Id: "nope"}}
-	if err := canonicalize(bad.ProtoReflect()); connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("a bad id: got %v, want InvalidArgument", err)
+	for i, m := range bad {
+		if err := checkIDs(m.ProtoReflect()); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("bad request %d (%T): got %v, want InvalidArgument", i, m, err)
+		}
 	}
 }
 

@@ -38,7 +38,7 @@ func TestImportTransactionList(t *testing.T) {
 	// New rows start at first (10) with new ids. The DIMENSION column has names, the edit has ids.
 	// One operation and one statement set the values of all rows.
 	id10, id11 := edits[0].GetAdd().Id, edits[1].GetAdd().Id
-	if _, err := parseID("id", id10); err != nil || id10 == id11 {
+	if err := checkID("id", id10); err != nil || id10 == id11 {
 		t.Fatalf("ids of the new members: %s, %s", id10, id11)
 	}
 	want := fmt.Sprintf(`[{"dim":%q,"id":%q,"name":"10","op":"add_member"},{"coords":{%q:%q},"metric":%q,"op":"set_cell","value":1200},`+

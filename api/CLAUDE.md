@@ -21,7 +21,7 @@ It uses `connect-go` on `net/http` of the Go standard library. It does not use a
 - The API keeps its own tables (`app_*` in `schema.sql`). It does not write to the engine tables (`nanashi_*`).
 - The API trusts the header `X-Nanashi-User` only from this host or from `--trusted-proxy`. If you listen on an address other than loopback, give `--trusted-proxy`. Otherwise the API does not start.
 - The API sends all engine requests through the router (`/models/<application ID>/...`). It does not start engine processes.
-- Each id in a request is a UUID (`../docs/ids.md`). The interceptor changes the ids to the canonical form (`canonicalize`), so an RPC can trust them.
+- Each id in a request is a UUID in the canonical form (`../docs/ids.md`). The interceptor refuses any other id (`checkIDs`), so an RPC can trust them.
 - A change that the engine and the api tables both take goes through the outbox `app_operation` (`change` in `server.go`, `../docs/engine-lifecycle.md`). A change of the api tables only goes through `apiOnly`. If such a change must read the model (for example a TEXT property), it goes through `change` with no engine operation. `WriteCells` goes to the engine only. There is no lock.
 - The audit trail `app_audit` gets one row for each `client_op_id` that is done: `change` writes it when the row flips to done, `apiOnly` in its transaction. The interceptor audits only `WriteCells`, which has no row.
 - The Metric catalog `app_metric` keeps the description, the folder and the owner of a Metric. The engine keeps the name. A change of the catalog goes in the outbox plan of the Metric RPC (`../docs/ids.md`).

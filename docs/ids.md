@@ -7,7 +7,7 @@ This note gives the identifier rules for `web/`, `api/` and `tessera/`. It follo
 - Each identifier that goes out of the system is a UUIDv7. Examples: an application, a Metric, a dimension (list), a member, a property, an item, an access rule, a comment, a snapshot and a `client_op_id`.
 - Usually `web/` makes the identifier. If `api/` makes an object for the user, `api/` makes the identifier one time, in the plan of the RPC.
 - A name is an attribute. It is not an identifier.
-- `api/` parses each incoming identifier and changes it to the canonical form (lowercase, with hyphens). If the identifier is not a UUID, `api/` returns InvalidArgument. `tessera/` does not parse identifiers. It compares them as strings.
+- Each identifier in a request must be in the canonical form (lowercase, with hyphens). If it is not, `api/` returns InvalidArgument and does not change it. `tessera/` does not parse identifiers. It compares them as strings, so each identifier has one spelling only.
 - The internal numbers of the engine do not go out of the engine. These are the handles (`Model._new_id()`), the member numbers and the Rust dense numbers.
 - The engine does not use an identifier again after a delete. It keeps the deleted identifiers as tombstones.
 

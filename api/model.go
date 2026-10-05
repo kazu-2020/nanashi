@@ -140,7 +140,7 @@ func editOps(app string, em engineModel, dim engineDim, meta appMeta, edits []*n
 				if isDim && v != "" {
 					// The value is a member id of the target list. On a list that refers to itself, the member can be
 					// one that an edit of this request adds, also a later edit (an import in any row order).
-					if _, err := parseID(ep.Name, v); err != nil {
+					if err := checkID(ep.Name, v); err != nil {
 						return err
 					}
 					target, _ := em.dim(ep.Target)

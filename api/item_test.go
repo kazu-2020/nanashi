@@ -19,9 +19,9 @@ func TestCreateAndUpdateItem(t *testing.T) {
 	pool := testPool(t, ctx)
 	app := testApp(t, ctx, pool)
 	alice := testClient(t, pool, nil)("alice")
-	id := strings.ToUpper(uuid.Must(uuid.NewV7()).String())
+	id := uuid.Must(uuid.NewV7()).String()
 	table := func(name string) *nanashiv1.TableDef {
-		return &nanashiv1.TableDef{Id: id, Name: name, Metrics: []string{strings.ToUpper(budget)}}
+		return &nanashiv1.TableDef{Id: id, Name: name, Metrics: []string{budget}}
 	}
 	create := func(op string) error {
 		_, err := alice.CreateTable(ctx, connect.NewRequest(&nanashiv1.CreateTableRequest{AppId: app, ClientOpId: op, Table: table("a")}))
@@ -29,6 +29,10 @@ func TestCreateAndUpdateItem(t *testing.T) {
 	}
 	if err := create("not-a-uuid"); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("bad client_op_id: got %v, want InvalidArgument", err)
+	}
+	upper := &nanashiv1.CreateTableRequest{AppId: app, ClientOpId: uuid.NewString(), Table: &nanashiv1.TableDef{Id: strings.ToUpper(id), Name: "a"}}
+	if _, err := alice.CreateTable(ctx, connect.NewRequest(upper)); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("upper case id: got %v, want InvalidArgument", err)
 	}
 	op := uuid.NewString()
 	if err := create(op); err != nil {
@@ -58,7 +62,7 @@ func TestCreateAndUpdateItem(t *testing.T) {
 	if err := pool.QueryRow(ctx, "select i.id, i.def->>'name', i.def->'metrics'->>0, a.version from app_item i join app_application a on a.id = i.app_id where i.app_id = $1", app).Scan(&stored, &name, &metric, &version); err != nil {
 		t.Fatal(err)
 	}
-	if stored != strings.ToLower(id) || name != "b" || metric != budget || version != 2 {
-		t.Errorf("stored item: got %s %q %s version %d, want %s \"b\" %s version 2", stored, name, metric, version, strings.ToLower(id), budget)
+	if stored != id || name != "b" || metric != budget || version != 2 {
+		t.Errorf("stored item: got %s %q %s version %d, want %s \"b\" %s version 2", stored, name, metric, version, id, budget)
 	}
 }
