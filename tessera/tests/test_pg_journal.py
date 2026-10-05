@@ -232,7 +232,7 @@ class PgJournalTests(unittest.TestCase):
         files = lambda: sorted(self.objects.list(f"{self.model_id}/"))
         before = files()
         out = j.prune(keep=1, op_window=0)
-        self.assertEqual(out, {"snapshots": 2, "cells": 1, "client_op_ids": 1})
+        self.assertEqual(out, {"snapshots": 2, "cells": 1, "client_op_ids": 1, "rejections": 0})
         after = files()
         self.assertEqual(len([k for k in after if k.endswith("/manifest.json")]), 1)
         self.assertFalse(any("/cells/" in k for k in after))
@@ -419,8 +419,8 @@ class Schema(unittest.TestCase):
         from sparse_engine.pg_journal import SchemaError, migrate
         with self.assertRaisesRegex(SchemaError, "migrate"):
             PgJournal(self.dsn, "new", tempfile.mkdtemp())
-        self.assertEqual(migrate(self.dsn), (0, 1))
-        self.assertEqual(migrate(self.dsn), (1, 1))  # Migrate can run again
+        self.assertEqual(migrate(self.dsn), (0, 2))
+        self.assertEqual(migrate(self.dsn), (2, 2))  # Migrate can run again
         j = PgJournal(self.dsn, "new", tempfile.mkdtemp(), heartbeat=False)
         m = build_with(ReferenceEngine())
         j.start(m)

@@ -42,6 +42,7 @@ class Dimension:
         self._rank: dict[str, int] | None = None  # 名前 -> 順位（必要になったら作る）
         # プロパティ名 -> (参照先の Dimension 名, {メンバー -> 参照先メンバー})
         self.properties: dict[str, tuple[str, dict[str, str]]] = {}
+        self.property_ids: dict[str, int] = {}  # property name -> handle (Model gives it with _new_id)
 
     def set_ids(self, ids: Iterable[int]) -> None:
         """位置ごとのメンバーの ID を設定する（保存したモデルを読み込むとき）。"""
@@ -71,6 +72,7 @@ class Dimension:
         other.members, other.ids = list(self.members), list(self.ids)
         other._index, other._by_id = dict(self._index), dict(self._by_id)
         other.properties = dict(self.properties)
+        other.property_ids = dict(self.property_ids)
         other._order, other._rank = self._order, self._rank  # どちらも書き換えずに作り直すので共有してよい
         return other
 

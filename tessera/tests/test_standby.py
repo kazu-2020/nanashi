@@ -128,7 +128,7 @@ class PgStandby(Standby, unittest.TestCase):
             c = Client(server.url, token=None)
             self.assertEqual(c.get("/ready"), (200, {"seq": 0, "ready": True, "role": "standby", "reasons": []}))
             self.assertEqual(c.get("/health"), (200, {"seq": 0, "role": "standby"}))
-            status, err = c.post("/writes", {"client_op_id": "x", "ops": [write("Stock", 1, Product="p0", Month="Jan")]})
+            status, err = c.post("/writes", {"client_op_id": "x", "ops": [write(self.b, "Stock", 1, Product="p0", Month="Jan")]})
             self.assertEqual((status, err["error"], err["leader"]), (421, "not_leader", "http://a"))
             with urllib.request.urlopen(server.url + "/stats", timeout=5) as r:  # Prometheus のテキスト
                 self.assertIn("nanashi_leader 0\n", r.read().decode())

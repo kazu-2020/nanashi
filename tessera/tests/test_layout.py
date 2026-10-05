@@ -72,7 +72,7 @@ class RustFollowsLayout(unittest.TestCase):
         rs = build_with(RustEngine())
         for model in (ref, rs):
             cells = model.value("Volume").cells
-            model.add_input("Volume", ["Product", "Region", "Month"], cells, partition="Month")
+            model.add_input("Volume", ["Product", "Region", "Month"], cells, partition="Month", id=model.metric_id("Volume"))
             model.set_cell("Volume", 9, Product="D", Region="S", Month="Apr")
         self.assertEqual(rs.engine.partition_of(rs.raw("Volume")), "Month")
         for name in ref.metrics:

@@ -62,6 +62,15 @@ class Overloaded(Exception):
     """書き込みの列が満杯（max_queue）で、timeout の間に空かなかった。"""
 
 
+class Rejected(Exception):
+    """A write with this client_op_id was rejected before (Workspace.reject). The HTTP server returns the
+    same status and body again."""
+
+    def __init__(self, status: int, body: dict):
+        super().__init__(f"この操作は拒否済み（{status}）")
+        self.status, self.body = status, body
+
+
 class Role(enum.Enum):
     """書き手のプロセスの役割。LEADER は書き込みの権利を持ち、書き込みを受ける。STANDBY は記録先に追従して
     読み出しだけを受け、権利が空いたら取って LEADER になる。"""
@@ -184,6 +193,9 @@ class Workspace:
         self._recent: collections.deque = collections.deque(maxlen=keep_recent)
         # このライターが最近確定した client_op_id（keep_recent 件まで。記録先にあるものは seq_of で引く）
         self._ops: collections.OrderedDict[str, int] = collections.OrderedDict()
+        # The rejections that the HTTP server recorded (client_op_id -> (status, body)), keep_recent at most.
+        # The journal keeps them too (record_rejection), so a restarted server gives the same answer
+        self._rejected: collections.OrderedDict[str, tuple[int, dict]] = collections.OrderedDict()
         self._closed = False
         if (checkpoint_every is not None or checkpoint_interval is not None) and journal is None:
             raise ValueError("スナップショットを取るには記録先（journal）が要る")
@@ -280,6 +292,31 @@ class Workspace:
             future.cancel()
             raise
 
+    def reject(self, client_op_id: str, status: int, body: dict) -> None:
+        """Record that the write with client_op_id was rejected with this HTTP status and body. If the same
+        client_op_id comes again, the writer raises Rejected with them instead of applying the write."""
+        self._rejected[client_op_id] = (status, body)
+        while len(self._rejected) > self._recent.maxlen:
+            self._rejected.popitem(last=False)
+        if self.journal is not None:
+            self.journal.record_rejection(client_op_id, status, body)
+
+    def _rejections(self, ids: list[str]) -> dict[str, tuple[int, dict]]:
+        out = {i: self._rejected[i] for i in ids if i in self._rejected}
+        unknown = [i for i in ids if i not in out]
+        if unknown and self.journal is not None:
+            out.update(self.journal.rejections_of_many(unknown))
+        return out
+
+    def operation(self, client_op_id: str) -> dict | None:
+        """The result of the write with client_op_id: {"state": "committed", "seq"} or
+        {"state": "rejected", "status", "body"}. None if the Workspace does not know it."""
+        if (seq := self._known_ops_of([client_op_id]).get(client_op_id)) is not None:
+            return {"state": "committed", "seq": seq}
+        if (r := self._rejections([client_op_id]).get(client_op_id)) is not None:
+            return {"state": "rejected", "status": r[0], "body": r[1]}
+        return None
+
     def checkpoint(self) -> None:
         """公開中の版のスナップショットを記録先に置く（版は変わらないので、どのスレッドからでもよい）。"""
         if self.journal is None:
@@ -374,13 +411,18 @@ class Workspace:
         applied: list[tuple[_Request, dict]] = []
         aliases: list[tuple[_Request, _Request]] = []  # 同じまとまりで同じ client_op_id を送ったもの
         firsts: dict[str, _Request] = {}
-        known = self._known_ops(batch)  # 確定済みの client_op_id は、まとまりごとに 1 回で引く
+        ids = [r.client_op_id for r in batch if r.client_op_id is not None]
+        known = self._known_ops_of(ids)  # 確定済みの client_op_id は、まとまりごとに 1 回で引く
+        rejected = self._rejections(ids)
         for req in batch:
             if not req.future.set_running_or_notify_cancel():
                 continue
             if req.client_op_id is not None:
                 if req.client_op_id in known:
                     req.future.set_result(known[req.client_op_id])
+                    continue
+                if req.client_op_id in rejected:
+                    req.future.set_exception(Rejected(*rejected[req.client_op_id]))
                     continue
                 if req.client_op_id in firsts:
                     aliases.append((req, firsts[req.client_op_id]))
@@ -443,8 +485,7 @@ class Workspace:
             _follow(req, first)
         self._maybe_checkpoint()
 
-    def _known_ops(self, batch: list[_Request]) -> dict[str, int]:
-        ids = [r.client_op_id for r in batch if r.client_op_id is not None]
+    def _known_ops_of(self, ids: list[str]) -> dict[str, int]:
         known = {i: self._ops[i] for i in ids if i in self._ops}
         unknown = [i for i in ids if i not in known]
         if unknown and self.journal is not None:
@@ -647,6 +688,14 @@ class Replica:
     def lag(self) -> int:
         """記録先の最後の記録から、公開中の版がいくつ遅れているか（最後に記録先を読んだ時点で）。"""
         return max(0, self.journal.head - self.seq)
+
+    def operation(self, client_op_id: str) -> dict | None:
+        """The result of the write with client_op_id, from the journal (the same as Workspace.operation)."""
+        if (seq := self.journal.seq_of(client_op_id)) is not None:
+            return {"state": "committed", "seq": seq}
+        if (r := self.journal.rejections_of_many([client_op_id]).get(client_op_id)) is not None:
+            return {"state": "rejected", "status": r[0], "body": r[1]}
+        return None
 
     def close(self) -> None:
         self._stop.set()

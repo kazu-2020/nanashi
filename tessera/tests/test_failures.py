@@ -132,7 +132,7 @@ class MemoryBudget(unittest.TestCase):
         m.add_formula("Filled", ["Customer", "Sku"], "IFBLANK(Sales, 0)")  # 20 億セル（32 GB）
         with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
             m.recalc()
-        m.add_formula("Filled", ["Customer", "Sku"], "Sales * 2")  # 直せば計算できる
+        m.add_formula("Filled", ["Customer", "Sku"], "Sales * 2", id=m.metric_id("Filled"))  # 直せば計算できる
         self.assertEqual(m.get("Filled", Customer="c1", Sku="s1"), 10.0)
 
     def test_split_budget_gives_the_same_results(self):

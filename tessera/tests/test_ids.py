@@ -1,11 +1,12 @@
 """変わらない ID と、Metric の削除と名前の変更。"""
 import tempfile
 import unittest
+import uuid
 
 from examples.fpa import build as build_fpa
 from sparse_engine import Model, to_formula
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.model import _UNSET
+from sparse_engine.model import _UNSET, DuplicateId, uuid7
 
 from .test_engines import build_with
 from .test_incremental import check_full, same, snapshot
@@ -80,10 +81,10 @@ class Ids(unittest.TestCase):
 
     def test_metrics_keep_their_id(self):
         margin = self.m.metrics["Margin"].id
-        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2")
+        self.m.add_formula("Margin", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2", id=self.m.metric_id("Margin"))
         self.assertEqual(self.m.metrics["Margin"].id, margin)
         price = self.m.metrics["Price"].id
-        self.m.add_input("Price", ["Product"], {("A",): 1})
+        self.m.add_input("Price", ["Product"], {("A",): 1}, id=self.m.metric_id("Price"))
         self.assertEqual(self.m.metrics["Price"].id, price)
         self.m.rename_metric("Margin", "Profit")
         self.assertEqual(self.m.metrics["Profit"].id, margin)
@@ -92,6 +93,119 @@ class Ids(unittest.TestCase):
     def test_fork_keeps_ids(self):
         fork = self.m.fork()
         self.assertEqual(all_ids(fork), all_ids(self.m))
+
+
+class Uuids(unittest.TestCase):
+    """The external UUIDs (docs/ids.md): one for each dimension, member, property, and Metric."""
+    engine = staticmethod(ReferenceEngine)
+
+    def setUp(self):
+        self.m = build_with(self.engine())
+        self.m.recalc()
+
+    def test_every_object_has_a_uuid(self):
+        m = self.m
+        handles = all_ids(m) + [h for d in m.dimensions.values() for h in d.property_ids.values()]
+        self.assertEqual(sorted(m._uuids), sorted(handles))
+        self.assertEqual({u: h for h, u in m._uuids.items()}, m.ids)
+        for u in m.ids:
+            self.assertEqual(uuid.UUID(u).version, 7)
+        self.assertEqual(m.metric_id("Margin"), m.uuid_of(m.metrics["Margin"].id))
+        self.assertEqual(m.member_id("Product", "A"), m.uuid_of(m.dimensions["Product"].id_of("A")))
+        self.assertEqual(m.ids[m.property_id("Product", "Category")], m.dimensions["Product"].property_ids["Category"])
+
+    def test_uuid7_is_ordered_by_time(self):
+        a, b = uuid7(), uuid7()
+        self.assertEqual((uuid.UUID(a).version, uuid.UUID(a).variant), (7, uuid.RFC_4122))
+        self.assertLessEqual(a[:13], b[:13])  # the time part
+        self.assertNotEqual(a, b)
+
+    def test_redefine_by_uuid_can_rename(self):
+        m = self.m
+        margin = m.metric_id("Margin")
+        m.add_formula("Profit", ["Product", "Month"], "Revenue[REMOVE SUM: Region] - Cost * 2", id=margin)
+        self.assertNotIn("Margin", m.metrics)
+        self.assertEqual(m.metric_id("Profit"), margin)
+        self.assertEqual(to_formula(m.metrics["Picked"].written), "Profit[FILTER: Flag]")
+        check_full(self, m)
+        m.add_input("Profit", ["Product", "Month"], {("A", "Jan"): 1.0}, id=margin)  # a formula becomes an input
+        self.assertEqual(m.metric_id("Profit"), margin)
+        a = m.member_id("Product", "A")
+        m.add_member("Product", "Alpha", id=a, at=2, Category="Y")
+        self.assertEqual((m.dimensions["Product"].in_order()[2], m.member_id("Product", "Alpha")), ("Alpha", a))
+        self.assertEqual(m.dimensions["Product"].properties["Category"][1]["Alpha"], "Y")
+        self.assertIs(m.add_dimension("Product", [], id=m.dimension_id("Product")), m.dimensions["Product"])
+        check_full(self, m)
+
+    def test_same_name_with_a_different_uuid_is_an_error(self):
+        m = self.m
+        with self.assertRaisesRegex(ValueError, "別の ID"):
+            m.add_formula("Margin", ["Product", "Month"], "Cost * 2")
+        with self.assertRaisesRegex(ValueError, "別の ID"):
+            m.add_input("Price", ["Product"], id="other")
+        with self.assertRaisesRegex(ValueError, "すでにある"):
+            m.add_member("Product", "A", id="other")
+        with self.assertRaisesRegex(ValueError, "別の ID"):
+            m.add_property("Product", "Category", "Category", {}, id="other")
+        with self.assertRaisesRegex(ValueError, "同じ名前の軸"):
+            m.add_dimension("Product", [], id="other")
+        with self.assertRaisesRegex(ValueError, "名前は変えられない"):
+            m.add_dimension("Products", [], id=m.dimension_id("Product"))
+        with self.assertRaisesRegex(ValueError, "名前は変えられない"):
+            m.add_property("Product", "Cat", "Category", {}, id=m.property_id("Product", "Category"))
+        self.assertNotIn("other", m.ids)
+
+    def test_uuid_of_another_kind_or_a_tombstone_is_duplicate_id(self):
+        m = self.m
+        margin, b = m.metric_id("Margin"), m.member_id("Product", "B")
+        with self.assertRaises(DuplicateId):
+            m.add_member("Product", "X", id=margin)
+        with self.assertRaises(DuplicateId):
+            m.add_dimension("X", [], id=b)
+        with self.assertRaises(DuplicateId):
+            m.add_formula("X", ["Product"], "Price", id=m.dimension_id("Product"))
+        with self.assertRaises(DuplicateId):
+            m.add_property("Product", "X", "Category", {}, id=b)
+        share = m.metric_id("CatShare")
+        m.remove_member("Product", "B")
+        m.remove_metric("CatShare")
+        self.assertEqual(m.tombstones, {b, share})
+        self.assertNotIn(b, m.ids)
+        self.assertNotIn(share, m.ids)
+        for fn in (lambda: m.add_member("Product", "B", id=b), lambda: m.add_input("B", [], id=b),
+                   lambda: m.add_dimension("B", [], id=b), lambda: m.add_property("Product", "B", "Category", {}, id=b)):
+            with self.assertRaises(DuplicateId):
+                fn()
+        m.add_member("Product", "B")  # a new UUID is fine
+        self.assertNotEqual(m.member_id("Product", "B"), b)
+        self.assertEqual(m.tombstones, {b, share})
+
+    def test_removed_override_input_is_a_tombstone_too(self):
+        m = self.m
+        m.add_formula("Bonus", ["Product"], "Price * 0.1", overridable=True, id="bonus")
+        hidden = m.metric_id("__override__Bonus")
+        m.remove_metric("Bonus")
+        self.assertEqual({"bonus", hidden} & m.tombstones, {"bonus", hidden})
+
+    def test_fork_keeps_uuids_and_tombstones(self):
+        m = self.m
+        m.remove_member("Product", "B")
+        fork = m.fork()
+        self.assertEqual((fork.ids, fork.tombstones), (m.ids, m.tombstones))
+        fork.add_member("Product", "E", id="e")
+        self.assertNotIn("e", m.ids)  # the fork and the original do not share the maps
+        with self.assertRaises(DuplicateId):
+            fork.add_member("Product", "B", id=next(iter(m.tombstones)))
+
+    def test_transaction_rollback_restores_the_maps(self):
+        m = self.m
+        before = (dict(m.ids), set(m.tombstones))
+        with self.assertRaises(ValueError):
+            with m.transaction():
+                m.remove_member("Product", "B")
+                m.add_member("Product", "E", id="e")
+                raise ValueError("abort")
+        self.assertEqual((m.ids, m.tombstones), before)
 
 
 class RemoveMetric(unittest.TestCase):
@@ -226,6 +340,8 @@ class Storage(unittest.TestCase):
             m.save(tmp)
             loaded = Model.load(tmp, self.engine())
         self.assertEqual(all_ids(loaded), all_ids(m))
+        self.assertEqual((loaded.ids, loaded.tombstones), (m.ids, m.tombstones))  # the UUIDs and the tombstones too
+        self.assertEqual(loaded.dimensions["Product"].property_ids, m.dimensions["Product"].property_ids)
         a, b = snapshot(m), snapshot(loaded)
         for name in a:
             self.assertTrue(same(a[name], b[name]), name)
@@ -235,6 +351,11 @@ class Storage(unittest.TestCase):
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class RustIds(Ids):
+    engine = staticmethod(RustEngine) if RustEngine is not None else None
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustUuids(Uuids):
     engine = staticmethod(RustEngine) if RustEngine is not None else None
 
 

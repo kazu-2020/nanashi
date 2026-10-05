@@ -40,7 +40,7 @@ class KeyWidth(unittest.TestCase):
         m.add_formula("Z", ["D0", "D1", "D2"], "(X[EXPAND: D3, D4] * Y[EXPAND: D0, D1])[REMOVE SUM: D3, D4]")
         with self.assertRaisesRegex(FormulaError, "途中の結果の軸 .*64 ビット.*D0 13 ビット.*先に集計して"):
             m.recalc()
-        m.add_formula("Z", ["D0", "D1", "D2"], "X * Y[REMOVE SUM: D3, D4]")
+        m.add_formula("Z", ["D0", "D1", "D2"], "X * Y[REMOVE SUM: D3, D4]", id=m.metric_id("Z"))
         self.assertEqual(m.get("Z", D0="m1", D1="m2", D2="m3"), 2.0)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -80,7 +80,7 @@ class KeyWidth(unittest.TestCase):
         m = self.by_metric(13)
         with self.assertRaisesRegex(FormulaError, r"式の途中の結果の軸 \[.*E.*Dept.*\] が 64 ビット.*E 13 ビット"):
             m.recalc()
-        m.add_formula("Cost", ["D1", "D2", "D3"], "Salary[REMOVE SUM: E]")  # 直せば通る
+        m.add_formula("Cost", ["D1", "D2", "D3"], "Salary[REMOVE SUM: E]", id=m.metric_id("Cost"))  # 直せば通る
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1"), 15.0)
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -89,7 +89,7 @@ class KeyWidth(unittest.TestCase):
         m = self.by_metric(13)
         m.add_dimension("Month", ["Jan", "Feb"])
         m.add_input("DeptOfM", ["E", "Month"], {("e1", "Jan"): "g1"}, kind="member:Dept")
-        m.add_formula("Cost", ["D1", "D2", "D3", "Dept", "Month"], "Salary[BY SUM: E.DeptOfM]")
+        m.add_formula("Cost", ["D1", "D2", "D3", "Dept", "Month"], "Salary[BY SUM: E.DeptOfM]", id=m.metric_id("Cost"))
         with self.assertRaisesRegex(FormulaError, "DeptOfM の軸 .*Month.* を持っていない"):
             m.recalc()
 
@@ -136,7 +136,7 @@ class CellEstimates(unittest.TestCase):
                 with self.assertRaisesRegex(FormulaError, r"Filled: .*最大 20,000 .*上限 10,000 .*"
                                                           r"IFBLANK が \['Customer', 'SKU'\]"):
                     m.recalc()
-                m.add_formula("Filled", ["Customer", "SKU"], "Sales * 2")  # 直せば通る
+                m.add_formula("Filled", ["Customer", "SKU"], "Sales * 2", id=m.metric_id("Filled"))  # 直せば通る
                 self.assertEqual(m.value("Filled").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
                 self.assertEqual(m.cell_estimates["Filled"], 2.0)
 
@@ -148,7 +148,7 @@ class CellEstimates(unittest.TestCase):
                 m.recalc()
                 with self.assertRaises(FormulaError):
                     with m.transaction():
-                        m.add_formula("Double", ["Customer", "SKU"], "Sales + 1")  # 定数との足し算で密になる
+                        m.add_formula("Double", ["Customer", "SKU"], "Sales + 1", id=m.metric_id("Double"))  # 定数との足し算で密になる
                 self.assertEqual(m.value("Double").cells, {("c1", "s1"): 2.0, ("c2", "s1"): 4.0})
 
     def test_downstream_of_a_dense_metric_is_checked_too(self):
@@ -196,16 +196,16 @@ class CellEstimates(unittest.TestCase):
                 m = model(engine())
                 m.recalc()
                 steps = [
-                    lambda: m.add_formula("Revenue", ["Product", "Month"], "IFBLANK(Volume, 0) * Price[EXPAND: Month]"),
+                    lambda: m.add_formula("Revenue", ["Product", "Month"], "IFBLANK(Volume, 0) * Price[EXPAND: Month]", id=m.metric_id("Revenue")),
                     lambda: m.rename_metric("Revenue", "Rev"),
-                    lambda: m.add_formula("Rev", ["Product", "Month"], "Volume * Price"),
-                    lambda: m.add_input("Volume", ["Product", "Month"], {("A", "Jan"): 1, ("B", "Jan"): 2}),
+                    lambda: m.add_formula("Rev", ["Product", "Month"], "Volume * Price", id=m.metric_id("Rev")),
+                    lambda: m.add_input("Volume", ["Product", "Month"], {("A", "Jan"): 1, ("B", "Jan"): 2}, id=m.metric_id("Volume")),
                     lambda: m.add_formula("Leaf", ["Month"], "Total[FILTER: Actual]"),
                     lambda: m.remove_metric("Leaf"),
-                    lambda: m.add_formula("Total", ["Month"], "IFBLANK(ByCat[REMOVE SUM: Category], 0)"),
-                    lambda: m.add_input("Total", ["Month"], {("Jan",): 1.0}),  # 式を入力にすると何も読まない
+                    lambda: m.add_formula("Total", ["Month"], "IFBLANK(ByCat[REMOVE SUM: Category], 0)", id=m.metric_id("Total")),
+                    lambda: m.add_input("Total", ["Month"], {("Jan",): 1.0}, id=m.metric_id("Total")),  # 式を入力にすると何も読まない
                     lambda: m.remove_metric("ByCat"),
-                    lambda: m.add_formula("Total", ["Month"], "Rev[REMOVE SUM: Product]"),
+                    lambda: m.add_formula("Total", ["Month"], "Rev[REMOVE SUM: Product]", id=m.metric_id("Total")),
                 ]
                 for step in steps:  # m は差分の見積もりだけを続け、全体の見積もり直しは複製で行う
                     step()

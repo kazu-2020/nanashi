@@ -10,13 +10,20 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 
 | Request | Content |
 |---|---|
-| `GET /` | The definitions of dimensions and Metrics, the property values of the dimensions, and the sequence number of the current published version |
-| `GET /metrics/<name>/cell?<dimension>=<member>` | 1 cell |
-| `GET /metrics/<name>/slice?<dimension>=a,b` | The cells of a range |
-| `GET /metrics/<name>/rows?<dimension>=a&offset=0&limit=50` | A list of rows and the total number of rows |
-| `GET /metrics/<name>/summary?keep=Month&agg=sum&<dimension>=a,b` | Aggregation |
-| `GET /metrics/<name>/overrides?<dimension>=a,b` | The cells that override the formula of an overridable Metric (`set_cell` on the Metric). The body is the same as slice. |
-| `POST /writes` | `{"client_op_id", "reason", "expect", "ops": [{"op": "set_cell", "args": [...], "kwargs": {...}}, ...]}` |
+| `GET /` | The definitions of dimensions and Metrics, the property values of the dimensions, and the sequence number of the current published version. The keys are the UUIDs ([ids.md](../../docs/ids.md)) |
+| `GET /metrics/<uuid>/cell?<dimension uuid>=<member uuid>` | 1 cell |
+| `GET /metrics/<uuid>/slice?<dimension uuid>=a,b` | The cells of a range |
+| `GET /metrics/<uuid>/rows?<dimension uuid>=a&offset=0&limit=50` | A list of rows and the total number of rows |
+| `GET /metrics/<uuid>/summary?keep=<dimension uuid>&agg=sum&<dimension uuid>=a,b` | Aggregation |
+| `GET /metrics/<uuid>/overrides?<dimension uuid>=a,b` | The cells that override the formula of an overridable Metric (`set_cell` on the Metric). The body is the same as slice. |
+| `GET /operations/<client_op_id>` | The result of a write: `{"state": "committed", "seq"}` or `{"state": "rejected", "status", "body"}`. If the server does not know the operation, it returns 404 `unknown_operation` |
+| `POST /writes` | `{"client_op_id", "reason", "expect", "ops": [{"op": "set_cell", "metric": "<uuid>", "value": 1, "coords": {"<dimension uuid>": "<member uuid>"}}, ...]}` |
+
+Each reference in a path, a query, or an op is a UUID. [ids.md](../../docs/ids.md) gives the rules and the arguments of each op.
+The engine changes a UUID to the name of the object at the boundary, and changes the names in a result to UUIDs.
+In a result, a dimension is a dimension UUID, a member is a member UUID, and a value of a member-type Metric is a member UUID.
+An op is an object with `op` (the operation name) and the arguments by name, for example `{"op": "add_member", "dim": "<uuid>", "id": "<uuid>", "name": "A"}`.
+`WRITE_OPS` in `server.py` lists the permitted operations.
 | `GET /health` | Whether the server is alive (the sequence number of the current published version and the role `role`). No authentication is necessary. |
 | `GET /ready` | Whether the server can receive requests. It returns 503 and the reason in these conditions: the writer stopped, the server could not open the journal again, the server cannot extend the lease, the standby monitor failed, or `Replica` cannot catch up. It also returns the role `role` (`leader`, `standby`, or `follower` with `--follow`). No authentication is necessary. |
 | `GET /stats` | Numbers for monitoring (Prometheus text format). For example: the number and time of commits, cancelled writes, the queue length, whether the server is the writer (`nanashi_leader`), the lease state, the time since the last snapshot, and the delay of `Replica`. |
@@ -80,9 +87,16 @@ The server returns these status codes, each with `{"error", "message"}`:
 
 - 429: the queue is full.
 - 504: the commit did not complete in the wait time.
-- 400: an error in a formula or an argument.
+- 400: an error in a formula or an argument (`formula` or `bad_request`). This includes a name that belongs to a different UUID.
+- 409 `duplicate_id`: the UUID of a new object belongs to an object of a different kind, or to a removed object.
+- 409 `conflict`: a later write changed the same cells (`expect`).
 - 401: an authentication error.
 - 413: the request is too large.
+
+The server records each rejected write (400, and 409 `duplicate_id`) with its `client_op_id` for the `op_window` of the journal.
+If a client sends the same `client_op_id` again, the server returns the same status and body, and does not apply the write.
+A conflict is not recorded: the client reads the new version, plans again, and sends the write again.
+`GET /operations/<client_op_id>` gives the result of a committed or rejected write.
 
 A write to a standby gets 421, and `leader` contains the address of the writer (next paragraph).
 A formula error also returns `code` (a key of `messages.MESSAGES`). Use this code, not the message text, to identify the error.

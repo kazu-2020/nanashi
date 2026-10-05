@@ -15,22 +15,27 @@
 待機系の 1 つが権利を取って書き手になる。ほかのプロセスに知らせる自分の番地は --advertise で決める
 （既定は http://<host>:<port>。0.0.0.0 で待ち受けるときは必須）。リースの期限は --lease-ttl（秒）。
 
-    GET  /                                    モデルの定義（軸、Metric）と公開中の版の通し番号
+    GET  /                                    The model (dimensions, Metrics) and the seq of the published version
     GET  /health                              生きているか（通し番号と役割 role。認証なしで読める）
     GET  /ready                               要求を受けられるか（受けられなければ 503 と理由。役割 role も返す。
                                               認証なしで読める）
     GET  /stats                               観察用の数（Prometheus のテキスト形式）
-    GET  /metrics/<name>/cell?<軸>=<メンバー>   1 セル（{"value": ..., "seq": ...}）
-    GET  /metrics/<name>/slice?<軸>=a,b        範囲（{"dims": [...], "cells": [[座標..., 値], ...]}）
-    GET  /metrics/<name>/rows?<軸>=a&offset=0&limit=50   行の列と全行数
-    GET  /metrics/<name>/summary?keep=Month&agg=sum&<軸>=a,b   集計
-    GET  /metrics/<name>/overrides?<軸>=a,b    The cells that override the formula of an overridable Metric
+    GET  /metrics/<uuid>/cell?<dim uuid>=<member uuid>   1 cell ({"value": ..., "seq": ...})
+    GET  /metrics/<uuid>/slice?<dim uuid>=a,b            A range ({"dims": [...], "cells": [[coordinates..., value], ...]})
+    GET  /metrics/<uuid>/rows?<dim uuid>=a&offset=0&limit=50   A page of rows and the total number of rows
+    GET  /metrics/<uuid>/summary?keep=<dim uuid>&agg=sum&<dim uuid>=a,b   Aggregation
+    GET  /metrics/<uuid>/overrides?<dim uuid>=a,b        The cells that override the formula of an overridable Metric
                                               (the same body as slice)
+    GET  /operations/<client_op_id>           The result of a write: committed (seq) or rejected (status, body)
     POST /writes                              {"client_op_id", "reason", "expect", "ops": [...]}
 
-Each element of ops is {"op": <operation name>, "args": [...], "kwargs": {...}}. The server calls the Model
-operations in sequence. WRITE_OPS lists the permitted operations. Give the cells of add_input as
-[[coordinates, value], ...].
+Each reference in a path, a query, or an op is a UUID (docs/ids.md). The server changes it to the name of the
+object, and changes the names in a result to UUIDs. Each element of ops is {"op": <operation name>, <argument>:
+<value>, ...}. _OPS gives the arguments of each operation. WRITE_OPS lists the permitted operations. Give the cells
+of add_input as [[coordinates, value], ...].
+
+The server records a rejected write (400, or 409 duplicate_id) with its client_op_id. If the same client_op_id
+comes again, it returns the same answer (a conflict 409 is not recorded: the client plans again).
 
 応答は JSON。失敗は {"error": 種類, "message": 文言} で、400（式や引数の誤り）、401（認証）、404、
 409（Conflict）、413（本文や読み出しが大きすぎる）、421（待機系。leader に書き手の番地）、429（Overloaded）、
@@ -76,9 +81,11 @@ from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from .core import Dimension
 from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
-from .workspace import Conflict, NotLeader, Overloaded, Replica, Role, Workspace
+from .model import DuplicateId, Metric
+from .workspace import Conflict, NotLeader, Overloaded, Rejected, Replica, Role, Workspace
 
 log = logging.getLogger(__name__)
 
@@ -93,9 +100,98 @@ class ApiError(Exception):
         super().__init__(message)
         self.status, self.kind, self.extra = status, kind, extra
 
+    @property
+    def body(self) -> dict:
+        return {"error": self.kind, "message": str(self), **self.extra}
+
+
+class Names:
+    """Changes the UUIDs of a request to the names of the model, and the names of a result to UUIDs.
+
+    Each method that takes a UUID raises ValueError (400) if the model does not have the object."""
+
+    def __init__(self, model):
+        self.m = model
+
+    def _handle(self, id) -> int | None:
+        return self.m.ids.get(id) if isinstance(id, str) else None
+
+    def dim(self, id) -> Dimension:
+        d = self.m.dimensions_by_id().get(self._handle(id))
+        if d is None:
+            raise ValueError(f"軸 {id} がない")
+        return d
+
+    def metric(self, id) -> Metric:
+        m = self.m.metrics_by_id().get(self._handle(id))
+        if m is None or m.name.startswith("__"):
+            raise ValueError(f"Metric {id} がない")
+        return m
+
+    def member(self, d: Dimension, id) -> str:
+        pos = d._by_id.get(self._handle(id))
+        if pos is None:
+            raise ValueError(f"{d.name} にメンバー {id} がない")
+        return d.members[pos]
+
+    def prop(self, d: Dimension, id) -> str:
+        h = self._handle(id)
+        for name, handle in d.property_ids.items():
+            if handle == h:
+                return name
+        raise ValueError(f"{d.name} にプロパティ {id} がない")
+
+    def kind(self, kind) -> str:
+        """"member:<dim uuid>" -> "member:<dim name>"."""
+        if isinstance(kind, str) and kind.startswith("member:"):
+            return "member:" + self.dim(kind.removeprefix("member:")).name
+        return kind
+
+    def value_dim(self, m: Metric) -> Dimension | None:
+        """The dimension of the values of a member-type Metric, or None."""
+        return self.m.dimension(m.kind.removeprefix("member:")) if m.kind.startswith("member:") else None
+
+    def value_in(self, m: Metric, value):
+        """A value of a write: a member UUID becomes the member name."""
+        d = self.value_dim(m)
+        return value if d is None or value is None else self.member(d, value)
+
+    def coords_in(self, coords) -> dict[str, Any]:
+        """{dim uuid: member uuid (or a list of them)} -> {dim name: member name (or names)}."""
+        if not isinstance(coords, dict):
+            raise ValueError("座標は {軸の ID: メンバーの ID} のオブジェクト")
+        out = {}
+        for k, v in coords.items():
+            d = self.dim(k)
+            out[d.name] = [self.member(d, x) for x in v] if isinstance(v, list) else self.member(d, v)
+        return out
+
+    # ------------------------------------------------ names -> UUIDs
+
+    def dim_id(self, name: str) -> str:
+        return self.m.uuid_of(self.m.dimension(name).id)
+
+    def member_id(self, d: Dimension, name: str) -> str:
+        return self.m.uuid_of(d.ids[d._index[name]])
+
+    def kind_out(self, kind: str) -> str:
+        return "member:" + self.dim_id(kind.removeprefix("member:")) if kind.startswith("member:") else kind
+
+    def value_out(self, m: Metric, value):
+        d = self.value_dim(m)
+        return value if d is None or value is None else self.member_id(d, value)
+
+    def rows_out(self, m: Metric, dims: tuple[str, ...], rows) -> list:
+        """[(coordinates, value), ...] -> [[member uuid..., value], ...]."""
+        ds = [self.m.dimension(d) for d in dims]
+        return [[*(self.member_id(d, x) for d, x in zip(ds, k)), self.value_out(m, v)] for k, v in rows]
+
+    def cube_out(self, m: Metric, cube) -> dict:
+        return {"dims": [self.dim_id(d) for d in cube.dims], "cells": self.rows_out(m, cube.dims, cube.cells.items())}
+
 
 def _coords(query: dict[str, list[str]]) -> dict[str, Any]:
-    """軸=メンバー（コンマ区切りなら複数）の絞り込み。"""
+    """<dim uuid>=<member uuid>[,<member uuid>...] -> {dim uuid: member uuid or a list of them}."""
     out = {}
     for k, vs in query.items():
         if k in READ_PARAMS:
@@ -114,40 +210,136 @@ def _int(query: dict[str, list[str]], key: str, default):
         raise ApiError(400, "bad_request", f"{key} は整数") from None
 
 
-def _cells(cube) -> list:
-    return [[*k, v] for k, v in cube.cells.items()]
-
-
 def apply_ops(model, ops: list) -> None:
-    """書き込みの操作を順に Model に適用する。操作の形と引数の誤りは ValueError（400）にする。"""
+    """Apply the write operations to the Model in sequence. Each op is {"op": <name>, <argument>: <value>, ...}.
+    The arguments refer to objects by UUID (docs/ids.md). An error in the shape or the arguments is a
+    ValueError (400)."""
+    names = Names(model)
     for op in ops:
         if not isinstance(op, dict):
-            raise ValueError(f"操作は {{\"op\", \"args\", \"kwargs\"}} の形（{op!r}）")
+            raise ValueError(f"操作は {{\"op\": 操作名, 引数...}} の形（{op!r}）")
         name = op.get("op")
         if name not in WRITE_OPS:
             raise ValueError(f"操作 {name!r} は使えない（{', '.join(sorted(WRITE_OPS))}）")
-        args, kwargs = op.get("args", []), op.get("kwargs", {})
-        if not isinstance(args, list) or not isinstance(kwargs, dict):
-            raise ValueError(f"{name}: args は配列、kwargs はオブジェクト")
-        args, kwargs = list(args), dict(kwargs)
-        if name == "add_input":  # cells は [[座標の列, 値], ...] で来る
-            if len(args) >= 3:
-                args[2] = _cell_map(args[2])
-            if "cells" in kwargs:
-                kwargs["cells"] = _cell_map(kwargs["cells"])
-        fn = getattr(model, name)
+        args = {k: v for k, v in op.items() if k != "op"}
+        fn = _OPS[name]
         try:
-            inspect.signature(fn).bind(*args, **kwargs)
+            inspect.signature(fn).bind(model, names, **args)
         except TypeError as e:
             raise ValueError(f"{name}: 引数が合わない（{e}）") from None
-        fn(*args, **kwargs)
+        fn(model, names, **args)
 
 
-def _cell_map(cells) -> dict:
+def _dims(n: Names, dims) -> list[str]:
+    if not isinstance(dims, list):
+        raise ValueError("dims は軸の ID の配列")
+    return [n.dim(d).name for d in dims]
+
+
+def _cell_map(n: Names, m: Metric, cells) -> dict:
+    """[[[member uuid...], value], ...] -> {(member name, ...): value}."""
     if not isinstance(cells, list) or not all(isinstance(c, list) and len(c) == 2 and isinstance(c[0], list)
                                               for c in cells):
         raise ValueError("add_input の cells は [[座標の列, 値], ...]")
-    return {tuple(k): v for k, v in cells}
+    ds = [n.m.dimension(d) for d in m.dims]
+    out = {}
+    for key, value in cells:
+        if len(key) != len(ds):
+            raise ValueError(f"{m.name}: キー {key} の長さが軸 {m.dims} と合わない")
+        out[tuple(n.member(d, x) for d, x in zip(ds, key))] = n.value_in(m, value)
+    return out
+
+
+def _op_add_dimension(m, n, id, name, ordered=False):
+    m.add_dimension(name, [], ordered=ordered, id=id)
+
+
+def _op_add_member(m, n, dim, id, name, at=None):
+    m.add_member(n.dim(dim).name, name, at=at, id=id)
+
+
+def _op_rename_member(m, n, dim, id, name):
+    d = n.dim(dim)
+    m.rename_member(d.name, n.member(d, id), name)
+
+
+def _op_move_member(m, n, dim, id, at):
+    d = n.dim(dim)
+    m.move_member(d.name, n.member(d, id), at)
+
+
+def _op_remove_member(m, n, dim, id):
+    d = n.dim(dim)
+    m.remove_member(d.name, n.member(d, id))
+
+
+def _op_add_property(m, n, dim, id, name, target):
+    m.add_property(n.dim(dim).name, name, n.dim(target).name, {}, id=id)
+
+
+def _op_set_property_values(m, n, dim, prop, values):
+    d = n.dim(dim)
+    p = n.prop(d, prop)
+    t = m.dimension(d.properties[p][0])
+    if not isinstance(values, dict):
+        raise ValueError("values は {メンバーの ID: メンバーの ID か null}")
+    m.set_property_values(d.name, p, {n.member(d, k): None if v is None else n.member(t, v) for k, v in values.items()})
+
+
+def _op_add_input(m, n, id, name, dims, kind="number", cells=None, partition=None):
+    """The cells come as [[coordinates, value], ...]."""
+    dims, kind = _dims(n, dims), n.kind(kind)
+    if partition is not None:
+        partition = n.dim(partition).name
+    cells = _cell_map(n, Metric(name, tuple(dims), kind), cells or [])
+    m.add_input(name, dims, cells, kind=kind, partition=partition, id=id)
+
+
+def _op_add_formula(m, n, id, name, formula, dims, kind="number", overridable=False, partition=None):
+    if partition is not None:
+        partition = n.dim(partition).name
+    m.add_formula(name, _dims(n, dims), formula, kind=n.kind(kind), overridable=overridable, partition=partition, id=id)
+
+
+def _op_rename_metric(m, n, id, name):
+    m.rename_metric(n.metric(id).name, name)
+
+
+def _op_remove_metric(m, n, id):
+    m.remove_metric(n.metric(id).name)
+
+
+def _target(m, n, metric, override: bool) -> Metric:
+    """The Metric that a set_cell or spread writes: with override, the hidden override input of a formula Metric."""
+    mt = n.metric(metric)
+    if not override:
+        return mt
+    if not mt.overridable:
+        raise ValueError(f"{mt.name} は上書きできる計算 Metric ではない")
+    return m.metrics[mt.override_name]
+
+
+def _op_set_cell(m, n, metric, value, coords=None, override=False):
+    mt = _target(m, n, metric, override)
+    m.set_cell(mt.name, n.value_in(mt, value), **n.coords_in(coords or {}))
+
+
+def _op_spread(m, n, metric, total, how="proportional", where=None, coords=None):
+    mt = _target(m, n, metric, False)
+    named = None
+    if where is not None:
+        if not isinstance(where, dict):
+            raise ValueError("where は {\"軸の ID.プロパティの ID\": メンバーの ID}")
+        named = {}
+        for path, value in where.items():
+            d = n.dim(path.partition(".")[0])
+            p = n.prop(d, path.partition(".")[2])
+            named[f"{d.name}.{p}"] = n.member(m.dimension(d.properties[p][0]), value)
+    m.spread(mt.name, total, how=how, where=named, **n.coords_in(coords or {}))
+
+
+_OPS = {name[4:]: fn for name, fn in list(globals().items()) if name.startswith("_op_")}
+assert set(_OPS) == WRITE_OPS
 
 
 PROBES = {"health", "ready", "stats"}  # monitors call these; they do not count as use (--idle-exit)
@@ -192,17 +384,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _fail(self, e: ApiError) -> None:
-        self._json(e.status, {"error": e.kind, "message": str(e), **e.extra})
+        self._json(e.status, e.body)
 
     def _run(self, fn) -> None:
         try:
             status, body = fn()
         except ApiError as e:
             self._fail(e)
-        except FormulaError as e:
-            self._fail(ApiError(400, "formula", str(e), code=e.code))
-        except ValueError as e:  # 引数の誤り（Model は利用者の誤りを ValueError にする）
-            self._fail(ApiError(400, "bad_request", str(e)))
+        except (DuplicateId, FormulaError, ValueError) as e:  # 引数の誤り（Model は利用者の誤りを ValueError にする）
+            self._fail(_rejection(e))
         except Exception:  # それ以外は内部の誤り。中身は応答に出さず、ログで引けるように ID を付ける
             error_id = uuid.uuid4().hex[:12]
             log.exception("要求の処理に失敗した（error_id=%s）", error_id)
@@ -264,54 +454,57 @@ class Handler(BaseHTTPRequestHandler):
         self._user()
         if parts == ["stats"]:
             return 200, _Text(stats_text(self.server.workspace))
+        n = Names(v)
         if not parts:
-            dims = {d.name: {"id": d.id, "members": d.in_order(), "ordered": d.ordered,
-                             "properties": {p: t for p, (t, _) in d.properties.items()},
-                             "property_values": {p: dict(mapping) for p, (_, mapping) in d.properties.items()}}
-                    for d in v.dimensions.values()}
-            metrics = {m.name: {"id": m.id, "dims": list(m.dims), "kind": m.kind, "overridable": m.overridable,
-                                "formula": None if m.written is None else _formula(m.written)}
-                       for m in v.metrics.values() if not m.name.startswith("__")}
-            return 200, {"seq": v.seq, "dimensions": dims, "metrics": metrics}
+            return 200, {"seq": v.seq, "dimensions": _dimensions_out(n), "metrics": _metrics_out(n)}
+        if len(parts) == 2 and parts[0] == "operations":
+            result = self.server.workspace.operation(urllib.parse.unquote(parts[1]))
+            if result is None:
+                raise ApiError(404, "unknown_operation", "この操作は知らない（覚えておく範囲の外か、まだ来ていない）")
+            return 200, result
         if len(parts) == 3 and parts[0] == "metrics":
-            name, what = urllib.parse.unquote(parts[1]), parts[2]
-            if name not in v.metrics or name.startswith("__"):
-                raise ApiError(404, "not_found", f"Metric {name} がない")
+            try:
+                m = n.metric(urllib.parse.unquote(parts[1]))
+            except ValueError as e:
+                raise ApiError(404, "not_found", str(e)) from None
+            what = parts[2]
             if what == "overrides":  # Read the hidden "__override__" input through its formula Metric.
-                if not v.metrics[name].overridable:
-                    raise ApiError(400, "bad_request", f"{name} は上書きできる計算 Metric ではない")
-                name, what = v.metrics[name].override_name, "slice"
-            coords = _coords(query)
+                if not m.overridable:
+                    raise ApiError(400, "bad_request", f"{m.name} は上書きできる計算 Metric ではない")
+                m, what = v.metrics[m.override_name], "slice"
+            name = m.name
+            coords = n.coords_in(_coords(query))
             if what == "cell":
                 bad = [k for k, x in coords.items() if not isinstance(x, str)]
                 if bad:
                     raise ApiError(400, "bad_request", f"cell では軸 {bad} に 1 つのメンバーを指定する")
-                return 200, {"seq": v.seq, "value": v.get(name, **coords)}
+                return 200, {"seq": v.seq, "value": n.value_out(m, v.get(name, **coords))}
             limit = self.server.max_cells
             if what == "slice":
-                n = v.summarize(name, agg="count", **coords).cells.get((), 0)  # 丸ごと読む前に数える
-                if n > limit:
-                    raise ApiError(413, "too_large", f"範囲のセルが {n:,} 件あり、上限 {limit:,} を超える（rows でページングする）")
-                cube = v.slice(name, **coords)
-                return 200, {"seq": v.seq, "dims": list(cube.dims), "cells": _cells(cube)}
+                count = v.summarize(name, agg="count", **coords).cells.get((), 0)  # 丸ごと読む前に数える
+                if count > limit:
+                    raise ApiError(413, "too_large", f"範囲のセルが {count:,} 件あり、上限 {limit:,} を超える（rows でページングする）")
+                return 200, {"seq": v.seq, **n.cube_out(m, v.slice(name, **coords))}
             if what == "rows":
                 page = _int(query, "limit", limit)
                 if page > limit:
                     raise ApiError(400, "bad_request", f"limit は {limit:,} まで")
                 rows, total = v.rows(name, offset=_int(query, "offset", 0), limit=page, **coords)
-                return 200, {"seq": v.seq, "dims": list(v.metrics[name].dims), "rows": [[*k, x] for k, x in rows],
+                return 200, {"seq": v.seq, "dims": [n.dim_id(d) for d in m.dims], "rows": n.rows_out(m, m.dims, rows),
                              "total": total}
             if what == "summary":
-                keep = [d for x in query.get("keep", []) for d in x.split(",") if d]
+                keep = [n.dim(d).name for x in query.get("keep", []) for d in x.split(",") if d]
                 groups = 1
                 for d in keep:
-                    if d in v.metrics[name].dims:
+                    if d in m.dims:
                         c = coords.get(d)
                         groups *= len(v.dimension(d).members) if c is None else 1 if isinstance(c, str) else len(c)
                 if groups > limit:
                     raise ApiError(413, "too_large", f"集計の結果が最大 {groups:,} 件になり、上限 {limit:,} を超える")
                 cube = v.summarize(name, keep=keep, agg=query.get("agg", ["sum"])[0], **coords)
-                return 200, {"seq": v.seq, "dims": list(cube.dims), "cells": _cells(cube)}
+                ds = [v.dimension(d) for d in cube.dims]
+                return 200, {"seq": v.seq, "dims": [n.dim_id(d) for d in cube.dims],
+                             "cells": [[*(n.member_id(d, x) for d, x in zip(ds, k)), val] for k, val in cube.cells.items()]}
         raise ApiError(404, "not_found", f"{url.path} はない")
 
     # ------------------------------------------------ 書き込み
@@ -351,11 +544,18 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "bad_request", "user は認証で決まる（本文では指定しない）")
         if not isinstance(body.get("client_op_id"), str) or not body["client_op_id"]:
             raise ApiError(400, "bad_request", "client_op_id（再送しても二重に確定しないための ID）が要る")
-        ops = body["ops"]
+        ops, client_op_id = body["ops"], body["client_op_id"]
         try:
             seq = self.server.workspace.write(
                 lambda m: apply_ops(m, ops), user=user, reason=body.get("reason"),
-                client_op_id=body["client_op_id"], expect=body.get("expect"), timeout=self.server.write_timeout)
+                client_op_id=client_op_id, expect=body.get("expect"), timeout=self.server.write_timeout)
+        except Rejected as e:  # the same client_op_id was rejected before: the same answer
+            return e.status, e.body
+        except (DuplicateId, FormulaError, ValueError) as e:
+            # A terminal rejection: the same client_op_id gets the same answer again (GET /operations/<id> too)
+            err = _rejection(e)
+            self.server.workspace.reject(client_op_id, err.status, err.body)
+            raise err from None
         except Conflict as e:
             raise ApiError(409, "conflict", str(e), seq=e.seq, user=e.user) from None
         except NotLeader as e:
@@ -371,6 +571,39 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             raise ApiError(503, "closed", str(e)) from None
         return 200, {"seq": seq}
+
+
+def _rejection(e: Exception) -> ApiError:
+    """The HTTP error of a write that the model refused."""
+    if isinstance(e, DuplicateId):
+        return ApiError(409, "duplicate_id", str(e))
+    if isinstance(e, FormulaError):
+        return ApiError(400, "formula", str(e), code=e.code)
+    return ApiError(400, "bad_request", str(e))
+
+
+def _dimensions_out(n: Names) -> dict:
+    """The dimensions of GET /, keyed by UUID."""
+    out = {}
+    for d in n.m.dimensions.values():
+        uid = lambda name: n.member_id(d, name)
+        props = {n.m.uuid_of(d.property_ids[p]): {"name": p, "target": n.dim_id(t)} for p, (t, _) in d.properties.items()}
+        values = {}
+        for p, (t, mapping) in d.properties.items():
+            td = n.m.dimension(t)
+            values[n.m.uuid_of(d.property_ids[p])] = {uid(k): n.member_id(td, v) for k, v in mapping.items()}
+        out[n.dim_id(d.name)] = {"name": d.name, "ordered": d.ordered,
+                                 "members": [{"id": uid(x), "name": x} for x in d.in_order()],
+                                 "properties": props, "property_values": values}
+    return out
+
+
+def _metrics_out(n: Names) -> dict:
+    """The Metrics of GET /, keyed by UUID. Names starting with "__" stay hidden."""
+    return {n.m.uuid_of(m.id): {"name": m.name, "dims": [n.dim_id(d) for d in m.dims], "kind": n.kind_out(m.kind),
+                                "overridable": m.overridable,
+                                "formula": None if m.written is None else _formula(m.written)}
+            for m in n.m.metrics.values() if not m.name.startswith("__")}
 
 
 class _Text(str):

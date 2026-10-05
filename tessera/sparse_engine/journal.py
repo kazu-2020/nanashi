@@ -117,9 +117,14 @@ def _definition(model, m) -> dict:
 
 
 def changes(before, after) -> dict:
-    """before（トランザクション前の複製）から after（確定するモデル）への変化。"""
+    """before（トランザクション前の複製）から after（確定するモデル）への変化。
+
+    "uuids" has the UUID of each new handle ({handle: UUID}) and "tombstones" the UUIDs that the transaction
+    made tombstones. A replay binds the same UUIDs to the same handles.
+    """
     out: dict[str, Any] = {"next_id": after._next_id}
     old_dims = {d.id: d for d in before.dimensions.values()}
+    new_handles: list[int] = []
 
     added_dims, members, orders = [], [], []
     for d in after.dimensions.values():
@@ -127,6 +132,7 @@ def changes(before, after) -> dict:
         if o is None:
             added_dims.append({"id": d.id, "name": d.name, "ordered": d.ordered,
                                "members": [[i, n] for i, n in zip(d.ids, d.members)]})
+            new_handles += [d.id, *d.ids]
             if d.rank_table() is not None:
                 orders.append({"dim": d.id, "order": _ids_in_order(d)})
             continue
@@ -137,6 +143,7 @@ def changes(before, after) -> dict:
                             "added": [[i, n] for i, n in zip(d.ids, d.members) if i not in old_names],
                             "renamed": [[i, n] for i, n in zip(d.ids, d.members)
                                         if i in old_names and old_names[i] != n]})
+            new_handles += [i for i, _ in members[-1]["added"]]
         # 並び順は、消したメンバーを除き、足したメンバーを最後に並べただけなら記録しない（再生で同じになる）
         expected = [i for i in _ids_in_order(o) if i in d._by_id] + [i for i in d.ids if i not in o._by_id]
         if _ids_in_order(d) != expected:
@@ -156,13 +163,18 @@ def changes(before, after) -> dict:
             set_ = [[k, v] for k, v in new_ids.items() if old_ids.get(k) != v]
             unset = [k for k in old_ids if k not in new_ids]
             if old is None or set_ or unset:
-                props.append({"dim": d.id, "prop": prop, "target": t.id, "set": set_, "unset": unset})
+                props.append({"dim": d.id, "prop": prop, "id": d.property_ids[prop], "target": t.id,
+                              "set": set_, "unset": unset})
+            if old is None:
+                new_handles.append(d.property_ids[prop])
 
     old_metrics = {m.id: m for m in before.metrics.values()}
     defs = []
     for m in after.metrics.values():
         o = old_metrics.get(m.id)
-        if o is not None and (o.name, o.dims, o.kind, o.partition, o.overridable) == \
+        if o is None:
+            new_handles.append(m.id)
+        elif (o.name, o.dims, o.kind, o.partition, o.overridable) == \
                 (m.name, m.dims, m.kind, m.partition, m.overridable) and o.written is m.written:
             continue
         d = _definition(after, m)
@@ -170,6 +182,8 @@ def changes(before, after) -> dict:
             defs.append(d)
     alive = {m.id for m in after.metrics.values()}
     removed = [i for i in old_metrics if i not in alive]
+    uuids = {h: after._uuids[h] for h in new_handles if h in after._uuids}
+    tombstones = sorted(after.tombstones - before.tombstones)
 
     cells = []
     for m in after.metrics.values():
@@ -182,8 +196,8 @@ def changes(before, after) -> dict:
             cells.append({"metric": m.id, "dims": [after.dimension(d).id for d in m.dims], "rows": rows})
 
     for key, value in (("dimensions", added_dims), ("members", members), ("member_order", orders),
-                       ("properties", props),
-                       ("metrics", defs), ("metrics_removed", removed), ("cells", cells)):
+                       ("properties", props), ("metrics", defs), ("metrics_removed", removed),
+                       ("uuids", uuids), ("tombstones", tombstones), ("cells", cells)):
         if value:
             out[key] = value
     return out
@@ -253,6 +267,15 @@ def _by_id(model, m, store) -> dict:
 STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # 並び順（member_order）は含まない
 
 
+def _apply_uuids(model, ch: dict) -> None:
+    """Bind the UUIDs of the new handles, and add the tombstones."""
+    for h, u in ch.get("uuids", {}).items():
+        model._bind(u, int(h))  # JSON keys are strings
+    for u in ch.get("tombstones", []):
+        model.ids.pop(u, None)
+        model.tombstones.add(u)
+
+
 def apply(model, record: dict, *, incremental: bool = False) -> None:
     """記録の結果を model に書き込む（計算し直さない）。
 
@@ -266,6 +289,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     if incremental and model._plan is not None and not any(k in ch for k in STRUCTURAL):
         _apply_orders(model, ch.get("member_order", []), dim_of)
         _apply_cells(model, ch.get("cells", []))
+        _apply_uuids(model, ch)
         model._next_id = ch["next_id"]
         return
     metric_of = lambda i: model.metrics_by_id().get(i)
@@ -276,6 +300,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     for e in ch.get("members", []):
         d = dim_of(e["dim"])
         for i in e["removed"]:
+            model._uuids.pop(i, None)  # the tombstone comes from "tombstones"
             model._drop_member(d.name, d.member_of(i))
         # 名前を入れ替える変更もあるので、一度仮の名前にしてから付け直す
         for i, _ in e["renamed"]:
@@ -290,6 +315,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
 
     for i in ch.get("metrics_removed", []):
         m = metric_of(i)
+        model._uuids.pop(i, None)
         model.metrics.pop(m.name)
         model._state.pop(m.name, None)
     defs = ch.get("metrics", [])
@@ -309,6 +335,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
         for i, j in p["set"]:
             mapping[d.member_of(i)] = t.member_of(j)
         d.properties[p["prop"]] = (t.name, mapping)
+        d.property_ids[p["prop"]] = p["id"]
         model.engine.dimension_changed(model, d.name)
 
     by_id = model.metrics_by_id()
@@ -334,6 +361,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             store = model.engine.write(store, key, new, model)
         model._values[m.name] = store
 
+    _apply_uuids(model, ch)
     model._next_id = ch["next_id"]
     model._invalidate()
 
@@ -411,6 +439,8 @@ class Journal:
         append_many(records)       Append the records, commit them in one write, and return their seqs
         seq_of(client_op_id)       The seq of the record with this ID (None if there is no record)
         seq_of_many(client_op_ids) The committed client_op_id -> seq, in one lookup
+        record_rejection(client_op_id, status, body)  Keep a rejected write (the HTTP status and body) for op_window
+        rejections_of_many(client_op_ids)              The rejected client_op_id -> (status, body), in one lookup
         records(after)             The records with a seq after "after" (oldest first)
         save_snapshot(model)       Put a snapshot of model (at seq model.seq)
         snapshots()                The (seq, place) of the snapshots, newest first
@@ -604,6 +634,9 @@ class FileJournal(Journal):
         self._lock_file = None  # 書き込みの権利（path/lock の排他ロック）。最初に書くときに取る
         self._broken: BaseException | None = None  # 追記の失敗を取り消せなかった（以後は書かない）
         self._rotate = False  # 次の追記から新しい区切りに書く（スナップショットを置いた）
+        # The rejected writes (client_op_id -> (status, body)), the last op_window only. This journal is for
+        # development, so they stay in memory: after a restart, the same write gets the same rejection again
+        self._rejected: collections.OrderedDict[str, tuple[int, dict]] = collections.OrderedDict()
         self._scan()
 
     @property
@@ -793,6 +826,14 @@ class FileJournal(Journal):
 
     def seq_of_many(self, client_op_ids: list[str]) -> dict[str, int]:
         return {i: self._by_client_op[i] for i in client_op_ids if i in self._by_client_op}
+
+    def record_rejection(self, client_op_id: str, status: int, body: dict) -> None:
+        self._rejected[client_op_id] = (status, body)
+        while len(self._rejected) > self.op_window:
+            self._rejected.popitem(last=False)
+
+    def rejections_of_many(self, client_op_ids: list[str]) -> dict[str, tuple[int, dict]]:
+        return {i: self._rejected[i] for i in client_op_ids if i in self._rejected}
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
