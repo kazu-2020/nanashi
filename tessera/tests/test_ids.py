@@ -105,7 +105,7 @@ class Ids(unittest.TestCase):
             self.assertEqual(uuid.UUID(key).version, 7)
         margin = m.metric("Margin")
         self.assertIs(m.metric(margin.id), margin)
-        self.assertIs(m.metric(margin.id), margin)  # the facade takes a name first, then an id
+        self.assertIs(m.metric("Margin"), margin)  # the facade takes a name first, then an id
         with self.assertRaisesRegex(ValueError, "がない"):
             m.metric("Nope")
         # a name in the UUID form is allowed: the Model API takes ids only, so it cannot collide (IdApi)
@@ -318,6 +318,25 @@ class RenameMetric(unittest.TestCase):
         self.m.set_cell("Reward", None, Product="A")
         self.assertEqual(self.m.get("Reward", Product="A"), 1)
         check_full(self, self.m)
+
+    def test_overrides_follow_a_redefinition(self):
+        """A redefinition without overridable keeps the hidden input. The override stops, but the hidden input
+        follows a rename and a remove, and overridable=True uses it again."""
+        m = self.m
+        bonus = m.add_formula("Bonus", ["Product"], "Price * 0.1", overridable=True)
+        hidden = m.metric("__override__Bonus").id
+        m.set_cell("Bonus", 9, Product="A")
+        m.add_formula("Bonus", ["Product"], "Price * 0.1", id=bonus)
+        self.assertEqual(m.get("Bonus", Product="A"), 1)
+        m.rename_metric("Bonus", "Reward")
+        self.assertEqual(m.metric(hidden).name, "__override__Reward")
+        m.add_formula("Reward", ["Product"], "Price * 0.1", overridable=True, id=bonus)
+        self.assertEqual(m.metric("__override__Reward").id, hidden)
+        self.assertEqual(m.get("Reward", Product="A"), 9)
+        m.add_input("Reward", ["Product"], id=bonus)
+        m.remove_metric("Reward")
+        self.assertNotIn(hidden, m.metrics)
+        check_full(self, m)
 
     def test_dynamic_hierarchy_mapping(self):
         m = build_fpa(self.engine(), employees=8, products=4, months=6, seed=2)

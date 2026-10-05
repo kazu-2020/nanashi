@@ -59,9 +59,11 @@ A journal entry has these 2 parts:
 - **Result**: the difference of the model before and after the transaction. It names each dimension, member, property and Metric by its ID (the UUID), which does not change. It shows these items: added, deleted, and renamed dimensions and members, the member order, properties (with their names), Metric definitions, and the values of input cells before and after the change.
   A Metric definition keeps the formula as the ID AST: a JSON tree with `node` (the node type) and one key for each field, where a reference holds an ID. Thus a replay does not parse or bind a formula, and the order of the renames in an entry is not important.
   A member-type value in a cell change is the member ID. `tombstones` has the IDs that the transaction made tombstones.
+  `renamed` has `[ID, new name]` for each dimension, member, property and Metric that got a new name. The IDs are unique across all kinds, so the ID finds the object.
+  If only the name of an object changes, the object is only in `renamed`. A hidden override input is a Metric, so its new name is also in `renamed`.
   The member order (`member_order`) is a list of member IDs in the member order.
   The engine records it only for dimensions where the order changes in a different way than "remove the deleted members and put the added members at the end".
-  A journal entry that changes only the order is not a structural change. Thus `Replica` and other followers do not recalculate when they catch up.
+  A journal entry that changes only names (`renamed`) or the order is not a structural change. Thus `Replica` and other followers do not recalculate when they catch up.
 
 The restore replays only the results, and then does 1 full recalculation at the end.
 If the engine replays the operations, values such as the floating-point values of a spread can be different between engine versions.

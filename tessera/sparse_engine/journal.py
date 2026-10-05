@@ -42,7 +42,7 @@ from .expr import Expr, from_json, to_json
 from .objects import LocalObjects
 from .parser import to_formula
 
-LOG_VERSION = 2  # The format version of a record ("v")
+LOG_VERSION = 3  # The format version of a record ("v")
 
 log = logging.getLogger(__name__)
 
@@ -138,11 +138,13 @@ def changes(before, after) -> dict:
 def structure(before, after) -> dict:
     """The changes to the definitions from before to after: dimensions, members, the member order, properties and
     Metrics. A record names each object by its id (the UUID), so a replay defines the objects directly and the
-    order of the renames does not matter. "tombstones" has the ids that became tombstones. Model.save keeps a
-    model as the structure from an empty model."""
+    order of the renames does not matter. "renamed" has [id, new name] for each object that got a new name. The
+    ids are unique across all kinds, so the id finds the object. A change of only the name is not in the other
+    keys. "tombstones" has the ids that became tombstones. Model.save keeps a model as the structure from an
+    empty model."""
     out: dict[str, Any] = {}
 
-    added_dims, renamed_dims, members, orders = [], [], [], []
+    added_dims, renamed, members, orders = [], [], [], []
     for d in after.dimensions.values():
         o = before.dimensions.get(d.id)
         if o is None:
@@ -152,14 +154,13 @@ def structure(before, after) -> dict:
                 orders.append({"dim": d.id, "order": _ids_in_order(d)})
             continue
         if o.name != d.name:
-            renamed_dims.append([d.id, d.name])
+            renamed.append([d.id, d.name])
         if o.ids != d.ids or o.members != d.members:
             old_names = dict(zip(o.ids, o.members))
-            members.append({"dim": d.id,
-                            "removed": [u for u in o.ids if u not in d._by_id],
-                            "added": [[u, n] for u, n in zip(d.ids, d.members) if u not in old_names],
-                            "renamed": [[u, n] for u, n in zip(d.ids, d.members)
-                                        if u in old_names and old_names[u] != n]})
+            renamed += [[u, n] for u, n in zip(d.ids, d.members) if u in old_names and old_names[u] != n]
+            if o.ids != d.ids:
+                members.append({"dim": d.id, "removed": [u for u in o.ids if u not in d._by_id],
+                                "added": [[u, n] for u, n in zip(d.ids, d.members) if u not in old_names]})
         # The order is not recorded if it is the old order without the removed members, then the added members
         # (a replay gives the same order)
         expected = [u for u in _ids_in_order(o) if u in d._by_id] + [u for u in d.ids if u not in o._by_id]
@@ -172,28 +173,31 @@ def structure(before, after) -> dict:
         for prop, (target, mapping) in d.properties.items():
             old = None if o is None else o.properties.get(prop)
             name = d.property_names[prop]
-            renamed = old is not None and o.property_names[prop] != name
-            if old is not None and old[1] is mapping and old[0] == target and not renamed:
+            if old is not None and o.property_names[prop] != name:
+                renamed.append([prop, name])
+            if old is not None and old[1] is mapping and old[0] == target:
                 continue
             old_map = {} if old is None else old[1]
             set_ = [[k, v] for k, v in mapping.items() if old_map.get(k) != v]
             unset = [k for k in old_map if k not in mapping]
-            if old is None or set_ or unset or renamed or old[0] != target:
+            if old is None or set_ or unset or old[0] != target:
                 props.append({"dim": d.id, "id": prop, "name": name, "target": target, "set": set_, "unset": unset})
 
     defs = []
     for m in after.metrics.values():
         o = before.metrics.get(m.id)
-        if o is not None and (o.name, o.dims, o.kind, o.partition, o.overridable) == \
-                (m.name, m.dims, m.kind, m.partition, m.overridable) and o.written is m.written:
+        if o is not None and o.name != m.name:
+            renamed.append([m.id, m.name])
+        if o is not None and (o.dims, o.kind, o.partition, o.overridable) == \
+                (m.dims, m.kind, m.partition, m.overridable) and o.written is m.written:
             continue
         d = _definition(m)
-        if o is None or d != _definition(o):
+        if o is None or d != _definition(o) | {"name": m.name}:
             defs.append(d)
     removed = [i for i in before.metrics if i not in after.metrics]
     tombstones = sorted(after.tombstones - before.tombstones)
 
-    for key, value in (("dimensions", added_dims), ("dimensions_renamed", renamed_dims), ("members", members),
+    for key, value in (("dimensions", added_dims), ("renamed", renamed), ("members", members),
                        ("member_order", orders), ("properties", props), ("metrics", defs),
                        ("metrics_removed", removed), ("tombstones", tombstones)):
         if value:
@@ -259,7 +263,27 @@ def _by_id(model, m, store) -> dict:
 
 # ---------------------------------------------------------------- 再生
 
-STRUCTURAL = ("dimensions", "dimensions_renamed", "members", "properties", "metrics", "metrics_removed")  # not member_order
+STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # not renamed or member_order
+
+
+def _rename(model, renamed: list) -> None:
+    """Set the names of a record ([id, new name] for a dimension, a member, a property or a Metric). All names
+    are set first and the name indexes are made again after, so names can change places."""
+    names = dict(renamed)
+    if not names:
+        return
+    for i, m in model.metrics.items():
+        m.name = names.get(i, m.name)
+    model._metric_ids = {m.name: i for i, m in model.metrics.items()}
+    for d in model.dimensions.values():
+        d.name = names.get(d.id, d.name)
+        if names.keys() & d.property_names.keys():
+            d.property_names = {p: names.get(p, n) for p, n in d.property_names.items()}
+            d._props = {n: p for p, n in d.property_names.items()}
+        members = {i: n for i, n in names.items() if i in d._by_id}
+        if members:
+            d.rename_members(members)
+    model._dim_ids = {d.name: i for i, d in model.dimensions.items()}
 
 
 def apply(model, record: dict, *, incremental: bool = False) -> None:
@@ -267,11 +291,13 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
 
     Without incremental, everything is calculated again after the replay (an open replays many records). With
     incremental, a record that changed only input cells is written as an input change, and the next recalc
-    calculates only the affected range (to catch up with the writes of another process). A record that changed
-    a dimension, a member, a property or a Metric definition causes a full recalculation in both modes."""
+    calculates only the affected range (to catch up with the writes of another process). A rename does not
+    change a value. A record that added or removed a dimension, a member or a Metric, or changed a property
+    map or a Metric definition, causes a full recalculation in both modes."""
     ch = record["changes"]
     model.tombstones.update(ch.get("tombstones", []))
     if incremental and model._plan is not None and not any(k in ch for k in STRUCTURAL):
+        _rename(model, ch.get("renamed", []))
         _apply_orders(model, ch.get("member_order", []))
         _apply_cells(model, ch.get("cells", []))
         return
@@ -279,23 +305,22 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     for d in ch.get("dimensions", []):
         model.dimensions[d["id"]] = Dimension(d["name"], [n for _, n in d["members"]], ordered=d["ordered"],
                                               ids=[i for i, _ in d["members"]], id=d["id"])
-    for i, n in ch.get("dimensions_renamed", []):
-        model.dimensions[i].name = n
-    model._dim_ids = {d.name: i for i, d in model.dimensions.items()}  # names can also change places
+    # A rename can take the name of a removed object, and an added object can take an old name
+    for e in ch.get("members", []):
+        for i in e["removed"]:
+            model._drop_member(e["dim"], i)  # the tombstone comes from "tombstones"
+    for i in ch.get("metrics_removed", []):
+        del model.metrics[i]
+        model._state.pop(i, None)
+    _rename(model, ch.get("renamed", []))
+    model._dim_ids = {d.name: i for i, d in model.dimensions.items()}
     for e in ch.get("members", []):
         d = model.dimensions[e["dim"]]
-        for i in e["removed"]:
-            model._drop_member(d.id, i)  # the tombstone comes from "tombstones"
-        d.rename_members(dict(e["renamed"]))
         for i, n in e["added"]:
             d.add_member(n, i)
         if e["added"]:
             model._member_added(d.id)
     _apply_orders(model, ch.get("member_order", []))
-
-    for i in ch.get("metrics_removed", []):
-        del model.metrics[i]
-        model._state.pop(i, None)
     _define(model, ch.get("metrics", []))
 
     for p in ch.get("properties", []):
@@ -389,8 +414,7 @@ def _define(model, specs: list[dict]) -> None:
         elif (old is None or old.formula is not None or m.id not in model._values
               or (old.dims, old.kind) != (m.dims, m.kind)):
             model._values[m.id] = model.engine.from_cells(m.dims, m.kind, {}, model, m.partition)
-        if m.overridable:
-            m.override = model._metric_ids[m.override_name]
+        m.override = model._metric_ids.get(m.override_name)  # the link stays also while not overridable
 
 
 # ---------------------------------------------------------------- ファイルへの記録

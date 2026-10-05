@@ -107,6 +107,17 @@ class Rename(unittest.TestCase):
         self.assertEqual(to_formula(self.m.metric("Jan").written, self.m), 'X[SELECT: Month."Jan"]')
         self.assertEqual(fork.get("Jan", Product="A"), 1)
 
+    def test_rename_members_changes_nothing_on_an_error(self):
+        d = self.m.dimension("Month")
+        jan, feb = d.id_of("Jan"), d.id_of("Feb")
+        for names, error in (({jan: "Feb"}, "重複"), ({jan: "X", "nope": "Y"}, "メンバーがない")):
+            with self.assertRaisesRegex(ValueError, error):
+                d.rename_members(names)
+            self.assertEqual(d.members, ["Jan", "Feb", "Mar", "Apr"])
+            self.assertEqual(d.id_of("Jan"), jan)
+        d.rename_members({jan: "Feb", feb: "Jan"})
+        self.assertEqual((d.id_of("Feb"), d.id_of("Jan")), (jan, feb))
+
 
 class Remove(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)

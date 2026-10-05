@@ -160,8 +160,8 @@ class Journal(JournalCase, unittest.TestCase):
             m.rename_member("Product", "B", "A")
             m.rename_member("Product", "tmp", "B")
         self.assertNotIn("metrics", txn.record["changes"])  # the formulas hold ids, so no definition changes
-        self.assertEqual(sorted(txn.record["changes"]["members"][0]["renamed"]),
-                         sorted([[m.member_id("Product", x), x] for x in "AB"]))
+        self.assertEqual(list(txn.record["changes"]), ["renamed"])  # a rename alone is not structural
+        self.assertEqual(sorted(txn.record["changes"]["renamed"]), sorted([[m.member_id("Product", x), x] for x in "AB"]))
         reopened = self.reopen()
         check_same_state(self, m, reopened)
         self.assertEqual(to_formula(reopened.metric("JanCost").written, reopened), 'Cost[SELECT: Month."January"]')
@@ -434,6 +434,39 @@ class Journal(JournalCase, unittest.TestCase):
         history = m.cell_history(self.journals.journal(), "Lead", Product="A")
         self.assertEqual([(h["old"], h["new"]) for h in history], [(None, "e1"), ("e1", "Eve")])
 
+    def test_renames_are_followed_without_recalculating(self):
+        """A reader that catches up on a rename only changes the name. A new open gives the same names."""
+        m = self.m
+        m.add_formula("Bonus", ["Product"], "Price * 0.1", overridable=True)
+        bonus, hidden = m.metric("Bonus").id, m.metric("__override__Bonus").id
+        m.add_formula("Bonus", ["Product"], "Price * 0.1", id=bonus)  # the hidden input stays linked
+        reader = Named(self.journals.journal().open(self.engine()))
+        reader.recalc()
+        steps = [("dimension", lambda: m.rename_dimension("Product", "Item")),
+                 ("property", lambda: m.rename_property("Item", "Category", "Group")),
+                 ("metric", lambda: m.rename_metric("Plus1", "PlusOne")),
+                 ("overridable metric", lambda: m.rename_metric("Bonus", "Reward")),
+                 ("member", lambda: m.rename_member("Item", "A", "Alpha"))]
+
+        def swap():
+            with m.transaction():
+                m.rename_metric("Price", "tmp")
+                m.rename_metric("PlusOne", "Price")
+                m.rename_metric("tmp", "PlusOne")
+        for label, change in steps + [("swap", swap)]:
+            change()
+            reader.model.eval_log.clear()
+            self.assertTrue(self.journals.journal().catch_up(reader.model), label)
+            reader.recalc()
+            self.assertEqual(list(reader.model.eval_log), [], label)
+            self.assertEqual(definitions(reader), definitions(m), label)
+        self.assertEqual(reader.metric(hidden).name, "__override__Reward")
+        reopened = self.reopen()
+        check_same_state(self, m, reopened)
+        reopened.model.journal = None  # self.m keeps the write right
+        reopened.rename_metric("Reward", "Prize")
+        self.assertEqual(reopened.metric(hidden).name, "__override__Prize")
+
     def test_renames_and_a_formula_in_one_transaction_replay(self):
         """A replay defines the objects by id. The order of the renames in a record does not matter: two Metrics
         change names with each other, and a formula uses the new names of a dimension, a property and a member."""
@@ -450,10 +483,11 @@ class Journal(JournalCase, unittest.TestCase):
             m.add_formula("CatPrice", ["Category"], "Plus1[BY SUM: Item.Group]")
         ch = txn.record["changes"]
         item = m.dimension("Item")
-        self.assertEqual(ch["dimensions_renamed"], [[item.id, "Item"]])
-        self.assertEqual([(p["id"], p["name"]) for p in ch["properties"]], [(m.property_id("Item", "Group"), "Group")])
-        self.assertEqual(ch["members"], [{"dim": item.id, "removed": [], "added": [],
-                                          "renamed": [[item.id_of("Alpha"), "Alpha"]]}])
+        self.assertEqual(sorted(ch["renamed"]), sorted(
+            [[item.id, "Item"], [item.id_of("Alpha"), "Alpha"], [m.property_id("Item", "Group"), "Group"]]
+            + [[m.metric(x).id, x] for x in ("Price", "Plus1")]))
+        self.assertNotIn("properties", ch)
+        self.assertNotIn("members", ch)
         defs = {d["name"]: d for d in ch["metrics"]}
         self.assertEqual(defs["Twice"]["formula"],  # the formula is the id AST as a JSON tree, not text
                          {"node": "BinOp", "op": "*", "left": {"node": "Ref", "name": m.metric("Price").id},

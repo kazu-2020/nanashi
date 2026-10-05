@@ -288,9 +288,13 @@ def to_json(e: Expr) -> dict:
 
 def from_json(x: dict) -> Expr:
     """The AST of a tree that to_json made."""
-    cls = {c.__name__: c for c in Expr.__subclasses__()}[x["node"]]
+    cls = _NODES[x["node"]]
     args = {}
     for f in fields(cls):
         v = x[f.name]
         args[f.name] = from_json(v) if isinstance(v, dict) else tuple(v) if isinstance(v, list) else v
     return cls(**args)
+
+
+# The node classes by name for from_json. Every node is a direct subclass of Expr.
+_NODES = {c.__name__: c for c in Expr.__subclasses__()}

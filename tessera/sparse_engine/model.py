@@ -58,7 +58,7 @@ class Metric:
     written: Expr | None = None  # 利用者が書いた元の式（保存や表示に使う）
     overridable: bool = False  # True なら set_cell で式の結果を手入力で上書きできる
     id: str = ""  # The UUID. It does not change with a rename or a new definition. It is the key of Model.metrics
-    override: str | None = None  # The id of the hidden override input (only if overridable)
+    override: str | None = None  # The id of the hidden override input. It is used only while overridable
 
     @property
     def override_name(self) -> str:
@@ -645,7 +645,8 @@ class Model:
         dims = tuple(self.dimension(d).id for d in dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
-        new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition), id=id)
+        new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition), id=id,
+                     override=None if old is None else old.override)  # rename and remove still follow the link
         if storage is None:
             self.metrics[id] = new  # _check uses the dimensions of the registered Metric
             try:
@@ -695,11 +696,11 @@ class Model:
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
         formula = bind(formula, self, {name: id})  # the formula can refer to the Metric that it defines
         m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable,
-                   id=id)
+                   id=id, override=None if old is None else old.override)  # also kept while not overridable
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
-        if overridable:
+        if overridable and m.override is None:
             if m.override_name not in self._metric_ids:  # a load reads the override values first
                 self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
             m.override = self._metric_ids[m.override_name]
