@@ -113,10 +113,10 @@ class PgJournalTests(unittest.TestCase):
         (f,) = rec["cells_blob"]["files"]
         v = m.metric("V")
         self.assertTrue(f["uri"].startswith(f"{self.model_id}/cells/"))  # 置き場所の中の相対的なキー
-        self.assertTrue(f["uri"].endswith(f"-{m.ids[v.id]}.parquet"))
+        self.assertTrue(f["uri"].endswith(f"-{v.id}.parquet"))
         data = self.objects.get(f["uri"])
         meta = dict(nanashi_core.parquet_metadata(data))
-        self.assertEqual(json.loads(meta["nanashi"]), {"metric": m.ids[v.id]})
+        self.assertEqual(json.loads(meta["nanashi"]), {"metric": v.id})
         block = nanashi_core.CellBlock.from_parquet(data)
         self.assertEqual(len(block), 11_999)
         for e in (ReferenceEngine, RustEngine):
@@ -419,8 +419,8 @@ class Schema(unittest.TestCase):
         from sparse_engine.pg_journal import SchemaError, migrate
         with self.assertRaisesRegex(SchemaError, "migrate"):
             PgJournal(self.dsn, "new", tempfile.mkdtemp())
-        self.assertEqual(migrate(self.dsn), (0, 2))
-        self.assertEqual(migrate(self.dsn), (2, 2))  # Migrate can run again
+        self.assertEqual(migrate(self.dsn), (0, 3))
+        self.assertEqual(migrate(self.dsn), (3, 3))  # Migrate can run again
         j = PgJournal(self.dsn, "new", tempfile.mkdtemp(), heartbeat=False)
         m = build_with(ReferenceEngine())
         j.start(m)

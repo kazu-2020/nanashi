@@ -1,7 +1,9 @@
 """変わらない ID と、Metric の削除と名前の変更。"""
+import json
 import tempfile
 import unittest
 import uuid
+from pathlib import Path
 
 from examples.fpa import build as build_fpa
 from sparse_engine import FormulaError, Model, to_formula
@@ -123,11 +125,9 @@ class Uuids(unittest.TestCase):
     def test_every_object_has_a_uuid(self):
         m = self.m
         uuids = all_ids(m) + [p for d in m.dimensions.values() for p in d.properties]
-        self.assertEqual(sorted(m.ids), sorted(uuids))
-        self.assertEqual({u: h for h, u in m._uuids.items()}, m.ids)
-        for u in m.ids:
+        self.assertEqual(len(set(uuids)), len(uuids))
+        for u in uuids:
             self.assertEqual(uuid.UUID(u).version, 7)
-        self.assertIn(m.metric("Margin").id, m.ids)  # a Metric also has a handle, for the journal and storage formats
         self.assertEqual(m.member_id("Product", "A"), m.dimension("Product").id_of("A"))
         self.assertEqual(m.dimension("Product").property_names[m.property_id("Product", "Category")], "Category")
 
@@ -160,13 +160,13 @@ class Uuids(unittest.TestCase):
             m.add_formula("Margin", ["Product", "Month"], "Cost * 2")
         with self.assertRaisesRegex(ValueError, "別の ID"):
             m.add_input("Price", ["Product"], id="other")
-        with self.assertRaisesRegex(ValueError, "すでにある"):
+        with self.assertRaisesRegex(ValueError, "別の ID"):
             m.add_member("Product", "A", id="other")
         with self.assertRaisesRegex(ValueError, "別の ID"):
             m.add_property("Product", "Category", "Category", {}, id="other")
         with self.assertRaisesRegex(ValueError, "同じ名前の軸"):
             m.add_dimension("Product", [], id="other")
-        self.assertNotIn("other", m.ids)
+        self.assertNotIn("other", all_ids(m))
 
     def test_uuid_of_another_kind_or_a_tombstone_is_duplicate_id(self):
         m = self.m
@@ -183,8 +183,8 @@ class Uuids(unittest.TestCase):
         m.remove_member("Product", "B")
         m.remove_metric("CatShare")
         self.assertEqual(m.tombstones, {b, share})
-        self.assertNotIn(b, m.ids)
-        self.assertNotIn(share, m.ids)
+        self.assertNotIn(b, all_ids(m))
+        self.assertNotIn(share, all_ids(m))
         for fn in (lambda: m.add_member("Product", "B", id=b), lambda: m.add_input("B", [], id=b),
                    lambda: m.add_dimension("B", [], id=b), lambda: m.add_property("Product", "B", "Category", {}, id=b)):
             with self.assertRaises(DuplicateId):
@@ -204,21 +204,21 @@ class Uuids(unittest.TestCase):
         m = self.m
         m.remove_member("Product", "B")
         fork = m.fork()
-        self.assertEqual((fork.ids, fork.tombstones), (m.ids, m.tombstones))
+        self.assertEqual((all_ids(fork), fork.tombstones), (all_ids(m), m.tombstones))
         fork.add_member("Product", "E", id="e")
-        self.assertNotIn("e", m.ids)  # the fork and the original do not share the maps
+        self.assertNotIn("e", all_ids(m))  # the fork and the original do not share the maps
         with self.assertRaises(DuplicateId):
             fork.add_member("Product", "B", id=next(iter(m.tombstones)))
 
     def test_transaction_rollback_restores_the_maps(self):
         m = self.m
-        before = (dict(m.ids), set(m.tombstones))
+        before = (all_ids(m), set(m.tombstones))
         with self.assertRaises(ValueError):
             with m.transaction():
                 m.remove_member("Product", "B")
                 m.add_member("Product", "E", id="e")
                 raise ValueError("abort")
-        self.assertEqual((m.ids, m.tombstones), before)
+        self.assertEqual((all_ids(m), m.tombstones), before)
 
 
 class RemoveMetric(unittest.TestCase):
@@ -604,9 +604,14 @@ class Storage(unittest.TestCase):
         m.rename_property("Product", "Category", "Group")
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
+            meta = json.loads((Path(tmp) / "model.json").read_text())
             loaded = Model.load(tmp, self.engine())
+        self.assertNotIn("next_id", meta)
+        spec = next(x for x in meta["changes"]["metrics"] if x["name"] == "RevByCat")
+        self.assertEqual(spec["formula"]["node"], "By")  # the formula is the id AST, not text
+        self.assertEqual(spec["formula"]["prop"], m.property_id("Product", "Group"))
         self.assertEqual(all_ids(loaded), all_ids(m))
-        self.assertEqual((loaded.ids, loaded.tombstones), (m.ids, m.tombstones))
+        self.assertEqual(loaded.tombstones, m.tombstones)
         self.assertEqual(loaded.dimension("Area").id, m.dimension("Area").id)
         self.assertEqual(loaded.dimension("Product").property_names, m.dimension("Product").property_names)
         self.assertEqual(to_formula(loaded.metric("RevByCat").written, loaded), "Revenue[BY SUM: Product.Group]")

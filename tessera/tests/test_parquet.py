@@ -12,12 +12,15 @@ except ImportError:  # nanashi_core をビルドしていない環境
     nanashi_core = RustEngine = None
 
 
-def model(engine) -> Model:
+def model(engine, like: Model | None = None) -> Model:
+    """A model with 4 input Metrics. With like, the dimensions get the ids of that model (a Parquet file names
+    its columns by dimension id, so a reader must have the same ids)."""
     rng = random.Random(3)
     m = Model(engine=engine)
-    m.add_dimension("Employee", [f"e{i}" for i in range(40)])
-    m.add_dimension("Department", ["営業", "開発", "管理"])
-    m.add_dimension("Month", [f"m{i:02d}" for i in range(1, 13)], ordered=True)
+    dim_id = lambda name: None if like is None else like.dimension_id(name)
+    m.add_dimension("Employee", [f"e{i}" for i in range(40)], id=dim_id("Employee"))
+    m.add_dimension("Department", ["営業", "開発", "管理"], id=dim_id("Department"))
+    m.add_dimension("Month", [f"m{i:02d}" for i in range(1, 13)], ordered=True, id=dim_id("Month"))
     emps, months = m.dimension("Employee").members, m.dimension("Month").members
     m.add_input("Salary", ["Employee", "Month"],
                 {(e, t): round(rng.uniform(-100, 900), 3) for e in emps for t in months if rng.random() < 0.7},
@@ -51,10 +54,10 @@ class ParquetRoundTrip(unittest.TestCase):
         for writer in self.engines():
             src = model(writer())
             for reader in self.engines():
-                dst = model(reader())
+                dst = model(reader(), like=src)
                 for name in ("Salary", "Active", "DeptOf", "Empty"):
                     m = src.metric(name)
-                    dims = tuple(src.dimension(d).name for d in m.dims)  # names: dst has other dimension ids
+                    dims = tuple(src.dimension(d).name for d in m.dims)  # names: dst has other member ids
                     kind = src._name_of(m.kind)
                     partition = None if m.partition is None else src.dimension(m.partition).name
                     with self.subTest(writer=writer.name, reader=reader.name, metric=name):
@@ -113,9 +116,9 @@ class CellBlocks(unittest.TestCase):
     """記録の入力セルの変更の塊（nanashi_core.CellBlock）。"""
 
     def test_behaves_like_rows_and_round_trips(self):
-        for rows in ([[[1, 2], 1.5, None], [[3, 4], None, -2.0], [[3, 5], 0.0, 1e300]],  # number
-                     [[[1], True, False], [[2], None, True]],  # boolean
-                     [[[1], 7, 9], [[2], None, 2 ** 40]]):  # メンバーの ID
+        for rows in ([[["a", "x"], 1.5, None], [["b", "y"], None, -2.0], [["b", "z"], 0.0, 1e300]],  # number
+                     [[["a"], True, False], [["b"], None, True]],  # boolean
+                     [[["a"], "p", "q"], [["b"], None, "p"]]):  # a member-type value is a member id
             with self.subTest(rows=rows):
                 b = nanashi_core.CellBlock.from_rows(rows)
                 self.assertEqual((len(b), b.width, b.rows(), list(b)), (len(rows), len(rows[0][0]), rows, rows))
@@ -131,20 +134,25 @@ class CellBlocks(unittest.TestCase):
             nanashi_core.CellBlock.from_parquet(data)
 
     def test_copy_text(self):
-        b = nanashi_core.CellBlock.from_rows([[[1, 2], 1.5, None], [[3, 4], None, 1e300], [[5, 6], float("-inf"), 0.1]])
-        self.assertEqual(b.copy_text("m\t1", 5, 9),
-                         b"m\\t1\t5\t9\t{1,2}\t1.5\t\\N\n"
-                         b"m\\t1\t5\t9\t{3,4}\t\\N\t1e300\n"
-                         b"m\\t1\t5\t9\t{5,6}\t-Infinity\t0.1\n")
+        b = nanashi_core.CellBlock.from_rows([[["a", "x"], 1.5, None], [["b", "y"], None, 1e300],
+                                              [['q"t', "z"], float("-inf"), 0.1]])
+        self.assertEqual(b.copy_text("m\t1", 5, "metric-9"),  # the ids are quoted in the array, so any character is fine
+                         b'm\\t1\t5\tmetric-9\t{"a","x"}\t1.5\t\\N\t\\N\t\\N\n'
+                         b'm\\t1\t5\tmetric-9\t{"b","y"}\t\\N\t1e300\t\\N\t\\N\n'
+                         b'm\\t1\t5\tmetric-9\t{"q\\\\"t","z"}\t-Infinity\t0.1\t\\N\t\\N\n')
+        b = nanashi_core.CellBlock.from_rows([[["a"], "p", None], [["b"], None, "q"]])
+        self.assertEqual(b.copy_text("m", 1, "x"),  # a member-type value goes to old_member / new_member
+                         b'm\t1\tx\t{"a"}\t\\N\t\\N\tp\t\\N\n'
+                         b'm\t1\tx\t{"b"}\t\\N\t\\N\t\\N\tq\n')
 
     def test_overlaps(self):
-        a = nanashi_core.CellBlock.from_rows([[[i, 0], 1.0, 2.0] for i in range(100)])
-        b = nanashi_core.CellBlock.from_rows([[[i, 1], 1.0, 2.0] for i in range(100)] + [[[5, 0], None, 1.0]])
-        c = nanashi_core.CellBlock.from_rows([[[i, 2], 1.0, 2.0] for i in range(10)])
+        a = nanashi_core.CellBlock.from_rows([[[f"k{i}", "t0"], 1.0, 2.0] for i in range(100)])
+        b = nanashi_core.CellBlock.from_rows([[[f"k{i}", "t1"], 1.0, 2.0] for i in range(100)] + [[["k5", "t0"], None, 1.0]])
+        c = nanashi_core.CellBlock.from_rows([[[f"k{i}", "t2"], 1.0, 2.0] for i in range(10)])
         self.assertTrue(a.overlaps(b) and b.overlaps(a))
         self.assertFalse(a.overlaps(c))
-        self.assertTrue(a.contains_any([[1000, 0], [7, 0]]))
-        self.assertFalse(a.contains_any([[7, 3], [1000, 0]]))
+        self.assertTrue(a.contains_any([["k1000", "t0"], ["k7", "t0"]]))
+        self.assertFalse(a.contains_any([["k7", "t3"], ["k1000", "t0"]]))
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -168,30 +176,29 @@ class ApplyBlock(unittest.TestCase):
         for n in (50, 3000):  # 1024 件未満は差分に入れ、それ以上は本体を作り直す
             for name in ("V", "M"):
                 a = self.model()
-                b = a.fork()  # the same member handles
+                b = a.fork()  # the same member ids
                 x = a.metric(name)
                 dims = [a.dimension(d) for d in x.dims]
                 vdim = a.dimension("D") if name == "M" else None
                 rows = []
                 for _ in range(n):
-                    ids = [a.ids[d.ids[rng.randrange(len(d.ids))]] for d in dims]
+                    ids = [d.ids[rng.randrange(len(d.ids))] for d in dims]
                     if rng.random() < 0.05:
-                        ids[0] = 10 ** 6  # 軸にないメンバー（消したメンバー）は飛ばす
+                        ids[0] = "gone"  # a member that is not in the dimension (a removed member) is skipped
                     new = None if rng.random() < 0.2 else (
-                        a.ids[vdim.ids[rng.randrange(3)]] if vdim else round(rng.uniform(-9, 9), 2))
+                        vdim.ids[rng.randrange(3)] if vdim else round(rng.uniform(-9, 9), 2))
                     rows.append([ids, None, new])
                 with self.subTest(n=n, metric=name):
                     block = nanashi_core.CellBlock.from_rows(rows)
-                    handles = lambda d: [a.ids[u] for u in d.ids]
                     a._values[a.metric(name).id] = a.engine.apply_block(a._values[a.metric(name).id], block,
-                                                                        [handles(d) for d in dims],
-                                                                        None if vdim is None else handles(vdim))
+                                                                        [d.ids for d in dims],
+                                                                        None if vdim is None else vdim.ids)
                     store = b._values[b.metric(name).id]
                     for ids, _, new in rows:  # journal.apply の 1 セルずつの経路と同じ
-                        key = tuple(b._uuids.get(i) for i in ids)
+                        key = tuple(ids)
                         if not all(u in d._by_id for d, u in zip(dims, key)):
                             continue
-                        value = new if new is None or vdim is None else float(vdim._by_id[b._uuids[new]])
+                        value = new if new is None or vdim is None else float(vdim._by_id[new])
                         store = b.engine.write(store, key, value, b)
                     self.assertEqual(cells(a, name), cells(b, name))
 

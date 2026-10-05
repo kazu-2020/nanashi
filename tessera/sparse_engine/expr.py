@@ -272,3 +272,25 @@ class Select(Expr):
 class IfBlank(Expr):
     child: Expr
     value: Value
+
+
+# ---------------------------------------------------------------- JSON form of an AST
+
+def to_json(e: Expr) -> dict:
+    """The AST as a JSON tree: {"node": the class name, then one key for each field}. The journal and model.json
+    keep a formula in this form (an id AST), so a replay does not parse or bind."""
+    out: dict[str, Any] = {"node": type(e).__name__}
+    for f in fields(e):
+        v = getattr(e, f.name)
+        out[f.name] = to_json(v) if isinstance(v, Expr) else list(v) if isinstance(v, tuple) else v
+    return out
+
+
+def from_json(x: dict) -> Expr:
+    """The AST of a tree that to_json made."""
+    cls = {c.__name__: c for c in Expr.__subclasses__()}[x["node"]]
+    args = {}
+    for f in fields(cls):
+        v = x[f.name]
+        args[f.name] = from_json(v) if isinstance(v, dict) else tuple(v) if isinstance(v, list) else v
+    return cls(**args)

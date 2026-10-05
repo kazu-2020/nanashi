@@ -231,6 +231,15 @@ class Dimension:
         self.members[i] = new
         self._rank = None  # the name -> rank table has names as keys, so make it again
 
+    def rename_members(self, names: Mapping[str, str]) -> None:
+        """Rename many members at one time ({member id: new name}). The names can change places (a replay)."""
+        for i, n in names.items():
+            self.members[self._by_id[i]] = n
+        self._index = {m: i for i, m in enumerate(self.members)}
+        if len(self._index) != len(self.members):
+            raise ValueError(f"{self.name}: メンバーが重複している")
+        self._rank = None  # the name -> rank table has names as keys, so make it again
+
     def remove_member(self, member: str) -> None:
         """Remove the member with this id. The numbers after it close up by 1. The member also goes from the
         maps of its own properties."""

@@ -55,7 +55,7 @@ class RoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
             names = sorted(p.name for p in Path(tmp).iterdir())
-        inputs = sorted(f"inputs.{m.ids[x.id]}.parquet" for x in m.metrics.values() if x.formula is None)
+        inputs = sorted(f"inputs.{x.id}.parquet" for x in m.metrics.values() if x.formula is None)
         self.assertEqual(names, sorted(inputs + ["model.json"]))
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")

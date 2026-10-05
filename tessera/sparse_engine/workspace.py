@@ -115,7 +115,7 @@ class Written:
 
     def __init__(self, record: dict):
         self.cells: set[tuple] = set()
-        self.blocks: list[tuple[int, Any]] = []
+        self.blocks: list[tuple[str, Any]] = []
         for c in record["changes"].get("cells", []):
             if isinstance(c["rows"], list):
                 self.cells.update((c["metric"], tuple(ids)) for ids, _, _ in c["rows"])

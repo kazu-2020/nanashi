@@ -5,7 +5,7 @@
 //! どの列も null を持たない。ファイルの置き場所は呼び出し側が決め、ここではバイト列だけを扱う。
 
 use crate::Result;
-use arrow_array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, UInt32Array};
+use arrow_array::{Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, StringArray, UInt32Array};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -13,11 +13,12 @@ use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const VALUE: &str = "v";
 
-/// The kind of a value. A member value is a member number (UInt32) in stored data and a member ID (Int64) in a change.
+/// The kind of a value. A member value is a member number (UInt32) in stored data and a member id (Utf8) in a change.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Value {
     Num,
@@ -151,12 +152,16 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
     Ok((cols, values))
 }
 
-/// 入力セルの変更（1 つの Metric の分）。値は f64 で持つ（真偽値は 0 と 1、メンバーは ID）。
+/// The input cell changes of one Metric. A coordinate is a member id (a string), and so is a member-type value.
+/// A column holds, for each row, the index of the id in its table (`ids[j]`). A member-type value is the index of
+/// the id in `value_ids`, as f64 like the other values. So a block of many rows does not keep one String for each cell.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Changes {
-    pub ids: Vec<Vec<i64>>, // 軸ごと
+    pub cols: Vec<Vec<u32>>,    // one column for each dimension: the index of the member id in ids[j]
+    pub ids: Vec<Vec<String>>,  // one table for each dimension: the member ids that the column uses
     pub old: Vec<Option<f64>>,
     pub new: Vec<Option<f64>>,
+    pub value_ids: Vec<String>, // the member ids of a member-type value (empty for the other kinds)
     pub kind: Value,
 }
 
@@ -168,48 +173,75 @@ impl Changes {
     pub fn is_empty(&self) -> bool {
         self.new.is_empty()
     }
-}
 
-fn change_array(kind: Value, xs: &[Option<f64>]) -> ArrayRef {
-    match kind {
-        Value::Num => Arc::new(Float64Array::from(xs.to_vec())),
-        Value::Bool => Arc::new(xs.iter().map(|v| v.map(|x| x != 0.0)).collect::<BooleanArray>()),
-        Value::Member => Arc::new(xs.iter().map(|v| v.map(|x| x as i64)).collect::<Int64Array>()),
+    /// The member ids of the coordinates of row r.
+    pub fn key(&self, r: usize) -> Vec<&str> {
+        self.cols.iter().zip(&self.ids).map(|(c, t)| t[c[r] as usize].as_str()).collect()
+    }
+
+    /// The member id of a member-type value.
+    pub fn value_id(&self, v: f64) -> &str {
+        &self.value_ids[v as usize]
     }
 }
 
-fn change_values(a: &dyn Array, out: &mut Vec<Option<f64>>) {
+/// A table of ids in the order of first use, with the index of each id.
+#[derive(Default)]
+pub struct Interner {
+    pub table: Vec<String>,
+    index: HashMap<String, u32>,
+}
+
+impl Interner {
+    pub fn intern(&mut self, id: &str) -> u32 {
+        if let Some(&i) = self.index.get(id) {
+            return i;
+        }
+        let i = self.table.len() as u32;
+        self.table.push(id.to_string());
+        self.index.insert(id.to_string(), i);
+        i
+    }
+}
+
+fn id_array(col: &[u32], ids: &[String]) -> ArrayRef {
+    Arc::new(StringArray::from_iter_values(col.iter().map(|&i| ids[i as usize].as_str())))
+}
+
+fn change_array(c: &Changes, xs: &[Option<f64>]) -> ArrayRef {
+    match c.kind {
+        Value::Num => Arc::new(Float64Array::from(xs.to_vec())),
+        Value::Bool => Arc::new(xs.iter().map(|v| v.map(|x| x != 0.0)).collect::<BooleanArray>()),
+        Value::Member => Arc::new(xs.iter().map(|v| v.map(|x| c.value_id(x))).collect::<StringArray>()),
+    }
+}
+
+fn change_values(a: &dyn Array, out: &mut Vec<Option<f64>>, ids: &mut Interner) {
     if let Some(f) = a.as_any().downcast_ref::<Float64Array>() {
         out.extend(f.iter());
     } else if let Some(b) = a.as_any().downcast_ref::<BooleanArray>() {
         out.extend(b.iter().map(|v| v.map(|x| if x { 1.0 } else { 0.0 })));
-    } else if let Some(i) = a.as_any().downcast_ref::<Int64Array>() {
-        out.extend(i.iter().map(|v| v.map(|x| x as f64)));
+    } else if let Some(s) = a.as_any().downcast_ref::<StringArray>() {
+        out.extend(s.iter().map(|v| v.map(|x| ids.intern(x) as f64)));
     }
 }
 
-/// 変更を Parquet のバイト列にする（列は names の軸、old、new）。
+/// Write the changes to Parquet bytes. The columns are the dimensions (names, Utf8 member ids), old and new.
 pub fn write_changes(names: &[String], c: &Changes, meta: &[(String, String)]) -> Result<Vec<u8>> {
-    if names.len() != c.ids.len() {
+    if names.len() != c.cols.len() {
         return Err("列の名前の数が軸の数と合わない".into());
     }
-    let mut fields: Vec<Field> = names.iter().map(|n| Field::new(n, DataType::Int64, false)).collect();
-    fields.push(Field::new("old", c.kind.data_type(DataType::Int64), true));
-    fields.push(Field::new("new", c.kind.data_type(DataType::Int64), true));
-    let mut arrays: Vec<ArrayRef> = c.ids.iter().map(|x| Arc::new(Int64Array::from(x.clone())) as ArrayRef).collect();
-    arrays.push(change_array(c.kind, &c.old));
-    arrays.push(change_array(c.kind, &c.new));
+    let mut fields: Vec<Field> = names.iter().map(|n| Field::new(n, DataType::Utf8, false)).collect();
+    fields.push(Field::new("old", c.kind.data_type(DataType::Utf8), true));
+    fields.push(Field::new("new", c.kind.data_type(DataType::Utf8), true));
+    let mut arrays: Vec<ArrayRef> = c.cols.iter().zip(&c.ids).map(|(col, ids)| id_array(col, ids)).collect();
+    arrays.push(change_array(c, &c.old));
+    arrays.push(change_array(c, &c.new));
     encode(fields, arrays, meta)
 }
 
-/// 軸の ID の列の名前か（d<軸の ID>、軸の ID を持たない記録は c<位置>）。
-fn is_axis_column(name: &str) -> bool {
-    let rest = name.strip_prefix('d').or_else(|| name.strip_prefix('c'));
-    rest.is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// write_changes で書いたバイト列を、軸の列の名前と変更に戻す。列は名前で選ぶ（軸の列、old、new。
-/// ほかの列は読まない）。
+/// Read bytes that write_changes wrote, as the names of the dimension columns and the changes. The columns are
+/// selected by name: old, new, and the other Utf8 columns are the dimensions (other columns are not read).
 pub fn read_changes(data: Bytes) -> Result<(Vec<String>, Changes)> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(pq_err)?;
     let fields = builder.schema().fields().clone();
@@ -219,33 +251,36 @@ pub fn read_changes(data: Bytes) -> Result<(Vec<String>, Changes)> {
     if old_t != new_t {
         return Err(bad());
     }
-    let kind = [Value::Num, Value::Bool, Value::Member].into_iter().find(|&k| k.data_type(DataType::Int64) == new_t).ok_or_else(bad)?;
-    let names: Vec<String> = fields.iter().filter(|f| is_axis_column(f.name())).map(|f| f.name().clone()).collect();
-    let mut expected: Vec<(&str, DataType)> = names.iter().map(|n| (n.as_str(), DataType::Int64)).collect();
+    let kind = [Value::Num, Value::Bool, Value::Member].into_iter().find(|&k| k.data_type(DataType::Utf8) == new_t).ok_or_else(bad)?;
+    let names: Vec<String> = fields
+        .iter()
+        .filter(|f| f.name() != "old" && f.name() != "new" && *f.data_type() == DataType::Utf8)
+        .map(|f| f.name().clone())
+        .collect();
+    let mut expected: Vec<(&str, DataType)> = names.iter().map(|n| (n.as_str(), DataType::Utf8)).collect();
     expected.push(("old", old_t.clone()));
     expected.push(("new", new_t.clone()));
     let (builder, at) = project(builder, &expected)?;
     let n = names.len();
     let rows = builder.metadata().file_metadata().num_rows() as usize;
-    let mut c = Changes {
-        ids: names.iter().map(|_| Vec::with_capacity(rows)).collect(),
-        old: Vec::with_capacity(rows),
-        new: Vec::with_capacity(rows),
-        kind,
-    };
+    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| Vec::with_capacity(rows)).collect();
+    let mut tables: Vec<Interner> = names.iter().map(|_| Interner::default()).collect();
+    let mut values = Interner::default();
+    let (mut old, mut new) = (Vec::with_capacity(rows), Vec::with_capacity(rows));
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
-        for (j, col) in c.ids.iter_mut().enumerate() {
-            let a = batch.column(at[j]);
+        for j in 0..n {
+            let a = batch.column(at[j]).as_any().downcast_ref::<StringArray>().unwrap();
             if a.null_count() > 0 {
                 return Err("Parquet の軸の列に空の値がある".into());
             }
-            col.extend_from_slice(a.as_any().downcast_ref::<Int64Array>().unwrap().values());
+            cols[j].extend(a.iter().map(|s| tables[j].intern(s.unwrap())));
         }
-        change_values(batch.column(at[n]).as_ref(), &mut c.old);
-        change_values(batch.column(at[n + 1]).as_ref(), &mut c.new);
+        change_values(batch.column(at[n]).as_ref(), &mut old, &mut values);
+        change_values(batch.column(at[n + 1]).as_ref(), &mut new, &mut values);
     }
-    Ok((names, c))
+    let ids = tables.into_iter().map(|t| t.table).collect();
+    Ok((names, Changes { cols, ids, old, new, value_ids: values.table, kind }))
 }
 
 /// フッターのキーと値だけを読む（本体は読まない）。
@@ -265,6 +300,7 @@ pub fn metadata(data: Bytes) -> Result<Vec<(String, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::Int64Array;
 
     fn names(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("d{i}")).collect()
@@ -312,14 +348,20 @@ mod tests {
         assert!(err.contains("列が合わない"), "{err}");
     }
 
+    fn strs(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn round_trip_changes() {
         for (kind, old, new) in [
             (Value::Num, vec![Some(1.5), None, Some(-3.0)], vec![Some(2.5), Some(0.0), None]),
             (Value::Bool, vec![Some(1.0), None, Some(0.0)], vec![Some(0.0), Some(1.0), None]),
-            (Value::Member, vec![Some(7.0), None, Some(1e12)], vec![None, Some(3.0), Some(9.0)]),
+            (Value::Member, vec![Some(0.0), None, Some(1.0)], vec![None, Some(2.0), Some(1.0)]),
         ] {
-            let c = Changes { ids: vec![vec![10, 11, 12], vec![5, 5, 6]], old, new, kind };
+            // the ids are in the order of first use, as read_changes makes them
+            let value_ids = if kind == Value::Member { strs(&["p", "q", "r"]) } else { Vec::new() };
+            let c = Changes { cols: vec![vec![0, 1, 2], vec![0, 0, 1]], ids: vec![strs(&["a", "b", "c"]), strs(&["x", "y"])], old, new, value_ids, kind };
             let buf = write_changes(&["d3".into(), "d8".into()], &c, &[]).unwrap();
             assert_eq!(read_changes(Bytes::from(buf)).unwrap(), (vec!["d3".to_string(), "d8".to_string()], c));
         }

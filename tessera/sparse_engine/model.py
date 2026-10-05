@@ -339,12 +339,7 @@ class Model:
     _plan: list[Step] | None = None
     _levels: list[list[Step]] = field(default_factory=list)  # 依存関係の段ごとの計画（全体の再計算用）
     _pending: Pending = field(default_factory=Pending)  # 前回の再計算のあとにためている変更
-    _next_id: int = 1  # 次に振る ID（軸、メンバー、Metric で共通。消した ID は再利用しない）
-    # The external UUIDs. ids: UUID -> handle (the internal ID), _uuids: handle -> UUID. Each dimension,
-    # member, property, and Metric has one. tombstones: the UUIDs of removed objects. They are not used again
-    ids: dict[str, int] = field(default_factory=dict)
-    _uuids: dict[int, str] = field(default_factory=dict)
-    tombstones: set[str] = field(default_factory=set)
+    tombstones: set[str] = field(default_factory=set)  # The UUIDs of removed objects. They are not used again
     journal: Any = None  # 記録先（journal.FileJournal など）。None なら記録しない
     seq: int = 0  # 確定した最後のトランザクションの通し番号
     last_record: dict | None = None  # 最後に確定したトランザクションの記録
@@ -474,8 +469,7 @@ class Model:
         other._state = {i: st.fork(self.engine.share) for i, st in self._state.items()}
         # 計算計画は定義だけに依存するので、そのまま引き継ぐ
         other._plan, other._levels = self._plan, self._levels
-        other._next_id = self._next_id
-        other.ids, other._uuids, other.tombstones = dict(self.ids), dict(self._uuids), set(self.tombstones)
+        other.tombstones = set(self.tombstones)
         other.seq = self.seq
         other._pending = Pending(full=False)
         return other
@@ -575,9 +569,6 @@ class Model:
         d = Dimension(name, members, ordered=ordered, id=id)
         self.dimensions[id] = d
         self._dim_ids[name] = id
-        self._bind(id, self._new_id())
-        for u in d.ids:
-            self._bind(u, self._new_id())
         return d
 
     @_operation
@@ -603,31 +594,10 @@ class Model:
 
     # ------------------------------------------------ UUIDs
 
-    def _resolve(self, id: str | None, exists) -> tuple[str, int | None]:
-        """Return (UUID, handle). The handle is None if the UUID is new (a None id makes a UUIDv7).
-        exists(handle) tells if the handle is an object of the kind that the caller defines. If the UUID is
-        a tombstone, or it belongs to an object of a different kind, raise DuplicateId."""
-        if id is None:
-            return uuid7(), None
-        if not isinstance(id, str) or not id:
-            raise ValueError(f"ID は空でない文字列: {id!r}")
-        if id in self.tombstones:
-            raise DuplicateId(f"ID {id} は消したオブジェクトのもの（再利用できない）")
-        handle = self.ids.get(id)
-        if handle is not None and not exists(handle):
-            raise DuplicateId(f"ID {id} は別の種類のオブジェクトのもの")
-        return id, handle
-
-    def _bind(self, id: str, handle: int) -> None:
-        self.ids[id] = handle
-        self._uuids[handle] = id
-
-    def _forget(self, handle: int) -> None:
-        """Make the UUID of a removed object a tombstone."""
-        id = self._uuids.pop(handle, None)
-        if id is not None:
-            del self.ids[id]
-            self.tombstones.add(id)
+    def _has_id(self, id: str) -> bool:
+        """Tell if a dimension, member, property or Metric has this id."""
+        return (id in self.metrics or id in self.dimensions
+                or any(id in d._by_id or id in d.properties for d in self.dimensions.values()))
 
     def dimension_id(self, name: str) -> str:
         return self.dimension(name).id
@@ -637,16 +607,6 @@ class Model:
 
     def property_id(self, dim: str, prop: str) -> str:
         return self.dimension(dim).prop_id(prop)
-
-    def _new_id(self) -> int:
-        """The handle of a dimension, member, property or Metric: an integer that is unique in the model. Only
-        the journal and the storage formats use it (through Model.ids).
-
-        A copy (fork) continues from the same number, so objects added separately to the copy and to the
-        original can get the same handle (to merge the changes of a copy, give the handles again).
-        """
-        self._next_id += 1
-        return self._next_id - 1
 
     @_operation
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str], *,
@@ -665,8 +625,6 @@ class Model:
         if old is None:
             self._check_prop_name(d, prop)
         d.add_property(id, prop, t, {_member(d, k): _member(t, v) for k, v in mapping.items()})
-        if old is None:
-            self._bind(id, self._new_id())
         self.engine.dimension_changed(self, d.id)  # the engine replaces the mapping that it holds
         for m in self.metrics.values():
             if m.written is not None and uses_property(m.written, d.id, id):
@@ -721,7 +679,7 @@ class Model:
             raise DuplicateId(f"ID {id} は消したオブジェクトのもの（再利用できない）")
         old = objects.get(id)
         if old is None:
-            if id in self.ids:
+            if self._has_id(id):
                 raise DuplicateId(f"ID {id} は別の種類のオブジェクトのもの")
             if name in names:
                 raise ValueError(f"{shown or name}: 同じ名前の{what}が別の ID にある")
@@ -729,14 +687,13 @@ class Model:
 
     def _register(self, m: Metric, old: Metric | None) -> None:
         """Put the new definition m in the catalog. If the id names a Metric with a different name, rename it
-        first. A new Metric also gets a handle (only the journal and the storage formats use it)."""
+        first."""
         if old is not None and old.name != m.name:
             self.metrics[m.id] = old  # rename the old definition (the override input follows it)
             self.rename_metric(old.name, m.name)
         self.metrics[m.id] = m
         if old is None:
             self._metric_ids[m.name] = m.id
-            self._bind(m.id, self._new_id())
 
     @_operation
     def add_input(self, name: str, dims, cells: Mapping[Key, float | bool] | None = None,
@@ -817,8 +774,7 @@ class Model:
     @_operation
     def remove_metric(self, name: str) -> None:
         """Remove the Metric. Only a Metric that no formula refers to can go (no other value changes).
-        The hidden override input of an overridable Metric goes with it. The handle is not used again, and
-        the UUID becomes a tombstone."""
+        The hidden override input of an overridable Metric goes with it. The UUIDs become tombstones."""
         m = self._own_metric(name)
         users = sorted(x.name for x in self.metrics.values()
                        if x.written is not None and x.id != m.id and references_metric(x.written, m.id))
@@ -826,7 +782,7 @@ class Model:
             raise ValueError(f"{m.name} は {', '.join(users)} の式が参照しているので消せない")
         gone = {m.id} | ({m.override} if m.override is not None else set())
         for i in gone:
-            self._forget(self.ids[i])
+            self.tombstones.add(i)
             del self._metric_ids[self.metrics[i].name]
             del self.metrics[i]
             self._state.pop(i, None)
@@ -1008,8 +964,10 @@ class Model:
             if (found := target.find_member(value)) is None:
                 raise ValueError(f"{d.name}.{d.property_names[pid]}: {target.name} に {value!r} がない")
             props[pid] = found
-        id, handle = self._resolve(id, lambda h: self._uuids[h] in d._by_id)
-        if handle is not None:
+        if id is None and member in d._index:
+            raise ValueError(f"{d.name}: メンバー {member!r} はすでにある")
+        id, old = self._same_object("メンバー", member, id, d._by_id, d._index, f"{d.name}.{member}")
+        if old is not None:
             if d.member_of(id) != member:
                 self.rename_member(d.id, id, member)
             if at is not None:
@@ -1027,7 +985,6 @@ class Model:
                 d.remove_member(id)
                 self.engine.dimension_changed(self, d.id)
                 raise
-        self._bind(id, self._new_id())
         for pid, value in props.items():
             d.set_property_value(pid, id, value, self.dimensions[d.properties[pid][0]])
         self._member_added(d.id)
@@ -1133,7 +1090,7 @@ class Model:
         #    そのメンバーのセルが実際にある Metric の消えるセルと、計算し直す範囲だけにする
         todo = self.engine.planner.removal_regions(self.compiled(), self._values, self, dim, member)
         self.slice_log._flush()  # the log can hold member numbers: make them ids before the numbers close up
-        self._forget(self.ids[member])
+        self.tombstones.add(member)
         self._drop_member(dim, member)
         self._pending.forced.update(todo)  # 範囲を必ず計算し直す（下流への伝え方は入力の変更と同じ）
         self.recalc()

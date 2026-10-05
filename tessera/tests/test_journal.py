@@ -37,12 +37,12 @@ def definitions(m: Model) -> dict:
             for d in m.dimensions.values()}
     metrics = {x.name: (x.id, x.dims, x.kind, None if x.written is None else to_formula(x.written, m),
                         x.partition, x.overridable) for x in m.metrics.values()}
-    return {"dims": dims, "metrics": metrics, "next_id": m._next_id}
+    return {"dims": dims, "metrics": metrics}
 
 
 def check_same_state(test, a: Model, b: Model) -> None:
     test.assertEqual(definitions(a), definitions(b))
-    test.assertEqual((a.ids, a.tombstones), (b.ids, b.tombstones))
+    test.assertEqual(a.tombstones, b.tombstones)
     sa, sb = snapshot(a), snapshot(b)
     for name in sa:
         test.assertTrue(same(sa[name], sb[name]), f"{name}\n{sa[name]}\n{sb[name]}")
@@ -90,13 +90,12 @@ class Transactions(unittest.TestCase):
         rec = txn.record
         self.assertEqual((rec["user"], rec["reason"]), ("alice", "値上げ"))
         self.assertEqual([op["op"] for op in rec["ops"]], ["set_cell", "spread"])  # 按分の中の set_cell は記録しない
-        cells = {c["metric"]: c["rows"] for c in rec["changes"]["cells"]}  # keyed by the Metric handle
+        cells = {c["metric"]: c["rows"] for c in rec["changes"]["cells"]}  # keyed by the Metric id
         product = self.m.dimension("Product")
-        handle = lambda d, x: self.m.ids[d.id_of(x)]  # the record names a member by its handle
-        self.assertEqual(cells[self.m.ids[self.m.metric("Price").id]], [[[handle(product, "A")], 10.0, 12.0]])
+        self.assertEqual(cells[self.m.metric("Price").id], [[[product.id_of("A")], 10.0, 12.0]])
         month = self.m.dimension("Month")
-        self.assertEqual(cells[self.m.ids[self.m.metric("Cost").id]],
-                         [[[handle(product, "B"), handle(month, "Mar")], 30.0, 60.0]])
+        self.assertEqual(cells[self.m.metric("Cost").id],
+                         [[[product.id_of("B"), month.id_of("Mar")], 30.0, 60.0]])
         self.assertNotIn("metrics", rec["changes"])
 
     def test_nested_transactions_join_the_outer_one(self):
@@ -106,6 +105,21 @@ class Transactions(unittest.TestCase):
             self.assertIs(inner, outer)
             self.m.set_cell("Price", 2, Product="B")
         self.assertEqual(len(outer.record["ops"]), 2)
+
+    def test_changes_of_a_fork_apply_to_the_original(self):
+        """Objects added to a fork and to the original do not collide: the record of the fork applies."""
+        from sparse_engine.journal import apply, changes
+        from .test_ids import all_ids
+        m = self.m
+        base, fork = m.fork(), m.fork()
+        fork.add_member("Product", "F")
+        fork.add_input("Y", ["Product"], {("F",): 2})
+        m.add_member("Product", "E")
+        m.add_input("X", ["Product"], {("E",): 1})
+        apply(m, {"changes": changes(base, fork)})
+        self.assertEqual(m.dimension("Product").members, ["A", "B", "C", "D", "E", "F"])
+        self.assertEqual((m.get("X", Product="E"), m.get("Y", Product="F")), (1, 2))
+        self.assertEqual(len(set(all_ids(m))), len(all_ids(m)))
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
@@ -147,7 +161,7 @@ class Journal(JournalCase, unittest.TestCase):
             m.rename_member("Product", "tmp", "B")
         self.assertNotIn("metrics", txn.record["changes"])  # the formulas hold ids, so no definition changes
         self.assertEqual(sorted(txn.record["changes"]["members"][0]["renamed"]),
-                         sorted([[m.ids[m.member_id("Product", x)], x] for x in "AB"]))
+                         sorted([[m.member_id("Product", x), x] for x in "AB"]))
         reopened = self.reopen()
         check_same_state(self, m, reopened)
         self.assertEqual(to_formula(reopened.metric("JanCost").written, reopened), 'Cost[SELECT: Month."January"]')
@@ -161,14 +175,14 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.move_member("Product", "D", 0)
         # 並び替えだけなら、メンバーの変更（構造の変更）でなく並び順として記録する
         self.assertEqual(moved.record["changes"]["member_order"],
-                         [{"dim": self.m.ids[product.id], "order": [self.m.ids[product.id_of(x)] for x in "DABC"]}])
+                         [{"dim": product.id, "order": [product.id_of(x) for x in "DABC"]}])
         self.assertNotIn("members", moved.record["changes"])
         with self.m.transaction() as txn:
             self.m.add_member("Product", "E", at=1, Category="Y")
             self.m.remove_member("Product", "B")
             self.m.set_cell("Price", 3, Product="E")
         self.assertEqual(txn.record["changes"]["member_order"],
-                         [{"dim": self.m.ids[product.id], "order": [self.m.ids[product.id_of(x)] for x in "DEAC"]}])
+                         [{"dim": product.id, "order": [product.id_of(x) for x in "DEAC"]}])
         with self.m.transaction() as appended:
             self.m.add_member("Product", "F")  # 最後に足すだけなら、並び順は記録しない
         self.assertNotIn("member_order", appended.record["changes"])
@@ -400,6 +414,51 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual([(h["user"], h["old"], h["new"]) for h in history],
                          [("alice", 10.0, 12.0), ("bob", 12.0, 30.0)])
 
+    def test_cell_history_of_a_member_type_metric_shows_names(self):
+        m = self.m
+        m.add_input("Lead", ["Product"], {("A",): "e1"}, kind="member:Employee")
+        m.set_cell("Lead", "e2", Product="A")
+        (c,) = m.last_record["changes"]["cells"]
+        self.assertEqual(c["rows"], [[[m.member_id("Product", "A")], m.member_id("Employee", "e1"),
+                                      m.member_id("Employee", "e2")]])  # a member-type value is a member id
+        m.rename_member("Employee", "e2", "Eve")
+        history = self.journals.journal().cell_history(m, "Lead", Product="A")
+        self.assertEqual([(h["old"], h["new"]) for h in history], [(None, "e1"), ("e1", "Eve")])
+
+    def test_renames_and_a_formula_in_one_transaction_replay(self):
+        """A replay defines the objects by id. The order of the renames in a record does not matter: two Metrics
+        change names with each other, and a formula uses the new names of a dimension, a property and a member."""
+        m = self.m
+        with m.transaction() as txn:
+            m.rename_metric("Price", "tmp")
+            m.rename_metric("Plus1", "Price")
+            m.rename_metric("tmp", "Plus1")
+            m.rename_dimension("Product", "Item")
+            m.rename_property("Item", "Category", "Group")
+            m.rename_member("Item", "A", "Alpha")
+            m.add_formula("Twice", ["Item"], "Price * 2")
+            m.add_formula("AlphaCost", ["Month"], 'Cost[SELECT: Item."Alpha"]')
+            m.add_formula("CatPrice", ["Category"], "Plus1[BY SUM: Item.Group]")
+        ch = txn.record["changes"]
+        item = m.dimension("Item")
+        self.assertEqual(ch["dimensions_renamed"], [[item.id, "Item"]])
+        self.assertEqual([(p["id"], p["name"]) for p in ch["properties"]], [(m.property_id("Item", "Group"), "Group")])
+        self.assertEqual(ch["members"], [{"dim": item.id, "removed": [], "added": [],
+                                          "renamed": [[item.id_of("Alpha"), "Alpha"]]}])
+        defs = {d["name"]: d for d in ch["metrics"]}
+        self.assertEqual(defs["Twice"]["formula"],  # the formula is the id AST as a JSON tree, not text
+                         {"node": "BinOp", "op": "*", "left": {"node": "Ref", "name": m.metric("Price").id},
+                          "right": {"node": "Const", "value": 2.0}})
+        self.assertEqual(defs["CatPrice"]["formula"]["dim"], item.id)
+        self.assertEqual(defs["CatPrice"]["formula"]["prop"], m.property_id("Item", "Group"))
+        self.assertEqual(defs["AlphaCost"]["formula"]["member"], item.id_of("Alpha"))
+        reopened = self.reopen()
+        check_same_state(self, m, reopened)
+        self.assertEqual(reopened.get("Twice", Item="Alpha"), 22)  # (10 + 1) * 2
+        self.assertEqual(reopened.get("AlphaCost", Month="Jan"), 7)
+        self.assertEqual(reopened.get("CatPrice", Category="X"), 30)
+        self.assertEqual(to_formula(reopened.metric("CatPrice").written, reopened), "Plus1[BY SUM: Item.Group]")
+
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class RustTransactions(Transactions):
@@ -504,9 +563,10 @@ class Blocks(unittest.TestCase):
             self.assertNotIsInstance(c["rows"], list)
             self.assertEqual(len(c["rows"]), 1499)  # k2 はもともと 2
             k, t = m.dimension("K"), m.dimension("T")
-            self.assertEqual(c["dims"], [m.ids[k.id], m.ids[t.id]])  # the record names a dimension by its handle
-            h = lambda d, i: m.ids[d.ids[i]]  # a member by its handle
-            self.assertEqual(sorted(c["rows"])[:2], [[[h(k, 0), h(t, 0)], 0.0, 2.0], [[h(k, 1), h(t, 0)], 1.0, 2.0]])
+            self.assertEqual(c["dims"], [k.id, t.id])  # the record names a dimension and a member by its id
+            rows = list(c["rows"])
+            self.assertIn([[k.ids[0], t.ids[0]], 0.0, 2.0], rows)
+            self.assertIn([[k.ids[1], t.ids[0]], 1.0, 2.0], rows)
             for e in (ReferenceEngine, RustEngine):  # ファイルには行として書く
                 check_same_state(self, m, FileJournal(tmp).open(e()))
             history = FileJournal(tmp).cell_history(m, "V", K="k5", T="t0")
@@ -545,7 +605,7 @@ class CellFiles(unittest.TestCase):
                 m.spread("V", 24_000.0, how="even")
             m.set_cell("V", 1.0, K="k7", T="t1")  # 少ないセルは、これまでどおり行に書く
             (f,) = (Path(tmp) / "cells").glob("*.parquet")
-            self.assertTrue(f.name.endswith(f"-{m.ids[m.metric('V').id]}.parquet"))
+            self.assertTrue(f.name.endswith(f"-{m.metric('V').id}.parquet"))
             lines = FileJournal(tmp).log_path.read_text().splitlines()
             self.assertLess(len(lines[0]), 1000)  # 記録の行には、ファイルの名前とハッシュだけ
             self.assertIn('"cells":[', lines[1])

@@ -110,9 +110,9 @@ def bench_bulk(kind: str) -> None:
     for n in (1_000, 10_000, 100_000, 1_000_000):
         t = Target(kind)
         j = t.make()
-        rows = [[[i // 1000, i % 1000, 7], float(i), float(i + 1)] for i in range(n)]
+        rows = [[[f"k{i // 1000}", f"t{i % 1000}", "v7"], float(i), float(i + 1)] for i in range(n)]
         rec = {"v": LOG_VERSION, "at": now(), "user": "etl", "reason": None, "client_op_id": None, "ops": [],
-               "changes": {"next_id": 1, "cells": [{"metric": 1, "rows": rows}]}}
+               "changes": {"cells": [{"metric": "m-bulk", "rows": rows}]}}
         s = time.perf_counter()
         j.append(rec)
         line = f"  {kind:4s} {n:>9,} セルの確定: {1e3 * (time.perf_counter() - s):,.0f} ms"

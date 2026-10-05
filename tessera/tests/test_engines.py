@@ -17,9 +17,6 @@ def build_with(engine) -> Model:
     m = build()
     fresh = Model(engine=engine)
     fresh.dimensions, fresh._dim_ids = m.dimensions, m._dim_ids
-    fresh._next_id = m._next_id  # 軸のメンバーに振った ID と重ならないように、続きから振る
-    fresh.ids = {u: h for u, h in m.ids.items() if u not in m.metrics}  # the dimensions, members, and properties only
-    fresh._uuids = {h: u for u, h in fresh.ids.items()}
     formulas = [x for x in m.metrics.values() if x.formula is not None]
     for x in m.metrics.values():
         if x.formula is None:

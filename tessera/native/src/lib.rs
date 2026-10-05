@@ -9,7 +9,7 @@ use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyIterator, PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyIterator, PyList, PyString, PyTuple};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -788,39 +788,39 @@ impl Core {
         }))
     }
 
-    /// 変更の塊を格納データにまとめて書き込む（記録の再生）。dim_ids は宣言した軸の順に、軸ごとの
-    /// メンバーの位置から ID への表。value_ids はメンバー型の値の軸の同じ表（ほかの型なら None）。
-    /// 今の軸にない ID のセルは飛ばす（そのトランザクションで消したメンバーのセル）。
+    /// Write a block of changes to the stored data at one time (journal replay). dim_ids is the table of
+    /// position -> member id of each dimension, in the declared order of the dimensions. value_ids is the same
+    /// table of the dimension of a member-type value (None for the other kinds). A cell of an id that is not in
+    /// the dimension now (a member that the transaction removed) is skipped.
     #[pyo3(signature = (store, block, dim_ids, value_ids))]
     fn apply_block(
         &self,
         py: Python<'_>,
         store: &Bound<'_, StoreHandle>,
         block: &CellBlock,
-        dim_ids: Vec<Vec<i64>>,
-        value_ids: Option<Vec<i64>>,
+        dim_ids: Vec<Vec<String>>,
+        value_ids: Option<Vec<String>>,
     ) -> PyResult<()> {
         let mut s = read(store)?;
         let c = &block.c;
-        if c.ids.len() != s.metric_dims.len() || dim_ids.len() != c.ids.len() {
+        if c.cols.len() != s.metric_dims.len() || dim_ids.len() != c.cols.len() {
             return Ok(()); // 軸の数が違う（Metric を定義し直した）。名前で比べる経路と同じく飛ばす
         }
         let s = py.detach(move || -> Result<Arc<Store>, String> {
-            let pos = |ids: &[i64]| -> FxHashMap<i64, u32> { ids.iter().enumerate().map(|(p, &i)| (i, p as u32)).collect() };
-            let maps: Vec<FxHashMap<i64, u32>> = dim_ids.iter().map(|x| pos(x)).collect();
-            let vmap = value_ids.as_deref().map(pos);
+            let maps: Vec<Vec<Option<u32>>> = c.ids.iter().zip(&dim_ids).map(|(used, table)| positions(used, table)).collect();
+            let vmap = value_ids.as_deref().map(|table| positions(&c.value_ids, table));
             let mut cols: Vec<Vec<u32>> = vec![Vec::with_capacity(c.len()); maps.len()];
             let mut values = Vec::with_capacity(c.len());
             'row: for r in 0..c.len() {
                 let mut key = Vec::with_capacity(maps.len());
-                for (m, ids) in maps.iter().zip(&c.ids) {
-                    match m.get(&ids[r]) {
-                        Some(&p) => key.push(p),
+                for (m, col) in maps.iter().zip(&c.cols) {
+                    match m[col[r] as usize] {
+                        Some(p) => key.push(p),
                         None => continue 'row,
                     }
                 }
                 let v = match (c.new[r], &vmap) {
-                    (Some(v), Some(vm)) => Some(*vm.get(&(v as i64)).ok_or_else(|| format!("値のメンバーの ID {} が軸にない", v as i64))? as f64),
+                    (Some(v), Some(vm)) => Some(vm[v as usize].ok_or_else(|| format!("値のメンバーの ID {} が軸にない", c.value_id(v)))? as f64),
                     (v, _) => v,
                 };
                 for (col, p) in cols.iter_mut().zip(key) {
@@ -1155,55 +1155,105 @@ impl Diff {
         (0..self.new.len()).map(|r| (self.cols.iter().map(|c| c[r]).collect(), self.old[r], self.new[r])).collect()
     }
 
-    /// メンバー番号を ID に直した変更の塊にする。dim_ids は軸ごとの位置から ID への表、value_ids は
-    /// メンバー型の値の軸の表（ほかの型なら None）、value は値の種類（number、boolean、member）。
+    /// Make the block of changes, with member ids in place of the member numbers. dim_ids is the table of
+    /// position -> member id of each dimension, value_ids the table of the dimension of a member-type value
+    /// (None for the other kinds), value the kind of the value (number, boolean, member). The block keeps only
+    /// the ids that it uses.
     #[pyo3(signature = (dim_ids, value_ids, value))]
-    fn to_block(&self, py: Python<'_>, dim_ids: Vec<Vec<i64>>, value_ids: Option<Vec<i64>>, value: &str) -> PyResult<CellBlock> {
+    fn to_block(&self, py: Python<'_>, dim_ids: Vec<Vec<String>>, value_ids: Option<Vec<String>>, value: &str) -> PyResult<CellBlock> {
         let kind = pq::Value::parse(value).map_err(err)?;
         if dim_ids.len() != self.cols.len() {
             return Err(err("軸の表の数が軸の数と合わない".into()));
         }
         let c = py
             .detach(|| -> Result<pq::Changes, String> {
-                let at = |ids: &[i64], p: u32| ids.get(p as usize).copied().ok_or_else(|| format!("メンバー番号 {p} の ID がない"));
-                let ids = self
-                    .cols
-                    .iter()
-                    .zip(&dim_ids)
-                    .map(|(c, t)| c.iter().map(|&p| at(t, p)).collect::<Result<Vec<i64>, String>>())
-                    .collect::<Result<_, _>>()?;
-                let conv = |xs: &[Option<f64>]| -> Result<Vec<Option<f64>>, String> {
-                    match &value_ids {
-                        None => Ok(xs.to_vec()),
-                        Some(t) => xs.iter().map(|v| v.map(|x| at(t, x as u32).map(|i| i as f64)).transpose()).collect(),
+                let (mut ids, mut cols) = (Vec::with_capacity(dim_ids.len()), Vec::with_capacity(dim_ids.len()));
+                for (col, table) in self.cols.iter().zip(&dim_ids) {
+                    let (used, col) = compact(table, col.iter().copied())?;
+                    ids.push(used);
+                    cols.push(col);
+                }
+                let (value_ids, old, new) = match &value_ids {
+                    None => (Vec::new(), self.old.clone(), self.new.clone()),
+                    Some(table) => {
+                        let present = self.old.iter().chain(&self.new).flatten().map(|&x| x as u32);
+                        let (used, index) = compact(table, present)?;
+                        let mut next = index.into_iter();
+                        let mut conv = |xs: &[Option<f64>]| xs.iter().map(|v| v.map(|_| next.next().unwrap() as f64)).collect::<Vec<_>>();
+                        let (old, new) = (conv(&self.old), conv(&self.new));
+                        (used, old, new)
                     }
                 };
-                Ok(pq::Changes { ids, old: conv(&self.old)?, new: conv(&self.new)?, kind })
+                Ok(pq::Changes { cols, ids, old, new, value_ids, kind })
             })
             .map_err(err)?;
         Ok(CellBlock::new(c))
     }
 }
 
-/// 1 つの入力 Metric の、書き換えたセルの塊（座標はメンバーの ID）。記録の "rows" に、行の列の
-/// 代わりに入る。行の列と同じく、長さを持ち、[座標の ID の列, 変更前, 変更後] を順に返す。
+/// Keep only the ids of table that positions use: (the used ids in the order of first use, the index in them of
+/// each position). An error names a position that the table does not have.
+fn compact(table: &[String], positions: impl Iterator<Item = u32>) -> Result<(Vec<String>, Vec<u32>), String> {
+    let mut remap = vec![u32::MAX; table.len()];
+    let (mut used, mut out) = (Vec::new(), Vec::new());
+    for p in positions {
+        let slot = remap.get_mut(p as usize).ok_or_else(|| format!("メンバー番号 {p} の ID がない"))?;
+        if *slot == u32::MAX {
+            *slot = used.len() as u32;
+            used.push(table[p as usize].clone());
+        }
+        out.push(*slot);
+    }
+    Ok((used, out))
+}
+
+/// The position in table of each id of used (None if table does not have the id).
+fn positions(used: &[String], table: &[String]) -> Vec<Option<u32>> {
+    let index: FxHashMap<&str, u32> = table.iter().enumerate().map(|(p, s)| (s.as_str(), p as u32)).collect();
+    used.iter().map(|s| index.get(s.as_str()).copied()).collect()
+}
+
+/// The text form of a PostgreSQL array of ids. Each id is quoted, so an id can hold any character.
+fn array_literal(ids: &[&str]) -> String {
+    let quoted: Vec<String> = ids.iter().map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))).collect();
+    format!("{{{}}}", quoted.join(","))
+}
+
+/// The changed cells of one input Metric as a block (the coordinates are member ids). It goes into the "rows" of
+/// a record in place of a list of rows. Like a list of rows, it has a length and gives [the ids of the
+/// coordinates, the old value, the new value] in sequence.
 #[pyclass(frozen, sequence)]
 struct CellBlock {
     c: pq::Changes,
-    keys: OnceLock<FxHashSet<Vec<i64>>>, // 座標の集まり（重なりを調べるときに作る）
+    keys: OnceLock<FxHashSet<Vec<u32>>>, // the coordinates as indexes in the tables of this block (made to look for overlaps)
 }
+
+type Indexes<'a> = Vec<FxHashMap<&'a str, u32>>;
 
 impl CellBlock {
     fn new(c: pq::Changes) -> CellBlock {
         CellBlock { c, keys: OnceLock::new() }
     }
 
-    fn key(&self, r: usize) -> Vec<i64> {
-        self.c.ids.iter().map(|x| x[r]).collect()
+    fn key(&self, r: usize) -> Vec<u32> {
+        self.c.cols.iter().map(|x| x[r]).collect()
     }
 
-    fn keys(&self) -> &FxHashSet<Vec<i64>> {
+    fn keys(&self) -> &FxHashSet<Vec<u32>> {
         self.keys.get_or_init(|| (0..self.c.len()).map(|r| self.key(r)).collect())
+    }
+
+    /// The index of each id in the tables of this block.
+    fn indexes(&self) -> Indexes<'_> {
+        self.c.ids.iter().map(|t| t.iter().enumerate().map(|(p, s)| (s.as_str(), p as u32)).collect()).collect()
+    }
+
+    /// The coordinates (member ids) as indexes in the tables. None if an id is not in this block: no row has the cell.
+    fn index_of(indexes: &Indexes<'_>, key: &[String]) -> Option<Vec<u32>> {
+        if key.len() != indexes.len() {
+            return None;
+        }
+        key.iter().zip(indexes).map(|(k, ix)| ix.get(k.as_str()).copied()).collect()
     }
 
     fn value<'py>(&self, py: Python<'py>, v: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
@@ -1211,7 +1261,7 @@ impl CellBlock {
             (None, _) => py.None().into_bound(py),
             (Some(x), pq::Value::Num) => x.into_pyobject(py)?.into_any(),
             (Some(x), pq::Value::Bool) => PyBool::new(py, x != 0.0).to_owned().into_any(),
-            (Some(x), pq::Value::Member) => (x as i64).into_pyobject(py)?.into_any(),
+            (Some(x), pq::Value::Member) => PyString::new(py, self.c.value_id(x)).into_any(),
         })
     }
 }
@@ -1236,18 +1286,19 @@ impl CellBlock {
         self.c.len()
     }
 
-    /// 座標の軸の数。
+    /// The number of dimensions of the coordinates.
     #[getter]
     fn width(&self) -> usize {
-        self.c.ids.len()
+        self.c.cols.len()
     }
 
-    /// 行の列 [座標の ID の列, 変更前, 変更後]（メンバー型の値は ID、真偽値は bool）。
+    /// The rows [the ids of the coordinates, the old value, the new value] (a member-type value is an id, a
+    /// boolean is bool).
     fn rows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let rows = PyList::empty(py);
         for r in 0..self.c.len() {
             let row = PyList::new(py, [
-                PyList::new(py, self.key(r))?.into_any(),
+                PyList::new(py, self.c.key(r))?.into_any(),
                 self.value(py, self.c.old[r])?,
                 self.value(py, self.c.new[r])?,
             ])?;
@@ -1261,68 +1312,79 @@ impl CellBlock {
     }
 
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let rows = self.rows(py)?;
         if let Ok(b) = other.cast::<CellBlock>() {
-            return Ok(self.c == b.get().c);
+            return rows.eq(b.get().rows(py)?);
         }
-        self.rows(py)?.eq(other)
+        rows.eq(other)
     }
 
-    /// 座標が key（座標の ID の列）の行の [変更前, 変更後] の列（履歴を引くときに、全行を Python にしない）。
-    fn find<'py>(&self, py: Python<'py>, key: Vec<i64>) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
-        if key.len() != self.c.ids.len() {
-            return Ok(Vec::new());
-        }
-        let rows: Vec<usize> = py.detach(|| (0..self.c.len()).filter(|&r| self.c.ids.iter().zip(&key).all(|(c, k)| c[r] == *k)).collect());
+    /// The [old value, new value] of the rows with the coordinates key (the ids). A history lookup does not make
+    /// all rows Python objects.
+    fn find<'py>(&self, py: Python<'py>, key: Vec<String>) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+        let rows: Vec<usize> = py.detach(|| {
+            let Some(k) = Self::index_of(&self.indexes(), &key) else { return Vec::new() };
+            (0..self.c.len()).filter(|&r| self.c.cols.iter().zip(&k).all(|(c, k)| c[r] == *k)).collect()
+        });
         rows.into_iter().map(|r| Ok((self.value(py, self.c.old[r])?, self.value(py, self.c.new[r])?))).collect()
     }
 
-    /// keys（座標の ID の列の列）のどれかを含むか。
-    fn contains_any(&self, py: Python<'_>, keys: Vec<Vec<i64>>) -> bool {
+    /// Tell if the block has one of the cells keys (lists of coordinate ids).
+    fn contains_any(&self, py: Python<'_>, keys: Vec<Vec<String>>) -> bool {
         py.detach(|| {
-            let set = self.keys();
-            keys.iter().any(|k| set.contains(k))
+            let (ix, set) = (self.indexes(), self.keys());
+            keys.iter().any(|k| Self::index_of(&ix, k).is_some_and(|k| set.contains(&k)))
         })
     }
 
-    /// other と同じセルを含むか。
+    /// Tell if the block has a cell that other also has.
     fn overlaps(&self, py: Python<'_>, other: &CellBlock) -> bool {
         py.detach(|| {
             let (small, large) = if self.c.len() <= other.c.len() { (self, other) } else { (other, self) };
+            if small.c.cols.len() != large.c.cols.len() {
+                return false;
+            }
             let set = large.keys();
-            (0..small.c.len()).any(|r| set.contains(&small.key(r)))
+            let maps: Vec<Vec<Option<u32>>> = small.c.ids.iter().zip(&large.c.ids).map(|(used, table)| positions(used, table)).collect();
+            (0..small.c.len()).any(|r| {
+                let key: Option<Vec<u32>> = small.c.cols.iter().zip(&maps).map(|(c, m)| m[c[r] as usize]).collect();
+                key.is_some_and(|k| set.contains(&k))
+            })
         })
     }
 
-    /// Parquet のバイト列にする（列は names の軸、old、new）。
+    /// Write the block to Parquet bytes (the columns are the dimensions names, old and new).
     #[pyo3(signature = (names, meta))]
     fn to_parquet<'py>(&self, py: Python<'py>, names: Vec<String>, meta: Vec<(String, String)>) -> PyResult<Bound<'py, PyBytes>> {
         let buf = py.detach(|| pq::write_changes(&names, &self.c, &meta)).map_err(err)?;
         Ok(PyBytes::new(py, &buf))
     }
 
-    /// to_parquet で書いたバイト列から作る。
+    /// Make the block from bytes that to_parquet wrote.
     #[staticmethod]
     fn from_parquet(py: Python<'_>, data: PyBackedBytes) -> PyResult<CellBlock> {
         let (_, c) = py.detach(move || pq::read_changes(Bytes::from_owner(data))).map_err(err)?;
         Ok(CellBlock::new(c))
     }
 
-    /// 行の列 [座標の ID の列, 変更前, 変更後] から作る。値の型は、すべて真偽値なら boolean、
-    /// すべて整数ならメンバーの ID、ほかは number とみなす。
+    /// Make the block from rows [the ids of the coordinates, the old value, the new value]. The kind of the value
+    /// is member if the values are ids (strings), boolean if they are all bool, and number otherwise.
     #[staticmethod]
     fn from_rows(rows: &Bound<'_, PyAny>) -> PyResult<CellBlock> {
-        let mut ids: Vec<Vec<i64>> = Vec::new();
+        let mut tables: Vec<pq::Interner> = Vec::new();
+        let mut cols: Vec<Vec<u32>> = Vec::new();
+        let mut values = pq::Interner::default();
         let (mut old, mut new) = (Vec::new(), Vec::new());
-        let (mut floats, mut bools, mut ints) = (false, false, false);
+        let (mut floats, mut bools, mut strs) = (false, false, false);
         let mut value = |v: Bound<'_, PyAny>| -> PyResult<Option<f64>> {
             if v.is_none() {
                 Ok(None)
             } else if let Ok(b) = v.cast::<PyBool>() {
                 bools = true;
                 Ok(Some(if b.is_true() { 1.0 } else { 0.0 }))
-            } else if v.cast::<PyInt>().is_ok() {
-                ints = true;
-                Ok(Some(v.extract::<i64>()? as f64))
+            } else if let Ok(s) = v.cast::<PyString>() {
+                strs = true;
+                Ok(Some(values.intern(s.to_str()?) as f64))
             } else {
                 floats = true;
                 Ok(Some(v.extract::<f64>()?))
@@ -1330,49 +1392,59 @@ impl CellBlock {
         };
         for (r, row) in rows.try_iter()?.enumerate() {
             let row = row?;
-            let key: Vec<i64> = row.get_item(0)?.extract()?;
+            let key: Vec<String> = row.get_item(0)?.extract()?;
             if r == 0 {
-                ids = vec![Vec::new(); key.len()];
-            } else if key.len() != ids.len() {
+                tables = key.iter().map(|_| pq::Interner::default()).collect();
+                cols = vec![Vec::new(); key.len()];
+            } else if key.len() != cols.len() {
                 return Err(err("行ごとに軸の数が違う".into()));
             }
-            for (col, k) in ids.iter_mut().zip(key) {
-                col.push(k);
+            for ((col, t), k) in cols.iter_mut().zip(&mut tables).zip(&key) {
+                col.push(t.intern(k));
             }
             old.push(value(row.get_item(1)?)?);
             new.push(value(row.get_item(2)?)?);
         }
-        let kind = if floats || (bools && ints) {
-            pq::Value::Num
-        } else if bools {
-            pq::Value::Bool
-        } else if ints {
+        if strs && (floats || bools) {
+            return Err(err("値の種類が混ざっている（メンバーの ID と、数か真偽値）".into()));
+        }
+        let kind = if strs {
             pq::Value::Member
+        } else if bools && !floats {
+            pq::Value::Bool
         } else {
             pq::Value::Num
         };
-        Ok(CellBlock::new(pq::Changes { ids, old, new, kind }))
+        let ids = tables.into_iter().map(|t| t.table).collect();
+        Ok(CellBlock::new(pq::Changes { cols, ids, old, new, value_ids: values.table, kind }))
     }
 
-    /// PostgreSQL の COPY（テキスト形式）の行（model_id、seq、metric、座標の配列、変更前、変更後）。
-    fn copy_text<'py>(&self, py: Python<'py>, model_id: &str, seq: i64, metric: i64) -> Bound<'py, PyBytes> {
+    /// The rows for the PostgreSQL COPY (text format): model_id, seq, metric, the coordinates (an array of ids),
+    /// old_value and new_value (numbers; null for a member type), old_member and new_member (the ids of a
+    /// member-type value; null for the other kinds).
+    fn copy_text<'py>(&self, py: Python<'py>, model_id: &str, seq: i64, metric: &str) -> Bound<'py, PyBytes> {
         let text = py.detach(|| {
-            use std::fmt::Write;
-            let prefix = format!("{}\t{seq}\t{metric}\t", copy_escape(model_id));
-            let mut out = String::with_capacity(self.c.len() * (prefix.len() + 40));
+            let prefix = format!("{}\t{seq}\t{}\t", copy_escape(model_id), copy_escape(metric));
+            let mut out = String::with_capacity(self.c.len() * (prefix.len() + 40 * (self.c.cols.len() + 1)));
+            let member = |out: &mut String, v: Option<f64>| match v {
+                None => out.push_str("\\N"),
+                Some(x) => out.push_str(&copy_escape(self.c.value_id(x))),
+            };
             for r in 0..self.c.len() {
                 out.push_str(&prefix);
-                out.push('{');
-                for (j, x) in self.c.ids.iter().enumerate() {
-                    if j > 0 {
-                        out.push(',');
-                    }
-                    write!(out, "{}", x[r]).unwrap();
-                }
-                out.push_str("}\t");
-                copy_float(&mut out, self.c.old[r]);
+                out.push_str(&copy_escape(&array_literal(&self.c.key(r))));
                 out.push('\t');
-                copy_float(&mut out, self.c.new[r]);
+                if self.c.kind == pq::Value::Member {
+                    out.push_str("\\N\t\\N\t");
+                    member(&mut out, self.c.old[r]);
+                    out.push('\t');
+                    member(&mut out, self.c.new[r]);
+                } else {
+                    copy_float(&mut out, self.c.old[r]);
+                    out.push('\t');
+                    copy_float(&mut out, self.c.new[r]);
+                    out.push_str("\t\\N\t\\N");
+                }
                 out.push('\n');
             }
             out

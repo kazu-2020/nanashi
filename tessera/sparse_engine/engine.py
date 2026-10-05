@@ -293,8 +293,9 @@ def native():
 
 
 def parquet_columns(dims, cat) -> list[str]:
-    """Parquet の軸の列の名前。名前を変えても変わらない軸の ID で付ける。"""
-    return [f"d{cat.ids[cat.dimension(d).id]}" for d in dims]  # the handle (unit 4 of issue 68 changes this)
+    """The names of the dimension columns of a Parquet file: d<dimension id>. The id does not change with a
+    rename. The prefix keeps a dimension column apart from the value columns (v, old, new)."""
+    return [f"d{cat.dimension(d).id}" for d in dims]
 
 
 def parquet_value(kind: Kind) -> str:
