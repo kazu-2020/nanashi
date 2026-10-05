@@ -169,6 +169,15 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual(reopened.get("RevByCat", Category="Hard", Region="N", Month="January"),
                          m.get("RevByCat", Category="Hard", Region="N", Month="January"))
 
+    def test_property_target_change_with_no_values_replays(self):
+        m = self.m
+        m.add_dimension("Shop", ["s1"])
+        m.add_dimension("Old", ["o"])
+        m.add_dimension("New", ["n"])
+        pid = m.add_property("Shop", "Link", "Old", {})
+        m.add_property("Shop", "Link", "New", {}, id=pid)
+        self.assertEqual(self.reopen().dimension("Shop").properties[pid][0], m.dimension_id("New"))
+
     def test_member_order_is_recorded(self):
         product = self.m.dimension("Product")
         with self.m.transaction() as moved:

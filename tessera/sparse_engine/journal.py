@@ -178,7 +178,7 @@ def structure(before, after) -> dict:
             old_map = {} if old is None else old[1]
             set_ = [[k, v] for k, v in mapping.items() if old_map.get(k) != v]
             unset = [k for k in old_map if k not in mapping]
-            if old is None or set_ or unset or renamed:
+            if old is None or set_ or unset or renamed or old[0] != target:
                 props.append({"dim": d.id, "id": prop, "name": name, "target": target, "set": set_, "unset": unset})
 
     defs = []
