@@ -31,7 +31,7 @@ class Pruning(unittest.TestCase):
     def test_moving_cutoff_recomputes_only_the_crossed_month(self):
         m = build(None, employees=12, products=6, months=12, seed=1)
         m.recalc()
-        months = m.dimensions["Month"].members
+        months = m.dimension("Month").members
         cutoff = m.get("Cutoff")
         nxt = months[months.index(cutoff) + 1]
         m.slice_log.clear()

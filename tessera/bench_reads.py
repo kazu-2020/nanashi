@@ -26,7 +26,7 @@ def main() -> None:
     args = ap.parse_args()
     m = build(RustEngine(), *SIZES[args.size])
     m.recalc()
-    emp, prod = m.dimensions["Employee"].members[1], m.dimensions["Product"].members[1]
+    emp, prod = m.dimension("Employee").members[1], m.dimension("Product").members[1]
     cases = [
         ("value: PayrollByEmployee を丸ごと Cube に", lambda: m.value("PayrollByEmployee")),
         ("get: PayrollByEmployee の 1 セル", lambda: m.get("PayrollByEmployee", Employee=emp, Version="予算", Month="m01")),

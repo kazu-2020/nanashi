@@ -81,7 +81,7 @@ class MatchesFullRecalc(unittest.TestCase):
             for _ in range(rng.randint(1, 4)):
                 name = rng.choice(inputs)
                 meta = m.metric(name)
-                coords = {d: rng.choice(m.dimensions[d].members) for d in meta.dims}
+                coords = {m.dimension(d).name: rng.choice(m.dimension(d).members) for d in meta.dims}
                 if rng.random() < 0.35:
                     value = None
                 elif meta.kind == "boolean":

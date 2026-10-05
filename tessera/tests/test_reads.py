@@ -52,7 +52,7 @@ class Reads:
                 continue
             whole = m.value(name).cells
             d = dims[0]
-            members = m.dimensions[d].members[:2]
+            members = m.dimension(d).members[:2]
             got = m.slice(name, **{d: members}).cells
             want = {k: v for k, v in whole.items() if k[dims.index(d)] in members}
             self.assertTrue(same(got, want), (name, got, want))
@@ -66,7 +66,7 @@ class Reads:
         whole = m.value("Volume").cells
         self.assertEqual(total, len(whole))
         self.assertEqual(dict(rows), whole)
-        order = [m.dimensions[d]._index for d in m.metric("Volume").dims]
+        order = [m.dimension(d)._index for d in m.metric("Volume").dims]
         keys = [k for k, _ in rows]
         self.assertEqual(keys, sorted(keys, key=lambda k: tuple(ix[x] for ix, x in zip(order, k))))
         page1, total1 = m.rows("Volume", offset=0, limit=3)
@@ -87,8 +87,8 @@ class Reads:
             for keep in [(), dims[:1], dims[1:], dims]:
                 for agg in ["sum", "avg", "min", "max", "count"]:
                     got = m.summarize(name, keep=keep, agg=agg)
-                    want = aggregate_cube(cube, keep, agg)
-                    self.assertEqual(got.dims, tuple(d for d in dims if d in keep))
+                    want = aggregate_cube(cube, tuple(m.dimension(d).name for d in keep), agg)
+                    self.assertEqual(got.dims, tuple(m.dimension(d).name for d in dims if d in keep))
                     self.assertTrue(same(got.cells, want.cells), (name, keep, agg, got.cells, want.cells))
         got = m.summarize("Volume", keep=["Month"], Product=["A", "C"])
         want = aggregate_cube(m.slice("Volume", Product=["A", "C"]), ["Month"], "sum")

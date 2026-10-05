@@ -477,10 +477,10 @@ class PgJournal(Journal):
             yield rec
 
     def cell_history(self, model, metric: str, **coords: str) -> list[dict]:
-        """セルの変更の履歴を、セルの索引で引く（記録を先頭から読まない）。"""
+        """The change history of one cell, from the cell index (not from a scan of the records)."""
         self.index_pending()  # 確定の後に回した分を先に反映する
         m = model.metric(metric)
-        key = [model.dimension(d).id_of(coords[d]) for d in m.dims]
+        key = [model.dimensions[d].id_of(x) for d, x in zip(m.dims, model._key(m, coords))]
         with self._lock:
             rows = self.conn.execute(
             "select c.seq, o.at, o.user_name, o.reason, c.old_value, c.new_value"

@@ -120,8 +120,8 @@ class Validation(unittest.TestCase):
 
     def reject(self, formula, dims, pattern):
         m = model()
-        m.add_formula("Bad", dims, formula)
         with self.assertRaisesRegex(FormulaError, pattern):
+            m.add_formula("Bad", dims, formula)
             m.recalc()
 
     def test_unknown_property_or_metric(self):
@@ -145,11 +145,11 @@ def random_round(rng: random.Random, models: list[Model], counter: list[int]) ->
         return
     name = rng.choice(["Salary", "DeptOf", "DeptOf", "HireMonth", "Budget"])
     meta = m0.metric(name)
-    coords = {d: rng.choice(m0.dimensions[d].members) for d in meta.dims}
+    coords = {m0.dimension(d).name: rng.choice(m0.dimension(d).members) for d in meta.dims}
     if rng.random() < 0.25:
         value = None
     elif meta.kind.startswith("member:"):
-        value = rng.choice(m0.dimensions[meta.kind.removeprefix("member:")].members)
+        value = rng.choice(m0.dimension(meta.kind.removeprefix("member:")).members)
     else:
         value = float(rng.randint(1, 60))
     for m in models:

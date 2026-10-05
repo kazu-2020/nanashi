@@ -247,6 +247,7 @@ class ReferenceEngine:
 
     def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
         nanashi_core = native()
+        dims = [cat.dimension(d).id for d in dims]
         order = [storage.dims.index(d) for d in dims]
         index = [cat.dimension(d)._index for d in dims]
         keys = list(storage.cells)
@@ -257,12 +258,13 @@ class ReferenceEngine:
 
     def from_parquet(self, data: bytes, dims, kind, cat, partition=None) -> Cube:
         nanashi_core = native()
+        dims = tuple(cat.dimension(d).id for d in dims)
         members = [cat.dimension(d).members for d in dims]
         cols, values = nanashi_core.read_parquet(data, parquet_columns(dims, cat), parquet_value(kind),
                                                  [len(ms) for ms in members])
         if kind == "boolean":
             values = [v != 0.0 for v in values]
-        return Cube(tuple(dims), {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]
+        return Cube(dims, {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]
                                   for r in range(len(values))})
 
     def size(self, storage: Cube) -> int:
@@ -294,7 +296,7 @@ def native():
 
 def parquet_columns(dims, cat) -> list[str]:
     """Parquet の軸の列の名前。名前を変えても変わらない軸の ID で付ける。"""
-    return [f"d{cat.dimension(d).id}" for d in dims]
+    return [f"d{cat.ids[cat.dimension(d).id]}" for d in dims]  # the handle (unit 4 of issue 68 changes this)
 
 
 def parquet_value(kind: Kind) -> str:

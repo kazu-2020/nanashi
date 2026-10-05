@@ -362,8 +362,8 @@ _NOT, _UNARY, _POSTFIX, _ATOM = 3, 7, 8, 9
 
 
 def to_formula(expr: Expr, model=None) -> str:
-    """The text of a formula. With model, a Metric id in the AST shows the current name of the Metric."""
-    show = (lambda x: x) if model is None else (lambda x: model.metrics[x].name if x in model.metrics else x)
+    """The text of a formula. With model, a Metric, dimension or property id in the AST shows its current name."""
+    show = (lambda x: x) if model is None else model._name_of
     return _fmt(expr, show)[0]
 
 
@@ -383,15 +383,15 @@ def _wrap(e: Expr, min_prec: int, show) -> str:
 
 
 def _fmt(e: Expr, show) -> tuple[str, int]:
-    """(text, precedence). show gives the display name of a Metric id (or returns a name as it is)."""
+    """(text, precedence). show gives the display name of an id (or returns a name as it is)."""
     sub = lambda x: _fmt(x, show)[0]
     match e:
         case Ref(name):
             return _name(show(name)), _ATOM
         case DimRef(name):
-            return _name(name), _ATOM
+            return _name(show(name)), _ATOM
         case Member(dim, member):
-            return f'{_name(dim)}."{member.replace(chr(34), chr(34) * 2)}"', _ATOM
+            return f'{_name(show(dim))}."{member.replace(chr(34), chr(34) * 2)}"', _ATOM
         case Const(value):
             if isinstance(value, bool):
                 return ("TRUE" if value else "FALSE"), _ATOM
@@ -414,19 +414,19 @@ def _fmt(e: Expr, show) -> tuple[str, int]:
             return f"ISBLANK({sub(x)})", _ATOM
         case By(x, dim, prop, agg):
             head = f"BY {agg.upper()}" if agg else "BY"
-            return f"{_wrap(x, _POSTFIX, show)}[{head}: {_name(dim)}.{_name(show(prop))}]", _POSTFIX
+            return f"{_wrap(x, _POSTFIX, show)}[{head}: {_name(show(dim))}.{_name(show(prop))}]", _POSTFIX
         case Remove(x, dim, agg):
-            return f"{_wrap(x, _POSTFIX, show)}[REMOVE {agg.upper()}: {_name(dim)}]", _POSTFIX
+            return f"{_wrap(x, _POSTFIX, show)}[REMOVE {agg.upper()}: {_name(show(dim))}]", _POSTFIX
         case Filter(x, cond):
             return f"{_wrap(x, _POSTFIX, show)}[FILTER: {sub(cond)}]", _POSTFIX
         case On(x, other):
             return f"{_wrap(x, _POSTFIX, show)}[ON: {sub(other)}]", _POSTFIX
         case Expand(x, dims):
-            return f"{_wrap(x, _POSTFIX, show)}[EXPAND: {', '.join(_name(d) for d in dims)}]", _POSTFIX
+            return f"{_wrap(x, _POSTFIX, show)}[EXPAND: {', '.join(_name(show(d)) for d in dims)}]", _POSTFIX
         case Shift(x, dim, n):
             sign = "-" if n >= 0 else "+"
-            return f"{_wrap(x, _POSTFIX, show)}[SELECT: {_name(dim)} {sign} {abs(n)}]", _POSTFIX
+            return f"{_wrap(x, _POSTFIX, show)}[SELECT: {_name(show(dim))} {sign} {abs(n)}]", _POSTFIX
         case Select(x, dim, member):
             quoted = '"' + member.replace('"', '""') + '"'
-            return f"{_wrap(x, _POSTFIX, show)}[SELECT: {_name(dim)}.{quoted}]", _POSTFIX
+            return f"{_wrap(x, _POSTFIX, show)}[SELECT: {_name(show(dim))}.{quoted}]", _POSTFIX
     raise TypeError(e)

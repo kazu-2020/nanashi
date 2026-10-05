@@ -15,6 +15,7 @@ from typing import Any, Callable, Protocol
 from .delta import DeltaPlan, plan_for, rename
 from .evaluate import (Catalog, Edge, FormulaError, Restrict, Type, affected, collect_refs, estimate, infer,
                        resolve, union_region)
+from .messages import Msg
 from .expr import BinOp, Const, Expr, Filter, Ref
 
 
@@ -115,7 +116,7 @@ class PyPlanner:
 
     def check(self, written: Expr, cat: Catalog) -> tuple[Expr, Type, list[str]]:
         formula = resolve(written, cat)  # 軸の名前、Metric を使った BY を評価できる形に
-        warnings: list[str] = []
+        warnings: list[Msg] = []
         return formula, infer(formula, cat, warnings), warnings
 
     def plan(self, formulas, dims, cat):

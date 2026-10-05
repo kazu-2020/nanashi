@@ -118,7 +118,7 @@ class Names:
         return self.m.ids.get(id) if isinstance(id, str) else None
 
     def dim(self, id) -> Dimension:
-        d = self.m.dimensions_by_id().get(self._handle(id))
+        d = self.m.dimensions.get(id) if isinstance(id, str) else None
         if d is None:
             raise ValueError(f"軸 {id} がない")
         return d
@@ -136,11 +136,10 @@ class Names:
         return d.members[pos]
 
     def prop(self, d: Dimension, id) -> str:
-        h = self._handle(id)
-        for name, handle in d.property_ids.items():
-            if handle == h:
-                return name
-        raise ValueError(f"{d.name} にプロパティ {id} がない")
+        """The property id (the Model takes it in place of the name)."""
+        if not isinstance(id, str) or id not in d.properties:
+            raise ValueError(f"{d.name} にプロパティ {id} がない")
+        return id
 
     def kind(self, kind) -> str:
         """"member:<dim uuid>" -> "member:<dim name>"."""
@@ -158,13 +157,13 @@ class Names:
         return value if d is None or value is None else self.member(d, value)
 
     def coords_in(self, coords) -> dict[str, Any]:
-        """{dim uuid: member uuid (or a list of them)} -> {dim name: member name (or names)}."""
+        """{dim uuid: member uuid (or a list of them)} -> {dim uuid: member name (or names)}."""
         if not isinstance(coords, dict):
             raise ValueError("座標は {軸の ID: メンバーの ID} のオブジェクト")
         out = {}
         for k, v in coords.items():
             d = self.dim(k)
-            out[d.name] = [self.member(d, x) for x in v] if isinstance(v, list) else self.member(d, v)
+            out[d.id] = [self.member(d, x) for x in v] if isinstance(v, list) else self.member(d, v)
         return out
 
     # ------------------------------------------------ names -> UUIDs
@@ -493,7 +492,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, {"seq": v.seq, "dims": [n.dim_id(d) for d in m.dims], "rows": n.rows_out(m, m.dims, rows),
                              "total": total}
             if what == "summary":
-                keep = [n.dim(d).name for x in query.get("keep", []) for d in x.split(",") if d]
+                keep = [n.dim(d).id for x in query.get("keep", []) for d in x.split(",") if d]
                 groups = 1
                 for d in keep:
                     if d in m.dims:
@@ -575,11 +574,11 @@ def _dimensions_out(n: Names) -> dict:
     for d in n.m.dimensions.values():
         uid = lambda name: n.member_id(d, name)
         props, values = {}, {}
-        for p, (t, mapping) in d.properties.items():
-            pid, td = n.m.uuid_of(d.property_ids[p]), n.m.dimension(t)
-            props[pid] = {"name": p, "target": n.dim_id(t)}
+        for pid, (t, mapping) in d.properties.items():
+            td = n.m.dimensions[t]
+            props[pid] = {"name": d.property_names[pid], "target": t}
             values[pid] = {uid(k): n.member_id(td, v) for k, v in mapping.items()}
-        out[n.dim_id(d.name)] = {"name": d.name, "ordered": d.ordered,
+        out[d.id] = {"name": d.name, "ordered": d.ordered,
                                  "members": [{"id": uid(x), "name": x} for x in d.in_order()],
                                  "properties": props, "property_values": values}
     return out

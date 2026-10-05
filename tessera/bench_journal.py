@@ -64,7 +64,7 @@ def bench_commit(kind: str, m) -> None:
     """損益計画の給与の変更を、1 件ずつトランザクションで確定する。"""
     t = Target(kind)
     t.make().start(m)
-    emps = m.dimensions["Employee"].members
+    emps = m.dimension("Employee").members
     times = []
     for i in range(200):
         s = time.perf_counter()
@@ -81,7 +81,7 @@ def bench_workspace(kind: str, m) -> None:
     t.make().start(m)
     m.journal = None
     ws = Workspace(m.fork(), t.make())  # 渡したモデルは公開済みの版になるので、複製を渡す
-    emps = m.dimensions["Employee"].members
+    emps = m.dimension("Employee").members
     latency: list[float] = []
     lock = threading.Lock()
 
@@ -128,7 +128,7 @@ def bench_open_and_history(kind: str, m) -> None:
     """1000 件の記録を積んでから、開き直す時間と、セルの履歴を引く時間を測る。"""
     t = Target(kind)
     t.make().start(m)
-    emps = m.dimensions["Employee"].members
+    emps = m.dimension("Employee").members
     for i in range(1000):
         m.set_cell("Salary", float(500 + i), Employee=emps[i % 50], Version="予算")
     m.journal = None

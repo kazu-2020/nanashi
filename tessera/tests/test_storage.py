@@ -40,7 +40,7 @@ class RoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             original.save(tmp)
             loaded = Model.load(tmp, loading_engine)
-        self.assertEqual(loaded.dimensions["Employee"].members, original.dimensions["Employee"].members)
+        self.assertEqual(loaded.dimension("Employee").members, original.dimension("Employee").members)
         a, b = snapshot(original), snapshot(loaded)
         for name in original._metric_ids:
             with self.subTest(metric=name):

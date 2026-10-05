@@ -10,6 +10,7 @@ from sparse_engine import FormulaError, Model, parse, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.evaluate import affected, collect_refs, estimate, infer
 from sparse_engine.expr import Expr, _children
+from sparse_engine.messages import render
 from sparse_engine.planner import PyPlanner
 
 from .test_engines import build_with
@@ -171,7 +172,8 @@ class RustTypeCheckMatchesPython(unittest.TestCase):
                 continue
             _, want, w = PyPlanner(m.engine).check(x.written, m)
             _, got, warnings = m.engine.planner.check(x.written, m)
-            self.assertEqual((got.dims, got.kind, warnings), (want.dims, want.kind, w), x.name)
+            shown = lambda ws: [render(w.code, m._shown_params(w.params)) for w in ws]
+            self.assertEqual((got.dims, got.kind, shown(warnings)), (want.dims, want.kind, shown(w)), x.name)
 
     def test_cell_estimates(self):
         """セル数の見積もりが一致し、実際のセル数の上限になっている。"""
@@ -229,17 +231,17 @@ class RustAffectedMatchesPython(unittest.TestCase):
             cases = []
             for name in inputs:
                 dims = m.metric(name).dims
-                cases.append(({name: {d: frozenset([m.dimensions[d].members[0]]) for d in dims}}, None))
+                cases.append(({name: {d: frozenset([m.dimension(d).members[0]]) for d in dims}}, None))
                 cases.append(({name: {}}, None))
-            cases.append(({n: {d: frozenset(m.dimensions[d].members[:2]) for d in m.metric(n).dims} for n in inputs[:3]},
-                          {"Month": frozenset(["Zzz"])}))
+            cases.append(({n: {d: frozenset(m.dimension(d).members[:2]) for d in m.metric(n).dims} for n in inputs[:3]},
+                          {m.dimension_id("Month"): frozenset(["Zzz"])}))
             for changed, added in cases:
                 if added:
                     for d, ms in added.items():
                         for x in ms:
-                            if x not in m.dimensions[d]:
-                                m.dimensions[d].add_member(x, m._new_id())
-                                m._member_added(d)
+                            if x not in m.dimension(d):
+                                m.dimension(d).add_member(x, m._new_id())
+                                m._member_added(m.dimension_id(d))
                 with self.subTest(changed=list(changed), added=added):
                     got = m._propagate(changed, added)
                     with python_resolved(m):
@@ -250,7 +252,7 @@ class RustAffectedMatchesPython(unittest.TestCase):
         for m in self.models():
             m.recalc()
             for dim in m.dimensions:
-                member = m.dimensions[dim].members[1]
+                member = m.dimension(dim).members[1]
                 with self.subTest(dim=dim, member=member):
                     got = m.engine.planner.removal_regions(m.compiled(), m._values, m, dim, member)
                     with python_resolved(m):
@@ -262,7 +264,7 @@ class RustAffectedMatchesPython(unittest.TestCase):
         for m in self.models():
             m.recalc()
             inputs = [n for n, x in m.metrics.items() if x.formula is None]
-            regions = {n: {d: frozenset(m.dimensions[d].members[:1]) for d in m.metric(n).dims} for n in inputs}
+            regions = {n: {d: frozenset(m.dimension(d).members[:1]) for d in m.metric(n).dims} for n in inputs}
             for x in m.metrics.values():
                 if x.formula is not None:
                     with self.subTest(metric=x.name):

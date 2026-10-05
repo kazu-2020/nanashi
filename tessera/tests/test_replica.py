@@ -62,7 +62,7 @@ class Follow(JournalCase):
         self.ws.write(lambda m: m.move_member("Product", "p3", 0))
         self.replica.refresh()
         v = self.replica.version
-        self.assertEqual(v.dimensions["Product"].in_order()[0], "p3")
+        self.assertEqual(v.dimension("Product").in_order()[0], "p3")
         self.assertEqual(list(v.slice_log), [])  # 並び順だけなら何も計算し直さない
         check_same_state(self, self.ws.version, v)
 

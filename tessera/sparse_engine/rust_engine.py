@@ -20,7 +20,7 @@ from .planner import Step
 from .evaluate import Catalog, Edge, FormulaError, Type, member_kind, resolve
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
-from .messages import from_rust, render
+from .messages import from_rust
 
 
 def _formula_error(e: nanashi_core.Diagnostic) -> FormulaError:
@@ -37,20 +37,20 @@ class RustEngine:
     key_bits = 64  # 1 セルのキーは各軸のメンバー番号を詰めた 64 ビット整数
 
     def __init__(self, **config):
-        """config は Rust の速さのための調整値（nanashi_core.Core に渡す。結果は変えない）。"""
+        """config has the tuning values for the speed of Rust (nanashi_core.Core gets them; the results do not change)."""
         self.core = nanashi_core.Core(**config)
-        self._dims: dict[str, tuple[Any, int]] = {}  # 軸名 -> (Dimension, 番号)
-        self._names: dict[int, str] = {}
-        self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (軸, プロパティ) -> (対応表, 番号)
-        self._exprs: dict[int, tuple] = {}
-        self._widths: dict[str, int] = {}  # 軸名 -> 型検査したときのビット幅  # id(式) -> (式, 変換結果, 読む名前, 型, 警告, 読む名前の型)
+        self._dims: dict[str, tuple[Any, int]] = {}  # dimension id -> (Dimension, Rust number)
+        self._names: dict[int, str] = {}  # Rust number -> dimension id
+        self._maps: dict[tuple[str, str], tuple[dict | None, int]] = {}  # (dim id, prop id) -> (mapping, number)
+        self._exprs: dict[int, tuple] = {}  # id(expr) -> (expr, compiled, read ids, type, warnings, read types)
+        self._widths: dict[str, int] = {}  # dimension id -> the bit width at the type check
         self.planner = RustPlanner(self)
 
     def fork(self, cat: Catalog) -> RustEngine:
         """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
         other = RustEngine.__new__(RustEngine)
         other.core = self.core.fork()
-        other._dims = {name: (cat.dimension(name), i) for name, (_, i) in self._dims.items()}
+        other._dims = {d: (cat.dimension(d), i) for d, (_, i) in self._dims.items()}
         other._names = dict(self._names)
         other._maps = dict(self._maps)
         other._exprs = dict(self._exprs)
@@ -64,19 +64,21 @@ class RustEngine:
     # ------------------------------------------------ 名前 -> 番号
 
     def _dim(self, cat: Catalog, name: str) -> int:
+        """The Rust number of the dimension (an id). The Rust name of the dimension is its id, so a diagnostic
+        carries the id, and Model._shown_params shows the current name."""
         d = cat.dimension(name)
-        cached = self._dims.get(name)
+        cached = self._dims.get(d.id)
         if cached is not None and cached[0] is d:
             return cached[1]
-        i = self.core.add_dim(len(d.members), d.ordered, name)
-        self._dims[name] = (d, i)
-        self._widths[name] = max(1, (len(d.members) - 1).bit_length())
-        self._names[i] = name
+        i = self.core.add_dim(len(d.members), d.ordered, d.id)
+        self._dims[d.id] = (d, i)
+        self._widths[d.id] = max(1, (len(d.members) - 1).bit_length())
+        self._names[i] = d.id
         return i
 
     def _map(self, cat: Catalog, dim: str, prop: str) -> int:
-        """プロパティの対応表の番号。対応表が変わったら、同じ番号のまま中身を置き換える
-        （コンパイル済みの式が番号を持っているので、番号は変えない）。"""
+        """The Rust number of the mapping of the property (dim and prop are ids). A changed mapping keeps its
+        number and gets new contents, because the compiled formulas hold the number."""
         target, mapping = cat.dimension(dim).properties[prop]
         cached = self._maps.get((dim, prop))
         if cached is not None and cached[0] is mapping:
@@ -140,7 +142,7 @@ class RustEngine:
             compiled, dims, kind, d, found = self.core.compile(tree, names, [self._type(cat, r) for r in reads])
         except nanashi_core.Diagnostic as e:
             raise _formula_error(e) from None
-        warnings = [render(*from_rust(code, params)) for code, params in found]
+        warnings = [from_rust(code, params) for code, params in found]
         t = Type(tuple(self._names[i] for i in dims), member_kind(self._names[d]) if kind == "member" else kind)
         if len(self._exprs) >= EXPRS_MAX:  # 定義を何度も変えても増え続けないように、溢れたら作り直させる
             self._exprs.clear()
@@ -241,8 +243,9 @@ class RustEngine:
 
     def to_parquet(self, store, dims, kind, cat, meta) -> bytes:
         stored = [self._names[i] for i in self.core.metric_dims(store)]
-        if stored != list(dims):
-            raise ValueError(f"格納データの軸 {stored} が {list(dims)} と違う")
+        if stored != [cat.dimension(d).id for d in dims]:
+            name = lambda ds: [cat.dimension(d).name for d in ds]
+            raise ValueError(f"格納データの軸 {name(stored)} が {name(dims)} と違う")
         return self.core.store_to_parquet(store, parquet_columns(dims, cat), parquet_value(kind), list(meta.items()))
 
     def from_parquet(self, data, dims, kind, cat, partition=None):
@@ -257,7 +260,7 @@ class RustEngine:
         return self.core.repartition(store, None if partition is None else self._dim(cat, partition))
 
     def dimension_changed(self, cat, dim, renumbered=False):
-        """メンバー数と、dim が関わる対応表を Rust 側に反映する。"""
+        """Send the member count of dim (an id) and the mappings that use dim to Rust."""
         if renumbered:  # 変換済みの式はメンバーの番号（定数、SELECT）を持っているので作り直す
             self._exprs.clear()
             self.planner.forget()

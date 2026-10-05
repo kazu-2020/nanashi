@@ -97,7 +97,7 @@ def _agg_kind(agg: str, t: Type, what: Msg) -> Kind:
     return t.kind if a.kind is None else a.kind
 
 
-def _check_expand(warnings: list[str], what: Msg, dims: tuple[str, ...],
+def _check_expand(warnings: list[Msg], what: Msg, dims: tuple[str, ...],
                   covered: tuple[str, ...], own: tuple[str, ...]) -> None:
     """結果の軸 dims のうち covered にない軸へ、この項の値が複製されるかを調べる。
 
@@ -109,11 +109,11 @@ def _check_expand(warnings: list[str], what: Msg, dims: tuple[str, ...],
         return
     if own:
         raise FormulaError("not_expanded", what=what, own=list(own), missing=missing)
-    warnings.append(render("densify", {"what": what, "missing": missing}))
+    warnings.append(msg("densify", what=what, missing=missing))
 
 
-def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
-    """式の出力の型（軸と値の種類）を返す。密になる演算は warnings に積む。"""
+def infer(expr: Expr, cat: Catalog, warnings: list[Msg]) -> Type:
+    """The type (dimensions and kind) of the result of expr. A dense operation adds a Msg to warnings."""
     match expr:
         case Ref(name):
             return cat.metric_type(name)
@@ -213,7 +213,7 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
         case IsBlank(child):
             t = infer(child, cat, warnings)
             if t.dims:
-                warnings.append(render("isblank_dense", {"dims": list(t.dims)}))
+                warnings.append(msg("isblank_dense", dims=list(t.dims)))
             return Type(t.dims, "boolean")
 
         case By(child, dim, prop, agg):
@@ -266,7 +266,7 @@ def infer(expr: Expr, cat: Catalog, warnings: list[str]) -> Type:
             if vkind != t.kind:
                 raise FormulaError("ifblank_kind", kind=t.kind)
             if t.dims:
-                warnings.append(render("ifblank_dense", {"dims": list(t.dims)}))
+                warnings.append(msg("ifblank_dense", dims=list(t.dims)))
             return t
     raise TypeError(expr)
 
@@ -353,16 +353,20 @@ def estimate(expr: Expr, cat: Catalog, cells: Mapping[str, float]) -> tuple[tupl
 # ---------------------------------------------------------------- 名前の解決
 
 def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
-    """Change the Metric names of a parsed formula to Metric ids: Ref, and By.prop when it names a Metric.
+    """Change the names of a parsed formula to ids: a Metric or dimension Ref, the dimension of Member, Select,
+    Expand, By, Remove, Shift and AsAxis, and By.prop (a property id, or a Metric id when it names a Metric).
 
-    names gives more name -> id pairs (the Metric that the formula defines). A Ref that already holds an id
-    stays. A Ref to a dimension name stays a name (resolve makes it a DimRef). A Ref to an unknown name
-    raises FormulaError unknown_metric with the name that the user wrote.
+    names gives more name -> id pairs (the Metric that the formula defines). A field that already holds an id
+    stays. An unknown name raises FormulaError (unknown_metric, unknown_dim, no_property_or_metric) with the
+    name that the user wrote.
     """
     def id_of(name: str) -> str | None:
         if names and name in names:
             return names[name]
         return cat._metric_ids.get(name)
+
+    def dim(name: str) -> str:
+        return cat.dimension(name).id
 
     def go(e: Expr) -> Expr:
         if isinstance(e, Ref):
@@ -370,16 +374,28 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
                 return e
             if (id := id_of(e.name)) is not None:
                 return Ref(id)
+            if e.name in cat._dim_ids:
+                return Ref(cat._dim_ids[e.name])
             raise FormulaError("unknown_metric", name=e.name)
         changes = {f.name: r for f in fields(e)
                    if isinstance(v := getattr(e, f.name), Expr) and (r := go(v)) is not v}
-        out = replace(e, **changes) if changes else e
-        if isinstance(out, By):
-            d = cat.dimensions.get(out.dim)
-            if d is not None and out.prop not in d.properties and out.prop not in cat.metrics \
-                    and (id := id_of(out.prop)) is not None:
-                out = replace(out, prop=id)
-        return out
+        if isinstance(e, Expand):
+            dims = tuple(dim(d) for d in e.dims)
+            if dims != e.dims:
+                changes["dims"] = dims
+        elif isinstance(e, (Member, Select, By, Remove, Shift, AsAxis)):
+            if (d := dim(e.dim)) != e.dim:
+                changes["dim"] = d
+            if isinstance(e, By):
+                props = cat.dimensions[d]
+                prop = props.find_prop(e.prop)
+                if prop is None and e.prop not in cat.metrics:
+                    prop = id_of(e.prop)
+                    if prop is None:
+                        raise FormulaError("no_property_or_metric", dim=e.dim, prop=e.prop)
+                if prop is not None and prop != e.prop:
+                    changes["prop"] = prop
+        return replace(e, **changes) if changes else e
     return go(expr)
 
 

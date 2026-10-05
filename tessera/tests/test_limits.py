@@ -55,7 +55,7 @@ class KeyWidth(unittest.TestCase):
         self.assertEqual(m.get("Z", D0="m1"), 2.0)
         with self.assertRaisesRegex(FormulaError, "途中の結果の軸"):  # E が 13 ビットになると収まらない
             m.add_member("E", "e_new")
-        self.assertNotIn("e_new", m.dimensions["E"])
+        self.assertNotIn("e_new", m.dimension("E"))
         m.set_cell("Y", 3.0, E="e1")
         self.assertEqual(m.get("Z", D0="m1"), 3.0)
 
@@ -99,7 +99,7 @@ class KeyWidth(unittest.TestCase):
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g1"), 10.0)
         with self.assertRaisesRegex(FormulaError, "途中の結果の軸"):  # E が 13 ビットになると結合が収まらない
             m.add_member("E", "e_new")
-        self.assertNotIn("e_new", m.dimensions["E"])
+        self.assertNotIn("e_new", m.dimension("E"))
         m.set_cell("Salary", 20.0, E="e1", D1="m1", D2="m1", D3="m1")  # 拒否したあとも計算し直せる
         self.assertEqual(m.get("Cost", D1="m1", D2="m1", D3="m1", Dept="g1"), 20.0)
         m.set_cell("DeptOf", "g2", E="e1")

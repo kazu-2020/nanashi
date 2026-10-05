@@ -63,12 +63,12 @@ def mid(ws, name: str) -> str:
 
 def did(ws, name: str) -> str:
     v = ws.version
-    return v.dimension_id(name) if name in v.dimensions else name
+    return v.dimension_id(name) if name in v._dim_ids else name
 
 
 def xid(ws, dim: str, member: str) -> str:
     v = ws.version
-    return v.member_id(dim, member) if dim in v.dimensions and member in v.dimensions[dim] else member
+    return v.member_id(dim, member) if dim in v._dim_ids and member in v.dimension(dim) else member
 
 
 def coords(ws, **kw) -> dict:
@@ -114,7 +114,7 @@ class Api:
 
     def named(self, dims: list, rows: list) -> list:
         v = self.ws.version
-        ds = [v.dimensions_by_id()[v.ids[d]] for d in dims]
+        ds = [v.dimensions[d] for d in dims]
         return sorted([*(d.member_of(v.ids[x]) for d, x in zip(ds, k[:-1])), k[-1]] for k in rows)
 
     def test_definition_and_health(self):
@@ -398,7 +398,7 @@ class Api:
         self.assertEqual(self.c.post("/writes", {"client_op_id": "o", "ops": ops})[0], 200)
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][:4], ["p2", "p0", "p_new", "p1"])
         rows = self.c.get(path(ws, "Stock", "rows", Month="Jan", params="limit=3"))[1]["rows"]
-        self.assertEqual([ws.version.dimensions["Product"].member_of(ws.version.ids[r[0]]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
+        self.assertEqual([ws.version.dimension("Product").member_of(ws.version.ids[r[0]]) for r in rows], ["p2", "p0", "p1"])  # p_new has no value
         status, err = self.c.post("/writes", {"client_op_id": "o2", "ops": [
             {"op": "move_member", "dim": did(ws, "Month"), "id": xid(ws, "Month", "Mar"), "at": 0}]})
         self.assertEqual((status, err["error"]), (400, "bad_request"))

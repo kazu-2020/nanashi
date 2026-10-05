@@ -16,7 +16,7 @@ except ImportError:  # nanashi_core をビルドしていない環境
 def build_with(engine) -> Model:
     m = build()
     fresh = Model(engine=engine)
-    fresh.dimensions = m.dimensions
+    fresh.dimensions, fresh._dim_ids = m.dimensions, m._dim_ids
     fresh._next_id = m._next_id  # 軸のメンバーに振った ID と重ならないように、続きから振る
     fresh.ids = {u: h for u, h in m.ids.items() if u not in m.metrics}  # the dimensions, members, and properties only
     fresh._uuids = {h: u for u, h in fresh.ids.items()}
@@ -45,7 +45,7 @@ class MatchesReference:
             for _ in range(rng.randint(1, 3)):
                 name = rng.choice(inputs)
                 meta = ref.metric(name)
-                coords = {d: rng.choice(ref.dimensions[d].members) for d in meta.dims}
+                coords = {ref.dimension(d).name: rng.choice(ref.dimension(d).members) for d in meta.dims}
                 if rng.random() < 0.3:
                     value = None
                 elif meta.kind == "boolean":
@@ -90,9 +90,9 @@ class WriteMany(unittest.TestCase):
             with self.subTest(count=count):
                 self.assertEqual(ref_m.engine.to_cube(ref_m._values[ref_m.metric("X").id], ref_m).cells,
                                  rs.engine.to_cube(rs._values[rs.metric("X").id], rs).cells)
-                region = {"A": frozenset(["a1", "a7", "a30"]), "C": frozenset(["c2", "c4"])}
                 read = []
                 for m in models:
+                    region = {m.dimension_id("A"): frozenset(["a1", "a7", "a30"]), m.dimension_id("C"): frozenset(["c2", "c4"])}
                     cols, values = m.engine.columns(m._values[m.metric("X").id], region, m)
                     read.append(sorted(zip(*cols, values)))
                 self.assertEqual(read[0], read[1])

@@ -11,7 +11,7 @@ from sparse_engine.workspace import Workspace
 
 sys.setswitchinterval(0.0005)
 m = build(RustEngine(), *SIZES["large"]); m.recalc()
-emp = m.dimensions["Employee"].members[1]
+emp = m.dimension("Employee").members[1]
 server = Server(Workspace(m), "127.0.0.1", 0).start()
 url = server.url
 

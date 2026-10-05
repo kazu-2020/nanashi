@@ -29,9 +29,9 @@ class Dimension:
     """
 
     def __init__(self, name: str, members: Iterable[str], *, ordered: bool = False,
-                 ids: Iterable[int] | None = None, id: int = 0):
+                 ids: Iterable[int] | None = None, id: str = ""):
         self.name = name
-        self.id = id
+        self.id = id  # The UUID. It does not change with a rename. It is the key of Model.dimensions
         self.members: list[str] = list(members)
         self.ordered = ordered  # True の軸だけ prev（時間方向のずらし）を許す
         self._index = {m: i for i, m in enumerate(self.members)}
@@ -40,9 +40,10 @@ class Dimension:
         self.set_ids(range(1, len(self.members) + 1) if ids is None else ids)
         self._order: list[int] | None = None  # 順位 -> 番号。None なら番号の順のまま
         self._rank: dict[str, int] | None = None  # 名前 -> 順位（必要になったら作る）
-        # プロパティ名 -> (参照先の Dimension 名, {メンバー -> 参照先メンバー})
+        # property id -> (the id of the target Dimension, {member -> target member})
         self.properties: dict[str, tuple[str, dict[str, str]]] = {}
-        self.property_ids: dict[str, int] = {}  # property name -> handle (Model gives it with _new_id)
+        self.property_names: dict[str, str] = {}  # property id -> name
+        self._props: dict[str, str] = {}  # property name -> id (the name index)
 
     def set_ids(self, ids: Iterable[int]) -> None:
         """位置ごとのメンバーの ID を設定する（保存したモデルを読み込むとき）。"""
@@ -72,20 +73,41 @@ class Dimension:
         other.members, other.ids = list(self.members), list(self.ids)
         other._index, other._by_id = dict(self._index), dict(self._by_id)
         other.properties = dict(self.properties)
-        other.property_ids = dict(self.property_ids)
+        other.property_names, other._props = dict(self.property_names), dict(self._props)
         other._order, other._rank = self._order, self._rank  # どちらも書き換えずに作り直すので共有してよい
         return other
 
     def __contains__(self, member: str) -> bool:
         return member in self._index
 
-    def add_property(self, prop: str, target: Dimension, mapping: Mapping[str, str]) -> None:
+    def find_prop(self, prop: str) -> str | None:
+        """The id of the property with this id, or else with this name. None if there is none."""
+        return prop if prop in self.properties else self._props.get(prop)
+
+    def prop_id(self, prop: str) -> str:
+        """The id of the property with this id, or else with this name. ValueError if there is none."""
+        id = self.find_prop(prop)
+        if id is None:
+            raise ValueError(f"{self.name} にプロパティ {prop} がない")
+        return id
+
+    def add_property(self, id: str, name: str, target: Dimension, mapping: Mapping[str, str]) -> None:
+        """Add the property, or replace its mapping. The name of a property that exists does not change here."""
         for src, dst in mapping.items():
             if src not in self:
-                raise ValueError(f"{self.name}.{prop}: 未知のメンバー {src!r}")
+                raise ValueError(f"{self.name}.{name}: 未知のメンバー {src!r}")
             if dst not in target:
-                raise ValueError(f"{self.name}.{prop}: {target.name} に {dst!r} がない")
-        self.properties[prop] = (target.name, dict(mapping))
+                raise ValueError(f"{self.name}.{name}: {target.name} に {dst!r} がない")
+        self.properties[id] = (target.id, dict(mapping))
+        if id not in self.property_names:
+            self.property_names[id] = name
+            self._props[name] = id
+
+    def rename_property(self, id: str, new: str) -> None:
+        """Rename the property. Only the name and the name index change."""
+        del self._props[self.property_names[id]]
+        self.property_names[id] = new
+        self._props[new] = id
 
     def add_member(self, member: str, id: int | None = None, at: int | None = None) -> None:
         """メンバーを足す。番号はいつも末尾になる。at を渡すと、並び順の at 番目（0 から）に入れる
@@ -198,16 +220,17 @@ class Dimension:
                 self.properties[prop] = (target, {k: v for k, v in mapping.items() if k != member})
 
     def set_property_value(self, prop: str, member: str, value: str, target: Dimension) -> None:
-        """member のプロパティ prop を value にする。対応表は新しい dict に置き換える
-        （エンジンが、キャッシュした対応表の変更を同一性で検知できるように）。"""
+        """Set the property prop (an id) of member to value. The mapping becomes a new dict, so an engine
+        can detect the change of a cached mapping by identity."""
         if prop not in self.properties:
             raise ValueError(f"{self.name} にプロパティ {prop} がない")
+        name = self.property_names[prop]
         if member not in self:
-            raise ValueError(f"{self.name}.{prop}: 未知のメンバー {member!r}")
+            raise ValueError(f"{self.name}.{name}: 未知のメンバー {member!r}")
         if value not in target:
-            raise ValueError(f"{self.name}.{prop}: {target.name} に {value!r} がない")
-        target_name, mapping = self.properties[prop]
-        self.properties[prop] = (target_name, {**mapping, member: value})
+            raise ValueError(f"{self.name}.{name}: {target.name} に {value!r} がない")
+        target_id, mapping = self.properties[prop]
+        self.properties[prop] = (target_id, {**mapping, member: value})
 
     def offset(self, member: str, n: int) -> str | None:
         """順序付き軸で n 個先のメンバー。範囲外なら None。"""

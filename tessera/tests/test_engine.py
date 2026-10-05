@@ -93,7 +93,7 @@ class ImplicitExpansion(unittest.TestCase):
 
     def test_constant_expands_with_warning(self):
         self.m.add_formula("Z", ["Product", "Month"], ref("Variable") + 1)
-        self.assertEqual(len(self.m.value("Z")), len(self.m.dimensions["Product"].members) * len(MONTHS))
+        self.assertEqual(len(self.m.value("Z")), len(self.m.dimension("Product").members) * len(MONTHS))
         self.assertTrue(self.m.warnings[self.m.metric("Z").id])
 
     def test_scalar_metric_is_treated_like_constant(self):

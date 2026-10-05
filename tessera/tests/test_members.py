@@ -55,7 +55,7 @@ class Validation(unittest.TestCase):
         m = small()
         with self.assertRaises(ValueError):
             m.add_member("Product", "C", Category="Z")
-        self.assertEqual(m.dimensions["Product"].members, ["A", "B"])
+        self.assertEqual(m.dimension("Product").members, ["A", "B"])
 
     def test_new_member_accepts_input(self):
         m = small()
@@ -134,14 +134,14 @@ def random_round(rng: random.Random, models: list[Model], counter: list[int]) ->
         name = f"{kind[0]}new{counter[0]}"
         props = {}
         if kind == "Product":
-            props = {"Category": rng.choice(m0.dimensions["Category"].members)}
+            props = {"Category": rng.choice(m0.dimension("Category").members)}
         for m in models:
             m.add_member(kind, name, **props)
         return
     inputs = [x.name for x in m0.metrics.values() if x.formula is None]
     name = rng.choice(inputs)
     meta = m0.metric(name)
-    coords = {d: rng.choice(m0.dimensions[d].members) for d in meta.dims}
+    coords = {m0.dimension(d).name: rng.choice(m0.dimension(d).members) for d in meta.dims}
     if rng.random() < 0.3:
         value = None
     elif meta.kind == "boolean":

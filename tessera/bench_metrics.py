@@ -102,7 +102,7 @@ def build(engine_name: str, n: int):
         if engine_name == "rust":
             m.add_input(name, dims, storage=engine.from_arrays(tuple(dims), "number", cols, m))
         else:
-            members = [m.dimensions[d].members for d in dims]
+            members = [m.dimension(d).members for d in dims]
             codes = [cols[d].tolist() for d in dims]
             values = cols["__v"].tolist()
             m.add_input(name, dims, {tuple(members[j][codes[j][i]] for j in range(len(dims))): values[i]

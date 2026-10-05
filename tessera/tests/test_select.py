@@ -157,7 +157,7 @@ def random_round(rng: random.Random, models: list[Model], counter: list[int]) ->
         for m in models:
             m.add_member(kind, name, **props)
         return
-    coords = {d: rng.choice(m0.dimensions[d].members) for d in ["Product", "Version", "Month"]}
+    coords = {d: rng.choice(m0.dimension(d).members) for d in ["Product", "Version", "Month"]}
     value = None if rng.random() < 0.3 else float(rng.randint(-5, 60))
     for m in models:
         m.set_cell("Sales", value, **coords)

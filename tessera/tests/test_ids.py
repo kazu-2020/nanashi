@@ -4,7 +4,7 @@ import unittest
 import uuid
 
 from examples.fpa import build as build_fpa
-from sparse_engine import Model, to_formula
+from sparse_engine import FormulaError, Model, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.model import _UNSET, DuplicateId, uuid7
 
@@ -24,7 +24,7 @@ except ImportError:
 
 def all_ids(m: Model) -> list[str]:
     """The UUIDs of the dimensions, the Metrics and the members."""
-    ids = [m.uuid_of(d.id) for d in m.dimensions.values()] + [x.id for x in m.metrics.values()]
+    ids = [d.id for d in m.dimensions.values()] + [x.id for x in m.metrics.values()]
     for d in m.dimensions.values():
         ids += [m.uuid_of(h) for h in d.ids]
     return ids
@@ -42,7 +42,7 @@ class Ids(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_members_keep_their_id(self):
-        d = self.m.dimensions["Product"]
+        d = self.m.dimension("Product")
         a = d.id_of("A")
         self.m.rename_member("Product", "A", "Alpha")
         self.assertEqual(d.id_of("Alpha"), a)
@@ -53,7 +53,7 @@ class Ids(unittest.TestCase):
         self.assertEqual(d.member_of(c), "C")
 
     def test_removed_ids_are_not_reused(self):
-        d = self.m.dimensions["Product"]
+        d = self.m.dimension("Product")
         b = d.id_of("B")
         self.m.remove_member("Product", "B")
         with self.assertRaisesRegex(ValueError, "ID"):
@@ -122,14 +122,14 @@ class Uuids(unittest.TestCase):
 
     def test_every_object_has_a_uuid(self):
         m = self.m
-        uuids = all_ids(m) + [m.uuid_of(h) for d in m.dimensions.values() for h in d.property_ids.values()]
+        uuids = all_ids(m) + [p for d in m.dimensions.values() for p in d.properties]
         self.assertEqual(sorted(m.ids), sorted(uuids))
         self.assertEqual({u: h for h, u in m._uuids.items()}, m.ids)
         for u in m.ids:
             self.assertEqual(uuid.UUID(u).version, 7)
         self.assertIn(m.metric("Margin").id, m.ids)  # a Metric also has a handle, for the journal and storage formats
-        self.assertEqual(m.member_id("Product", "A"), m.uuid_of(m.dimensions["Product"].id_of("A")))
-        self.assertEqual(m.ids[m.property_id("Product", "Category")], m.dimensions["Product"].property_ids["Category"])
+        self.assertEqual(m.member_id("Product", "A"), m.uuid_of(m.dimension("Product").id_of("A")))
+        self.assertEqual(m.dimension("Product").property_names[m.property_id("Product", "Category")], "Category")
 
     def test_uuid7_is_ordered_by_time(self):
         a, b = uuid7(), uuid7()
@@ -149,9 +149,9 @@ class Uuids(unittest.TestCase):
         self.assertEqual(m.metric("Profit").id, margin)
         a = m.member_id("Product", "A")
         m.add_member("Product", "Alpha", id=a, at=2, Category="Y")
-        self.assertEqual((m.dimensions["Product"].in_order()[2], m.member_id("Product", "Alpha")), ("Alpha", a))
-        self.assertEqual(m.dimensions["Product"].properties["Category"][1]["Alpha"], "Y")
-        self.assertIs(m.add_dimension("Product", [], id=m.dimension_id("Product")), m.dimensions["Product"])
+        self.assertEqual((m.dimension("Product").in_order()[2], m.member_id("Product", "Alpha")), ("Alpha", a))
+        self.assertEqual(m.dimension("Product").properties[m.property_id("Product", "Category")][1]["Alpha"], "Y")
+        self.assertIs(m.add_dimension("Product", [], id=m.dimension_id("Product")), m.dimension("Product"))
         check_full(self, m)
 
     def test_same_name_with_a_different_uuid_is_an_error(self):
@@ -166,10 +166,6 @@ class Uuids(unittest.TestCase):
             m.add_property("Product", "Category", "Category", {}, id="other")
         with self.assertRaisesRegex(ValueError, "同じ名前の軸"):
             m.add_dimension("Product", [], id="other")
-        with self.assertRaisesRegex(ValueError, "名前は変えられない"):
-            m.add_dimension("Products", [], id=m.dimension_id("Product"))
-        with self.assertRaisesRegex(ValueError, "名前は変えられない"):
-            m.add_property("Product", "Cat", "Category", {}, id=m.property_id("Product", "Category"))
         self.assertNotIn("other", m.ids)
 
     def test_uuid_of_another_kind_or_a_tombstone_is_duplicate_id(self):
@@ -331,7 +327,7 @@ class RenameMetric(unittest.TestCase):
         m.recalc()
         m.rename_metric("DeptOf", "Assignment")
         self.assertIn("Employee.Assignment", to_formula(m.metric("Payroll").written, m))
-        e, t = m.dimensions["Employee"].members[0], m.dimensions["Month"].members[2]
+        e, t = m.dimension("Employee").members[0], m.dimension("Month").members[2]
         m.set_cell("Assignment", "管理", Employee=e, Month=t)
         check_full(self, m)
 
@@ -374,8 +370,8 @@ class RenameMetric(unittest.TestCase):
         follow a rename without a recalculation, while a change waits."""
         m = build_fpa(self.engine(), employees=8, products=4, months=6, seed=2)
         m.add_formula("Bonus", ["Employee", "Version"], "Salary * 0.1", overridable=True)
-        e, t = m.dimensions["Employee"].members[0], m.dimensions["Month"].members[2]
-        v = m.dimensions["Version"].members[0]
+        e, t = m.dimension("Employee").members[0], m.dimension("Month").members[2]
+        v = m.dimension("Version").members[0]
         m.set_cell("Bonus", 9, Employee=e, Version=v)
         m.recalc()
         m.set_cell("DeptOf", "管理", Employee=e, Month=t)  # a change that waits
@@ -400,6 +396,114 @@ class RenameMetric(unittest.TestCase):
             self.m.rename_metric("Margin", "__x")
 
 
+class DimensionRenames(unittest.TestCase):
+    """rename_dimension and rename_property change only the name: no recalculation, no formula rewrite."""
+    engine = staticmethod(ReferenceEngine)
+
+    def setUp(self):
+        self.m = build_with(self.engine())
+        self.m.recalc()
+
+    def test_rename_dimension_is_an_attribute_change(self):
+        m = self.m
+        before = snapshot(m)
+        product = m.dimension_id("Product")
+        m.eval_log.clear()
+        m.slice_log.clear()
+        m.rename_dimension("Product", "Item")
+        self.assertEqual(snapshot(m), before)
+        self.assertEqual(list(m.eval_log), [])
+        self.assertEqual(list(m.slice_log), [])
+        self.assertIs(m.dimension("Item"), m.dimension(product))
+        self.assertNotIn("Product", m._dim_ids)
+        self.assertEqual(m.metric("Revenue").dims, (product, m.dimension_id("Region"), m.dimension_id("Month")))
+        self.assertEqual(m.value("Revenue").dims, ("Item", "Region", "Month"))
+        formulas = {x.name: to_formula(x.written, m) for x in m.metrics.values() if x.written is not None}
+        for name, text in formulas.items():
+            self.assertNotRegex(text, r"\bProduct\b", name)
+        self.assertEqual(formulas["RevByCat"], "Revenue[BY SUM: Item.Category]")
+        self.assertEqual(formulas["Total"], "Stock[REMOVE SUM: Item][REMOVE SUM: Month]")
+        m.set_cell("Cost", 1, Item="A", Month="Jan")
+        self.assertEqual(m.get("Picked", Item="A", Month="Jan"), 30 - 1)
+        self.assertEqual(m.slice("Margin", Item="A").dims, ("Item", "Month"))
+        with self.assertRaisesRegex(ValueError, "軸 Product"):
+            m.get("Picked", Product="A", Month="Jan")
+        check_full(self, m)
+
+    def test_rename_property_is_an_attribute_change(self):
+        m = self.m
+        before = snapshot(m)
+        category = m.property_id("Product", "Category")
+        m.eval_log.clear()
+        m.rename_property("Product", "Category", "Group")
+        self.assertEqual(snapshot(m), before)
+        self.assertEqual(list(m.eval_log), [])
+        self.assertEqual(m.property_id("Product", "Group"), category)
+        self.assertEqual(m.dimension("Product").property_names[category], "Group")
+        self.assertEqual(to_formula(m.metric("RevByCat").written, m), "Revenue[BY SUM: Product.Group]")
+        m.set_property_values("Product", "Group", {"A": "Y"})
+        self.assertEqual(m.get("RevByCat", Category="Y", Region="N", Month="Jan"), 30)
+        m.spread("Volume", 100, Month="Jan", where={"Product.Group": "X"})  # X is only B now: 2 empty cells
+        self.assertEqual(m.summarize("Volume", Month="Jan").cells[()], 3 + 8 + 100)
+        check_full(self, m)
+
+    def test_errors_and_warnings_show_the_new_names(self):
+        m = self.m
+        m.add_formula("Dense", ["Product", "Month"], "IFBLANK(Cost, 0)")
+        m.recalc()
+        m.rename_dimension("Product", "Item")
+        m.rename_dimension("Month", "Period")
+        w = m.warnings[m.metric("Dense").id]
+        self.assertEqual(len(w), 1)
+        self.assertIn("Item", w[0])
+        self.assertNotIn("Product", w[0])
+        with self.assertRaises(FormulaError) as cm:  # a type check error (the Rust engine checks in Rust)
+            m.add_formula("Bad", ["Item"], "Item < Item")
+            m.recalc()
+        self.assertEqual((cm.exception.code, cm.exception.params["dim"]), ("unordered_compare", "Item"))
+        self.assertIn("Item", str(cm.exception))
+        m.remove_metric("Bad")
+        with self.assertRaises(FormulaError) as cm:  # a bind error shows the name that the user wrote
+            m.add_formula("Bad", ["Item"], "Price[BY: Product.Category]")
+        self.assertEqual((cm.exception.code, cm.exception.params), ("unknown_dim", {"name": "Product"}))
+        with self.assertRaises(FormulaError) as cm:
+            m.add_formula("Bad", ["Item"], "Price[BY: Item.Nope]")
+        self.assertEqual(cm.exception.params, {"dim": "Item", "prop": "Nope"})
+        check_full(self, m)
+
+    def test_redefine_by_uuid_renames(self):
+        m = self.m
+        d, category = m.dimension("Product"), m.property_id("Product", "Category")
+        self.assertIs(m.add_dimension("Item", [], id=d.id), d)
+        self.assertEqual((d.name, m.dimension("Item")), ("Item", d))
+        m.add_property("Item", "Group", "Category", {"A": "Y", "B": "X", "C": "X", "D": "Y"}, id=category)
+        self.assertEqual(d.property_names[category], "Group")
+        self.assertEqual(to_formula(m.metric("RevByCat").written, m), "Revenue[BY SUM: Item.Group]")
+        self.assertEqual(m.get("RevByCat", Category="Y", Region="N", Month="Jan"), 30)
+        check_full(self, m)
+
+    def test_rename_errors(self):
+        m = self.m
+        with self.assertRaisesRegex(ValueError, "同じ名前の軸"):
+            m.rename_dimension("Product", "Month")
+        with self.assertRaisesRegex(ValueError, "同じ名前の Metric"):
+            m.rename_dimension("Product", "Price")
+        with self.assertRaisesRegex(ValueError, "UUID"):
+            m.rename_dimension("Product", str(uuid.uuid4()))
+        m.add_property("Product", "Other", "Category", {})
+        with self.assertRaisesRegex(ValueError, "同じ名前のプロパティ"):
+            m.rename_property("Product", "Category", "Other")
+        with self.assertRaisesRegex(ValueError, "UUID"):
+            m.rename_property("Product", "Category", str(uuid.uuid4()))
+        with self.assertRaisesRegex(ValueError, "プロパティ Nope がない"):
+            m.rename_property("Product", "Nope", "X")
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustDimensionRenames(DimensionRenames):
+    engine = staticmethod(RustEngine)
+
+
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
 class Storage(unittest.TestCase):
     engine = staticmethod(ReferenceEngine)
@@ -409,12 +513,16 @@ class Storage(unittest.TestCase):
         m.remove_member("Product", "B")
         m.add_member("Product", "E")
         m.rename_metric("Margin", "Profit")
+        m.rename_dimension("Region", "Area")
+        m.rename_property("Product", "Category", "Group")
         with tempfile.TemporaryDirectory() as tmp:
             m.save(tmp)
             loaded = Model.load(tmp, self.engine())
         self.assertEqual(all_ids(loaded), all_ids(m))
         self.assertEqual((loaded.ids, loaded.tombstones), (m.ids, m.tombstones))
-        self.assertEqual(loaded.dimensions["Product"].property_ids, m.dimensions["Product"].property_ids)
+        self.assertEqual(loaded.dimension("Area").id, m.dimension("Area").id)
+        self.assertEqual(loaded.dimension("Product").property_names, m.dimension("Product").property_names)
+        self.assertEqual(to_formula(loaded.metric("RevByCat").written, loaded), "Revenue[BY SUM: Product.Group]")
         a, b = snapshot(m), snapshot(loaded)
         for name in a:
             self.assertTrue(same(a[name], b[name]), name)

@@ -24,7 +24,7 @@ def models(which: str):
         from examples.fpa import SIZES, build
         from sparse_engine.rust_engine import RustEngine
         m = build(RustEngine(), *SIZES["large"])
-        emp = m.dimensions["Employee"].members[7]
+        emp = m.dimension("Employee").members[7]
         yield "損益計画（大）、給与を 1 人変更", m, lambda i: m_edit("Salary", {"Employee": emp, "Version": "予算"}, i)
 
 

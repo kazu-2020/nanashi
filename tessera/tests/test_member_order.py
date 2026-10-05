@@ -41,7 +41,7 @@ class MemberOrder(unittest.TestCase):
 
     def test_insert_in_the_middle_keeps_numbers_and_cells(self):
         m = self.m
-        account = m.dimensions["Account"]
+        account = m.dimension("Account")
         m.add_member("Account", "粗利", at=2)
         self.assertEqual(account.in_order(), ["売上", "原価", "粗利", "販管費"])
         self.assertEqual(account.members, ["売上", "原価", "販管費", "粗利"])  # 番号は末尾に振る
@@ -58,7 +58,7 @@ class MemberOrder(unittest.TestCase):
         m.move_member("Account", "販管費", 0)
         m.move_member("Account", "売上", 2)
         m.recalc()
-        self.assertEqual(m.dimensions["Account"].in_order(), ["販管費", "原価", "売上"])
+        self.assertEqual(m.dimension("Account").in_order(), ["販管費", "原価", "売上"])
         self.assertEqual(list(m.slice_log), [])  # 何も計算し直さない
         for name, store in stores.items():
             self.assertIs(m._values[m.metric(name).id], store, name)  # 格納データにも触れない
@@ -68,7 +68,7 @@ class MemberOrder(unittest.TestCase):
 
     def test_order_follows_removal_and_moving_back_restores_the_number_order(self):
         m = self.m
-        account = m.dimensions["Account"]
+        account = m.dimension("Account")
         m.move_member("Account", "販管費", 0)
         m.remove_member("Account", "原価")  # 後ろの番号が詰まっても、並び順は保つ
         self.assertEqual(account.in_order(), ["販管費", "売上"])
@@ -86,7 +86,7 @@ class MemberOrder(unittest.TestCase):
         self.assertEqual(self.rows(), [("販管費", "Mar"), ("売上", "Jan"), ("売上", "Feb"), ("原価", "Jan")])
         m.rename_member("Account", "販管費", "一般管理費")  # 名前 -> 順位の表を引いたあとで名前を変える
         self.assertEqual(self.rows()[0], ("一般管理費", "Mar"))
-        self.assertEqual(m.dimensions["Account"].ranks()["一般管理費"], 0)
+        self.assertEqual(m.dimension("Account").ranks()["一般管理費"], 0)
 
     def test_ordered_dimensions_cannot_be_reordered(self):
         m = self.m
@@ -94,9 +94,9 @@ class MemberOrder(unittest.TestCase):
             m.move_member("Month", "Mar", 0)
         with self.assertRaisesRegex(ValueError, "順序付きの軸"):
             m.add_member("Month", "Dec", at=0)
-        self.assertNotIn("Dec", m.dimensions["Month"])
+        self.assertNotIn("Dec", m.dimension("Month"))
         m.add_member("Month", "Apr", at=3)  # 最後なら位置を渡してもよい
-        self.assertEqual(m.dimensions["Month"].in_order(), ["Jan", "Feb", "Mar", "Apr"])
+        self.assertEqual(m.dimension("Month").in_order(), ["Jan", "Feb", "Mar", "Apr"])
         self.assertEqual(m.get("Running", Account="売上", Month="Apr"), 210.0)
 
     def test_positions_are_checked(self):
@@ -104,7 +104,7 @@ class MemberOrder(unittest.TestCase):
         for at in (-1, 4, 1.5, True, "1"):
             with self.subTest(at=at), self.assertRaisesRegex(ValueError, "並び順の位置"):
                 m.add_member("Account", "x", at=at)
-        self.assertNotIn("x", m.dimensions["Account"])
+        self.assertNotIn("x", m.dimension("Account"))
         with self.assertRaisesRegex(ValueError, "並び順の位置"):
             m.move_member("Account", "売上", 3)
         with self.assertRaisesRegex(ValueError, "メンバー 'x' がない"):
@@ -117,13 +117,13 @@ class MemberOrder(unittest.TestCase):
                 m.move_member("Account", "販管費", 0)
                 m.add_member("Account", "粗利", at=1)
                 raise RuntimeError
-        self.assertEqual(m.dimensions["Account"].in_order(), ["売上", "原価", "販管費"])
+        self.assertEqual(m.dimension("Account").in_order(), ["売上", "原価", "販管費"])
 
     def test_fork_has_its_own_order(self):
         other = self.m.fork()
         other.move_member("Account", "販管費", 0)
-        self.assertEqual(self.m.dimensions["Account"].in_order(), ["売上", "原価", "販管費"])
-        self.assertEqual(other.dimensions["Account"].in_order(), ["販管費", "売上", "原価"])
+        self.assertEqual(self.m.dimension("Account").in_order(), ["売上", "原価", "販管費"])
+        self.assertEqual(other.dimension("Account").in_order(), ["販管費", "売上", "原価"])
 
     @unittest.skipIf(nanashi_core is None, "nanashi_core のビルドが必要")
     def test_save_and_load_keep_the_order(self):
@@ -133,8 +133,8 @@ class MemberOrder(unittest.TestCase):
         m.move_member("Account", "販管費", 0)
         files = dump(m)
         back = read(files.__getitem__, self.engine())
-        self.assertEqual(back.dimensions["Account"].in_order(), ["販管費", "売上", "原価", "粗利"])
-        self.assertEqual(back.dimensions["Account"].members, m.dimensions["Account"].members)
+        self.assertEqual(back.dimension("Account").in_order(), ["販管費", "売上", "原価", "粗利"])
+        self.assertEqual(back.dimension("Account").members, m.dimension("Account").members)
         self.assertEqual(back.rows("Plan")[0], m.rows("Plan")[0])
         self.assertEqual(back.get("Total", Month="Jan"), 200.0)
 

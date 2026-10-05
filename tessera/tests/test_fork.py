@@ -28,9 +28,9 @@ def what_if(m, seed: int) -> None:
         edit(m, rng)
     m.add_member("Employee", f"new{seed}")  # 社員の追加を必ず含める
     m.set_cell("Salary", 500.0, Employee=f"new{seed}", Version="予算")
-    m.set_cell("HireMonth", m.dimensions["Month"].members[0], Employee=f"new{seed}")
-    m.set_cell("PlanOI", 1.0, Version="予算", Month=m.dimensions["Month"].members[0])
-    m.spread("OtherOpex", 9_000.0, Version="予算", Month=m.dimensions["Month"].members[-1])
+    m.set_cell("HireMonth", m.dimension("Month").members[0], Employee=f"new{seed}")
+    m.set_cell("PlanOI", 1.0, Version="予算", Month=m.dimension("Month").members[0])
+    m.spread("OtherOpex", 9_000.0, Version="予算", Month=m.dimension("Month").members[-1])
 
 
 def check_equal(test, a: dict, b: dict) -> None:
@@ -49,7 +49,7 @@ class Fork(unittest.TestCase):
         fork = original.fork()
         what_if(fork, 1)
         check_equal(self, snapshot(original), before)
-        self.assertNotEqual(len(fork.dimensions["Employee"].members), len(original.dimensions["Employee"].members))
+        self.assertNotEqual(len(fork.dimension("Employee").members), len(original.dimension("Employee").members))
 
     def test_changes_in_original_do_not_touch_fork(self):
         original = small(self.engine())

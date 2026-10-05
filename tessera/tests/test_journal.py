@@ -33,7 +33,7 @@ except ImportError:
 def definitions(m: Model) -> dict:
     """値以外の状態（軸、メンバー、ID、プロパティ、Metric の定義）。"""
     dims = {d.name: (d.id, d.ordered, list(zip(d.ids, d.members)), d.in_order(),
-                     {p: (t, dict(mp)) for p, (t, mp) in d.properties.items()})
+                     {p: (t, dict(mp), d.property_names[p]) for p, (t, mp) in d.properties.items()})
             for d in m.dimensions.values()}
     metrics = {x.name: (x.id, x.dims, x.kind, None if x.written is None else to_formula(x.written, m),
                         x.partition, x.overridable) for x in m.metrics.values()}
@@ -43,8 +43,6 @@ def definitions(m: Model) -> dict:
 def check_same_state(test, a: Model, b: Model) -> None:
     test.assertEqual(definitions(a), definitions(b))
     test.assertEqual((a.ids, a.tombstones), (b.ids, b.tombstones))
-    test.assertEqual({d.name: d.property_ids for d in a.dimensions.values()},
-                     {d.name: d.property_ids for d in b.dimensions.values()})
     sa, sb = snapshot(a), snapshot(b)
     for name in sa:
         test.assertTrue(same(sa[name], sb[name]), f"{name}\n{sa[name]}\n{sb[name]}")
@@ -93,9 +91,9 @@ class Transactions(unittest.TestCase):
         self.assertEqual((rec["user"], rec["reason"]), ("alice", "値上げ"))
         self.assertEqual([op["op"] for op in rec["ops"]], ["set_cell", "spread"])  # 按分の中の set_cell は記録しない
         cells = {c["metric"]: c["rows"] for c in rec["changes"]["cells"]}  # keyed by the Metric handle
-        product = self.m.dimensions["Product"]
+        product = self.m.dimension("Product")
         self.assertEqual(cells[self.m.ids[self.m.metric("Price").id]], [[[product.id_of("A")], 10.0, 12.0]])
-        month = self.m.dimensions["Month"]
+        month = self.m.dimension("Month")
         self.assertEqual(cells[self.m.ids[self.m.metric("Cost").id]], [[[product.id_of("B"), month.id_of("Mar")], 30.0, 60.0]])
         self.assertNotIn("metrics", rec["changes"])
 
@@ -135,19 +133,19 @@ class Journal(JournalCase, unittest.TestCase):
         check_same_state(self, self.m, self.reopen())
 
     def test_member_order_is_recorded(self):
-        product = self.m.dimensions["Product"]
+        product = self.m.dimension("Product")
         with self.m.transaction() as moved:
             self.m.move_member("Product", "D", 0)
         # 並び替えだけなら、メンバーの変更（構造の変更）でなく並び順として記録する
         self.assertEqual(moved.record["changes"]["member_order"],
-                         [{"dim": product.id, "order": [product.id_of(x) for x in "DABC"]}])
+                         [{"dim": self.m.ids[product.id], "order": [product.id_of(x) for x in "DABC"]}])
         self.assertNotIn("members", moved.record["changes"])
         with self.m.transaction() as txn:
             self.m.add_member("Product", "E", at=1, Category="Y")
             self.m.remove_member("Product", "B")
             self.m.set_cell("Price", 3, Product="E")
         self.assertEqual(txn.record["changes"]["member_order"],
-                         [{"dim": product.id, "order": [product.id_of(x) for x in "DEAC"]}])
+                         [{"dim": self.m.ids[product.id], "order": [product.id_of(x) for x in "DEAC"]}])
         with self.m.transaction() as appended:
             self.m.add_member("Product", "F")  # 最後に足すだけなら、並び順は記録しない
         self.assertNotIn("member_order", appended.record["changes"])
@@ -166,6 +164,9 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.add_property("Product", "Category", "Category", {"A": "Y", "C": "X"}, id=self.m.property_id("Product", "Category"))  # D loses its mapping
             self.m.set_property_values("Product", "Category", {"A": "X", "C": None, "D": "Y"})
             self.m.remove_metric("CatShare")
+            self.m.rename_dimension("Region", "Area")
+            self.m.rename_property("Employee", "Department", "Dept")
+        self.m.rename_dimension("Area", "Zone")
         self.m.add_input("Salary", ["Employee"], {("e2",): 250}, id=self.m.metric("Salary").id)  # replace an input
         self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric("Stock").id)  # a formula Metric becomes an input
         check_same_state(self, self.m, self.reopen())
@@ -404,7 +405,7 @@ def random_operation(rng: random.Random, models: list[Model], counters: list[lis
         edit_or_add_member(rng, models, counters[0])
     elif kind < 0.55:
         m0 = models[0]
-        p = rng.choice(m0.dimensions["Product"].members)
+        p = rng.choice(m0.dimension("Product").members)
         total = float(rng.randint(10, 200))
         if "Volume" in m0._metric_ids and m0.metric("Volume").formula is None:
             for m in models:
@@ -479,8 +480,8 @@ class Blocks(unittest.TestCase):
             (c,) = txn.record["changes"]["cells"]
             self.assertNotIsInstance(c["rows"], list)
             self.assertEqual(len(c["rows"]), 1499)  # k2 はもともと 2
-            k, t = m.dimensions["K"], m.dimensions["T"]
-            self.assertEqual(c["dims"], [k.id, t.id])
+            k, t = m.dimension("K"), m.dimension("T")
+            self.assertEqual(c["dims"], [m.ids[k.id], m.ids[t.id]])  # the record names a dimension by its handle
             self.assertEqual(sorted(c["rows"])[:2], [[[k.ids[0], t.ids[0]], 0.0, 2.0], [[k.ids[1], t.ids[0]], 1.0, 2.0]])
             for e in (ReferenceEngine, RustEngine):  # ファイルには行として書く
                 check_same_state(self, m, FileJournal(tmp).open(e()))

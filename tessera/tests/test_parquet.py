@@ -48,10 +48,13 @@ class ParquetRoundTrip(unittest.TestCase):
                 dst = model(reader())
                 for name in ("Salary", "Active", "DeptOf", "Empty"):
                     m = src.metric(name)
+                    dims = tuple(src.dimension(d).name for d in m.dims)  # names: dst has other dimension ids
+                    kind = src._name_of(m.kind)
+                    partition = None if m.partition is None else src.dimension(m.partition).name
                     with self.subTest(writer=writer.name, reader=reader.name, metric=name):
-                        data = src.engine.to_parquet(src._values[src.metric(name).id], m.dims, m.kind, src, {"metric": str(m.id)})
+                        data = src.engine.to_parquet(src._values[src.metric(name).id], dims, kind, src, {"metric": str(m.id)})
                         self.assertIsInstance(data, bytes)
-                        store = dst.engine.from_parquet(data, m.dims, m.kind, dst, m.partition)
+                        store = dst.engine.from_parquet(data, dims, kind, dst, partition)
                         self.assertEqual(dst.engine.to_cube(store, dst).cells, cells(src, name))
                         self.assertIn(("metric", str(m.id)), nanashi_core.parquet_metadata(data))
 

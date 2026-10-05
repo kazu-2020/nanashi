@@ -189,7 +189,7 @@ class Redefine(unittest.TestCase):
         m.add_formula("Looked", ["Product"], "Rate[BY: Product.Category]")
         m.recalc()
         m.set_property_values("Product", "Category", {"A": "Y", "C": None})
-        self.assertEqual(m.dimensions["Product"].properties["Category"][1], {"A": "Y", "B": "Y"})
+        self.assertEqual(m.dimension("Product").properties[m.property_id("Product", "Category")][1], {"A": "Y", "B": "Y"})
         self.assertEqual(dict(m.value("Looked").cells), {("A",): 2, ("B",): 2})
         with self.assertRaises(ValueError):
             m.set_property_values("Product", "Category", {"A": "Z"})
@@ -246,7 +246,7 @@ def template(rng: random.Random, m: Model, target: str, dims: tuple[str, ...]) -
         return None
     a, b = rng.choice(same), rng.choice(same)
     choices = [f"{a} * 2", f"{a} + {b}", f"IF({a} > 5, {a}, 0)", f"IFBLANK({a}, 1)", f"{a}[FILTER: {b} > 3]"]
-    if "Month" in dims and m.dimensions["Month"].ordered:
+    if m.dimension_id("Month") in dims and m.dimension("Month").ordered:
         choices.append(f"PREVIOUS(Month) * 0.5 + {a}")
     return rng.choice(choices)
 
@@ -260,7 +260,7 @@ def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> Non
     numbers = [x.name for x in m0.metrics.values() if x.kind == "number" and not x.name.startswith("__")]
     if kind < 0.25:  # 新しい計算 Metric
         a = rng.choice(numbers)
-        dims = m0.metric(a).dims
+        dims = tuple(m0.dimension(d).name for d in m0.metric(a).dims)  # names: the models have different ids
         counter[0] += 1
         name = f"N{counter[0]}"
         choices = [(f"{a} * 3", dims)]
@@ -283,15 +283,15 @@ def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> Non
             m.add_formula(target, m.metric(target).dims, formula, id=m.metric(target).id)
     elif kind < 0.7:  # 入力に置き換える（計算 Metric を入力にすることもある）
         target = rng.choice(numbers)
-        dims = m0.metric(target).dims
+        dims = tuple(m0.dimension(d).name for d in m0.metric(target).dims)
         cells = {}
         for _ in range(rng.randint(0, 4)):
-            key = tuple(rng.choice(m0.dimensions[d].members) for d in dims)
+            key = tuple(rng.choice(m0.dimension(d).members) for d in dims)
             cells[key] = float(rng.randint(-5, 60))
         for m in models:
             m.add_input(target, dims, cells, id=m.metric(target).id)
     elif kind < 0.8:  # プロパティを置き換える
-        mapping = {p: rng.choice(m0.dimensions["Category"].members) for p in m0.dimensions["Product"].members}
+        mapping = {p: rng.choice(m0.dimension("Category").members) for p in m0.dimension("Product").members}
         for m in models:
             m.add_property("Product", "Category", "Category", mapping, id=m.property_id("Product", "Category"))
     elif kind < 0.9:  # Metric の名前を変える
