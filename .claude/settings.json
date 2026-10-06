@@ -1,4 +1,7 @@
 {
+  "env": {
+    "ENABLE_LSP_TOOL": "1"
+  },
   "permissions": {
     "deny": [
       "Read(./api/gen/**/*)",
@@ -16,6 +19,11 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/web/scripts/heroui-docs.sh"
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/mise-install.sh",
+            "timeout": 600
           }
         ]
       }
@@ -23,7 +31,10 @@
   },
   "enabledPlugins": {
     "pstack@pstack-claude": true,
-    "ponytail@ponytail": true
+    "ponytail@ponytail": true,
+    "gopls-lsp@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "typescript-lsp@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "pstack-claude": {

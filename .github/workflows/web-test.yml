@@ -1,6 +1,6 @@
 name: web-test
 
-# Start only when web/, proto/, the generated code or this file changes.
+# Start only when web/, proto/, the generated code, mise.toml or this file changes.
 # This workflow also makes sure that the generated code in api/gen/ and web/src/gen/ agrees with proto/.
 on:
   push:
@@ -13,6 +13,7 @@ on:
       - api/go.sum
       - buf.yaml
       - buf.gen.yaml
+      - mise.toml
       - .github/workflows/web-test.yml
   pull_request:
     paths: *paths
@@ -32,19 +33,27 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+      # Use the versions in mise.toml. buf generate runs the Go plugins with "go tool".
+      - uses: jdx/mise-action@v5
         with:
-          package_json_file: web/package.json
-      - uses: actions/setup-node@v7
+          install_args: node npm:pnpm go
+      - name: Cache the Go modules and the build cache
+        uses: actions/cache@v6
         with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      # buf generate runs the Go plugins with "go tool".
-      - uses: actions/setup-go@v7
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ github.workflow }}-${{ runner.os }}-${{ hashFiles('mise.toml', 'api/go.sum') }}
+          restore-keys: go-${{ github.workflow }}-${{ runner.os }}-
+      - name: Find the pnpm store
+        id: pnpm
+        run: echo "store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - name: Cache the pnpm store
+        uses: actions/cache@v6
         with:
-          go-version-file: api/go.mod
-          cache-dependency-path: api/go.sum
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('mise.toml', 'web/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
       - run: pnpm install --frozen-lockfile
       - name: Make sure that the generated code is up to date
         run: |

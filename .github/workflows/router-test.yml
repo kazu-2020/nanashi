@@ -1,11 +1,12 @@
 name: router-test
 
-# Start only when router/ or this file changes.
+# Start only when router/, mise.toml or this file changes.
 on:
   push:
     branches: [main]
     paths: &paths
       - router/**
+      - mise.toml
       - .github/workflows/router-test.yml
   pull_request:
     paths: *paths
@@ -33,13 +34,17 @@ jobs:
       NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: jdx/mise-action@v5  # Use the versions in mise.toml
         with:
-          python-version: "3.12"
-      - uses: actions/setup-go@v7
+          install_args: go python
+      - name: Cache the Go modules and the build cache
+        uses: actions/cache@v6
         with:
-          go-version-file: router/go.mod
-          cache-dependency-path: router/go.sum
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ github.workflow }}-${{ runner.os }}-${{ hashFiles('mise.toml', 'router/go.sum') }}
+          restore-keys: go-${{ github.workflow }}-${{ runner.os }}-
       # The PgResolver tests read the nanashi_model table. The engine schema makes it.
       - name: Make the engine schema
         working-directory: tessera

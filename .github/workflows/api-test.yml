@@ -1,12 +1,13 @@
 name: api-test
 
-# Start only when api/, proto/ (the validation rules) or this file changes.
+# Start only when api/, proto/ (the validation rules), mise.toml or this file changes.
 on:
   push:
     branches: [main]
     paths: &paths
       - api/**
       - proto/**
+      - mise.toml
       - .github/workflows/api-test.yml
   pull_request:
     paths: *paths
@@ -34,10 +35,17 @@ jobs:
       NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:55432/nanashi
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: jdx/mise-action@v5  # Use the versions in mise.toml
         with:
-          go-version-file: api/go.mod
-          cache-dependency-path: api/go.sum
+          install_args: go
+      - name: Cache the Go modules and the build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ github.workflow }}-${{ runner.os }}-${{ hashFiles('mise.toml', 'api/go.sum') }}
+          restore-keys: go-${{ github.workflow }}-${{ runner.os }}-
       - name: Test
         working-directory: api
         run: |
