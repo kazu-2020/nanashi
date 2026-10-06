@@ -1,9 +1,14 @@
 #!/bin/bash
 # Install the tools in mise.toml. Run only in a cloud session.
-# The network policy blocks some downloads (Python and Rust). A failure does not stop the session.
+# The network policy can block some downloads. A failure does not stop the session.
 [ "$CLAUDE_CODE_REMOTE" = "true" ] || exit 0
 cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 0
-command -v mise >/dev/null || npm install -g @jdxcode/mise >/dev/null 2>&1 || exit 0
+# Use the official install script. mise.run is blocked, so get the same script from mise.jdx.dev.
+# If the script fails, get mise from the npm registry.
+export PATH="$HOME/.local/bin:$PATH"
+command -v mise >/dev/null || (curl -fsSL https://mise.jdx.dev/install.sh | MISE_QUIET=1 sh) >/dev/null 2>&1
+command -v mise >/dev/null || npm install -g @jdxcode/mise >/dev/null 2>&1
+command -v mise >/dev/null || exit 0
 mise trust --yes mise.toml >/dev/null 2>&1
 
 # The network policy blocks go.dev. If mise cannot install Go, get the same Go from proxy.golang.org.
