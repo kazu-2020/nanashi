@@ -156,7 +156,7 @@ func TestCheckID(t *testing.T) {
 	}
 }
 
-func TestCheckIDs(t *testing.T) {
+func TestCheckRequest(t *testing.T) {
 	up := strings.ToUpper
 	ok := []proto.Message{
 		&nanashiv1.QueryRequest{AppId: product, Metrics: []string{budget}, Rows: []string{product},
@@ -168,7 +168,7 @@ func TestCheckIDs(t *testing.T) {
 	}
 	for _, m := range ok {
 		before := proto.Clone(m)
-		if err := checkIDs(m.ProtoReflect()); err != nil || !proto.Equal(m, before) {
+		if err := checkRequest(m); err != nil || !proto.Equal(m, before) {
 			t.Errorf("%T: got %v, want no error and no change", m, err)
 		}
 	}
@@ -184,7 +184,7 @@ func TestCheckIDs(t *testing.T) {
 			{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: sale1, Name: "x", Properties: map[string]string{up(salesProduct): "text"}}}}}},
 	}
 	for i, m := range bad {
-		if err := checkIDs(m.ProtoReflect()); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		if err := checkRequest(m); connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Errorf("bad request %d (%T): got %v, want InvalidArgument", i, m, err)
 		}
 	}

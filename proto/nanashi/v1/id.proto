@@ -1,0 +1,18 @@
+// Extensions of a proto3 file can only extend the descriptor options, so this rule is in its own file.
+edition = "2023";
+
+package nanashi.v1;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1";
+
+extend buf.validate.StringRules {
+  // id requires a UUID in the canonical form: lower case, with hyphens (docs/ids.md).
+  // The engine and the jsonb columns compare ids as strings, so each id has one spelling only.
+  bool id = 1000 [(buf.validate.predefined).cel = {
+    id: "string.id"
+    message: "正規形の UUID ではない"
+    expression: "!rule || this.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')"
+  }];
+}

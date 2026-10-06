@@ -2,6 +2,10 @@
 # The plugins run locally, so that the result does not change with the network.
 version: v2
 clean: true
+# The Go code of buf/validate comes from the Go module of protovalidate. The TypeScript code of it is made here.
+inputs:
+  - directory: proto
+    exclude_paths: [proto/buf]
 plugins:
   - local: [go, tool, -C, api, protoc-gen-go]
     out: api/gen
@@ -12,3 +16,4 @@ plugins:
   - local: web/node_modules/.bin/protoc-gen-es
     out: web/src/gen
     opt: target=ts
+    include_imports: true

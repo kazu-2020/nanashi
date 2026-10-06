@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package nanashi.v1;
 
+import "buf/validate/validate.proto";
+import "nanashi/v1/id.proto";
+
 option go_package = "github.com/kazu-2020/nanashi/api/gen/nanashi/v1;nanashiv1";
 
 // PlanService gives the planning features to the frontend.
@@ -92,7 +95,10 @@ enum Role {
 }
 
 message Application {
-  string id = 1;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 2;
   Role role = 3;
 }
@@ -106,14 +112,26 @@ message ListApplicationsResponse {
 message CreateApplicationRequest {
   string name = 1;
   // If set, the new application starts with the content of this snapshot.
-  string snapshot_id = 2;
+  string snapshot_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The id of the new application.
-  string id = 3;
-  string client_op_id = 4;
+  string id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message GetModelRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 enum ListKind {
@@ -137,23 +155,35 @@ enum PropertyType {
 }
 
 message PropertyDef {
-  string id = 4;
+  string id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 1;
   PropertyType type = 2;
   // The id of the target list of a DIMENSION property.
-  string target = 3;
+  string target = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message Member {
-  string id = 3;
+  string id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 1;
   // The value of each property, by property id. The value of a DIMENSION property is a member id of the target
   // list. The other values are text. A blank value is missing.
-  map<string, string> properties = 2;
+  map<string, string> properties = 2 [(buf.validate.field).map.keys.string.(nanashi.v1.id) = true];
 }
 
 message ListDef {
-  string id = 6;
+  string id = 6 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 1;
   ListKind kind = 2;
   reserved 3;
@@ -171,13 +201,19 @@ enum ValueKind {
 }
 
 message MetricDef {
-  string id = 7;
+  string id = 7 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 1;
   // The ids of the lists.
-  repeated string dimensions = 2;
+  repeated string dimensions = 2 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
   ValueKind kind = 3;
   // The id of the list of a MEMBER Metric. Empty for the other kinds.
-  string member_list = 6;
+  string member_list = 6 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // Empty for an input Metric. A formula names the Metrics, lists and members by their names.
   string formula = 4;
   // True if a user can type over the formula result.
@@ -201,51 +237,102 @@ message ModelDef {
 }
 
 message NewMember {
-  string id = 1;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 2;
 }
 
 message CreateListRequest {
-  string app_id = 1;
-  string id = 6;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 6 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 2;
   ListKind kind = 3;
   repeated NewMember members = 4;
-  string client_op_id = 5;
+  string client_op_id = 5 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message RenameListRequest {
-  string app_id = 1;
-  string id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 3;
-  string client_op_id = 4;
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message AddPropertyRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The id of the list.
-  string list = 2;
+  string list = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // property.id is required. The api makes the id of the Metric of a NUMBER or BOOLEAN property.
   PropertyDef property = 3;
-  string client_op_id = 4;
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message RenamePropertyRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The id of the list.
-  string list = 2;
+  string list = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The id of the property.
-  string id = 3;
+  string id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 4;
-  string client_op_id = 5;
+  string client_op_id = 5 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message EditMembersRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The id of the list.
-  string list = 2;
+  string list = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   repeated MemberEdit edits = 3;
-  string client_op_id = 4;
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message MemberEdit {
@@ -259,81 +346,144 @@ message MemberEdit {
 }
 
 message AddMember {
-  string id = 3;
+  string id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 1;
   // Property id to value (see Member.properties).
-  map<string, string> properties = 2;
+  map<string, string> properties = 2 [(buf.validate.field).map.keys.string.(nanashi.v1.id) = true];
 }
 
 message RenameMember {
-  string id = 1;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 2;
 }
 
 message RemoveMember {
-  string id = 1;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message MoveMember {
-  string id = 1;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   int32 position = 2;
 }
 
 // SetProperties sets property values of a member. An empty value makes the value blank.
 message SetProperties {
-  string id = 1;
-  map<string, string> properties = 2;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  map<string, string> properties = 2 [(buf.validate.field).map.keys.string.(nanashi.v1.id) = true];
 }
 
 // CreateCalendar makes the ordered lists Year, Quarter and Month with the properties
 // Month.Quarter, Month.Year and Quarter.Year. Member names are "2026", "2026-Q1" and "2026-01".
 // The api makes the ids.
 message CreateCalendarRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   int32 start_year = 2;
   int32 years = 3;
-  string client_op_id = 4;
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message CreateScenarioRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The id of the new member.
-  string id = 5;
+  string id = 5 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 2;
   // The id of an existing scenario member. Empty gives an empty scenario.
-  string copy_from = 3;
-  string client_op_id = 4;
+  string copy_from = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message CreateMetricRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // metric.id is required.
   MetricDef metric = 3;
 }
 
 message UpdateMetricRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   MetricDef metric = 3;
 }
 
 message RenameMetricRequest {
-  string app_id = 1;
-  string id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 3;
-  string client_op_id = 4;
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message DeleteMetricRequest {
-  string app_id = 1;
-  string id = 2;
-  string client_op_id = 3;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 // Members is a set of member ids.
 message Members {
-  repeated string ids = 1;
+  repeated string ids = 1 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
 }
 
 message Value {
@@ -341,7 +491,7 @@ message Value {
     double number = 1;
     bool boolean = 2;
     // A member id.
-    string member = 3;
+    string member = 3 [(buf.validate.field).string.(nanashi.v1.id) = true];
   }
 }
 
@@ -358,18 +508,24 @@ enum Aggregation {
 // QueryRequest reads the cells of Metrics, aggregated to the lists in rows and columns. All references are ids.
 // The response ignores a list that a Metric does not have, and a Metric that the model does not have.
 message QueryRequest {
-  string app_id = 1;
-  repeated string metrics = 2;
-  repeated string rows = 3;
-  repeated string columns = 4;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  repeated string metrics = 2 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
+  repeated string rows = 3 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
+  repeated string columns = 4 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
   // Only these members, by list id. A missing list gives all members.
-  map<string, Members> filters = 5;
+  map<string, Members> filters = 5 [(buf.validate.field).map.keys.string.(nanashi.v1.id) = true];
   // It is used only for number Metrics.
   Aggregation aggregation = 6;
 }
 
 message QueryCell {
-  string metric = 1;
+  string metric = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The member id of each list in QueryResponse.dimensions. Empty if the Metric does not have the list.
   repeated string coords = 2;
   Value value = 3;
@@ -378,29 +534,47 @@ message QueryCell {
 message QueryResponse {
   reserved 1;
   // The list ids of QueryCell.coords: the rows, then the columns.
-  repeated string dimensions = 2;
+  repeated string dimensions = 2 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
   repeated QueryCell cells = 3;
 }
 
 message CellWrite {
-  string metric = 1;
+  string metric = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // List id to member id.
-  map<string, string> coords = 2;
+  map<string, string> coords = 2 [
+    (buf.validate.field).map.keys.string.(nanashi.v1.id) = true,
+    (buf.validate.field).map.values.string.(nanashi.v1.id) = true
+  ];
   // Missing makes the cell blank.
   Value value = 3;
 }
 
 message WriteCellsRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   repeated CellWrite writes = 2;
-  string client_op_id = 3;
+  string client_op_id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 // ImportRequest loads a CSV file (with a header row) into a list or a Metric.
 message ImportRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string csv = 2;
-  string client_op_id = 5;
+  string client_op_id = 5 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   oneof target {
     ListImport list = 3;
     MetricImport metric = 4;
@@ -409,18 +583,24 @@ message ImportRequest {
 
 message ListImport {
   // The id of the list.
-  string list = 1;
+  string list = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The column with the member names. Empty for a transaction list gives the row numbers.
   string member_column = 2;
   // Property id to column name. The column of a DIMENSION property has member names of the target list.
-  map<string, string> property_columns = 3;
+  map<string, string> property_columns = 3 [(buf.validate.field).map.keys.string.(nanashi.v1.id) = true];
 }
 
 message MetricImport {
   // The id of the Metric.
-  string metric = 1;
+  string metric = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // List id to column name. The column has member names.
-  map<string, string> dimension_columns = 2;
+  map<string, string> dimension_columns = 2 [(buf.validate.field).map.keys.string.(nanashi.v1.id) = true];
   string value_column = 3;
   // If true, add the members that are not in the lists. If false, such rows are errors.
   bool add_members = 4;
@@ -431,24 +611,42 @@ message ImportResponse {
 }
 
 message CreateTableRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // table.id is required.
   TableDef table = 3;
 }
 
 message UpdateTableRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   TableDef table = 3;
 }
 
 message TableDef {
-  string app_id = 1;
-  string id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 3;
   // Metric ids.
-  repeated string metrics = 4;
+  repeated string metrics = 4 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
 }
 
 enum Display {
@@ -461,57 +659,93 @@ enum Display {
 
 // ViewDef is a saved pivot of Metrics.
 message CreateViewRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // view.id is required.
   ViewDef view = 3;
 }
 
 message UpdateViewRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   ViewDef view = 3;
 }
 
 message ViewDef {
-  string app_id = 1;
-  string id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 3;
-  repeated string metrics = 4;
-  repeated string rows = 5;
-  repeated string columns = 6;
-  map<string, Members> filters = 7;
+  repeated string metrics = 4 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
+  repeated string rows = 5 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
+  repeated string columns = 6 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
+  map<string, Members> filters = 7 [(buf.validate.field).map.keys.string.(nanashi.v1.id) = true];
   Display display = 8;
   Aggregation aggregation = 9;
 }
 
 message Widget {
   oneof content {
-    string view_id = 1;
+    string view_id = 1 [(buf.validate.field).string.(nanashi.v1.id) = true];
     string text = 2;
   }
 }
 
 message CreateBoardRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // board.id is required.
   BoardDef board = 3;
 }
 
 message UpdateBoardRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   BoardDef board = 3;
 }
 
 message BoardDef {
-  string app_id = 1;
-  string id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 3;
   repeated Widget widgets = 4;
   // Lists with a page selector. The selected member filters all the widgets.
-  repeated string page_selectors = 5;
+  repeated string page_selectors = 5 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
 }
 
 enum ItemType {
@@ -522,26 +756,53 @@ enum ItemType {
 }
 
 message DeleteItemRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   ItemType type = 2;
-  string id = 3;
-  string client_op_id = 4;
+  string id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message AddCommentRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // comment.id is required.
   Comment comment = 3;
 }
 
 message Comment {
-  string app_id = 1;
-  string id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The id of the Metric of the comment.
-  string metric = 3;
+  string metric = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // The cell, as list id to member id. Empty for the whole Metric.
-  map<string, string> cell = 4;
+  map<string, string> cell = 4 [
+    (buf.validate.field).map.keys.string.(nanashi.v1.id) = true,
+    (buf.validate.field).map.values.string.(nanashi.v1.id) = true
+  ];
   string user = 5;
   string body = 6;
   // Unix time in milliseconds.
@@ -549,9 +810,15 @@ message Comment {
 }
 
 message ListCommentsRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // Empty gives all comments of the application.
-  string metric = 2;
+  string metric = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message ListCommentsResponse {
@@ -559,7 +826,10 @@ message ListCommentsResponse {
 }
 
 message AuditEntry {
-  string id = 1;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string user = 2;
   int64 created_at = 3;
   // The RPC name, for example "WriteCells".
@@ -569,7 +839,10 @@ message AuditEntry {
 }
 
 message ListAuditRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   int32 limit = 2;
 }
 
@@ -578,14 +851,20 @@ message ListAuditResponse {
 }
 
 message Snapshot {
-  string id = 1;
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 2;
   string user = 3;
   int64 created_at = 4;
 }
 
 message ListSnapshotsRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message ListSnapshotsResponse {
@@ -593,40 +872,73 @@ message ListSnapshotsResponse {
 }
 
 message CreateSnapshotRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string name = 2;
   // The id of the new snapshot.
-  string id = 3;
-  string client_op_id = 4;
+  string id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message GetAccessRequest {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message SetMemberRoleRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   AppMember member = 3;
 }
 
 message AppMember {
-  string app_id = 1;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   string user = 2;
   // ROLE_UNSPECIFIED removes the user from the application.
   Role role = 3;
 }
 
 message CreateAccessRuleRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // rule.id is required.
   AccessRule rule = 3;
 }
 
 message UpdateAccessRuleRequest {
-  string app_id = 1;
-  string client_op_id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   AccessRule rule = 3;
 }
 
@@ -635,21 +947,39 @@ message UpdateAccessRuleRequest {
 // A member that the model does not have is not readable. A list that the model does not have makes the rule
 // inactive.
 message AccessRule {
-  string app_id = 1;
-  string id = 2;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   Role role = 3;
   // The id of the list.
-  string list = 4;
+  string list = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
   // Member ids.
-  repeated string members = 5;
+  repeated string members = 5 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
   // If false, the users can read the members but cannot write.
   bool write = 6;
 }
 
 message DeleteAccessRuleRequest {
-  string app_id = 1;
-  string id = 2;
-  string client_op_id = 3;
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
 }
 
 message Access {
