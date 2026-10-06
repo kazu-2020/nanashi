@@ -2,7 +2,7 @@
 [tools]
 go = "1.27.1"
 rust = { version = "1.99.0", components = "clippy,rust-analyzer" }  # rust-analyzer is the LSP server for the rust-analyzer-lsp plugin
-python = "3.14.6"
+python = "3.14.8"
 node = "26.10.0"
 # Node 25 and later do not include corepack. Keep the same version in "packageManager" of web/package.json.
 # Get pnpm from the npm registry, not from GitHub releases.

@@ -51,6 +51,7 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           install_args: rust
+          cache: false  # The cache does not keep ~/.rustup, so a cache hit can lose the Rust toolchain
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -92,6 +93,7 @@ jobs:
       - uses: jdx/mise-action@v5  # Use the versions in mise.toml. pyo3 (nanashi_core) uses Python for the build
         with:
           install_args: rust python
+          cache: false  # The cache does not keep ~/.rustup, so a cache hit can lose the Rust toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tessera/native
