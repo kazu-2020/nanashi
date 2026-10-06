@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file nanashi/v1/plan.proto.
  */
 export const file_nanashi_v1_plan: GenFile = /*@__PURE__*/
-  fileDesc("ChVuYW5hc2hpL3YxL3BsYW4ucHJvdG8SCm5hbmFzaGkudjEiBQoDQWNrIkcKC0FwcGxpY2F0aW9uEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSHgoEcm9sZRgDIAEoDjIQLm5hbmFzaGkudjEuUm9sZSIZChdMaXN0QXBwbGljYXRpb25zUmVxdWVzdCJJChhMaXN0QXBwbGljYXRpb25zUmVzcG9uc2USLQoMYXBwbGljYXRpb25zGAEgAygLMhcubmFuYXNoaS52MS5BcHBsaWNhdGlvbiJfChhDcmVhdGVBcHBsaWNhdGlvblJlcXVlc3QSDAoEbmFtZRgBIAEoCRITCgtzbmFwc2hvdF9pZBgCIAEoCRIKCgJpZBgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkiIQoPR2V0TW9kZWxSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCSJfCgtQcm9wZXJ0eURlZhIKCgJpZBgEIAEoCRIMCgRuYW1lGAEgASgJEiYKBHR5cGUYAiABKA4yGC5uYW5hc2hpLnYxLlByb3BlcnR5VHlwZRIOCgZ0YXJnZXQYAyABKAkijQEKBk1lbWJlchIKCgJpZBgDIAEoCRIMCgRuYW1lGAEgASgJEjYKCnByb3BlcnRpZXMYAiADKAsyIi5uYW5hc2hpLnYxLk1lbWJlci5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEinwEKB0xpc3REZWYSCgoCaWQYBiABKAkSDAoEbmFtZRgBIAEoCRIiCgRraW5kGAIgASgOMhQubmFuYXNoaS52MS5MaXN0S2luZBIjCgdtZW1iZXJzGAQgAygLMhIubmFuYXNoaS52MS5NZW1iZXISKwoKcHJvcGVydGllcxgFIAMoCzIXLm5hbmFzaGkudjEuUHJvcGVydHlEZWZKBAgDEAQizQEKCU1ldHJpY0RlZhIKCgJpZBgHIAEoCRIMCgRuYW1lGAEgASgJEhIKCmRpbWVuc2lvbnMYAiADKAkSIwoEa2luZBgDIAEoDjIVLm5hbmFzaGkudjEuVmFsdWVLaW5kEhMKC21lbWJlcl9saXN0GAYgASgJEg8KB2Zvcm11bGEYBCABKAkSEwoLb3ZlcnJpZGFibGUYBSABKAgSEwoLZGVzY3JpcHRpb24YCCABKAkSDgoGZm9sZGVyGAkgASgJEg0KBW93bmVyGAogASgJIvEBCghNb2RlbERlZhIeCgRyb2xlGAIgASgOMhAubmFuYXNoaS52MS5Sb2xlEiIKBWxpc3RzGAMgAygLMhMubmFuYXNoaS52MS5MaXN0RGVmEiYKB21ldHJpY3MYBCADKAsyFS5uYW5hc2hpLnYxLk1ldHJpY0RlZhIkCgZ0YWJsZXMYBSADKAsyFC5uYW5hc2hpLnYxLlRhYmxlRGVmEiIKBXZpZXdzGAYgAygLMhMubmFuYXNoaS52MS5WaWV3RGVmEiQKBmJvYXJkcxgHIAMoCzIULm5hbmFzaGkudjEuQm9hcmREZWZKBAgBEAJSA3NlcSIlCglOZXdNZW1iZXISCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCSKfAQoRQ3JlYXRlTGlzdFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAYgASgJEgwKBG5hbWUYAiABKAkSIgoEa2luZBgDIAEoDjIULm5hbmFzaGkudjEuTGlzdEtpbmQSJgoHbWVtYmVycxgEIAMoCzIVLm5hbmFzaGkudjEuTmV3TWVtYmVyEhQKDGNsaWVudF9vcF9pZBgFIAEoCSJTChFSZW5hbWVMaXN0UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkicwoSQWRkUHJvcGVydHlSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIMCgRsaXN0GAIgASgJEikKCHByb3BlcnR5GAMgASgLMhcubmFuYXNoaS52MS5Qcm9wZXJ0eURlZhIUCgxjbGllbnRfb3BfaWQYBCABKAkiZQoVUmVuYW1lUHJvcGVydHlSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIMCgRsaXN0GAIgASgJEgoKAmlkGAMgASgJEgwKBG5hbWUYBCABKAkSFAoMY2xpZW50X29wX2lkGAUgASgJIm8KEkVkaXRNZW1iZXJzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDAoEbGlzdBgCIAEoCRIlCgVlZGl0cxgDIAMoCzIWLm5hbmFzaGkudjEuTWVtYmVyRWRpdBIUCgxjbGllbnRfb3BfaWQYBCABKAki5AEKCk1lbWJlckVkaXQSJAoDYWRkGAEgASgLMhUubmFuYXNoaS52MS5BZGRNZW1iZXJIABIqCgZyZW5hbWUYAiABKAsyGC5uYW5hc2hpLnYxLlJlbmFtZU1lbWJlckgAEioKBnJlbW92ZRgDIAEoCzIYLm5hbmFzaGkudjEuUmVtb3ZlTWVtYmVySAASJgoEbW92ZRgEIAEoCzIWLm5hbmFzaGkudjEuTW92ZU1lbWJlckgAEigKA3NldBgFIAEoCzIZLm5hbmFzaGkudjEuU2V0UHJvcGVydGllc0gAQgYKBGVkaXQikwEKCUFkZE1lbWJlchIKCgJpZBgDIAEoCRIMCgRuYW1lGAEgASgJEjkKCnByb3BlcnRpZXMYAiADKAsyJS5uYW5hc2hpLnYxLkFkZE1lbWJlci5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiKAoMUmVuYW1lTWVtYmVyEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkiGgoMUmVtb3ZlTWVtYmVyEgoKAmlkGAEgASgJIioKCk1vdmVNZW1iZXISCgoCaWQYASABKAkSEAoIcG9zaXRpb24YAiABKAUijQEKDVNldFByb3BlcnRpZXMSCgoCaWQYASABKAkSPQoKcHJvcGVydGllcxgCIAMoCzIpLm5hbmFzaGkudjEuU2V0UHJvcGVydGllcy5Qcm9wZXJ0aWVzRW50cnkaMQoPUHJvcGVydGllc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiYAoVQ3JlYXRlQ2FsZW5kYXJSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRISCgpzdGFydF95ZWFyGAIgASgFEg0KBXllYXJzGAMgASgFEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJqChVDcmVhdGVTY2VuYXJpb1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAUgASgJEgwKBG5hbWUYAiABKAkSEQoJY29weV9mcm9tGAMgASgJEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJiChNDcmVhdGVNZXRyaWNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJQoGbWV0cmljGAMgASgLMhUubmFuYXNoaS52MS5NZXRyaWNEZWYiYgoTVXBkYXRlTWV0cmljUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiUKBm1ldHJpYxgDIAEoCzIVLm5hbmFzaGkudjEuTWV0cmljRGVmIlUKE1JlbmFtZU1ldHJpY1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEgwKBG5hbWUYAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJIkcKE0RlbGV0ZU1ldHJpY1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEhQKDGNsaWVudF9vcF9pZBgDIAEoCSIWCgdNZW1iZXJzEgsKA2lkcxgBIAMoCSJHCgVWYWx1ZRIQCgZudW1iZXIYASABKAFIABIRCgdib29sZWFuGAIgASgISAASEAoGbWVtYmVyGAMgASgJSABCBwoFdmFsdWUi+QEKDFF1ZXJ5UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDwoHbWV0cmljcxgCIAMoCRIMCgRyb3dzGAMgAygJEg8KB2NvbHVtbnMYBCADKAkSNgoHZmlsdGVycxgFIAMoCzIlLm5hbmFzaGkudjEuUXVlcnlSZXF1ZXN0LkZpbHRlcnNFbnRyeRIsCgthZ2dyZWdhdGlvbhgGIAEoDjIXLm5hbmFzaGkudjEuQWdncmVnYXRpb24aQwoMRmlsdGVyc0VudHJ5EgsKA2tleRgBIAEoCRIiCgV2YWx1ZRgCIAEoCzITLm5hbmFzaGkudjEuTWVtYmVyczoCOAEiTQoJUXVlcnlDZWxsEg4KBm1ldHJpYxgBIAEoCRIOCgZjb29yZHMYAiADKAkSIAoFdmFsdWUYAyABKAsyES5uYW5hc2hpLnYxLlZhbHVlIk8KDVF1ZXJ5UmVzcG9uc2USEgoKZGltZW5zaW9ucxgCIAMoCRIkCgVjZWxscxgDIAMoCzIVLm5hbmFzaGkudjEuUXVlcnlDZWxsSgQIARACIp8BCglDZWxsV3JpdGUSDgoGbWV0cmljGAEgASgJEjEKBmNvb3JkcxgCIAMoCzIhLm5hbmFzaGkudjEuQ2VsbFdyaXRlLkNvb3Jkc0VudHJ5EiAKBXZhbHVlGAMgASgLMhEubmFuYXNoaS52MS5WYWx1ZRotCgtDb29yZHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBImAKEVdyaXRlQ2VsbHNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIlCgZ3cml0ZXMYAiADKAsyFS5uYW5hc2hpLnYxLkNlbGxXcml0ZRIUCgxjbGllbnRfb3BfaWQYAyABKAkioAEKDUltcG9ydFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgsKA2NzdhgCIAEoCRIUCgxjbGllbnRfb3BfaWQYBSABKAkSJgoEbGlzdBgDIAEoCzIWLm5hbmFzaGkudjEuTGlzdEltcG9ydEgAEioKBm1ldHJpYxgEIAEoCzIYLm5hbmFzaGkudjEuTWV0cmljSW1wb3J0SABCCAoGdGFyZ2V0IrABCgpMaXN0SW1wb3J0EgwKBGxpc3QYASABKAkSFQoNbWVtYmVyX2NvbHVtbhgCIAEoCRJFChBwcm9wZXJ0eV9jb2x1bW5zGAMgAygLMisubmFuYXNoaS52MS5MaXN0SW1wb3J0LlByb3BlcnR5Q29sdW1uc0VudHJ5GjYKFFByb3BlcnR5Q29sdW1uc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEizQEKDE1ldHJpY0ltcG9ydBIOCgZtZXRyaWMYASABKAkSSQoRZGltZW5zaW9uX2NvbHVtbnMYAiADKAsyLi5uYW5hc2hpLnYxLk1ldHJpY0ltcG9ydC5EaW1lbnNpb25Db2x1bW5zRW50cnkSFAoMdmFsdWVfY29sdW1uGAMgASgJEhMKC2FkZF9tZW1iZXJzGAQgASgIGjcKFURpbWVuc2lvbkNvbHVtbnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIh4KDkltcG9ydFJlc3BvbnNlEgwKBHJvd3MYASABKAUiXwoSQ3JlYXRlVGFibGVSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIwoFdGFibGUYAyABKAsyFC5uYW5hc2hpLnYxLlRhYmxlRGVmIl8KElVwZGF0ZVRhYmxlUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiMKBXRhYmxlGAMgASgLMhQubmFuYXNoaS52MS5UYWJsZURlZiJFCghUYWJsZURlZhIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIPCgdtZXRyaWNzGAQgAygJIlwKEUNyZWF0ZVZpZXdSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIQoEdmlldxgDIAEoCzITLm5hbmFzaGkudjEuVmlld0RlZiJcChFVcGRhdGVWaWV3UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiEKBHZpZXcYAyABKAsyEy5uYW5hc2hpLnYxLlZpZXdEZWYirwIKB1ZpZXdEZWYSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEgwKBG5hbWUYAyABKAkSDwoHbWV0cmljcxgEIAMoCRIMCgRyb3dzGAUgAygJEg8KB2NvbHVtbnMYBiADKAkSMQoHZmlsdGVycxgHIAMoCzIgLm5hbmFzaGkudjEuVmlld0RlZi5GaWx0ZXJzRW50cnkSJAoHZGlzcGxheRgIIAEoDjITLm5hbmFzaGkudjEuRGlzcGxheRIsCgthZ2dyZWdhdGlvbhgJIAEoDjIXLm5hbmFzaGkudjEuQWdncmVnYXRpb24aQwoMRmlsdGVyc0VudHJ5EgsKA2tleRgBIAEoCRIiCgV2YWx1ZRgCIAEoCzITLm5hbmFzaGkudjEuTWVtYmVyczoCOAEiNgoGV2lkZ2V0EhEKB3ZpZXdfaWQYASABKAlIABIOCgR0ZXh0GAIgASgJSABCCQoHY29udGVudCJfChJDcmVhdGVCb2FyZFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIjCgVib2FyZBgDIAEoCzIULm5hbmFzaGkudjEuQm9hcmREZWYiXwoSVXBkYXRlQm9hcmRSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIwoFYm9hcmQYAyABKAsyFC5uYW5hc2hpLnYxLkJvYXJkRGVmInEKCEJvYXJkRGVmEg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIMCgRuYW1lGAMgASgJEiMKB3dpZGdldHMYBCADKAsyEi5uYW5hc2hpLnYxLldpZGdldBIWCg5wYWdlX3NlbGVjdG9ycxgFIAMoCSJpChFEZWxldGVJdGVtUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSIgoEdHlwZRgCIAEoDjIULm5hbmFzaGkudjEuSXRlbVR5cGUSCgoCaWQYAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJIl8KEUFkZENvbW1lbnRSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJAoHY29tbWVudBgDIAEoCzITLm5hbmFzaGkudjEuQ29tbWVudCK/AQoHQ29tbWVudBIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDgoGbWV0cmljGAMgASgJEisKBGNlbGwYBCADKAsyHS5uYW5hc2hpLnYxLkNvbW1lbnQuQ2VsbEVudHJ5EgwKBHVzZXIYBSABKAkSDAoEYm9keRgGIAEoCRISCgpjcmVhdGVkX2F0GAcgASgDGisKCUNlbGxFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIjUKE0xpc3RDb21tZW50c1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEg4KBm1ldHJpYxgCIAEoCSI9ChRMaXN0Q29tbWVudHNSZXNwb25zZRIlCghjb21tZW50cxgBIAMoCzITLm5hbmFzaGkudjEuQ29tbWVudCJaCgpBdWRpdEVudHJ5EgoKAmlkGAEgASgJEgwKBHVzZXIYAiABKAkSEgoKY3JlYXRlZF9hdBgDIAEoAxIOCgZhY3Rpb24YBCABKAkSDgoGZGV0YWlsGAUgASgJIjEKEExpc3RBdWRpdFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEg0KBWxpbWl0GAIgASgFIjwKEUxpc3RBdWRpdFJlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5uYW5hc2hpLnYxLkF1ZGl0RW50cnkiRgoIU25hcHNob3QSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgR1c2VyGAMgASgJEhIKCmNyZWF0ZWRfYXQYBCABKAMiJgoUTGlzdFNuYXBzaG90c1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJIkAKFUxpc3RTbmFwc2hvdHNSZXNwb25zZRInCglzbmFwc2hvdHMYASADKAsyFC5uYW5hc2hpLnYxLlNuYXBzaG90IlcKFUNyZWF0ZVNuYXBzaG90UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIKCgJpZBgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkiIgoQR2V0QWNjZXNzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkiYwoUU2V0TWVtYmVyUm9sZVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIlCgZtZW1iZXIYAyABKAsyFS5uYW5hc2hpLnYxLkFwcE1lbWJlciJJCglBcHBNZW1iZXISDgoGYXBwX2lkGAEgASgJEgwKBHVzZXIYAiABKAkSHgoEcm9sZRgDIAEoDjIQLm5hbmFzaGkudjEuUm9sZSJlChdDcmVhdGVBY2Nlc3NSdWxlUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiQKBHJ1bGUYAyABKAsyFi5uYW5hc2hpLnYxLkFjY2Vzc1J1bGUiZQoXVXBkYXRlQWNjZXNzUnVsZVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIkCgRydWxlGAMgASgLMhYubmFuYXNoaS52MS5BY2Nlc3NSdWxlInYKCkFjY2Vzc1J1bGUSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEh4KBHJvbGUYAyABKA4yEC5uYW5hc2hpLnYxLlJvbGUSDAoEbGlzdBgEIAEoCRIPCgdtZW1iZXJzGAUgAygJEg0KBXdyaXRlGAYgASgIIksKF0RlbGV0ZUFjY2Vzc1J1bGVSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIUCgxjbGllbnRfb3BfaWQYAyABKAkiVwoGQWNjZXNzEiYKB21lbWJlcnMYASADKAsyFS5uYW5hc2hpLnYxLkFwcE1lbWJlchIlCgVydWxlcxgCIAMoCzIWLm5hbmFzaGkudjEuQWNjZXNzUnVsZSplCgRSb2xlEhQKEFJPTEVfVU5TUEVDSUZJRUQQABIPCgtST0xFX1ZJRVdFUhABEhQKEFJPTEVfQ09OVFJJQlVUT1IQAhIQCgxST0xFX01PREVMRVIQAxIOCgpST0xFX0FETUlOEAQqiQEKCExpc3RLaW5kEhkKFUxJU1RfS0lORF9VTlNQRUNJRklFRBAAEhcKE0xJU1RfS0lORF9ESU1FTlNJT04QARIZChVMSVNUX0tJTkRfVFJBTlNBQ1RJT04QAhIWChJMSVNUX0tJTkRfQ0FMRU5EQVIQAxIWChJMSVNUX0tJTkRfU0NFTkFSSU8QBCqXAQoMUHJvcGVydHlUeXBlEh0KGVBST1BFUlRZX1RZUEVfVU5TUEVDSUZJRUQQABIbChdQUk9QRVJUWV9UWVBFX0RJTUVOU0lPThABEhgKFFBST1BFUlRZX1RZUEVfTlVNQkVSEAISGQoVUFJPUEVSVFlfVFlQRV9CT09MRUFOEAMSFgoSUFJPUEVSVFlfVFlQRV9URVhUEAQqbQoJVmFsdWVLaW5kEhoKFlZBTFVFX0tJTkRfVU5TUEVDSUZJRUQQABIVChFWQUxVRV9LSU5EX05VTUJFUhABEhYKElZBTFVFX0tJTkRfQk9PTEVBThACEhUKEVZBTFVFX0tJTkRfTUVNQkVSEAMqlQEKC0FnZ3JlZ2F0aW9uEhsKF0FHR1JFR0FUSU9OX1VOU1BFQ0lGSUVEEAASEwoPQUdHUkVHQVRJT05fU1VNEAESEwoPQUdHUkVHQVRJT05fQVZHEAISEwoPQUdHUkVHQVRJT05fTUlOEAMSEwoPQUdHUkVHQVRJT05fTUFYEAQSFQoRQUdHUkVHQVRJT05fQ09VTlQQBSpoCgdEaXNwbGF5EhcKE0RJU1BMQVlfVU5TUEVDSUZJRUQQABIQCgxESVNQTEFZX0dSSUQQARIQCgxESVNQTEFZX0xJTkUQAhIPCgtESVNQTEFZX0JBUhADEg8KC0RJU1BMQVlfS1BJEAQqYwoISXRlbVR5cGUSGQoVSVRFTV9UWVBFX1VOU1BFQ0lGSUVEEAASEwoPSVRFTV9UWVBFX1RBQkxFEAESEgoOSVRFTV9UWVBFX1ZJRVcQAhITCg9JVEVNX1RZUEVfQk9BUkQQAzLxEgoLUGxhblNlcnZpY2USXwoQTGlzdEFwcGxpY2F0aW9ucxIjLm5hbmFzaGkudjEuTGlzdEFwcGxpY2F0aW9uc1JlcXVlc3QaJC5uYW5hc2hpLnYxLkxpc3RBcHBsaWNhdGlvbnNSZXNwb25zZSIAElQKEUNyZWF0ZUFwcGxpY2F0aW9uEiQubmFuYXNoaS52MS5DcmVhdGVBcHBsaWNhdGlvblJlcXVlc3QaFy5uYW5hc2hpLnYxLkFwcGxpY2F0aW9uIgASPwoIR2V0TW9kZWwSGy5uYW5hc2hpLnYxLkdldE1vZGVsUmVxdWVzdBoULm5hbmFzaGkudjEuTW9kZWxEZWYiABI+CgpDcmVhdGVMaXN0Eh0ubmFuYXNoaS52MS5DcmVhdGVMaXN0UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASPgoKUmVuYW1lTGlzdBIdLm5hbmFzaGkudjEuUmVuYW1lTGlzdFJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC0FkZFByb3BlcnR5Eh4ubmFuYXNoaS52MS5BZGRQcm9wZXJ0eVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkYKDlJlbmFtZVByb3BlcnR5EiEubmFuYXNoaS52MS5SZW5hbWVQcm9wZXJ0eVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC0VkaXRNZW1iZXJzEh4ubmFuYXNoaS52MS5FZGl0TWVtYmVyc1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkYKDkNyZWF0ZUNhbGVuZGFyEiEubmFuYXNoaS52MS5DcmVhdGVDYWxlbmRhclJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkYKDkNyZWF0ZVNjZW5hcmlvEiEubmFuYXNoaS52MS5DcmVhdGVTY2VuYXJpb1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkIKDENyZWF0ZU1ldHJpYxIfLm5hbmFzaGkudjEuQ3JlYXRlTWV0cmljUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQgoMVXBkYXRlTWV0cmljEh8ubmFuYXNoaS52MS5VcGRhdGVNZXRyaWNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJCCgxSZW5hbWVNZXRyaWMSHy5uYW5hc2hpLnYxLlJlbmFtZU1ldHJpY1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkIKDERlbGV0ZU1ldHJpYxIfLm5hbmFzaGkudjEuRGVsZXRlTWV0cmljUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASPgoFUXVlcnkSGC5uYW5hc2hpLnYxLlF1ZXJ5UmVxdWVzdBoZLm5hbmFzaGkudjEuUXVlcnlSZXNwb25zZSIAEj4KCldyaXRlQ2VsbHMSHS5uYW5hc2hpLnYxLldyaXRlQ2VsbHNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJBCgZJbXBvcnQSGS5uYW5hc2hpLnYxLkltcG9ydFJlcXVlc3QaGi5uYW5hc2hpLnYxLkltcG9ydFJlc3BvbnNlIgASQAoLQ3JlYXRlVGFibGUSHi5uYW5hc2hpLnYxLkNyZWF0ZVRhYmxlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQAoLVXBkYXRlVGFibGUSHi5uYW5hc2hpLnYxLlVwZGF0ZVRhYmxlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASPgoKQ3JlYXRlVmlldxIdLm5hbmFzaGkudjEuQ3JlYXRlVmlld1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEj4KClVwZGF0ZVZpZXcSHS5uYW5hc2hpLnYxLlVwZGF0ZVZpZXdSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJACgtDcmVhdGVCb2FyZBIeLm5hbmFzaGkudjEuQ3JlYXRlQm9hcmRSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJACgtVcGRhdGVCb2FyZBIeLm5hbmFzaGkudjEuVXBkYXRlQm9hcmRSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABI+CgpEZWxldGVJdGVtEh0ubmFuYXNoaS52MS5EZWxldGVJdGVtUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASUwoMTGlzdENvbW1lbnRzEh8ubmFuYXNoaS52MS5MaXN0Q29tbWVudHNSZXF1ZXN0GiAubmFuYXNoaS52MS5MaXN0Q29tbWVudHNSZXNwb25zZSIAEkIKCkFkZENvbW1lbnQSHS5uYW5hc2hpLnYxLkFkZENvbW1lbnRSZXF1ZXN0GhMubmFuYXNoaS52MS5Db21tZW50IgASSgoJTGlzdEF1ZGl0EhwubmFuYXNoaS52MS5MaXN0QXVkaXRSZXF1ZXN0Gh0ubmFuYXNoaS52MS5MaXN0QXVkaXRSZXNwb25zZSIAElYKDUxpc3RTbmFwc2hvdHMSIC5uYW5hc2hpLnYxLkxpc3RTbmFwc2hvdHNSZXF1ZXN0GiEubmFuYXNoaS52MS5MaXN0U25hcHNob3RzUmVzcG9uc2UiABJLCg5DcmVhdGVTbmFwc2hvdBIhLm5hbmFzaGkudjEuQ3JlYXRlU25hcHNob3RSZXF1ZXN0GhQubmFuYXNoaS52MS5TbmFwc2hvdCIAEj8KCUdldEFjY2VzcxIcLm5hbmFzaGkudjEuR2V0QWNjZXNzUmVxdWVzdBoSLm5hbmFzaGkudjEuQWNjZXNzIgASRAoNU2V0TWVtYmVyUm9sZRIgLm5hbmFzaGkudjEuU2V0TWVtYmVyUm9sZVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkoKEENyZWF0ZUFjY2Vzc1J1bGUSIy5uYW5hc2hpLnYxLkNyZWF0ZUFjY2Vzc1J1bGVSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJKChBVcGRhdGVBY2Nlc3NSdWxlEiMubmFuYXNoaS52MS5VcGRhdGVBY2Nlc3NSdWxlUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASSgoQRGVsZXRlQWNjZXNzUnVsZRIjLm5hbmFzaGkudjEuRGVsZXRlQWNjZXNzUnVsZVJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAQjtaOWdpdGh1Yi5jb20va2F6dS0yMDIwL25hbmFzaGkvYXBpL2dlbi9uYW5hc2hpL3YxO25hbmFzaGl2MWIGcHJvdG8z");
+  fileDesc("ChVuYW5hc2hpL3YxL3BsYW4ucHJvdG8SCm5hbmFzaGkudjEiBQoDQWNrIjMKC0FwcGxpY2F0aW9uEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAlKBAgDEARSBHJvbGUiGQoXTGlzdEFwcGxpY2F0aW9uc1JlcXVlc3QiSQoYTGlzdEFwcGxpY2F0aW9uc1Jlc3BvbnNlEi0KDGFwcGxpY2F0aW9ucxgBIAMoCzIXLm5hbmFzaGkudjEuQXBwbGljYXRpb24iXwoYQ3JlYXRlQXBwbGljYXRpb25SZXF1ZXN0EgwKBG5hbWUYASABKAkSEwoLc25hcHNob3RfaWQYAiABKAkSCgoCaWQYAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJIiEKD0dldE1vZGVsUmVxdWVzdBIOCgZhcHBfaWQYASABKAkiXwoLUHJvcGVydHlEZWYSCgoCaWQYBCABKAkSDAoEbmFtZRgBIAEoCRImCgR0eXBlGAIgASgOMhgubmFuYXNoaS52MS5Qcm9wZXJ0eVR5cGUSDgoGdGFyZ2V0GAMgASgJIo0BCgZNZW1iZXISCgoCaWQYAyABKAkSDAoEbmFtZRgBIAEoCRI2Cgpwcm9wZXJ0aWVzGAIgAygLMiIubmFuYXNoaS52MS5NZW1iZXIuUHJvcGVydGllc0VudHJ5GjEKD1Byb3BlcnRpZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIp8BCgdMaXN0RGVmEgoKAmlkGAYgASgJEgwKBG5hbWUYASABKAkSIgoEa2luZBgCIAEoDjIULm5hbmFzaGkudjEuTGlzdEtpbmQSIwoHbWVtYmVycxgEIAMoCzISLm5hbmFzaGkudjEuTWVtYmVyEisKCnByb3BlcnRpZXMYBSADKAsyFy5uYW5hc2hpLnYxLlByb3BlcnR5RGVmSgQIAxAEIs0BCglNZXRyaWNEZWYSCgoCaWQYByABKAkSDAoEbmFtZRgBIAEoCRISCgpkaW1lbnNpb25zGAIgAygJEiMKBGtpbmQYAyABKA4yFS5uYW5hc2hpLnYxLlZhbHVlS2luZBITCgttZW1iZXJfbGlzdBgGIAEoCRIPCgdmb3JtdWxhGAQgASgJEhMKC292ZXJyaWRhYmxlGAUgASgIEhMKC2Rlc2NyaXB0aW9uGAggASgJEg4KBmZvbGRlchgJIAEoCRINCgVvd25lchgKIAEoCSLdAQoITW9kZWxEZWYSIgoFbGlzdHMYAyADKAsyEy5uYW5hc2hpLnYxLkxpc3REZWYSJgoHbWV0cmljcxgEIAMoCzIVLm5hbmFzaGkudjEuTWV0cmljRGVmEiQKBnRhYmxlcxgFIAMoCzIULm5hbmFzaGkudjEuVGFibGVEZWYSIgoFdmlld3MYBiADKAsyEy5uYW5hc2hpLnYxLlZpZXdEZWYSJAoGYm9hcmRzGAcgAygLMhQubmFuYXNoaS52MS5Cb2FyZERlZkoECAEQAkoECAIQA1IDc2VxUgRyb2xlIiUKCU5ld01lbWJlchIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJIp8BChFDcmVhdGVMaXN0UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCgoCaWQYBiABKAkSDAoEbmFtZRgCIAEoCRIiCgRraW5kGAMgASgOMhQubmFuYXNoaS52MS5MaXN0S2luZBImCgdtZW1iZXJzGAQgAygLMhUubmFuYXNoaS52MS5OZXdNZW1iZXISFAoMY2xpZW50X29wX2lkGAUgASgJIlMKEVJlbmFtZUxpc3RSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIMCgRuYW1lGAMgASgJEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJzChJBZGRQcm9wZXJ0eVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgwKBGxpc3QYAiABKAkSKQoIcHJvcGVydHkYAyABKAsyFy5uYW5hc2hpLnYxLlByb3BlcnR5RGVmEhQKDGNsaWVudF9vcF9pZBgEIAEoCSJlChVSZW5hbWVQcm9wZXJ0eVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEgwKBGxpc3QYAiABKAkSCgoCaWQYAyABKAkSDAoEbmFtZRgEIAEoCRIUCgxjbGllbnRfb3BfaWQYBSABKAkibwoSRWRpdE1lbWJlcnNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIMCgRsaXN0GAIgASgJEiUKBWVkaXRzGAMgAygLMhYubmFuYXNoaS52MS5NZW1iZXJFZGl0EhQKDGNsaWVudF9vcF9pZBgEIAEoCSLkAQoKTWVtYmVyRWRpdBIkCgNhZGQYASABKAsyFS5uYW5hc2hpLnYxLkFkZE1lbWJlckgAEioKBnJlbmFtZRgCIAEoCzIYLm5hbmFzaGkudjEuUmVuYW1lTWVtYmVySAASKgoGcmVtb3ZlGAMgASgLMhgubmFuYXNoaS52MS5SZW1vdmVNZW1iZXJIABImCgRtb3ZlGAQgASgLMhYubmFuYXNoaS52MS5Nb3ZlTWVtYmVySAASKAoDc2V0GAUgASgLMhkubmFuYXNoaS52MS5TZXRQcm9wZXJ0aWVzSABCBgoEZWRpdCKTAQoJQWRkTWVtYmVyEgoKAmlkGAMgASgJEgwKBG5hbWUYASABKAkSOQoKcHJvcGVydGllcxgCIAMoCzIlLm5hbmFzaGkudjEuQWRkTWVtYmVyLlByb3BlcnRpZXNFbnRyeRoxCg9Qcm9wZXJ0aWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASIoCgxSZW5hbWVNZW1iZXISCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCSIaCgxSZW1vdmVNZW1iZXISCgoCaWQYASABKAkiKgoKTW92ZU1lbWJlchIKCgJpZBgBIAEoCRIQCghwb3NpdGlvbhgCIAEoBSKNAQoNU2V0UHJvcGVydGllcxIKCgJpZBgBIAEoCRI9Cgpwcm9wZXJ0aWVzGAIgAygLMikubmFuYXNoaS52MS5TZXRQcm9wZXJ0aWVzLlByb3BlcnRpZXNFbnRyeRoxCg9Qcm9wZXJ0aWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASJgChVDcmVhdGVDYWxlbmRhclJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhIKCnN0YXJ0X3llYXIYAiABKAUSDQoFeWVhcnMYAyABKAUSFAoMY2xpZW50X29wX2lkGAQgASgJImoKFUNyZWF0ZVNjZW5hcmlvUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCgoCaWQYBSABKAkSDAoEbmFtZRgCIAEoCRIRCgljb3B5X2Zyb20YAyABKAkSFAoMY2xpZW50X29wX2lkGAQgASgJImIKE0NyZWF0ZU1ldHJpY1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIlCgZtZXRyaWMYAyABKAsyFS5uYW5hc2hpLnYxLk1ldHJpY0RlZiJiChNVcGRhdGVNZXRyaWNSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSJQoGbWV0cmljGAMgASgLMhUubmFuYXNoaS52MS5NZXRyaWNEZWYiVQoTUmVuYW1lTWV0cmljUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkiRwoTRGVsZXRlTWV0cmljUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSFAoMY2xpZW50X29wX2lkGAMgASgJIhYKB01lbWJlcnMSCwoDaWRzGAEgAygJIkcKBVZhbHVlEhAKBm51bWJlchgBIAEoAUgAEhEKB2Jvb2xlYW4YAiABKAhIABIQCgZtZW1iZXIYAyABKAlIAEIHCgV2YWx1ZSL5AQoMUXVlcnlSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIPCgdtZXRyaWNzGAIgAygJEgwKBHJvd3MYAyADKAkSDwoHY29sdW1ucxgEIAMoCRI2CgdmaWx0ZXJzGAUgAygLMiUubmFuYXNoaS52MS5RdWVyeVJlcXVlc3QuRmlsdGVyc0VudHJ5EiwKC2FnZ3JlZ2F0aW9uGAYgASgOMhcubmFuYXNoaS52MS5BZ2dyZWdhdGlvbhpDCgxGaWx0ZXJzRW50cnkSCwoDa2V5GAEgASgJEiIKBXZhbHVlGAIgASgLMhMubmFuYXNoaS52MS5NZW1iZXJzOgI4ASJNCglRdWVyeUNlbGwSDgoGbWV0cmljGAEgASgJEg4KBmNvb3JkcxgCIAMoCRIgCgV2YWx1ZRgDIAEoCzIRLm5hbmFzaGkudjEuVmFsdWUiTwoNUXVlcnlSZXNwb25zZRISCgpkaW1lbnNpb25zGAIgAygJEiQKBWNlbGxzGAMgAygLMhUubmFuYXNoaS52MS5RdWVyeUNlbGxKBAgBEAIinwEKCUNlbGxXcml0ZRIOCgZtZXRyaWMYASABKAkSMQoGY29vcmRzGAIgAygLMiEubmFuYXNoaS52MS5DZWxsV3JpdGUuQ29vcmRzRW50cnkSIAoFdmFsdWUYAyABKAsyES5uYW5hc2hpLnYxLlZhbHVlGi0KC0Nvb3Jkc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiYAoRV3JpdGVDZWxsc1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEiUKBndyaXRlcxgCIAMoCzIVLm5hbmFzaGkudjEuQ2VsbFdyaXRlEhQKDGNsaWVudF9vcF9pZBgDIAEoCSKgAQoNSW1wb3J0UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSCwoDY3N2GAIgASgJEhQKDGNsaWVudF9vcF9pZBgFIAEoCRImCgRsaXN0GAMgASgLMhYubmFuYXNoaS52MS5MaXN0SW1wb3J0SAASKgoGbWV0cmljGAQgASgLMhgubmFuYXNoaS52MS5NZXRyaWNJbXBvcnRIAEIICgZ0YXJnZXQisAEKCkxpc3RJbXBvcnQSDAoEbGlzdBgBIAEoCRIVCg1tZW1iZXJfY29sdW1uGAIgASgJEkUKEHByb3BlcnR5X2NvbHVtbnMYAyADKAsyKy5uYW5hc2hpLnYxLkxpc3RJbXBvcnQuUHJvcGVydHlDb2x1bW5zRW50cnkaNgoUUHJvcGVydHlDb2x1bW5zRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASLNAQoMTWV0cmljSW1wb3J0Eg4KBm1ldHJpYxgBIAEoCRJJChFkaW1lbnNpb25fY29sdW1ucxgCIAMoCzIuLm5hbmFzaGkudjEuTWV0cmljSW1wb3J0LkRpbWVuc2lvbkNvbHVtbnNFbnRyeRIUCgx2YWx1ZV9jb2x1bW4YAyABKAkSEwoLYWRkX21lbWJlcnMYBCABKAgaNwoVRGltZW5zaW9uQ29sdW1uc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiHgoOSW1wb3J0UmVzcG9uc2USDAoEcm93cxgBIAEoBSJfChJDcmVhdGVUYWJsZVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIjCgV0YWJsZRgDIAEoCzIULm5hbmFzaGkudjEuVGFibGVEZWYiXwoSVXBkYXRlVGFibGVSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIwoFdGFibGUYAyABKAsyFC5uYW5hc2hpLnYxLlRhYmxlRGVmIkUKCFRhYmxlRGVmEg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIMCgRuYW1lGAMgASgJEg8KB21ldHJpY3MYBCADKAkiXAoRQ3JlYXRlVmlld1JlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIhCgR2aWV3GAMgASgLMhMubmFuYXNoaS52MS5WaWV3RGVmIlwKEVVwZGF0ZVZpZXdSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIUCgxjbGllbnRfb3BfaWQYAiABKAkSIQoEdmlldxgDIAEoCzITLm5hbmFzaGkudjEuVmlld0RlZiKvAgoHVmlld0RlZhIOCgZhcHBfaWQYASABKAkSCgoCaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIPCgdtZXRyaWNzGAQgAygJEgwKBHJvd3MYBSADKAkSDwoHY29sdW1ucxgGIAMoCRIxCgdmaWx0ZXJzGAcgAygLMiAubmFuYXNoaS52MS5WaWV3RGVmLkZpbHRlcnNFbnRyeRIkCgdkaXNwbGF5GAggASgOMhMubmFuYXNoaS52MS5EaXNwbGF5EiwKC2FnZ3JlZ2F0aW9uGAkgASgOMhcubmFuYXNoaS52MS5BZ2dyZWdhdGlvbhpDCgxGaWx0ZXJzRW50cnkSCwoDa2V5GAEgASgJEiIKBXZhbHVlGAIgASgLMhMubmFuYXNoaS52MS5NZW1iZXJzOgI4ASI2CgZXaWRnZXQSEQoHdmlld19pZBgBIAEoCUgAEg4KBHRleHQYAiABKAlIAEIJCgdjb250ZW50Il8KEkNyZWF0ZUJvYXJkUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSFAoMY2xpZW50X29wX2lkGAIgASgJEiMKBWJvYXJkGAMgASgLMhQubmFuYXNoaS52MS5Cb2FyZERlZiJfChJVcGRhdGVCb2FyZFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIjCgVib2FyZBgDIAEoCzIULm5hbmFzaGkudjEuQm9hcmREZWYicQoIQm9hcmREZWYSDgoGYXBwX2lkGAEgASgJEgoKAmlkGAIgASgJEgwKBG5hbWUYAyABKAkSIwoHd2lkZ2V0cxgEIAMoCzISLm5hbmFzaGkudjEuV2lkZ2V0EhYKDnBhZ2Vfc2VsZWN0b3JzGAUgAygJImkKEURlbGV0ZUl0ZW1SZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIiCgR0eXBlGAIgASgOMhQubmFuYXNoaS52MS5JdGVtVHlwZRIKCgJpZBgDIAEoCRIUCgxjbGllbnRfb3BfaWQYBCABKAkiXwoRQWRkQ29tbWVudFJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhQKDGNsaWVudF9vcF9pZBgCIAEoCRIkCgdjb21tZW50GAMgASgLMhMubmFuYXNoaS52MS5Db21tZW50Ir8BCgdDb21tZW50Eg4KBmFwcF9pZBgBIAEoCRIKCgJpZBgCIAEoCRIOCgZtZXRyaWMYAyABKAkSKwoEY2VsbBgEIAMoCzIdLm5hbmFzaGkudjEuQ29tbWVudC5DZWxsRW50cnkSDAoEdXNlchgFIAEoCRIMCgRib2R5GAYgASgJEhIKCmNyZWF0ZWRfYXQYByABKAMaKwoJQ2VsbEVudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiNQoTTGlzdENvbW1lbnRzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDgoGbWV0cmljGAIgASgJIj0KFExpc3RDb21tZW50c1Jlc3BvbnNlEiUKCGNvbW1lbnRzGAEgAygLMhMubmFuYXNoaS52MS5Db21tZW50IloKCkF1ZGl0RW50cnkSCgoCaWQYASABKAkSDAoEdXNlchgCIAEoCRISCgpjcmVhdGVkX2F0GAMgASgDEg4KBmFjdGlvbhgEIAEoCRIOCgZkZXRhaWwYBSABKAkiMQoQTGlzdEF1ZGl0UmVxdWVzdBIOCgZhcHBfaWQYASABKAkSDQoFbGltaXQYAiABKAUiPAoRTGlzdEF1ZGl0UmVzcG9uc2USJwoHZW50cmllcxgBIAMoCzIWLm5hbmFzaGkudjEuQXVkaXRFbnRyeSJGCghTbmFwc2hvdBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEgwKBHVzZXIYAyABKAkSEgoKY3JlYXRlZF9hdBgEIAEoAyImChRMaXN0U25hcHNob3RzUmVxdWVzdBIOCgZhcHBfaWQYASABKAkiQAoVTGlzdFNuYXBzaG90c1Jlc3BvbnNlEicKCXNuYXBzaG90cxgBIAMoCzIULm5hbmFzaGkudjEuU25hcHNob3QiVwoVQ3JlYXRlU25hcHNob3RSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCRIMCgRuYW1lGAIgASgJEgoKAmlkGAMgASgJEhQKDGNsaWVudF9vcF9pZBgEIAEoCSqJAQoITGlzdEtpbmQSGQoVTElTVF9LSU5EX1VOU1BFQ0lGSUVEEAASFwoTTElTVF9LSU5EX0RJTUVOU0lPThABEhkKFUxJU1RfS0lORF9UUkFOU0FDVElPThACEhYKEkxJU1RfS0lORF9DQUxFTkRBUhADEhYKEkxJU1RfS0lORF9TQ0VOQVJJTxAEKpcBCgxQcm9wZXJ0eVR5cGUSHQoZUFJPUEVSVFlfVFlQRV9VTlNQRUNJRklFRBAAEhsKF1BST1BFUlRZX1RZUEVfRElNRU5TSU9OEAESGAoUUFJPUEVSVFlfVFlQRV9OVU1CRVIQAhIZChVQUk9QRVJUWV9UWVBFX0JPT0xFQU4QAxIWChJQUk9QRVJUWV9UWVBFX1RFWFQQBCptCglWYWx1ZUtpbmQSGgoWVkFMVUVfS0lORF9VTlNQRUNJRklFRBAAEhUKEVZBTFVFX0tJTkRfTlVNQkVSEAESFgoSVkFMVUVfS0lORF9CT09MRUFOEAISFQoRVkFMVUVfS0lORF9NRU1CRVIQAyqVAQoLQWdncmVnYXRpb24SGwoXQUdHUkVHQVRJT05fVU5TUEVDSUZJRUQQABITCg9BR0dSRUdBVElPTl9TVU0QARITCg9BR0dSRUdBVElPTl9BVkcQAhITCg9BR0dSRUdBVElPTl9NSU4QAxITCg9BR0dSRUdBVElPTl9NQVgQBBIVChFBR0dSRUdBVElPTl9DT1VOVBAFKmgKB0Rpc3BsYXkSFwoTRElTUExBWV9VTlNQRUNJRklFRBAAEhAKDERJU1BMQVlfR1JJRBABEhAKDERJU1BMQVlfTElORRACEg8KC0RJU1BMQVlfQkFSEAMSDwoLRElTUExBWV9LUEkQBCpjCghJdGVtVHlwZRIZChVJVEVNX1RZUEVfVU5TUEVDSUZJRUQQABITCg9JVEVNX1RZUEVfVEFCTEUQARISCg5JVEVNX1RZUEVfVklFVxACEhMKD0lURU1fVFlQRV9CT0FSRBADMoYQCgtQbGFuU2VydmljZRJfChBMaXN0QXBwbGljYXRpb25zEiMubmFuYXNoaS52MS5MaXN0QXBwbGljYXRpb25zUmVxdWVzdBokLm5hbmFzaGkudjEuTGlzdEFwcGxpY2F0aW9uc1Jlc3BvbnNlIgASVAoRQ3JlYXRlQXBwbGljYXRpb24SJC5uYW5hc2hpLnYxLkNyZWF0ZUFwcGxpY2F0aW9uUmVxdWVzdBoXLm5hbmFzaGkudjEuQXBwbGljYXRpb24iABI/CghHZXRNb2RlbBIbLm5hbmFzaGkudjEuR2V0TW9kZWxSZXF1ZXN0GhQubmFuYXNoaS52MS5Nb2RlbERlZiIAEj4KCkNyZWF0ZUxpc3QSHS5uYW5hc2hpLnYxLkNyZWF0ZUxpc3RSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABI+CgpSZW5hbWVMaXN0Eh0ubmFuYXNoaS52MS5SZW5hbWVMaXN0UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQAoLQWRkUHJvcGVydHkSHi5uYW5hc2hpLnYxLkFkZFByb3BlcnR5UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASRgoOUmVuYW1lUHJvcGVydHkSIS5uYW5hc2hpLnYxLlJlbmFtZVByb3BlcnR5UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQAoLRWRpdE1lbWJlcnMSHi5uYW5hc2hpLnYxLkVkaXRNZW1iZXJzUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASRgoOQ3JlYXRlQ2FsZW5kYXISIS5uYW5hc2hpLnYxLkNyZWF0ZUNhbGVuZGFyUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASRgoOQ3JlYXRlU2NlbmFyaW8SIS5uYW5hc2hpLnYxLkNyZWF0ZVNjZW5hcmlvUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQgoMQ3JlYXRlTWV0cmljEh8ubmFuYXNoaS52MS5DcmVhdGVNZXRyaWNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJCCgxVcGRhdGVNZXRyaWMSHy5uYW5hc2hpLnYxLlVwZGF0ZU1ldHJpY1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkIKDFJlbmFtZU1ldHJpYxIfLm5hbmFzaGkudjEuUmVuYW1lTWV0cmljUmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASQgoMRGVsZXRlTWV0cmljEh8ubmFuYXNoaS52MS5EZWxldGVNZXRyaWNSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABI+CgVRdWVyeRIYLm5hbmFzaGkudjEuUXVlcnlSZXF1ZXN0GhkubmFuYXNoaS52MS5RdWVyeVJlc3BvbnNlIgASPgoKV3JpdGVDZWxscxIdLm5hbmFzaGkudjEuV3JpdGVDZWxsc1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkEKBkltcG9ydBIZLm5hbmFzaGkudjEuSW1wb3J0UmVxdWVzdBoaLm5hbmFzaGkudjEuSW1wb3J0UmVzcG9uc2UiABJACgtDcmVhdGVUYWJsZRIeLm5hbmFzaGkudjEuQ3JlYXRlVGFibGVSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJACgtVcGRhdGVUYWJsZRIeLm5hbmFzaGkudjEuVXBkYXRlVGFibGVSZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABI+CgpDcmVhdGVWaWV3Eh0ubmFuYXNoaS52MS5DcmVhdGVWaWV3UmVxdWVzdBoPLm5hbmFzaGkudjEuQWNrIgASPgoKVXBkYXRlVmlldxIdLm5hbmFzaGkudjEuVXBkYXRlVmlld1JlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC0NyZWF0ZUJvYXJkEh4ubmFuYXNoaS52MS5DcmVhdGVCb2FyZFJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEkAKC1VwZGF0ZUJvYXJkEh4ubmFuYXNoaS52MS5VcGRhdGVCb2FyZFJlcXVlc3QaDy5uYW5hc2hpLnYxLkFjayIAEj4KCkRlbGV0ZUl0ZW0SHS5uYW5hc2hpLnYxLkRlbGV0ZUl0ZW1SZXF1ZXN0Gg8ubmFuYXNoaS52MS5BY2siABJTCgxMaXN0Q29tbWVudHMSHy5uYW5hc2hpLnYxLkxpc3RDb21tZW50c1JlcXVlc3QaIC5uYW5hc2hpLnYxLkxpc3RDb21tZW50c1Jlc3BvbnNlIgASQgoKQWRkQ29tbWVudBIdLm5hbmFzaGkudjEuQWRkQ29tbWVudFJlcXVlc3QaEy5uYW5hc2hpLnYxLkNvbW1lbnQiABJKCglMaXN0QXVkaXQSHC5uYW5hc2hpLnYxLkxpc3RBdWRpdFJlcXVlc3QaHS5uYW5hc2hpLnYxLkxpc3RBdWRpdFJlc3BvbnNlIgASVgoNTGlzdFNuYXBzaG90cxIgLm5hbmFzaGkudjEuTGlzdFNuYXBzaG90c1JlcXVlc3QaIS5uYW5hc2hpLnYxLkxpc3RTbmFwc2hvdHNSZXNwb25zZSIAEksKDkNyZWF0ZVNuYXBzaG90EiEubmFuYXNoaS52MS5DcmVhdGVTbmFwc2hvdFJlcXVlc3QaFC5uYW5hc2hpLnYxLlNuYXBzaG90IgBCO1o5Z2l0aHViLmNvbS9rYXp1LTIwMjAvbmFuYXNoaS9hcGkvZ2VuL25hbmFzaGkvdjE7bmFuYXNoaXYxYgZwcm90bzM");
 
 /**
  * @generated from message nanashi.v1.Ack
@@ -38,11 +38,6 @@ export type Application = Message<"nanashi.v1.Application"> & {
    * @generated from field: string name = 2;
    */
   name: string;
-
-  /**
-   * @generated from field: nanashi.v1.Role role = 3;
-   */
-  role: Role;
 };
 
 /**
@@ -219,7 +214,7 @@ export type ListDef = Message<"nanashi.v1.ListDef"> & {
   kind: ListKind;
 
   /**
-   * The members in their order. Access rules can hide members.
+   * The members in their order.
    *
    * @generated from field: repeated nanashi.v1.Member members = 4;
    */
@@ -316,11 +311,6 @@ export const MetricDefSchema: GenMessage<MetricDef> = /*@__PURE__*/
  * @generated from message nanashi.v1.ModelDef
  */
 export type ModelDef = Message<"nanashi.v1.ModelDef"> & {
-  /**
-   * @generated from field: nanashi.v1.Role role = 2;
-   */
-  role: Role;
-
   /**
    * @generated from field: repeated nanashi.v1.ListDef lists = 3;
    */
@@ -1929,285 +1919,6 @@ export const CreateSnapshotRequestSchema: GenMessage<CreateSnapshotRequest> = /*
   messageDesc(file_nanashi_v1_plan, 61);
 
 /**
- * @generated from message nanashi.v1.GetAccessRequest
- */
-export type GetAccessRequest = Message<"nanashi.v1.GetAccessRequest"> & {
-  /**
-   * @generated from field: string app_id = 1;
-   */
-  appId: string;
-};
-
-/**
- * Describes the message nanashi.v1.GetAccessRequest.
- * Use `create(GetAccessRequestSchema)` to create a new message.
- */
-export const GetAccessRequestSchema: GenMessage<GetAccessRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 62);
-
-/**
- * @generated from message nanashi.v1.SetMemberRoleRequest
- */
-export type SetMemberRoleRequest = Message<"nanashi.v1.SetMemberRoleRequest"> & {
-  /**
-   * @generated from field: string app_id = 1;
-   */
-  appId: string;
-
-  /**
-   * @generated from field: string client_op_id = 2;
-   */
-  clientOpId: string;
-
-  /**
-   * @generated from field: nanashi.v1.AppMember member = 3;
-   */
-  member?: AppMember | undefined;
-};
-
-/**
- * Describes the message nanashi.v1.SetMemberRoleRequest.
- * Use `create(SetMemberRoleRequestSchema)` to create a new message.
- */
-export const SetMemberRoleRequestSchema: GenMessage<SetMemberRoleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 63);
-
-/**
- * @generated from message nanashi.v1.AppMember
- */
-export type AppMember = Message<"nanashi.v1.AppMember"> & {
-  /**
-   * @generated from field: string app_id = 1;
-   */
-  appId: string;
-
-  /**
-   * @generated from field: string user = 2;
-   */
-  user: string;
-
-  /**
-   * ROLE_UNSPECIFIED removes the user from the application.
-   *
-   * @generated from field: nanashi.v1.Role role = 3;
-   */
-  role: Role;
-};
-
-/**
- * Describes the message nanashi.v1.AppMember.
- * Use `create(AppMemberSchema)` to create a new message.
- */
-export const AppMemberSchema: GenMessage<AppMember> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 64);
-
-/**
- * @generated from message nanashi.v1.CreateAccessRuleRequest
- */
-export type CreateAccessRuleRequest = Message<"nanashi.v1.CreateAccessRuleRequest"> & {
-  /**
-   * @generated from field: string app_id = 1;
-   */
-  appId: string;
-
-  /**
-   * @generated from field: string client_op_id = 2;
-   */
-  clientOpId: string;
-
-  /**
-   * rule.id is required.
-   *
-   * @generated from field: nanashi.v1.AccessRule rule = 3;
-   */
-  rule?: AccessRule | undefined;
-};
-
-/**
- * Describes the message nanashi.v1.CreateAccessRuleRequest.
- * Use `create(CreateAccessRuleRequestSchema)` to create a new message.
- */
-export const CreateAccessRuleRequestSchema: GenMessage<CreateAccessRuleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 65);
-
-/**
- * @generated from message nanashi.v1.UpdateAccessRuleRequest
- */
-export type UpdateAccessRuleRequest = Message<"nanashi.v1.UpdateAccessRuleRequest"> & {
-  /**
-   * @generated from field: string app_id = 1;
-   */
-  appId: string;
-
-  /**
-   * @generated from field: string client_op_id = 2;
-   */
-  clientOpId: string;
-
-  /**
-   * @generated from field: nanashi.v1.AccessRule rule = 3;
-   */
-  rule?: AccessRule | undefined;
-};
-
-/**
- * Describes the message nanashi.v1.UpdateAccessRuleRequest.
- * Use `create(UpdateAccessRuleRequestSchema)` to create a new message.
- */
-export const UpdateAccessRuleRequestSchema: GenMessage<UpdateAccessRuleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 66);
-
-/**
- * AccessRule limits the members of a list that the users with a role can read and write.
- * A user with more than one rule must agree with all of them. MODELER and ADMIN ignore rules.
- * A member that the model does not have is not readable. A list that the model does not have makes the rule
- * inactive.
- *
- * @generated from message nanashi.v1.AccessRule
- */
-export type AccessRule = Message<"nanashi.v1.AccessRule"> & {
-  /**
-   * @generated from field: string app_id = 1;
-   */
-  appId: string;
-
-  /**
-   * @generated from field: string id = 2;
-   */
-  id: string;
-
-  /**
-   * @generated from field: nanashi.v1.Role role = 3;
-   */
-  role: Role;
-
-  /**
-   * The id of the list.
-   *
-   * @generated from field: string list = 4;
-   */
-  list: string;
-
-  /**
-   * Member ids.
-   *
-   * @generated from field: repeated string members = 5;
-   */
-  members: string[];
-
-  /**
-   * If false, the users can read the members but cannot write.
-   *
-   * @generated from field: bool write = 6;
-   */
-  write: boolean;
-};
-
-/**
- * Describes the message nanashi.v1.AccessRule.
- * Use `create(AccessRuleSchema)` to create a new message.
- */
-export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 67);
-
-/**
- * @generated from message nanashi.v1.DeleteAccessRuleRequest
- */
-export type DeleteAccessRuleRequest = Message<"nanashi.v1.DeleteAccessRuleRequest"> & {
-  /**
-   * @generated from field: string app_id = 1;
-   */
-  appId: string;
-
-  /**
-   * @generated from field: string id = 2;
-   */
-  id: string;
-
-  /**
-   * @generated from field: string client_op_id = 3;
-   */
-  clientOpId: string;
-};
-
-/**
- * Describes the message nanashi.v1.DeleteAccessRuleRequest.
- * Use `create(DeleteAccessRuleRequestSchema)` to create a new message.
- */
-export const DeleteAccessRuleRequestSchema: GenMessage<DeleteAccessRuleRequest> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 68);
-
-/**
- * @generated from message nanashi.v1.Access
- */
-export type Access = Message<"nanashi.v1.Access"> & {
-  /**
-   * @generated from field: repeated nanashi.v1.AppMember members = 1;
-   */
-  members: AppMember[];
-
-  /**
-   * @generated from field: repeated nanashi.v1.AccessRule rules = 2;
-   */
-  rules: AccessRule[];
-};
-
-/**
- * Describes the message nanashi.v1.Access.
- * Use `create(AccessSchema)` to create a new message.
- */
-export const AccessSchema: GenMessage<Access> = /*@__PURE__*/
-  messageDesc(file_nanashi_v1_plan, 69);
-
-/**
- * Role is the role of a user in an application. A higher role has all the rights of a lower role.
- *
- * @generated from enum nanashi.v1.Role
- */
-export enum Role {
-  /**
-   * No access.
-   *
-   * @generated from enum value: ROLE_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * Reads data.
-   *
-   * @generated from enum value: ROLE_VIEWER = 1;
-   */
-  VIEWER = 1,
-
-  /**
-   * Also writes input cells and imports data.
-   *
-   * @generated from enum value: ROLE_CONTRIBUTOR = 2;
-   */
-  CONTRIBUTOR = 2,
-
-  /**
-   * Also changes lists, Metrics, tables, views and boards.
-   *
-   * @generated from enum value: ROLE_MODELER = 3;
-   */
-  MODELER = 3,
-
-  /**
-   * Also changes access rights and members.
-   *
-   * @generated from enum value: ROLE_ADMIN = 4;
-   */
-  ADMIN = 4,
-}
-
-/**
- * Describes the enum nanashi.v1.Role.
- */
-export const RoleSchema: GenEnum<Role> = /*@__PURE__*/
-  enumDesc(file_nanashi_v1_plan, 0);
-
-/**
  * @generated from enum nanashi.v1.ListKind
  */
 export enum ListKind {
@@ -2241,7 +1952,7 @@ export enum ListKind {
  * Describes the enum nanashi.v1.ListKind.
  */
 export const ListKindSchema: GenEnum<ListKind> = /*@__PURE__*/
-  enumDesc(file_nanashi_v1_plan, 1);
+  enumDesc(file_nanashi_v1_plan, 0);
 
 /**
  * @generated from enum nanashi.v1.PropertyType
@@ -2285,7 +1996,7 @@ export enum PropertyType {
  * Describes the enum nanashi.v1.PropertyType.
  */
 export const PropertyTypeSchema: GenEnum<PropertyType> = /*@__PURE__*/
-  enumDesc(file_nanashi_v1_plan, 2);
+  enumDesc(file_nanashi_v1_plan, 1);
 
 /**
  * ValueKind is the type of the values of a Metric.
@@ -2322,7 +2033,7 @@ export enum ValueKind {
  * Describes the enum nanashi.v1.ValueKind.
  */
 export const ValueKindSchema: GenEnum<ValueKind> = /*@__PURE__*/
-  enumDesc(file_nanashi_v1_plan, 3);
+  enumDesc(file_nanashi_v1_plan, 2);
 
 /**
  * Aggregation is how a Query combines the cells of a number Metric.
@@ -2367,7 +2078,7 @@ export enum Aggregation {
  * Describes the enum nanashi.v1.Aggregation.
  */
 export const AggregationSchema: GenEnum<Aggregation> = /*@__PURE__*/
-  enumDesc(file_nanashi_v1_plan, 4);
+  enumDesc(file_nanashi_v1_plan, 3);
 
 /**
  * @generated from enum nanashi.v1.Display
@@ -2405,7 +2116,7 @@ export enum Display {
  * Describes the enum nanashi.v1.Display.
  */
 export const DisplaySchema: GenEnum<Display> = /*@__PURE__*/
-  enumDesc(file_nanashi_v1_plan, 5);
+  enumDesc(file_nanashi_v1_plan, 4);
 
 /**
  * @generated from enum nanashi.v1.ItemType
@@ -2436,7 +2147,7 @@ export enum ItemType {
  * Describes the enum nanashi.v1.ItemType.
  */
 export const ItemTypeSchema: GenEnum<ItemType> = /*@__PURE__*/
-  enumDesc(file_nanashi_v1_plan, 6);
+  enumDesc(file_nanashi_v1_plan, 5);
 
 /**
  * PlanService gives the planning features to the frontend.
@@ -2445,10 +2156,10 @@ export const ItemTypeSchema: GenEnum<ItemType> = /*@__PURE__*/
  * Each application is one engine model.
  *
  * Identifiers (docs/ids.md). Each id that a request or a response carries is a UUIDv7. The frontend makes the id
- * of each new object (list, member, property, Metric, table, view, board, comment, access rule, snapshot,
+ * of each new object (list, member, property, Metric, table, view, board, comment, snapshot,
  * application). The api makes the ids of the objects that it makes for the user (the calendar, the scenario
  * list, the members of an import, the Metric of a NUMBER or BOOLEAN property). A name is an attribute.
- * Every reference (the dimensions of a Metric, a filter, a cell, a rule) is an id. The api changes each id to
+ * Every reference (the dimensions of a Metric, a filter, a cell) is an id. The api changes each id to
  * the canonical form (lower case, with hyphens) and refuses a value that is not a UUID with INVALID_ARGUMENT.
  *
  * Each request that changes data has client_op_id: a UUID that the frontend makes once for each user action.
@@ -2719,48 +2430,6 @@ export const PlanService: GenService<{
     methodKind: "unary";
     input: typeof CreateSnapshotRequestSchema;
     output: typeof SnapshotSchema;
-  },
-  /**
-   * Access rights. Only an ADMIN can change them.
-   *
-   * @generated from rpc nanashi.v1.PlanService.GetAccess
-   */
-  getAccess: {
-    methodKind: "unary";
-    input: typeof GetAccessRequestSchema;
-    output: typeof AccessSchema;
-  },
-  /**
-   * @generated from rpc nanashi.v1.PlanService.SetMemberRole
-   */
-  setMemberRole: {
-    methodKind: "unary";
-    input: typeof SetMemberRoleRequestSchema;
-    output: typeof AckSchema;
-  },
-  /**
-   * @generated from rpc nanashi.v1.PlanService.CreateAccessRule
-   */
-  createAccessRule: {
-    methodKind: "unary";
-    input: typeof CreateAccessRuleRequestSchema;
-    output: typeof AckSchema;
-  },
-  /**
-   * @generated from rpc nanashi.v1.PlanService.UpdateAccessRule
-   */
-  updateAccessRule: {
-    methodKind: "unary";
-    input: typeof UpdateAccessRuleRequestSchema;
-    output: typeof AckSchema;
-  },
-  /**
-   * @generated from rpc nanashi.v1.PlanService.DeleteAccessRule
-   */
-  deleteAccessRule: {
-    methodKind: "unary";
-    input: typeof DeleteAccessRuleRequestSchema;
-    output: typeof AckSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_nanashi_v1_plan, 0);

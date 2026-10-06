@@ -8,6 +8,8 @@ do $$ begin
   end if;
 end $$;
 drop function if exists app_rename(jsonb, text, text);
+-- ponytail: the access rights tables are removed (issue #50). Delete this line when no database has them.
+drop table if exists app_member, app_access_rule;
 
 create table if not exists app_application (
   id uuid primary key,
@@ -15,12 +17,6 @@ create table if not exists app_application (
   -- A transaction that writes a row of a snapshot (app_list, app_property, app_item, app_metric) adds 1. CreateSnapshot compares it.
   version bigint not null default 0,
   created_at timestamptz not null default now()
-);
-create table if not exists app_member (
-  app_id uuid not null references app_application (id) on delete cascade,
-  user_name text not null,
-  role integer not null,
-  primary key (app_id, user_name)
 );
 create table if not exists app_list (
   app_id uuid not null references app_application (id) on delete cascade,
@@ -91,15 +87,6 @@ create table if not exists app_snapshot (
   user_name text not null,
   content text not null, -- text, not jsonb: jsonb does not keep the key order of the engine definitions
   created_at timestamptz not null default now()
-);
-create table if not exists app_access_rule (
-  app_id uuid not null references app_application (id) on delete cascade,
-  id uuid not null,
-  role integer not null,
-  list uuid not null,
-  members jsonb not null,
-  write boolean not null,
-  primary key (app_id, id)
 );
 -- app_operation is the outbox: one row for each client_op_id. A request that the engine must apply is pending
 -- until the api knows the engine result. A done row keeps the result. A failed row keeps the error.

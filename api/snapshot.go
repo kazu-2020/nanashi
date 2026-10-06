@@ -105,10 +105,9 @@ func restoreStmts(app string, snap snapshotData) []stmt {
 
 // The actions follow.
 
-// CreateApplication goes through the outbox: the first transaction makes the application and its member, the
+// CreateApplication goes through the outbox: the first transaction makes the application, the
 // engine gets the model, and the application shows only when the row is done. A refusal deletes the application.
 func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request[nanashiv1.CreateApplicationRequest]) (*connect.Response[nanashiv1.Application], error) {
-	c := callerOf(ctx)
 	name := strings.TrimSpace(req.Msg.Name)
 	if name == "" || req.Msg.Id == "" {
 		return nil, invalid(errors.New("アプリケーションの id と名前が要る"))
@@ -117,21 +116,13 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 	_, err := s.outbox(ctx, app, req.Msg, func() (plan, error) {
 		var snap snapshotData
 		if req.Msg.SnapshotId != "" {
-			var source, content string
-			err := s.Pool.QueryRow(ctx, "select app_id, content from app_snapshot where id = $1", req.Msg.SnapshotId).Scan(&source, &content)
+			var content string
+			err := s.Pool.QueryRow(ctx, "select content from app_snapshot where id = $1", req.Msg.SnapshotId).Scan(&content)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return plan{}, connect.NewError(connect.CodeNotFound, errors.New("スナップショットがない"))
 			}
 			if err != nil {
 				return plan{}, dbError(err)
-			}
-			// The new application has no access rules, so only a user who reads all data can restore it.
-			r, _, err := s.rights(ctx, source, c.user)
-			if err != nil {
-				return plan{}, err
-			}
-			if r < modeler {
-				return plan{}, connect.NewError(connect.CodePermissionDenied, errors.New("このスナップショットを戻す権限がない"))
 			}
 			if err := json.Unmarshal([]byte(content), &snap); err != nil {
 				return plan{}, dbError(err)
@@ -140,7 +131,6 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 		p := plan{
 			stmts: []stmt{
 				{sql: "insert into app_application (id, name) values ($1, $2) on conflict do nothing", args: []any{app, name}, zero: tag(errExists, "同じ id のアプリケーションがすでにある")},
-				{sql: "insert into app_member (app_id, user_name, role) values ($1, $2, $3)", args: []any{app, c.user, admin}},
 			},
 			made: []madeRow{{Table: "app_application", ID: app}},
 		}
@@ -158,7 +148,7 @@ func (s *PlanServer) CreateApplication(ctx context.Context, req *connect.Request
 	if err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nanashiv1.Application{Id: app, Name: name, Role: admin}), nil
+	return connect.NewResponse(&nanashiv1.Application{Id: app, Name: name}), nil
 }
 
 func (s *PlanServer) ListSnapshots(ctx context.Context, req *connect.Request[nanashiv1.ListSnapshotsRequest]) (*connect.Response[nanashiv1.ListSnapshotsResponse], error) {

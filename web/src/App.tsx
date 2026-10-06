@@ -10,8 +10,6 @@ import {
   type ReactNode,
 } from "react";
 import { api, errorText, getUser, newId, setUser } from "./api";
-import { Role } from "./gen/nanashi/v1/plan_pb";
-import { roleName } from "./logic";
 import { AppCtx, modelNames, Report, useRun } from "./state";
 import { Sel } from "./ui";
 
@@ -30,22 +28,20 @@ const AuditPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.A
 const SnapshotsPage = lazy(() =>
   import("./pages/admin").then((m) => ({ default: m.SnapshotsPage })),
 );
-const AccessPage = lazy(() => import("./pages/admin").then((m) => ({ default: m.AccessPage })));
 
-// PAGES gives the navigation. A page with a role shows only to users with that role or higher.
-const PAGES: { id: string; label: string; page: ComponentType; role?: Role }[] = [
+// PAGES gives the navigation.
+const PAGES: { id: string; label: string; page: ComponentType }[] = [
   { id: "lists", label: "リスト", page: ListsPage },
   { id: "metrics", label: "メトリック", page: MetricsPage },
   { id: "tables", label: "テーブル", page: TablesPage },
   { id: "views", label: "ビュー", page: ViewsPage },
   { id: "boards", label: "ボード", page: BoardsPage },
-  { id: "import", label: "インポート", page: ImportPage, role: Role.CONTRIBUTOR },
+  { id: "import", label: "インポート", page: ImportPage },
   { id: "scenarios", label: "シナリオ", page: ScenariosPage },
   { id: "calendar", label: "カレンダー", page: CalendarPage },
   { id: "comments", label: "コメント", page: CommentsPage },
-  { id: "audit", label: "監査ログ", page: AuditPage, role: Role.MODELER },
+  { id: "audit", label: "監査ログ", page: AuditPage },
   { id: "snapshots", label: "スナップショット", page: SnapshotsPage },
-  { id: "access", label: "アクセス権", page: AccessPage, role: Role.ADMIN },
 ];
 
 export default function App() {
@@ -171,8 +167,7 @@ function Apps(props: { onOpen: (a: { id: string; name: string }) => void }) {
           <li key={a.id}>
             <Button size="sm" variant="ghost" onPress={() => props.onOpen(a)}>
               {a.name}
-            </Button>{" "}
-            <span className="text-sm">（{roleName(a.role)}）</span>
+            </Button>
           </li>
         ))}
         {apps?.applications.length === 0 && <li>アプリケーションがありません。</li>}
@@ -220,14 +215,12 @@ function Shell(props: { appId: string }) {
   });
   const [page, setPage] = useState("lists");
   if (!model) return <p>読み込み中…</p>;
-  const can = (r: Role) => model.role >= r;
-  const pages = PAGES.filter((p) => !p.role || can(p.role));
-  const Page = (pages.find((p) => p.id === page) ?? pages[0]).page;
+  const Page = (PAGES.find((p) => p.id === page) ?? PAGES[0]).page;
   return (
-    <AppCtx.Provider value={{ appId: props.appId, model, names: modelNames(model), can }}>
+    <AppCtx.Provider value={{ appId: props.appId, model, names: modelNames(model) }}>
       <div className="flex gap-4">
         <nav className="flex w-40 shrink-0 flex-col gap-1">
-          {pages.map((p) => (
+          {PAGES.map((p) => (
             <Button
               key={p.id}
               size="sm"
