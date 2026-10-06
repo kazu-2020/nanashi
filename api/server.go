@@ -12,6 +12,7 @@ import (
 	"log"
 	"path"
 
+	"buf.build/go/protovalidate"
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,7 +20,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 	"github.com/kazu-2020/nanashi/api/gen/nanashi/v1/nanashiv1connect"
@@ -103,54 +103,17 @@ func checkID(field, s string) error {
 
 func newID() string { return uuid.Must(uuid.NewV7()).String() }
 
-// Request fields that hold ids: every string field with one of these names, the keys of these map fields, and
-// the values of these map fields. checkIDs checks them.
-var (
-	idFields = map[string]bool{"id": true, "app_id": true, "client_op_id": true, "snapshot_id": true, "metric": true,
-		"list": true, "target": true, "member_list": true, "dimensions": true, "rows": true, "columns": true,
-		"metrics": true, "members": true, "ids": true, "page_selectors": true, "copy_from": true, "view_id": true, "member": true}
-	idKeys   = map[string]bool{"filters": true, "coords": true, "cell": true, "properties": true, "property_columns": true, "dimension_columns": true}
-	idValues = map[string]bool{"coords": true, "cell": true}
-)
-
-// checkIDs checks each id in a request with checkID. An empty string field is not set, so an optional reference
-// stays empty.
-func checkIDs(m protoreflect.Message) error {
-	var fail error
-	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
-		name := string(fd.Name())
-		switch {
-		case fd.IsMap():
-			keys, values := idKeys[name], idValues[name]
-			messages := fd.MapValue().Kind() == protoreflect.MessageKind
-			v.Map().Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
-				if keys {
-					fail = checkID(name, k.String())
-				}
-				if fail == nil && values {
-					fail = checkID(name, v.String())
-				}
-				if fail == nil && messages {
-					fail = checkIDs(v.Message())
-				}
-				return fail == nil
-			})
-		case fd.IsList() && fd.Kind() == protoreflect.StringKind && idFields[name]:
-			for i, l := 0, v.List(); i < l.Len() && fail == nil; i++ {
-				fail = checkID(name, l.Get(i).String())
-			}
-		case fd.IsList() && fd.Kind() == protoreflect.MessageKind:
-			for i, l := 0, v.List(); i < l.Len() && fail == nil; i++ {
-				fail = checkIDs(l.Get(i).Message())
-			}
-		case fd.Kind() == protoreflect.MessageKind:
-			fail = checkIDs(v.Message())
-		case fd.Kind() == protoreflect.StringKind && idFields[name]:
-			fail = checkID(name, v.String())
-		}
-		return fail == nil
-	})
-	return fail
+// checkRequest checks the rules in proto/ with protovalidate. For example, each id must be a UUID in the
+// canonical form (nanashi.v1.id).
+func checkRequest(m proto.Message) error {
+	verr := new(protovalidate.ValidationError)
+	if err := protovalidate.Validate(m); errors.As(err, &verr) {
+		v := verr.Violations[0].Proto
+		return invalid(fmt.Errorf("%s が%s", protovalidate.FieldPathString(v.GetField()), v.GetMessage()))
+	} else if err != nil {
+		return connect.NewError(connect.CodeInternal, err)
+	}
+	return nil
 }
 
 // requestHash identifies the content of a request without its client_op_id. A resend with the same client_op_id
@@ -341,7 +304,7 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 			}
 			method := path.Base(req.Spec().Procedure)
 			msg := req.Any().(proto.Message)
-			if err := checkIDs(msg.ProtoReflect()); err != nil {
+			if err := checkRequest(msg); err != nil {
 				return nil, err
 			}
 			c := caller{user: user, method: method}
@@ -358,7 +321,7 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 					return nil, connect.NewError(connect.CodeNotFound, errors.New("アプリケーションがない"))
 				}
 			}
-			// Each request that changes data has a client_op_id. checkIDs checked its form.
+			// Each request that changes data has a client_op_id. checkRequest checked its form.
 			if r, ok := req.Any().(interface{ GetClientOpId() string }); ok {
 				if c.opID = r.GetClientOpId(); c.opID == "" {
 					return nil, invalid(errors.New("client_op_id が要る"))

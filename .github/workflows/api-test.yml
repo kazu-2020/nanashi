@@ -1,11 +1,12 @@
 name: api-test
 
-# Start only when api/, the engine schema or this file changes.
+# Start only when api/, proto/ (the validation rules) or this file changes.
 on:
   push:
     branches: [main]
     paths: &paths
       - api/**
+      - proto/**
       - .github/workflows/api-test.yml
   pull_request:
     paths: *paths

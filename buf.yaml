@@ -5,3 +5,6 @@ lint:
   use: [STANDARD]
   # PlanService shares small responses (Ack, the definitions) between RPCs, so that the contract stays small.
   except: [RPC_REQUEST_RESPONSE_UNIQUE, RPC_RESPONSE_STANDARD_NAME]
+  # proto/buf/validate/ is a copy of protovalidate v1.2.0. Its descriptor agrees with the Go module
+  # buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go in api/go.mod. Issue #78 replaces the copy.
+  ignore: [proto/buf]
