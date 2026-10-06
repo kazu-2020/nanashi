@@ -14,6 +14,7 @@ Issue #30 gives the full structure of the service.
 
 ## Start the local environment
 
+Install [mise](https://mise.jdx.dev/) and run `mise install` in the repository root. `mise.toml` sets the versions of Go, Rust, Python, Node.js, and pnpm.
 Set up `tessera/.venv` (`tessera/CLAUDE.md`) and run `pnpm install` in `web/`. Then run `./dev.sh`.
 It starts PostgreSQL, the router, `nanashi-api` with one engine for each application, and the web dev server.
 Open http://127.0.0.1:5173 and log in with a user name. The planning features are in `proto/nanashi/v1/plan.proto`.
