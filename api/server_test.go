@@ -595,6 +595,16 @@ func TestAuditOnceForEachOperation(t *testing.T) {
 	if n := auditCount(t, ctx, pool, app, op3); n != 1 {
 		t.Errorf("audit rows of an api-only change sent two times: %d, want 1", n)
 	}
+	op4 := uuid.NewString()
+	write := &nanashiv1.CellWrite{Metric: budget, Coords: map[string]string{product: memberA, region: east}, Value: &nanashiv1.Value{Value: &nanashiv1.Value_Number{Number: 1}}}
+	for range 2 {
+		if _, err := alice.WriteCells(ctx, connect.NewRequest(&nanashiv1.WriteCellsRequest{AppId: app, ClientOpId: op4, Writes: []*nanashiv1.CellWrite{write}})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := auditCount(t, ctx, pool, app, op4); n != 1 {
+		t.Errorf("audit rows of WriteCells sent two times: %d, want 1", n)
+	}
 }
 
 func TestInterceptorAndListApplications(t *testing.T) {

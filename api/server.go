@@ -368,8 +368,8 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 			// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
 			// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
 			if err == nil && method == "WriteCells" {
-				if _, err := s.Pool.Exec(ctx, "insert into app_audit (app_id, user_name, action, detail) values ($1, $2, $3, $4)",
-					appID, user, method, detailOf(msg)); err != nil {
+				if _, err := s.Pool.Exec(ctx, `insert into app_audit (app_id, user_name, action, detail, client_op_id)
+					values ($1, $2, $3, $4, $5) on conflict do nothing`, appID, user, method, detailOf(msg), c.opID); err != nil {
 					log.Printf("audit %s %s: %v", appID, method, err)
 				}
 			}

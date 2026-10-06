@@ -80,6 +80,10 @@ create table if not exists app_audit (
   created_at timestamptz not null default now()
 );
 create index if not exists app_audit_app on app_audit (app_id, id);
+-- client_op_id is set only on the rows that the interceptor writes for WriteCells. A resend of the same
+-- WriteCells adds no row.
+alter table app_audit add column if not exists client_op_id uuid;
+create unique index if not exists app_audit_op on app_audit (app_id, client_op_id);
 create table if not exists app_snapshot (
   id uuid primary key,
   app_id uuid not null references app_application (id) on delete cascade,
