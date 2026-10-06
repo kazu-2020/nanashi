@@ -1,6 +1,8 @@
 #!/bin/bash
 # Install the tools in mise.toml. Run only in a cloud session.
-# The environment must allow mise.run, go.dev, and dl.google.com. A failure does not stop the session.
+# The environment must allow mise.run, mise-versions.jdx.dev, go.dev, and dl.google.com.
+# If mise-versions.jdx.dev is blocked, mise uses the GitHub API for the versions, and the GitHub proxy blocks it.
+# A failure does not stop the session.
 [ "$CLAUDE_CODE_REMOTE" = "true" ] || exit 0
 cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 0
 export PATH="$HOME/.local/bin:$PATH"
