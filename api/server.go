@@ -38,52 +38,14 @@ type PlanServer struct {
 
 var _ nanashiv1connect.PlanServiceHandler = (*PlanServer)(nil)
 
-type (
-	ack     = connect.Response[nanashiv1.Ack]
-	role    = nanashiv1.Role
-	rpcRule struct {
-		min   role // The minimum role in the application. ROLE_UNSPECIFIED: the RPC needs no application.
-		audit bool // The interceptor records a successful call in the audit trail.
-	}
-)
+type ack = connect.Response[nanashiv1.Ack]
 
-const (
-	viewer      = nanashiv1.Role_ROLE_VIEWER
-	contributor = nanashiv1.Role_ROLE_CONTRIBUTOR
-	modeler     = nanashiv1.Role_ROLE_MODELER
-	admin       = nanashiv1.Role_ROLE_ADMIN
-)
-
-// rpcRules gives the minimum role and the audit of each RPC. An RPC that is not in the table is refused.
-var rpcRules = map[string]rpcRule{
-	"ListApplications": {}, "CreateApplication": {},
-	"GetModel": {min: viewer}, "Query": {min: viewer}, "ListComments": {min: viewer}, "AddComment": {viewer, true},
-	"ListSnapshots": {min: viewer},
-	// The audit detail has the full requests (cells and CSV), and the access rules do not apply to it.
-	"ListAudit": {min: modeler},
-	// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
-	// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
-	"WriteCells": {contributor, true}, "Import": {min: contributor}, "CreateSnapshot": {min: contributor},
-	"CreateList": {min: modeler}, "RenameList": {min: modeler}, "AddProperty": {min: modeler},
-	"RenameProperty": {min: modeler}, "EditMembers": {min: modeler},
-	"CreateCalendar": {min: modeler}, "CreateScenario": {min: modeler}, "CreateMetric": {min: modeler},
-	"UpdateMetric": {min: modeler}, "RenameMetric": {min: modeler}, "DeleteMetric": {min: modeler},
-	"CreateTable": {min: modeler}, "UpdateTable": {min: modeler}, "CreateView": {min: modeler},
-	"UpdateView": {min: modeler}, "CreateBoard": {min: modeler}, "UpdateBoard": {min: modeler},
-	"DeleteItem": {min: modeler}, "GetAccess": {min: admin}, "SetMemberRole": {min: admin},
-	"CreateAccessRule": {min: admin}, "UpdateAccessRule": {min: admin}, "DeleteAccessRule": {min: admin},
-}
-
-// caller is the user of a request and the rights of the user in the application of the request.
+// caller is the user and the RPC of a request.
 type caller struct {
 	user   string
 	method string // The RPC name, for example "CreateList".
 	opID   string // The client_op_id of a request that changes data. Empty for a read.
-	role   role
-	rules  []*nanashiv1.AccessRule // The access rules of the application. Empty when role >= MODELER.
 }
-
-func (c caller) limitsIn(em engineModel) limits { return accessLimits(c.role, c.rules, em).through(em) }
 
 type callerKey struct{}
 
@@ -97,7 +59,6 @@ var constraintMessages = map[string]string{
 	"app_item_pkey":        "同じ id がすでにある",
 	"app_metric_pkey":      "同じ id のメトリックがすでにある",
 	"app_comment_pkey":     "同じ id のコメントがすでにある",
-	"app_access_rule_pkey": "同じ id のルールがすでにある",
 	"app_snapshot_pkey":    "同じ id のスナップショットがすでにある",
 }
 
@@ -222,7 +183,6 @@ func connectError(err error) error {
 }
 
 var errorCodes = map[error]connect.Code{
-	errDenied:       connect.CodePermissionDenied,
 	errExists:       connect.CodeAlreadyExists,
 	errNotFound:     connect.CodeNotFound,
 	errPrecondition: connect.CodeFailedPrecondition,
@@ -341,7 +301,6 @@ func jsonText(v any) string {
 
 // The tags give an error its Connect code (connectError). An error without a tag is an input error.
 var (
-	errDenied       = errors.New("permission denied")
 	errExists       = errors.New("already exists")
 	errNotFound     = errors.New("not found")
 	errPrecondition = errors.New("failed precondition")
@@ -371,8 +330,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return err
 }
 
-// Interceptor identifies the user, checks the ids, checks the role for the RPC, and
-// records the audit trail.
+// Interceptor identifies the user, checks the ids and the application, and records the audit trail.
 func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
@@ -382,10 +340,6 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("X-Nanashi-User がない"))
 			}
 			method := path.Base(req.Spec().Procedure)
-			rule, ok := rpcRules[method]
-			if !ok {
-				return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("%s は使えない", method))
-			}
 			msg := req.Any().(proto.Message)
 			if err := checkIDs(msg.ProtoReflect()); err != nil {
 				return nil, err
@@ -393,18 +347,15 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 			c := caller{user: user, method: method}
 			appID := ""
 			if a, ok := req.Any().(interface{ GetAppId() string }); ok {
-				appID = a.GetAppId()
-			}
-			if rule.min != nanashiv1.Role_ROLE_UNSPECIFIED {
-				if appID == "" {
+				if appID = a.GetAppId(); appID == "" {
 					return nil, invalid(errors.New("app_id が要る"))
 				}
-				var err error
-				if c.role, c.rules, err = s.rights(ctx, appID, user); err != nil {
-					return nil, err
+				var done bool
+				if err := s.Pool.QueryRow(ctx, "select exists (select 1 from app_application a where a.id = $1 and "+doneApps+")", appID).Scan(&done); err != nil {
+					return nil, dbError(err)
 				}
-				if c.role < rule.min {
-					return nil, connect.NewError(connect.CodePermissionDenied, errors.New("この操作をする権限がない"))
+				if !done {
+					return nil, connect.NewError(connect.CodeNotFound, errors.New("アプリケーションがない"))
 				}
 			}
 			// Each request that changes data has a client_op_id. checkIDs checked its form.
@@ -414,9 +365,11 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 				}
 			}
 			res, err := next(context.WithValue(ctx, callerKey{}, c), req)
-			if err == nil && rule.audit {
-				if _, err := s.Pool.Exec(ctx, "insert into app_audit (app_id, user_name, action, detail) values ($1, $2, $3, $4)",
-					appID, user, method, detailOf(msg)); err != nil {
+			// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
+			// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
+			if err == nil && method == "WriteCells" {
+				if _, err := s.Pool.Exec(ctx, `insert into app_audit (app_id, user_name, action, detail, client_op_id)
+					values ($1, $2, $3, $4, $5) on conflict do nothing`, appID, user, method, detailOf(msg), c.opID); err != nil {
 					log.Printf("audit %s %s: %v", appID, method, err)
 				}
 			}
@@ -429,11 +382,10 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 const doneApps = `exists (select 1 from app_operation o where o.app_id = a.id and o.method = 'CreateApplication' and o.status = 'done')`
 
 func (s *PlanServer) ListApplications(ctx context.Context, _ *connect.Request[nanashiv1.ListApplicationsRequest]) (*connect.Response[nanashiv1.ListApplicationsResponse], error) {
-	rows, _ := s.Pool.Query(ctx, `select a.id, a.name, m.role from app_application a
-		join app_member m on m.app_id = a.id where m.user_name = $1 and `+doneApps+` order by a.created_at, a.id`, callerOf(ctx).user)
+	rows, _ := s.Pool.Query(ctx, `select a.id, a.name from app_application a where `+doneApps+` order by a.created_at, a.id`)
 	apps, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*nanashiv1.Application, error) {
 		a := &nanashiv1.Application{}
-		return a, row.Scan(&a.Id, &a.Name, &a.Role)
+		return a, row.Scan(&a.Id, &a.Name)
 	})
 	if err != nil {
 		return nil, dbError(err)

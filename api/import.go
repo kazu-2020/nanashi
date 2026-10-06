@@ -133,7 +133,7 @@ func largestRow(dim engineDim) int {
 
 // importMetricOps changes CSV rows into set_cell operations. Each row gives all dimensions of the Metric by
 // member name. A new member gets an id from newID.
-func importMetricOps(text string, mi *nanashiv1.MetricImport, em engineModel, l limits) ([]op, int, error) {
+func importMetricOps(text string, mi *nanashiv1.MetricImport, em engineModel) ([]op, int, error) {
 	header, rows, err := parseCSV(text)
 	if err != nil {
 		return nil, 0, err
@@ -161,7 +161,6 @@ func importMetricOps(text string, mi *nanashiv1.MetricImport, em engineModel, l 
 	}
 	var adds, sets []op
 	for r, row := range rows {
-		coords := map[string]string{}
 		cell := map[string]any{}
 		for i, d := range m.Dims {
 			member := strings.TrimSpace(row[cols[i]])
@@ -174,10 +173,7 @@ func importMetricOps(text string, mi *nanashiv1.MetricImport, em engineModel, l 
 				known[i][member] = id
 				adds = append(adds, newOp("add_member", map[string]any{"dim": d, "id": id, "name": member}))
 			}
-			coords[d], cell[d] = id, id
-		}
-		if err := l.checkWrite(m.Name, m.Dims, coords, em); err != nil {
-			return nil, 0, fmt.Errorf("%d 行目: %w", r+2, err)
+			cell[d] = id
 		}
 		v, err := parseValue(m.Kind, row[valueCol])
 		if err != nil {
@@ -204,7 +200,7 @@ func (s *PlanServer) reserveRows(ctx context.Context, app, list string, n, floor
 }
 
 func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.ImportRequest]) (*connect.Response[nanashiv1.ImportResponse], error) {
-	app, c := req.Msg.AppId, callerOf(ctx)
+	app := req.Msg.AppId
 	type rows struct {
 		Rows int32 `json:"rows"`
 	}
@@ -215,9 +211,6 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 			dim, ok := em.dim(t.List.List)
 			if !ok {
 				return plan{}, fmt.Errorf("リスト %s がない", t.List.List)
-			}
-			if _, ruled := c.limitsIn(em)[dim.ID]; ruled {
-				return plan{}, tag(errDenied, "%s には権限の制限があるので読み込めない", dim.Name)
 			}
 			first := 0
 			if t.List.MemberColumn == "" && meta.Kinds[dim.ID] == nanashiv1.ListKind_LIST_KIND_TRANSACTION {
@@ -239,7 +232,7 @@ func (s *PlanServer) Import(ctx context.Context, req *connect.Request[nanashiv1.
 		}
 	case *nanashiv1.ImportRequest_Metric:
 		planOf = func(em engineModel, _ appMeta) (plan, error) {
-			ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em, c.limitsIn(em))
+			ops, n, err := importMetricOps(req.Msg.Csv, t.Metric, em)
 			return plan{ops: ops, result: rows{int32(n)}}, err
 		}
 	default:

@@ -5,7 +5,6 @@ import {
   type Members,
   type MetricDef,
   type QueryResponse,
-  Role,
   type Value,
   ValueKind,
 } from "./gen/nanashi/v1/plan_pb";
@@ -258,15 +257,6 @@ export function total(g: Grid): number {
     }
   return s;
 }
-
-export const ROLES: [string, string][] = [
-  [String(Role.VIEWER), "閲覧者"],
-  [String(Role.CONTRIBUTOR), "入力者"],
-  [String(Role.MODELER), "モデラー"],
-  [String(Role.ADMIN), "管理者"],
-];
-
-export const roleName = (r: Role) => ROLES.find(([v]) => v === String(r))?.[1] ?? "";
 
 export type Spec = {
   metrics: string[];

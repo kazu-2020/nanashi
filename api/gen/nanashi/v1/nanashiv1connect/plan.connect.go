@@ -103,20 +103,6 @@ const (
 	// PlanServiceCreateSnapshotProcedure is the fully-qualified name of the PlanService's
 	// CreateSnapshot RPC.
 	PlanServiceCreateSnapshotProcedure = "/nanashi.v1.PlanService/CreateSnapshot"
-	// PlanServiceGetAccessProcedure is the fully-qualified name of the PlanService's GetAccess RPC.
-	PlanServiceGetAccessProcedure = "/nanashi.v1.PlanService/GetAccess"
-	// PlanServiceSetMemberRoleProcedure is the fully-qualified name of the PlanService's SetMemberRole
-	// RPC.
-	PlanServiceSetMemberRoleProcedure = "/nanashi.v1.PlanService/SetMemberRole"
-	// PlanServiceCreateAccessRuleProcedure is the fully-qualified name of the PlanService's
-	// CreateAccessRule RPC.
-	PlanServiceCreateAccessRuleProcedure = "/nanashi.v1.PlanService/CreateAccessRule"
-	// PlanServiceUpdateAccessRuleProcedure is the fully-qualified name of the PlanService's
-	// UpdateAccessRule RPC.
-	PlanServiceUpdateAccessRuleProcedure = "/nanashi.v1.PlanService/UpdateAccessRule"
-	// PlanServiceDeleteAccessRuleProcedure is the fully-qualified name of the PlanService's
-	// DeleteAccessRule RPC.
-	PlanServiceDeleteAccessRuleProcedure = "/nanashi.v1.PlanService/DeleteAccessRule"
 )
 
 // PlanServiceClient is a client for the nanashi.v1.PlanService service.
@@ -168,12 +154,6 @@ type PlanServiceClient interface {
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
 	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.Snapshot], error)
-	// Access rights. Only an ADMIN can change them.
-	GetAccess(context.Context, *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error)
-	SetMemberRole(context.Context, *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error)
-	CreateAccessRule(context.Context, *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
-	UpdateAccessRule(context.Context, *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
-	DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 }
 
 // NewPlanServiceClient constructs a client for the nanashi.v1.PlanService service. By default, it
@@ -361,36 +341,6 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("CreateSnapshot")),
 			connect.WithClientOptions(opts...),
 		),
-		getAccess: connect.NewClient[v1.GetAccessRequest, v1.Access](
-			httpClient,
-			baseURL+PlanServiceGetAccessProcedure,
-			connect.WithSchema(planServiceMethods.ByName("GetAccess")),
-			connect.WithClientOptions(opts...),
-		),
-		setMemberRole: connect.NewClient[v1.SetMemberRoleRequest, v1.Ack](
-			httpClient,
-			baseURL+PlanServiceSetMemberRoleProcedure,
-			connect.WithSchema(planServiceMethods.ByName("SetMemberRole")),
-			connect.WithClientOptions(opts...),
-		),
-		createAccessRule: connect.NewClient[v1.CreateAccessRuleRequest, v1.Ack](
-			httpClient,
-			baseURL+PlanServiceCreateAccessRuleProcedure,
-			connect.WithSchema(planServiceMethods.ByName("CreateAccessRule")),
-			connect.WithClientOptions(opts...),
-		),
-		updateAccessRule: connect.NewClient[v1.UpdateAccessRuleRequest, v1.Ack](
-			httpClient,
-			baseURL+PlanServiceUpdateAccessRuleProcedure,
-			connect.WithSchema(planServiceMethods.ByName("UpdateAccessRule")),
-			connect.WithClientOptions(opts...),
-		),
-		deleteAccessRule: connect.NewClient[v1.DeleteAccessRuleRequest, v1.Ack](
-			httpClient,
-			baseURL+PlanServiceDeleteAccessRuleProcedure,
-			connect.WithSchema(planServiceMethods.ByName("DeleteAccessRule")),
-			connect.WithClientOptions(opts...),
-		),
 	}
 }
 
@@ -425,11 +375,6 @@ type planServiceClient struct {
 	listAudit         *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
 	listSnapshots     *connect.Client[v1.ListSnapshotsRequest, v1.ListSnapshotsResponse]
 	createSnapshot    *connect.Client[v1.CreateSnapshotRequest, v1.Snapshot]
-	getAccess         *connect.Client[v1.GetAccessRequest, v1.Access]
-	setMemberRole     *connect.Client[v1.SetMemberRoleRequest, v1.Ack]
-	createAccessRule  *connect.Client[v1.CreateAccessRuleRequest, v1.Ack]
-	updateAccessRule  *connect.Client[v1.UpdateAccessRuleRequest, v1.Ack]
-	deleteAccessRule  *connect.Client[v1.DeleteAccessRuleRequest, v1.Ack]
 }
 
 // ListApplications calls nanashi.v1.PlanService.ListApplications.
@@ -577,31 +522,6 @@ func (c *planServiceClient) CreateSnapshot(ctx context.Context, req *connect.Req
 	return c.createSnapshot.CallUnary(ctx, req)
 }
 
-// GetAccess calls nanashi.v1.PlanService.GetAccess.
-func (c *planServiceClient) GetAccess(ctx context.Context, req *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error) {
-	return c.getAccess.CallUnary(ctx, req)
-}
-
-// SetMemberRole calls nanashi.v1.PlanService.SetMemberRole.
-func (c *planServiceClient) SetMemberRole(ctx context.Context, req *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error) {
-	return c.setMemberRole.CallUnary(ctx, req)
-}
-
-// CreateAccessRule calls nanashi.v1.PlanService.CreateAccessRule.
-func (c *planServiceClient) CreateAccessRule(ctx context.Context, req *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
-	return c.createAccessRule.CallUnary(ctx, req)
-}
-
-// UpdateAccessRule calls nanashi.v1.PlanService.UpdateAccessRule.
-func (c *planServiceClient) UpdateAccessRule(ctx context.Context, req *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
-	return c.updateAccessRule.CallUnary(ctx, req)
-}
-
-// DeleteAccessRule calls nanashi.v1.PlanService.DeleteAccessRule.
-func (c *planServiceClient) DeleteAccessRule(ctx context.Context, req *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
-	return c.deleteAccessRule.CallUnary(ctx, req)
-}
-
 // PlanServiceHandler is an implementation of the nanashi.v1.PlanService service.
 type PlanServiceHandler interface {
 	// Applications.
@@ -651,12 +571,6 @@ type PlanServiceHandler interface {
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
 	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.Snapshot], error)
-	// Access rights. Only an ADMIN can change them.
-	GetAccess(context.Context, *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error)
-	SetMemberRole(context.Context, *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error)
-	CreateAccessRule(context.Context, *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
-	UpdateAccessRule(context.Context, *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error)
-	DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error)
 }
 
 // NewPlanServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -840,36 +754,6 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(planServiceMethods.ByName("CreateSnapshot")),
 		connect.WithHandlerOptions(opts...),
 	)
-	planServiceGetAccessHandler := connect.NewUnaryHandler(
-		PlanServiceGetAccessProcedure,
-		svc.GetAccess,
-		connect.WithSchema(planServiceMethods.ByName("GetAccess")),
-		connect.WithHandlerOptions(opts...),
-	)
-	planServiceSetMemberRoleHandler := connect.NewUnaryHandler(
-		PlanServiceSetMemberRoleProcedure,
-		svc.SetMemberRole,
-		connect.WithSchema(planServiceMethods.ByName("SetMemberRole")),
-		connect.WithHandlerOptions(opts...),
-	)
-	planServiceCreateAccessRuleHandler := connect.NewUnaryHandler(
-		PlanServiceCreateAccessRuleProcedure,
-		svc.CreateAccessRule,
-		connect.WithSchema(planServiceMethods.ByName("CreateAccessRule")),
-		connect.WithHandlerOptions(opts...),
-	)
-	planServiceUpdateAccessRuleHandler := connect.NewUnaryHandler(
-		PlanServiceUpdateAccessRuleProcedure,
-		svc.UpdateAccessRule,
-		connect.WithSchema(planServiceMethods.ByName("UpdateAccessRule")),
-		connect.WithHandlerOptions(opts...),
-	)
-	planServiceDeleteAccessRuleHandler := connect.NewUnaryHandler(
-		PlanServiceDeleteAccessRuleProcedure,
-		svc.DeleteAccessRule,
-		connect.WithSchema(planServiceMethods.ByName("DeleteAccessRule")),
-		connect.WithHandlerOptions(opts...),
-	)
 	return "/nanashi.v1.PlanService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case PlanServiceListApplicationsProcedure:
@@ -930,16 +814,6 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceListSnapshotsHandler.ServeHTTP(w, r)
 		case PlanServiceCreateSnapshotProcedure:
 			planServiceCreateSnapshotHandler.ServeHTTP(w, r)
-		case PlanServiceGetAccessProcedure:
-			planServiceGetAccessHandler.ServeHTTP(w, r)
-		case PlanServiceSetMemberRoleProcedure:
-			planServiceSetMemberRoleHandler.ServeHTTP(w, r)
-		case PlanServiceCreateAccessRuleProcedure:
-			planServiceCreateAccessRuleHandler.ServeHTTP(w, r)
-		case PlanServiceUpdateAccessRuleProcedure:
-			planServiceUpdateAccessRuleHandler.ServeHTTP(w, r)
-		case PlanServiceDeleteAccessRuleProcedure:
-			planServiceDeleteAccessRuleHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1063,24 +937,4 @@ func (UnimplementedPlanServiceHandler) ListSnapshots(context.Context, *connect.R
 
 func (UnimplementedPlanServiceHandler) CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.Snapshot], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateSnapshot is not implemented"))
-}
-
-func (UnimplementedPlanServiceHandler) GetAccess(context.Context, *connect.Request[v1.GetAccessRequest]) (*connect.Response[v1.Access], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.GetAccess is not implemented"))
-}
-
-func (UnimplementedPlanServiceHandler) SetMemberRole(context.Context, *connect.Request[v1.SetMemberRoleRequest]) (*connect.Response[v1.Ack], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.SetMemberRole is not implemented"))
-}
-
-func (UnimplementedPlanServiceHandler) CreateAccessRule(context.Context, *connect.Request[v1.CreateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.CreateAccessRule is not implemented"))
-}
-
-func (UnimplementedPlanServiceHandler) UpdateAccessRule(context.Context, *connect.Request[v1.UpdateAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.UpdateAccessRule is not implemented"))
-}
-
-func (UnimplementedPlanServiceHandler) DeleteAccessRule(context.Context, *connect.Request[v1.DeleteAccessRuleRequest]) (*connect.Response[v1.Ack], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.DeleteAccessRule is not implemented"))
 }

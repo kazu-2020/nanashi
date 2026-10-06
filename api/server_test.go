@@ -90,24 +90,13 @@ func opsJSON(t *testing.T, ops []op) string {
 	return string(b)
 }
 
-// eastOnly is a CONTRIBUTOR limited to East (read and write).
-func eastOnly() limits {
-	return accessLimits(contributor, []*nanashiv1.AccessRule{{Role: contributor, List: region, Members: []string{east}, Write: true}}, sampleModel())
-}
-
-func sampleModel() engineModel {
-	em, _ := parseEngineModel([]byte(sample))
-	return em
-}
-
 func TestConnectError(t *testing.T) {
 	for _, c := range []struct {
 		err  error
 		code connect.Code
 	}{
 		{errors.New("入力の誤り"), connect.CodeInvalidArgument},
-		{tag(errDenied, "権限がない"), connect.CodePermissionDenied},
-		{fmt.Errorf("3 行目: %w", tag(errDenied, "権限がない")), connect.CodePermissionDenied},
+		{fmt.Errorf("3 行目: %w", tag(errExists, "ある")), connect.CodeAlreadyExists},
 		{tag(errExists, "ある"), connect.CodeAlreadyExists},
 		{tag(errPrecondition, "消える"), connect.CodeFailedPrecondition},
 		{connect.NewError(connect.CodeUnavailable, errors.New("x")), connect.CodeUnavailable},
@@ -115,17 +104,6 @@ func TestConnectError(t *testing.T) {
 		got := connectError(c.err)
 		if connect.CodeOf(got) != c.code || !strings.Contains(got.Error(), c.err.Error()) {
 			t.Errorf("%v: got %v, want code %v with the same message", c.err, got, c.code)
-		}
-	}
-}
-
-// TestRPCRulesCoverAllMethods makes sure that the interceptor does not refuse an RPC of PlanService.
-func TestRPCRulesCoverAllMethods(t *testing.T) {
-	methods := nanashiv1.File_nanashi_v1_plan_proto.Services().ByName("PlanService").Methods()
-	for i := range methods.Len() {
-		name := string(methods.Get(i).Name())
-		if _, ok := rpcRules[name]; !ok {
-			t.Errorf("rpcRules has no entry for %s", name)
 		}
 	}
 }
@@ -253,13 +231,11 @@ func (e *fakeEngine) opIDs() []string {
 	return out
 }
 
-// testApp makes an application with alice as ADMIN and bob as VIEWER, whose creation is done.
 func testApp(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
 	t.Helper()
 	app := uuid.Must(uuid.NewV7()).String()
 	for _, sql := range []string{
 		"insert into app_application (id, name) values ($1, 'test')",
-		"insert into app_member (app_id, user_name, role) values ($1, 'alice', 4), ($1, 'bob', 1)",
 		"insert into app_operation (app_id, client_op_id, user_name, method, request_hash, status) values ($1, $1, 'alice', 'CreateApplication', '', 'done')",
 	} {
 		if _, err := pool.Exec(ctx, sql, app); err != nil {
@@ -618,5 +594,58 @@ func TestAuditOnceForEachOperation(t *testing.T) {
 	}
 	if n := auditCount(t, ctx, pool, app, op3); n != 1 {
 		t.Errorf("audit rows of an api-only change sent two times: %d, want 1", n)
+	}
+	op4 := uuid.NewString()
+	write := &nanashiv1.CellWrite{Metric: budget, Coords: map[string]string{product: memberA, region: east}, Value: &nanashiv1.Value{Value: &nanashiv1.Value_Number{Number: 1}}}
+	for range 2 {
+		if _, err := alice.WriteCells(ctx, connect.NewRequest(&nanashiv1.WriteCellsRequest{AppId: app, ClientOpId: op4, Writes: []*nanashiv1.CellWrite{write}})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := auditCount(t, ctx, pool, app, op4); n != 1 {
+		t.Errorf("audit rows of WriteCells sent two times: %d, want 1", n)
+	}
+}
+
+func TestInterceptorAndListApplications(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	hidden := uuid.Must(uuid.NewV7()).String()
+	for _, sql := range []string{
+		"insert into app_application (id, name) values ($1, 'pending')",
+		"insert into app_operation (app_id, client_op_id, user_name, method, request_hash, status) values ($1, $1, 'alice', 'CreateApplication', '', 'pending')",
+	} {
+		if _, err := pool.Exec(ctx, sql, hidden); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), "delete from app_application where id = $1", hidden)
+		pool.Exec(context.Background(), "delete from app_operation where app_id = $1", hidden)
+	})
+	client := testClient(t, pool, nil)
+	if _, err := client("").ListApplications(ctx, connect.NewRequest(&nanashiv1.ListApplicationsRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("no user: got %v, want unauthenticated", err)
+	}
+	res, err := client("carol").ListApplications(ctx, connect.NewRequest(&nanashiv1.ListApplicationsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, a := range res.Msg.Applications {
+		seen[a.Id] = true
+	}
+	if !seen[app] || seen[hidden] {
+		t.Errorf("got %v, want the done application and not the pending one", seen)
+	}
+	if _, err := client("alice").GetModel(ctx, connect.NewRequest(&nanashiv1.GetModelRequest{AppId: hidden})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("pending application: got %v, want NotFound", err)
+	}
+	for _, id := range []string{"not-an-id", ""} {
+		if _, err := client("alice").GetModel(ctx, connect.NewRequest(&nanashiv1.GetModelRequest{AppId: id})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("app_id %q: got %v, want InvalidArgument", id, err)
+		}
 	}
 }

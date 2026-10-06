@@ -15,7 +15,7 @@ import {
   YAxis,
 } from "recharts";
 import { api, getUser, newId } from "./api";
-import { Aggregation, Display, Role } from "./gen/nanashi/v1/plan_pb";
+import { Aggregation, Display } from "./gen/nanashi/v1/plan_pb";
 import {
   buildGrid,
   chartRows,
@@ -90,7 +90,7 @@ export function PivotWidget(props: { spec: Spec; page: Record<string, string> })
 }
 
 export function PivotEditor(props: { initial: Spec; view?: { id: string; name: string } }) {
-  const { appId, can, names, model } = useApp();
+  const { appId, names, model } = useApp();
   const mutate = useMutate();
   const writeCells = useMutate("query");
   const [spec, setSpec] = useState(props.initial);
@@ -210,23 +210,19 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
               CSV エクスポート
             </Button>
           )}
-          {can(Role.MODELER) && (
-            <>
-              <Input
-                aria-label="ビュー名"
-                placeholder="ビュー名"
-                value={viewName}
-                onChange={(e) => setViewName(e.target.value)}
-              />
-              <Button size="sm" variant="secondary" onPress={() => saveView()}>
-                ビューとして保存
-              </Button>
-              {view && (
-                <Button size="sm" variant="secondary" onPress={() => saveView(view.id)}>
-                  このビューを上書き保存
-                </Button>
-              )}
-            </>
+          <Input
+            aria-label="ビュー名"
+            placeholder="ビュー名"
+            value={viewName}
+            onChange={(e) => setViewName(e.target.value)}
+          />
+          <Button size="sm" variant="secondary" onPress={() => saveView()}>
+            ビューとして保存
+          </Button>
+          {view && (
+            <Button size="sm" variant="secondary" onPress={() => saveView(view.id)}>
+              このビューを上書き保存
+            </Button>
           )}
         </div>
       </div>
@@ -238,9 +234,7 @@ export function PivotEditor(props: { initial: Spec; view?: { id: string; name: s
           names={names}
           display={spec.display}
           editable={(m) =>
-            !isPlaceholderData &&
-            can(Role.CONTRIBUTOR) &&
-            editable(defs.get(m), grid, filters, spec.aggregation)
+            !isPlaceholderData && editable(defs.get(m), grid, filters, spec.aggregation)
           }
           onWrite={(r, c, t) => write(grid, r, c, t)}
           onSelect={(r, c) => {

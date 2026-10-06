@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -86,7 +85,7 @@ var engineAggs = map[nanashiv1.Aggregation]string{
 
 // queryReads makes the engine reads for a QueryRequest. It leaves out a Metric that the model does not have
 // (a deleted Metric of a saved view) and a Metric that the filters make empty.
-func queryReads(req *nanashiv1.QueryRequest, em engineModel, l limits) ([]engineRead, error) {
+func queryReads(req *nanashiv1.QueryRequest, em engineModel) ([]engineRead, error) {
 	agg, ok := engineAggs[req.Aggregation]
 	if !ok {
 		return nil, fmt.Errorf("集計 %d がない", req.Aggregation)
@@ -96,30 +95,24 @@ func queryReads(req *nanashiv1.QueryRequest, em engineModel, l limits) ([]engine
 next:
 	for _, id := range req.Metrics {
 		m, ok := em.metric(id)
-		if !ok || l.hides(m) {
+		if !ok {
 			continue
 		}
 		q := map[string][]string{}
 		for _, d := range m.Dims {
 			members := req.Filters[d].GetIds()
-			lim, limited := l[d]
-			if limited && len(members) == 0 {
-				members = slices.Sorted(maps.Keys(lim.read))
-			}
-			if limited || len(members) > 0 {
+			if len(members) > 0 {
 				// A saved filter can name a member that was removed later. The engine refuses such an id.
 				dim, _ := em.dim(d)
 				exists := map[string]bool{}
 				for _, x := range dim.Members {
 					exists[x.ID] = true
 				}
-				members = slices.DeleteFunc(slices.Clone(members), func(x string) bool { return !exists[x] || limited && !lim.read[x] })
+				members = slices.DeleteFunc(slices.Clone(members), func(x string) bool { return !exists[x] })
 				if len(members) == 0 {
 					continue next
 				}
 				// All members is the same as no filter, and a big transaction list does not fit in the URL.
-				// ponytail: a limit that hides some members still sends all readable ids in the URL. Past about
-				// 64 KiB the engine refuses the request (414). Upgrade: let the engine take the filter in a POST body.
 				if len(members) == len(dim.Members) {
 					members = nil
 				}
@@ -142,9 +135,7 @@ next:
 
 // queryCells changes an engine cube into QueryCells with coordinates in the order of dims.
 // A slice of a non-number Metric can have dimensions that are not shown. Then the first cell wins.
-// It leaves out a cell of a member Metric whose value is a member that l hides.
-func queryCells(m engineMetric, dims []string, cube engineCube, l limits) []*nanashiv1.QueryCell {
-	target, _ := strings.CutPrefix(m.Kind, "member:")
+func queryCells(m engineMetric, dims []string, cube engineCube) []*nanashiv1.QueryCell {
 	index := make([]int, len(dims))
 	for i, d := range dims {
 		index[i] = slices.Index(cube.Dims, d)
@@ -153,7 +144,7 @@ func queryCells(m engineMetric, dims []string, cube engineCube, l limits) []*nan
 	var out []*nanashiv1.QueryCell
 	for _, c := range cube.Cells {
 		v := toValue(c[len(c)-1])
-		if v == nil || v.GetMember() != "" && !l.visible(target, v.GetMember()) {
+		if v == nil {
 			continue
 		}
 		coords := make([]string, len(dims))
@@ -173,7 +164,7 @@ func queryCells(m engineMetric, dims []string, cube engineCube, l limits) []*nan
 }
 
 // writeOps sets a cell if the coordinates give all dimensions of the Metric. Otherwise it spreads the value.
-func writeOps(writes []*nanashiv1.CellWrite, em engineModel, l limits) ([]op, error) {
+func writeOps(writes []*nanashiv1.CellWrite, em engineModel) ([]op, error) {
 	var ops []op
 	for _, w := range writes {
 		m, ok := em.metric(w.Metric)
@@ -186,9 +177,6 @@ func writeOps(writes []*nanashiv1.CellWrite, em engineModel, l limits) ([]op, er
 				return nil, fmt.Errorf("%s: 軸 %s がない", m.Name, em.name(d))
 			}
 			coords[d] = member
-		}
-		if err := l.checkWrite(m.Name, m.Dims, w.Coords, em); err != nil {
-			return nil, err
 		}
 		if len(w.Coords) == len(m.Dims) {
 			ops = append(ops, newOp("set_cell", map[string]any{"metric": m.ID, "value": valueOf(w.Value), "coords": coords}))
@@ -222,33 +210,6 @@ func checkCommentCell(metric string, cell map[string]string, em engineModel) err
 	return nil
 }
 
-// visibleComments removes the comments that a query does not show to a reader with the limits l. It removes a
-// comment on a Metric that l hides, on a cell without a member of a limited list, or on a member that l hides.
-// For a reader with rules, a Metric or a cell that the model does not have is hidden too (fail-closed).
-func visibleComments(comments []*nanashiv1.Comment, l limits, em engineModel) []*nanashiv1.Comment {
-	return slices.DeleteFunc(comments, func(c *nanashiv1.Comment) bool {
-		m, ok := em.metric(c.Metric)
-		if !ok || l.hides(m) {
-			return true
-		}
-		for list := range l {
-			if _, set := c.Cell[list]; !set && slices.Contains(m.Dims, list) {
-				return true
-			}
-		}
-		for list, member := range c.Cell {
-			d, ok := em.dim(list)
-			if !ok {
-				return true
-			}
-			if _, ok := d.member(member); !ok || !l.visible(list, member) {
-				return true
-			}
-		}
-		return false
-	})
-}
-
 // The actions follow.
 
 func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.QueryRequest]) (*connect.Response[nanashiv1.QueryResponse], error) {
@@ -257,8 +218,7 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 	if err != nil {
 		return nil, err
 	}
-	l := callerOf(ctx).limitsIn(em)
-	reads, err := queryReads(req.Msg, em, l)
+	reads, err := queryReads(req.Msg, em)
 	if err != nil {
 		return nil, invalid(err)
 	}
@@ -270,7 +230,7 @@ func (s *PlanServer) Query(ctx context.Context, req *connect.Request[nanashiv1.Q
 			return nil, err
 		}
 		m, _ := em.metric(r.Metric) // queryReads found it.
-		out.Cells = append(out.Cells, queryCells(m, dims, cube, l)...)
+		out.Cells = append(out.Cells, queryCells(m, dims, cube)...)
 	}
 	return connect.NewResponse(out), nil
 }
@@ -283,7 +243,7 @@ func (s *PlanServer) WriteCells(ctx context.Context, req *connect.Request[nanash
 	if err != nil {
 		return nil, err
 	}
-	ops, err := writeOps(req.Msg.Writes, em, c.limitsIn(em))
+	ops, err := writeOps(req.Msg.Writes, em)
 	if err != nil {
 		return nil, connectError(err)
 	}
@@ -309,13 +269,6 @@ func (s *PlanServer) ListComments(ctx context.Context, req *connect.Request[nana
 	})
 	if err != nil {
 		return nil, dbError(err)
-	}
-	if c := callerOf(ctx); len(c.rules) > 0 {
-		em, _, err := s.Engines.model(ctx, req.Msg.AppId)
-		if err != nil {
-			return nil, err
-		}
-		comments = visibleComments(comments, c.limitsIn(em), em)
 	}
 	return connect.NewResponse(&nanashiv1.ListCommentsResponse{Comments: comments}), nil
 }

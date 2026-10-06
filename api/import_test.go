@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -138,11 +137,11 @@ func TestImportMetric(t *testing.T) {
 	em := model(t)
 	imp := &nanashiv1.MetricImport{Metric: budget, DimensionColumns: map[string]string{product: "p", region: "r"}, ValueColumn: "v"}
 	csv := "p,r,v\nA,East,3\nC,East,4\n"
-	if _, _, err := importMetricOps(csv, imp, em, limits{}); err == nil || !strings.Contains(err.Error(), "3 行目") {
+	if _, _, err := importMetricOps(csv, imp, em); err == nil || !strings.Contains(err.Error(), "3 行目") {
 		t.Errorf("unknown member: got %v", err)
 	}
 	imp.AddMembers = true
-	ops, rows, err := importMetricOps(csv, imp, em, limits{})
+	ops, rows, err := importMetricOps(csv, imp, em)
 	if err != nil || rows != 2 {
 		t.Fatal(rows, err)
 	}
@@ -151,8 +150,5 @@ func TestImportMetric(t *testing.T) {
 		`{"coords":{%q:%q,%q:%q},"metric":%q,"op":"set_cell","value":4}]`, product, c, product, memberA, region, east, budget, product, c, region, east, budget)
 	if got := opsJSON(t, ops); got != want {
 		t.Errorf("got %s\nwant %s", got, want)
-	}
-	if _, _, err := importMetricOps("p,r,v\nA,West,1\n", imp, em, eastOnly()); !errors.Is(err, errDenied) {
-		t.Errorf("a row outside the access rule: got %v, want a permission error", err)
 	}
 }

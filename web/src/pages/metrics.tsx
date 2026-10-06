@@ -1,7 +1,7 @@
 import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
 import { api, newId } from "../api";
-import { ItemType, type MetricDef, Role, ValueKind } from "../gen/nanashi/v1/plan_pb";
+import { ItemType, type MetricDef, ValueKind } from "../gen/nanashi/v1/plan_pb";
 import { defaultSpec, dropsInputCells, toFilters } from "../logic";
 import { PivotEditor } from "../Pivot";
 import { cls, createOrUpdate, listOptions, metricOptions, useApp, useMutate } from "../state";
@@ -181,20 +181,18 @@ function MetricEditor(props: { def?: MetricDef; onSaved: (id: string) => void })
 }
 
 export function MetricsPage() {
-  const { model, can } = useApp();
+  const { model } = useApp();
   // "" shows the form for a new Metric.
   const [sel, setSel] = useState(model.metrics[0]?.id ?? "");
   const def = model.metrics.find((m) => m.id === sel);
   return (
     <div className="flex gap-4">
       <ul className="flex w-48 shrink-0 flex-col gap-1 text-sm">
-        {can(Role.MODELER) && (
-          <li>
-            <Button size="sm" variant="secondary" onPress={() => setSel("")}>
-              新しいメトリック
-            </Button>
-          </li>
-        )}
+        <li>
+          <Button size="sm" variant="secondary" onPress={() => setSel("")}>
+            新しいメトリック
+          </Button>
+        </li>
         {/* The Metrics grouped by folder. The Metrics without a folder come first. */}
         {[...new Set(model.metrics.map((m) => m.folder))].sort().map((folder) => (
           <li key={folder}>
@@ -224,9 +222,7 @@ export function MetricsPage() {
         ))}
       </ul>
       <div className="flex min-w-0 flex-1 flex-col gap-4">
-        {can(Role.MODELER) && (
-          <MetricEditor key={JSON.stringify(def ?? sel)} def={def} onSaved={setSel} />
-        )}
+        <MetricEditor key={JSON.stringify(def ?? sel)} def={def} onSaved={setSel} />
         {def && (
           <PivotEditor
             key={`${def.id}:${def.dimensions.join()}`}
@@ -239,7 +235,7 @@ export function MetricsPage() {
 }
 
 export function TablesPage() {
-  const { appId, model, can } = useApp();
+  const { appId, model } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.tables[0]?.id ?? "");
   const [draftId, setDraftId] = useState(newId);
@@ -265,54 +261,52 @@ export function TablesPage() {
         empty="（新しいテーブル）"
         options={model.tables.map((x): [string, string] => [x.id, x.name])}
       />
-      {can(Role.MODELER) && (
-        <div className="flex flex-col gap-2 rounded border p-2">
-          <Input
-            aria-label="テーブル名"
-            placeholder="テーブル名"
-            value={f.name}
-            onChange={(e) => setF({ ...f, name: e.target.value })}
-          />
-          <Checks
-            label="メトリック"
-            options={metricOptions(model)}
-            value={f.metrics}
-            onChange={(metrics) => setF({ ...f, metrics })}
-          />
-          <div className="flex gap-2">
+      <div className="flex flex-col gap-2 rounded border p-2">
+        <Input
+          aria-label="テーブル名"
+          placeholder="テーブル名"
+          value={f.name}
+          onChange={(e) => setF({ ...f, name: e.target.value })}
+        />
+        <Checks
+          label="メトリック"
+          options={metricOptions(model)}
+          value={f.metrics}
+          onChange={(metrics) => setF({ ...f, metrics })}
+        />
+        <div className="flex gap-2">
+          <Button
+            onPress={() =>
+              mutate(async (clientOpId) => {
+                const req = { appId, clientOpId, table: { id: t ? t.id : draftId, ...f } };
+                if (t) return api.updateTable(req);
+                await createOrUpdate(
+                  req,
+                  (r) => api.createTable(r),
+                  (r) => api.updateTable(r),
+                );
+                setSel(draftId);
+                setDraftId(newId());
+              })
+            }
+          >
+            保存
+          </Button>
+          {t && (
             <Button
+              variant="danger"
               onPress={() =>
                 mutate(async (clientOpId) => {
-                  const req = { appId, clientOpId, table: { id: t ? t.id : draftId, ...f } };
-                  if (t) return api.updateTable(req);
-                  await createOrUpdate(
-                    req,
-                    (r) => api.createTable(r),
-                    (r) => api.updateTable(r),
-                  );
-                  setSel(draftId);
-                  setDraftId(newId());
+                  await api.deleteItem({ appId, clientOpId, type: ItemType.TABLE, id: t.id });
+                  open("");
                 })
               }
             >
-              保存
+              削除
             </Button>
-            {t && (
-              <Button
-                variant="danger"
-                onPress={() =>
-                  mutate(async (clientOpId) => {
-                    await api.deleteItem({ appId, clientOpId, type: ItemType.TABLE, id: t.id });
-                    open("");
-                  })
-                }
-              >
-                削除
-              </Button>
-            )}
-          </div>
+          )}
         </div>
-      )}
+      </div>
       {t && t.metrics.length > 0 && (
         <PivotEditor key={t.id + t.metrics.join()} initial={defaultSpec(t.metrics, dims)} />
       )}
@@ -321,7 +315,7 @@ export function TablesPage() {
 }
 
 export function ViewsPage() {
-  const { appId, model, can } = useApp();
+  const { appId, model } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.views[0]?.id ?? "");
   const v = model.views.find((x) => x.id === sel);
@@ -335,7 +329,7 @@ export function ViewsPage() {
           empty=""
           options={model.views.map((x): [string, string] => [x.id, x.name])}
         />
-        {v && can(Role.MODELER) && (
+        {v && (
           <Button
             variant="danger"
             size="sm"

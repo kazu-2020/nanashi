@@ -39,9 +39,9 @@ func TestTrustedOnly(t *testing.T) {
 	nets, _ := ParseNetworks([]string{"10.0.1.5"})
 	h := TrustedOnly(nets, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	for addr, want := range map[string]int{"10.0.1.5:4000": http.StatusOK, "10.0.1.6:4000": http.StatusUnauthorized} {
-		r := httptest.NewRequest(http.MethodPost, "/nanashi.v1.PlanService/GetAccess", nil)
+		r := httptest.NewRequest(http.MethodPost, "/nanashi.v1.PlanService/GetModel", nil)
 		r.RemoteAddr = addr
-		r.Header.Set("X-Nanashi-User", "admin")
+		r.Header.Set("X-Nanashi-User", "alice")
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		if w.Code != want {

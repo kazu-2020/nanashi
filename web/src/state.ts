@@ -2,7 +2,7 @@ import { Code, ConnectError } from "@connectrpc/connect";
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useRef } from "react";
 import { errorText, newId } from "./api";
-import type { ModelDef, Role } from "./gen/nanashi/v1/plan_pb";
+import type { ModelDef } from "./gen/nanashi/v1/plan_pb";
 import { followOpId, METRIC, type Names } from "./logic";
 
 export const Report = createContext<(e: unknown) => void>(() => {});
@@ -11,7 +11,6 @@ export type AppState = {
   appId: string;
   model: ModelDef;
   names: Names;
-  can: (r: Role) => boolean;
 };
 export const AppCtx = createContext<AppState | null>(null);
 export const useApp = () => useContext(AppCtx)!;
