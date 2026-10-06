@@ -21,16 +21,23 @@
       }
     ]
   },
+  "enabledPlugins": {
+    "pstack@pstack-claude": true,
+    "ponytail@ponytail": true
+  },
   "extraKnownMarketplaces": {
     "pstack-claude": {
       "source": {
         "source": "github",
         "repo": "michael-denyer/pstack-claude"
       }
+    },
+    "ponytail": {
+      "source": {
+        "source": "github",
+        "repo": "dietrichgebert/ponytail"
+      }
     }
   },
-  "language": "japanese",
-  "enabledPlugins": {
-    "pstack@pstack-claude": true
-  }
+  "language": "japanese"
 }
