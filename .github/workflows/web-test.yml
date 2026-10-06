@@ -12,6 +12,7 @@ on:
       - api/go.mod  # The versions of the Go plugins
       - api/go.sum
       - buf.yaml
+      - buf.lock
       - buf.gen.yaml
       - mise.toml
       - .github/workflows/web-test.yml
