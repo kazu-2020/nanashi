@@ -1,5 +1,4 @@
 {
-  "language": "japanese",
   "permissions": {
     "deny": [
       "Read(./api/gen/**/*)",
@@ -21,5 +20,17 @@
         ]
       }
     ]
+  },
+  "extraKnownMarketplaces": {
+    "pstack-claude": {
+      "source": {
+        "source": "github",
+        "repo": "michael-denyer/pstack-claude"
+      }
+    }
+  },
+  "language": "japanese",
+  "enabledPlugins": {
+    "pstack@pstack-claude": true
   }
 }
