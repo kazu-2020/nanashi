@@ -1,11 +1,12 @@
 name: tessera-test
 
-# Start only when tessera/ or this file changes.
+# Start only when tessera/, mise.toml or this file changes.
 on:
   push:
     branches: [main]  # ほかのブランチは pull_request で回す（push と二重に回さない）
     paths: &paths
       - tessera/**
+      - mise.toml
       - .github/workflows/tessera-test.yml
   pull_request:
     paths: *paths
@@ -46,6 +47,10 @@ jobs:
       NANASHI_S3_ENDPOINT: http://127.0.0.1:59000
     steps:
       - uses: actions/checkout@v7
+      # Use Rust from mise.toml. Run setup-python after mise, so that the matrix Python comes first in PATH.
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: rust
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -54,9 +59,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: tessera/wheelhouse
-          key: nanashi-core-${{ runner.os }}-py${{ matrix.python }}-${{ hashFiles('tessera/native/Cargo.toml', 'tessera/native/Cargo.lock', 'tessera/native/pyproject.toml', 'tessera/native/src/**', 'tessera/native/engine/Cargo.toml', 'tessera/native/engine/src/**') }}
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.wheel.outputs.cache-hit != 'true'
+          key: nanashi-core-${{ runner.os }}-py${{ matrix.python }}-${{ hashFiles('mise.toml', 'tessera/native/Cargo.toml', 'tessera/native/Cargo.lock', 'tessera/native/pyproject.toml', 'tessera/native/src/**', 'tessera/native/engine/Cargo.toml', 'tessera/native/engine/src/**') }}
       - uses: Swatinem/rust-cache@v2
         if: steps.wheel.outputs.cache-hit != 'true'
         with:
@@ -86,12 +89,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7  # pyo3（nanashi_core）のビルドに使う
+      - uses: jdx/mise-action@v5  # Use the versions in mise.toml. pyo3 (nanashi_core) uses Python for the build
         with:
-          python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+          install_args: rust python
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tessera/native
