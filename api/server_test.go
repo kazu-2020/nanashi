@@ -182,6 +182,11 @@ func TestCheckRequest(t *testing.T) {
 		&nanashiv1.WriteCellsRequest{Writes: []*nanashiv1.CellWrite{{Metric: budget, Coords: map[string]string{product: up(memberA)}}}},
 		&nanashiv1.EditMembersRequest{AppId: product, List: sales, Edits: []*nanashiv1.MemberEdit{
 			{Edit: &nanashiv1.MemberEdit_Add{Add: &nanashiv1.AddMember{Id: sale1, Name: "x", Properties: map[string]string{up(salesProduct): "text"}}}}}},
+		// An empty id is refused in a list, a map key, a map value and a set oneof.
+		&nanashiv1.QueryRequest{AppId: product, Metrics: []string{""}},
+		&nanashiv1.QueryRequest{AppId: product, Filters: map[string]*nanashiv1.Members{"": {Ids: []string{east}}}},
+		&nanashiv1.WriteCellsRequest{Writes: []*nanashiv1.CellWrite{{Metric: budget, Coords: map[string]string{product: ""}}}},
+		&nanashiv1.Widget{Content: &nanashiv1.Widget_ViewId{}},
 	}
 	for i, m := range bad {
 		if err := checkRequest(m); connect.CodeOf(err) != connect.CodeInvalidArgument {
