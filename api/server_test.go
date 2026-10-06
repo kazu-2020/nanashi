@@ -108,17 +108,6 @@ func TestConnectError(t *testing.T) {
 	}
 }
 
-// TestRPCAuditCoversAllMethods makes sure that the interceptor does not refuse an RPC of PlanService.
-func TestRPCAuditCoversAllMethods(t *testing.T) {
-	methods := nanashiv1.File_nanashi_v1_plan_proto.Services().ByName("PlanService").Methods()
-	for i := range methods.Len() {
-		name := string(methods.Get(i).Name())
-		if _, ok := rpcAudit[name]; !ok {
-			t.Errorf("rpcAudit has no entry for %s", name)
-		}
-	}
-}
-
 func TestDBErrorGivesAlreadyExistsByConstraint(t *testing.T) {
 	err := dbError(fmt.Errorf("insert: %w", &pgconn.PgError{Code: "23505", ConstraintName: "app_property_name"}))
 	if connect.CodeOf(err) != connect.CodeAlreadyExists || !strings.Contains(err.Error(), "名前") {
@@ -242,7 +231,6 @@ func (e *fakeEngine) opIDs() []string {
 	return out
 }
 
-// testApp makes an application whose creation is done.
 func testApp(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
 	t.Helper()
 	app := uuid.Must(uuid.NewV7()).String()
@@ -609,13 +597,11 @@ func TestAuditOnceForEachOperation(t *testing.T) {
 	}
 }
 
-// TestInterceptorAndListApplications needs PostgreSQL, but no engine: the interceptor refuses the bad calls before the engine.
 func TestInterceptorAndListApplications(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool := testPool(t, ctx)
 	app := testApp(t, ctx, pool)
-	// An application whose creation is pending is not shown.
 	hidden := uuid.Must(uuid.NewV7()).String()
 	for _, sql := range []string{
 		"insert into app_application (id, name) values ($1, 'pending')",
@@ -643,6 +629,9 @@ func TestInterceptorAndListApplications(t *testing.T) {
 	}
 	if !seen[app] || seen[hidden] {
 		t.Errorf("got %v, want the done application and not the pending one", seen)
+	}
+	if _, err := client("alice").GetModel(ctx, connect.NewRequest(&nanashiv1.GetModelRequest{AppId: hidden})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("pending application: got %v, want NotFound", err)
 	}
 	for _, id := range []string{"not-an-id", ""} {
 		if _, err := client("alice").GetModel(ctx, connect.NewRequest(&nanashiv1.GetModelRequest{AppId: id})); connect.CodeOf(err) != connect.CodeInvalidArgument {

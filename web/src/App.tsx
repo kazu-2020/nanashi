@@ -29,7 +29,6 @@ const SnapshotsPage = lazy(() =>
   import("./pages/admin").then((m) => ({ default: m.SnapshotsPage })),
 );
 
-// PAGES gives the navigation.
 const PAGES: { id: string; label: string; page: ComponentType }[] = [
   { id: "lists", label: "リスト", page: ListsPage },
   { id: "metrics", label: "メトリック", page: MetricsPage },

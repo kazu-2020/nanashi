@@ -40,25 +40,7 @@ var _ nanashiv1connect.PlanServiceHandler = (*PlanServer)(nil)
 
 type ack = connect.Response[nanashiv1.Ack]
 
-// rpcAudit gives the RPCs. If the value is true, the interceptor records a successful call in the audit trail.
-// An RPC that is not in the table is refused.
-var rpcAudit = map[string]bool{
-	"ListApplications": false, "CreateApplication": false,
-	"GetModel": false, "Query": false, "ListComments": false, "AddComment": true,
-	"ListSnapshots": false, "ListAudit": false,
-	// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
-	// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
-	"WriteCells": true, "Import": false, "CreateSnapshot": false,
-	"CreateList": false, "RenameList": false, "AddProperty": false,
-	"RenameProperty": false, "EditMembers": false,
-	"CreateCalendar": false, "CreateScenario": false, "CreateMetric": false,
-	"UpdateMetric": false, "RenameMetric": false, "DeleteMetric": false,
-	"CreateTable": false, "UpdateTable": false, "CreateView": false,
-	"UpdateView": false, "CreateBoard": false, "UpdateBoard": false,
-	"DeleteItem": false,
-}
-
-// caller is the user of a request.
+// caller is the user and the RPC of a request.
 type caller struct {
 	user   string
 	method string // The RPC name, for example "CreateList".
@@ -348,7 +330,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return err
 }
 
-// Interceptor identifies the user, checks the ids and records the audit trail.
+// Interceptor identifies the user, checks the ids and the application, and records the audit trail.
 func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
@@ -358,10 +340,6 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("X-Nanashi-User がない"))
 			}
 			method := path.Base(req.Spec().Procedure)
-			audit, ok := rpcAudit[method]
-			if !ok {
-				return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("%s は使えない", method))
-			}
 			msg := req.Any().(proto.Message)
 			if err := checkIDs(msg.ProtoReflect()); err != nil {
 				return nil, err
@@ -372,6 +350,13 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 				if appID = a.GetAppId(); appID == "" {
 					return nil, invalid(errors.New("app_id が要る"))
 				}
+				var done bool
+				if err := s.Pool.QueryRow(ctx, "select exists (select 1 from app_application a where a.id = $1 and "+doneApps+")", appID).Scan(&done); err != nil {
+					return nil, dbError(err)
+				}
+				if !done {
+					return nil, connect.NewError(connect.CodeNotFound, errors.New("アプリケーションがない"))
+				}
 			}
 			// Each request that changes data has a client_op_id. checkIDs checked its form.
 			if r, ok := req.Any().(interface{ GetClientOpId() string }); ok {
@@ -380,7 +365,9 @@ func (s *PlanServer) Interceptor() connect.UnaryInterceptorFunc {
 				}
 			}
 			res, err := next(context.WithValue(ctx, callerKey{}, c), req)
-			if err == nil && audit {
+			// WriteCells has no app_operation row, so the interceptor audits it. The other changes audit themselves, one
+			// time for each client_op_id: outbox when the row flips to done, apiOnly in its transaction.
+			if err == nil && method == "WriteCells" {
 				if _, err := s.Pool.Exec(ctx, "insert into app_audit (app_id, user_name, action, detail) values ($1, $2, $3, $4)",
 					appID, user, method, detailOf(msg)); err != nil {
 					log.Printf("audit %s %s: %v", appID, method, err)

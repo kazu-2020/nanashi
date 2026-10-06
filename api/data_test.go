@@ -121,6 +121,9 @@ func TestComments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if n := count(t, ctx, pool, "select count(*) from app_audit where app_id = $1 and action = 'AddComment'", app); n != 4 {
+		t.Errorf("audit rows of 4 comments: %d, want 4", n)
+	}
 	// A comment on a total over Region, from a time before AddComment checked the cell.
 	if _, err := pool.Exec(ctx, "insert into app_comment (app_id, id, metric, cell, user_name, body) values ($1, $2, $3, $4, 'alice', 'total')",
 		app, uuid.Must(uuid.NewV7()).String(), budget, textJSON(map[string]string{product: memberA})); err != nil {

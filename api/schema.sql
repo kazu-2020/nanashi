@@ -8,7 +8,7 @@ do $$ begin
   end if;
 end $$;
 drop function if exists app_rename(jsonb, text, text);
--- ponytail: the access rights tables are removed (issue #50). Delete this line when no database has them.
+-- ponytail: issue #50 removes the access rights tables. Delete this line when no database has them.
 drop table if exists app_member, app_access_rule;
 
 create table if not exists app_application (
