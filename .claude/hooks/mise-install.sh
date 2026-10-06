@@ -7,7 +7,7 @@ cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 0
 # If the script fails, get mise from the npm registry.
 export PATH="$HOME/.local/bin:$PATH"
 command -v mise >/dev/null || (curl -fsSL https://mise.jdx.dev/install.sh | MISE_QUIET=1 sh) >/dev/null 2>&1
-command -v mise >/dev/null || npm install -g @jdxcode/mise >/dev/null 2>&1
+command -v mise >/dev/null || npm install -g @jdxcode/mise@2026.10.3 >/dev/null 2>&1  # Pin the version
 command -v mise >/dev/null || exit 0
 mise trust --yes mise.toml >/dev/null 2>&1
 
@@ -17,7 +17,19 @@ if ! mise install go >/dev/null 2>&1; then
   dir="$HOME/.cache/go-toolchain/$v"
   if [ ! -x "$dir/bin/go" ]; then
     tmp=$(mktemp -d)
+    mod="golang.org/toolchain@v0.0.1-go$v.linux-amd64"
+    # Compare the dirhash ("h1:") of the zip with the value in the Go checksum database.
+    # Use the zip only if the two values are the same.
     curl -fsSL -o "$tmp/go.zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$v.linux-amd64.zip" &&
+      want=$(curl -fsSL "https://sum.golang.org/lookup/$mod" | awk -v m="${mod%@*}" -v ver="${mod#*@}" '$1 == m && $2 == ver { print $3 }') &&
+      got=$(python3 -I -c '
+import base64, hashlib, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+names = sorted(n for n in z.namelist() if not n.endswith("/"))
+lines = "".join("%s  %s\n" % (hashlib.sha256(z.read(n)).hexdigest(), n) for n in names)
+print("h1:" + base64.b64encode(hashlib.sha256(lines.encode()).digest()).decode())
+' "$tmp/go.zip") &&
+      [ -n "$want" ] && [ "$want" = "$got" ] &&
       unzip -q "$tmp/go.zip" -d "$tmp" &&
       mkdir -p "$(dirname "$dir")" &&
       mv "$tmp/golang.org/toolchain@v0.0.1-go$v.linux-amd64" "$dir"
