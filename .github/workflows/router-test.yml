@@ -37,6 +37,14 @@ jobs:
       - uses: jdx/mise-action@v5  # Use the versions in mise.toml
         with:
           install_args: go python
+      - name: Cache the Go modules and the build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ github.workflow }}-${{ runner.os }}-${{ hashFiles('mise.toml', 'router/go.sum') }}
+          restore-keys: go-${{ github.workflow }}-${{ runner.os }}-
       # The PgResolver tests read the nanashi_model table. The engine schema makes it.
       - name: Make the engine schema
         working-directory: tessera

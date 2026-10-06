@@ -37,6 +37,23 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           install_args: node pnpm go
+      - name: Cache the Go modules and the build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ github.workflow }}-${{ runner.os }}-${{ hashFiles('mise.toml', 'api/go.sum') }}
+          restore-keys: go-${{ github.workflow }}-${{ runner.os }}-
+      - name: Find the pnpm store
+        id: pnpm
+        run: echo "store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - name: Cache the pnpm store
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('mise.toml', 'web/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
       - run: pnpm install --frozen-lockfile
       - name: Make sure that the generated code is up to date
         run: |
