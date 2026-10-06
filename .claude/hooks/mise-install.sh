@@ -26,4 +26,7 @@ path=$(rustup which rust-analyzer 2>/dev/null) && ln -sf "$path" /usr/local/bin/
 
 # typescript-language-server uses the TypeScript in web/node_modules.
 (cd web && pnpm install --frozen-lockfile) >&2 || true
+# The server looks for TypeScript only in node_modules of the workspace root.
+# Claude Code uses the repository root, so link the TypeScript of web/ there.
+mkdir -p node_modules && ln -sfn ../web/node_modules/typescript node_modules/typescript
 exit 0
