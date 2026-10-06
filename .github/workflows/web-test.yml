@@ -36,7 +36,7 @@ jobs:
       # Use the versions in mise.toml. buf generate runs the Go plugins with "go tool".
       - uses: jdx/mise-action@v5
         with:
-          install_args: node pnpm go
+          install_args: node npm:pnpm go
       - name: Cache the Go modules and the build cache
         uses: actions/cache@v6
         with:

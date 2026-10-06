@@ -8,3 +8,5 @@ peerDependencyRules:
     - vite
   allowedVersions:
     vite: "*"
+allowBuilds:
+  "@bufbuild/buf": false # pnpm 10 also skipped this script. buf runs from its platform package.
