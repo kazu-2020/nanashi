@@ -23,7 +23,7 @@ uuid() { uuidgen 2>/dev/null | tr 'A-F' 'a-f' || cat /proc/sys/kernel/random/uui
 call() { # user method body: a request that changes data gets a new clientOpId
   local body=$3
   case $2 in
-    Create* | Update* | Add* | Edit* | Rename* | Delete* | Write* | Import | Set*) body=$(jq -c --arg op "$(uuid)" '. + {clientOpId: $op}' <<<"$3") ;;
+    Create* | Update* | Add* | Edit* | Rename* | Delete* | Write* | Import) body=$(jq -c --arg op "$(uuid)" '. + {clientOpId: $op}' <<<"$3") ;;
   esac
   curl -sS -X POST "$API/$2" -H 'Content-Type: application/json' -H "X-Nanashi-User: $1" -d "$body"
 }
@@ -55,7 +55,7 @@ members() { jq -c --arg l "$2" '.lists[] | select(.name == $l) | .members | map(
 for _ in $(seq 100); do call alice ListApplications '{}' >/dev/null 2>&1 && break; sleep 0.1; done
 
 APP=$(ok alice CreateApplication "{\"id\": \"$(uuid)\", \"name\": \"E2E\"}" | jq -r .id)
-check "create application" '.role == "ROLE_ADMIN"' "$(ok alice ListApplications '{}' | jq ".applications[] | select(.id == \"$APP\")")"
+check "create application" ".id == \"$APP\"" "$(ok alice ListApplications '{}' | jq ".applications[] | select(.id == \"$APP\")")"
 check "a second create of the id is refused" '.code == "already_exists"' "$(call alice CreateApplication "{\"id\": \"$APP\", \"name\": \"Again\"}")"
 check "an id that is not a UUID is refused" '.code == "invalid_argument"' "$(call alice GetModel '{"appId": "plan"}')"
 
@@ -215,25 +215,15 @@ ok alice CreateView "{\"appId\": \"$APP2\", \"view\": {\"id\": \"$VIEW2\", \"nam
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"rename\": {\"id\": \"$C\", \"name\": \" D \"}}]}" >/dev/null
 check "a member rename keeps the comment cell" ".comments[0].cell[\"$PRODUCT\"] == \"$C\"" "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
 check "a member rename gives the trimmed name" ".lists[] | select(.name == \"Product\") | .members[] | select(.id == \"$C\") | .name == \"D\"" "$(model "$APP2")"
-ok alice SetMemberRole "{\"appId\": \"$APP2\", \"member\": {\"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}}" >/dev/null
-RULE=$(uuid)
-ok alice CreateAccessRule "{\"appId\": \"$APP2\", \"rule\": {\"id\": \"$RULE\", \"role\": \"ROLE_VIEWER\", \"list\": \"$PRODUCT\", \"members\": [\"$A\", \"$C\"]}}" >/dev/null
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"rename\": {\"id\": \"$A\", \"name\": \"A1\"}}]}" >/dev/null
-check "a member rename keeps the access rule" ".rules[0].members == [\"$A\", \"$C\"]" "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
 check "a member rename keeps the TEXT value and the DIMENSION value" \
   ".lists[] | select(.name == \"Product\") | .members[] | select(.id == \"$A\") | .name == \"A1\" and .properties == {\"$PCAT\": \"$HARD\", \"$NOTE\": \"first\"}" "$(model "$APP2")"
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"rename\": {\"id\": \"$A\", \"name\": \"A\"}}]}" >/dev/null
 ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"remove\": {\"id\": \"$C\"}}]}" >/dev/null
-check "a removed member stays in the rule row and gives no access" ".rules[0].members == [\"$A\", \"$C\"]" "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
-check "a removed member keeps its comments for a MODELER" ".comments[0].cell[\"$PRODUCT\"] == \"$C\"" "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
+check "a removed member keeps its comments" ".comments[0].cell[\"$PRODUCT\"] == \"$C\"" "$(ok alice ListComments "{\"appId\": \"$APP2\", \"metric\": \"$BUDGET\"}")"
 check "a removed member stays in the view filter in GetModel" ".views[] | select(.name == \"C only\") | .filters[\"$PRODUCT\"].ids == [\"$C\"]" "$(model "$APP2")"
-D=$(uuid)
-ok alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"add\": {\"id\": \"$D\", \"name\": \"D\"}}]}" >/dev/null
-check "a member added again does not get the old access" ".lists[] | select(.name == \"Product\") | [.members[].id] == [\"$A\"]" "$(ok bob GetModel "{\"appId\": \"$APP2\"}")"
 check "a removed id cannot come back" '.code == "aborted" or .code == "already_exists"' \
   "$(call alice EditMembers "{\"appId\": \"$APP2\", \"list\": \"$PRODUCT\", \"edits\": [{\"add\": {\"id\": \"$C\", \"name\": \"C again\"}}]}")"
-ok alice DeleteAccessRule "{\"appId\": \"$APP2\", \"id\": \"$RULE\"}" >/dev/null
-check "delete removes the access rule" '(.rules // []) == []' "$(ok alice GetAccess "{\"appId\": \"$APP2\"}")"
 LOAD=$(uuid) LNOTE=$(uuid)
 ok alice CreateList "{\"appId\": \"$APP2\", \"id\": \"$LOAD\", \"name\": \"Load\", \"kind\": \"LIST_KIND_DIMENSION\"}" >/dev/null
 ok alice AddProperty "{\"appId\": \"$APP2\", \"list\": \"$LOAD\", \"property\": {\"id\": \"$LNOTE\", \"name\": \"Note\", \"type\": \"PROPERTY_TYPE_TEXT\"}}" >/dev/null
@@ -254,19 +244,8 @@ check "concurrent imports add all transaction rows" '[.lists[] | select(.name ==
 ok alice DeleteItem "{\"appId\": \"$APP2\", \"id\": \"$VIEW\", \"type\": \"ITEM_TYPE_VIEW\"}" >/dev/null
 check "a deleted view leaves the board widget in GetModel" '(.boards[0].widgets | length == 1) and (.boards[0].widgets[0].text == "Notes")' "$(model "$APP2")"
 
-ok alice SetMemberRole "{\"appId\": \"$APP\", \"member\": {\"user\": \"bob\", \"role\": \"ROLE_VIEWER\"}}" >/dev/null
-ok alice CreateAccessRule "{\"appId\": \"$APP\", \"rule\": {\"id\": \"$(uuid)\", \"role\": \"ROLE_VIEWER\", \"list\": \"$PRODUCT\", \"members\": [\"$A\"]}}" >/dev/null
-check "access" '(.members | length == 2) and (.rules | length == 1)' "$(ok alice GetAccess "{\"appId\": \"$APP\"}")"
-check "bob sees the app as VIEWER" ".applications | map(select(.id == \"$APP\")) | .[0].role == \"ROLE_VIEWER\"" "$(ok bob ListApplications '{}')"
-check "bob sees only Product A" ".lists[] | select(.name == \"Product\") | [.members[].id] == [\"$A\"]" "$(ok bob GetModel "{\"appId\": \"$APP\"}")"
-Q=$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"$REVENUE\", \"$BUDGET\"], \"rows\": [\"$PRODUCT\"]}")
-check "bob reads only Product A" "[.cells[].coords[0]] | unique == [\"$A\"]" "$Q"
-check "bob total is A only" "$(cell "$BUDGET" "[\"$A\"]").number == 2400" "$Q"
 TOTAL=$(uuid)
 ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$TOTAL\", \"name\": \"Total\", \"dimensions\": [\"$SCENARIO\", \"$MONTH\"], \"formula\": \"Budget[REMOVE SUM: Product]\"}}" >/dev/null
-check "bob cannot read a total over hidden products" '(.cells // []) == []' \
-  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"$TOTAL\"], \"aggregation\": \"AGGREGATION_SUM\"}")"
-check "bob does not see the total in the model" "[.metrics[].id] | index(\"$TOTAL\") == null" "$(ok bob GetModel "{\"appId\": \"$APP\"}")"
 check "alice reads the total" '.cells[0].value.number == 2414' "$(ok alice Query "{\"appId\": \"$APP\", \"metrics\": [\"$TOTAL\"], \"aggregation\": \"AGGREGATION_SUM\"}")"
 PICK=$(uuid)
 ok alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$PICK\", \"name\": \"Pick\", \"dimensions\": [\"$CATEGORY\"], \"kind\": \"VALUE_KIND_MEMBER\", \"memberList\": \"$PRODUCT\"}}" >/dev/null
@@ -275,25 +254,9 @@ check "a member Metric needs an existing list" '.code == "invalid_argument"' \
   "$(call alice CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$(uuid)\", \"name\": \"Pick2\", \"kind\": \"VALUE_KIND_MEMBER\", \"memberList\": \"$(uuid)\"}}")"
 ok alice WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$PICK\", \"coords\": {\"$CATEGORY\": \"$HARD\"}, \"value\": {\"member\": \"$B\"}},
   {\"metric\": \"$PICK\", \"coords\": {\"$CATEGORY\": \"$SOFT\"}, \"value\": {\"member\": \"$A\"}}]}" >/dev/null
-check "bob does not see a hidden member as a value" "[.cells[] | .value.member] == [\"$A\"]" \
-  "$(ok bob Query "{\"appId\": \"$APP\", \"metrics\": [\"$PICK\"], \"rows\": [\"$CATEGORY\"]}")"
-check "bob cannot write" '.code == "permission_denied"' \
-  "$(call bob WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$BUDGET\", \"coords\": {\"$PRODUCT\": \"$A\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"value\": {\"number\": 1}}]}")"
-check "bob cannot model" '.code == "permission_denied"' "$(call bob CreateMetric "{\"appId\": \"$APP\", \"metric\": {\"id\": \"$(uuid)\", \"name\": \"X\"}}")"
-ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$B\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"hidden\"}}" >/dev/null
-check "bob does not see a comment on a hidden cell" '[.comments[].body] == ["check this"]' \
-  "$(ok bob ListComments "{\"appId\": \"$APP\", \"metric\": \"$BUDGET\"}")"
-check "alice sees all comments" '[.comments[].body] == ["check this", "hidden"]' \
+ok alice AddComment "{\"appId\": \"$APP\", \"comment\": {\"id\": \"$(uuid)\", \"metric\": \"$BUDGET\", \"cell\": {\"$PRODUCT\": \"$B\", \"$SCENARIO\": \"$BASE\", \"$MONTH\": \"$JAN\"}, \"body\": \"second\"}}" >/dev/null
+check "alice sees all comments" '[.comments[].body] == ["check this", "second"]' \
   "$(ok alice ListComments "{\"appId\": \"$APP\", \"metric\": \"$BUDGET\"}")"
-check "bob cannot read the audit trail" '.code == "permission_denied"' "$(call bob ListAudit "{\"appId\": \"$APP\"}")"
-ok alice SetMemberRole "{\"appId\": \"$APP\", \"member\": {\"user\": \"carol\", \"role\": \"ROLE_CONTRIBUTOR\"}}" >/dev/null
-ok alice CreateAccessRule "{\"appId\": \"$APP\", \"rule\": {\"id\": \"$(uuid)\", \"role\": \"ROLE_CONTRIBUTOR\", \"list\": \"$PRODUCT\", \"members\": [\"$A\"], \"write\": true}}" >/dev/null
-W='"metric": "'$BUDGET'", "coords": {"'$SCENARIO'": "'$BASE'", "'$MONTH'": "'$FEB'", "'$PRODUCT'": '
-ok carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{$W \"$A\"}, \"value\": {\"number\": 1}}]}" >/dev/null
-check "carol cannot write outside her rule" '.code == "permission_denied"' \
-  "$(call carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{$W \"$B\"}, \"value\": {\"number\": 1}}]}")"
-check "carol cannot spread over Product" '.code == "permission_denied"' \
-  "$(call carol WriteCells "{\"appId\": \"$APP\", \"writes\": [{\"metric\": \"$BUDGET\", \"coords\": {\"$SCENARIO\": \"$BASE\"}, \"value\": {\"number\": 1}}]}")"
 check "no user" '.code == "unauthenticated"' "$(curl -sS -X POST "$API/ListApplications" -H 'Content-Type: application/json' -d '{}')"
 
 # A resend with the same client_op_id gives the stored result, and another content with that id is refused.

@@ -340,7 +340,7 @@ func copyCellOps(metric, dim, to string, cube engineCube, override bool) []op {
 
 // modelDef builds the lists and Metrics of ModelDef. propCells has the cells of each NUMBER or BOOLEAN property
 // Metric, by Metric id. A property whose engine object is missing (a pending change) is left out.
-func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l limits) ([]*nanashiv1.ListDef, []*nanashiv1.MetricDef) {
+func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube) ([]*nanashiv1.ListDef, []*nanashiv1.MetricDef) {
 	hidden := map[string]bool{}
 	var lists []*nanashiv1.ListDef
 	for _, d := range em.Dims {
@@ -369,9 +369,7 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 				}
 				def.Target = ep.Target
 				for member, v := range ep.Values {
-					if l.visible(ep.Target, v) { // A property value can name a hidden member, for example on a list that refers to itself.
-						set(member, p.ID, v)
-					}
+					set(member, p.ID, v)
 				}
 			case nanashiv1.PropertyType_PROPERTY_TYPE_TEXT:
 				for member, v := range p.Text {
@@ -390,15 +388,13 @@ func modelDef(em engineModel, meta appMeta, propCells map[string]engineCube, l l
 			ld.Properties = append(ld.Properties, def)
 		}
 		for _, m := range d.Members {
-			if l.visible(d.ID, m.ID) {
-				ld.Members = append(ld.Members, &nanashiv1.Member{Id: m.ID, Name: m.Name, Properties: values[m.ID]})
-			}
+			ld.Members = append(ld.Members, &nanashiv1.Member{Id: m.ID, Name: m.Name, Properties: values[m.ID]})
 		}
 		lists = append(lists, ld)
 	}
 	var metrics []*nanashiv1.MetricDef
 	for _, m := range em.Metrics {
-		if !hidden[m.ID] && !l.hides(m) {
+		if !hidden[m.ID] {
 			kind, list := valueKind(m.Kind)
 			c := meta.Metrics[m.ID] // A Metric without a catalog row has empty values.
 			metrics = append(metrics, &nanashiv1.MetricDef{Id: m.ID, Name: m.Name, Dimensions: m.Dims, Kind: kind, MemberList: list, Formula: m.Formula, Overridable: m.Overridable,
@@ -516,7 +512,7 @@ func metaIn(ctx context.Context, q querier, app string) (appMeta, error) {
 }
 
 func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv1.GetModelRequest]) (*connect.Response[nanashiv1.ModelDef], error) {
-	app, c := req.Msg.AppId, callerOf(ctx)
+	app := req.Msg.AppId
 	em, _, err := s.Engines.model(ctx, app)
 	if err != nil {
 		return nil, err
@@ -533,8 +529,8 @@ func (s *PlanServer) GetModel(ctx context.Context, req *connect.Request[nanashiv
 			}
 		}
 	}
-	out := &nanashiv1.ModelDef{Role: c.role}
-	out.Lists, out.Metrics = modelDef(em, meta, propCells, c.limitsIn(em))
+	out := &nanashiv1.ModelDef{}
+	out.Lists, out.Metrics = modelDef(em, meta, propCells)
 	items, err := itemsIn(ctx, s.Pool, app)
 	if err != nil {
 		return nil, err

@@ -3,7 +3,7 @@ import { Button, Input, TextArea } from "@heroui/react";
 import { useState } from "react";
 import { FileTrigger } from "react-aria-components";
 import { api, newId } from "../api";
-import { ListKind, type MemberEditSchema, PropertyType, Role } from "../gen/nanashi/v1/plan_pb";
+import { ListKind, type MemberEditSchema, PropertyType } from "../gen/nanashi/v1/plan_pb";
 import { label, parseCsv } from "../logic";
 import { cls, listOptions, memberOptions, metricOptions, useApp, useMutate } from "../state";
 import { Check, Section, Sel } from "../ui";
@@ -25,17 +25,11 @@ const lines = (s: string) =>
     .filter(Boolean);
 
 // The key remounts the Input when the name changes, so that defaultValue shows the new name.
-function RenameInput(props: {
-  name: string;
-  label: string;
-  disabled: boolean;
-  onRename: (name: string) => unknown;
-}) {
+function RenameInput(props: { name: string; label: string; onRename: (name: string) => unknown }) {
   return (
     <Input
       key={props.name}
       aria-label={props.label}
-      disabled={props.disabled}
       defaultValue={props.name}
       onBlur={(e) => e.target.value !== props.name && props.onRename(e.target.value)}
     />
@@ -43,64 +37,61 @@ function RenameInput(props: {
 }
 
 export function ListsPage() {
-  const { appId, model, names, can } = useApp();
+  const { appId, model, names } = useApp();
   const mutate = useMutate();
   const [sel, setSel] = useState(model.lists[0]?.id ?? "");
   const [form, setForm] = useState({ name: "", kind: String(ListKind.DIMENSION), members: "" });
   const [prop, setProp] = useState({ name: "", type: String(PropertyType.NUMBER), target: "" });
   const [newMember, setNewMember] = useState("");
   const list = model.lists.find((l) => l.id === sel);
-  const modeler = can(Role.MODELER);
   const edit = (edits: MessageInitShape<typeof MemberEditSchema>[]) =>
     mutate((clientOpId) => api.editMembers({ appId, clientOpId, list: sel, edits }));
 
   return (
     <div>
-      {modeler && (
-        <Section title="リストを作成">
-          <div className="flex flex-wrap items-start gap-2">
-            <Input
-              aria-label="リスト名"
-              placeholder="リスト名"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
-            <Sel
-              label="種類"
-              value={form.kind}
-              onChange={(kind) => setForm({ ...form, kind })}
-              options={KINDS}
-            />
-            <TextArea
-              aria-label="メンバー"
-              placeholder="メンバー（1 行に 1 つ）"
-              value={form.members}
-              onChange={(e) => setForm({ ...form, members: e.target.value })}
-            />
-            <Button
-              onPress={() => {
-                // The ids of the list and its members: one set for each user action.
-                const id = newId();
-                const members = lines(form.members).map((name) => ({ id: newId(), name }));
-                return mutate(async (clientOpId) => {
-                  await api.createList({
-                    clientOpId,
-                    appId,
-                    id,
-                    name: form.name,
-                    kind: Number(form.kind),
-                    members,
-                  });
-                  setSel(id);
-                  setForm({ ...form, name: "", members: "" });
+      <Section title="リストを作成">
+        <div className="flex flex-wrap items-start gap-2">
+          <Input
+            aria-label="リスト名"
+            placeholder="リスト名"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+          />
+          <Sel
+            label="種類"
+            value={form.kind}
+            onChange={(kind) => setForm({ ...form, kind })}
+            options={KINDS}
+          />
+          <TextArea
+            aria-label="メンバー"
+            placeholder="メンバー（1 行に 1 つ）"
+            value={form.members}
+            onChange={(e) => setForm({ ...form, members: e.target.value })}
+          />
+          <Button
+            onPress={() => {
+              // The ids of the list and its members: one set for each user action.
+              const id = newId();
+              const members = lines(form.members).map((name) => ({ id: newId(), name }));
+              return mutate(async (clientOpId) => {
+                await api.createList({
+                  clientOpId,
+                  appId,
+                  id,
+                  name: form.name,
+                  kind: Number(form.kind),
+                  members,
                 });
-              }}
-            >
-              作成
-            </Button>
-          </div>
-        </Section>
-      )}
+                setSel(id);
+                setForm({ ...form, name: "", members: "" });
+              });
+            }}
+          >
+            作成
+          </Button>
+        </div>
+      </Section>
       <Section title="リスト">
         <div className="flex flex-wrap items-center gap-2">
           <Sel label="リスト" value={sel} onChange={setSel} options={listOptions(model)} />
@@ -109,7 +100,6 @@ export function ListsPage() {
               key={list.id}
               name={list.name}
               label="リスト名"
-              disabled={!modeler}
               onRename={(name) =>
                 mutate((clientOpId) => api.renameList({ appId, clientOpId, id: list.id, name }))
               }
@@ -128,7 +118,6 @@ export function ListsPage() {
                     <RenameInput
                       name={p.name}
                       label="プロパティ名"
-                      disabled={!modeler}
                       onRename={(name) =>
                         mutate((clientOpId) =>
                           api.renameProperty({ appId, clientOpId, list: sel, id: p.id, name }),
@@ -138,7 +127,7 @@ export function ListsPage() {
                     {p.target && ` → ${label(names, p.target)}`}
                   </th>
                 ))}
-                {modeler && <th>操作</th>}
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -148,7 +137,6 @@ export function ListsPage() {
                     <RenameInput
                       name={m.name}
                       label="メンバー名"
-                      disabled={!modeler}
                       onRename={(name) =>
                         edit([{ edit: { case: "rename", value: { id: m.id, name } } }])
                       }
@@ -180,7 +168,6 @@ export function ListsPage() {
                           <Input
                             key={v}
                             aria-label={p.name}
-                            disabled={!modeler}
                             defaultValue={v}
                             onBlur={(e) => set(e.target.value)}
                           />
@@ -188,108 +175,102 @@ export function ListsPage() {
                       </td>
                     );
                   })}
-                  {modeler && (
-                    <td className="whitespace-nowrap">
-                      {(
-                        [
-                          [-1, "↑", i === 0],
-                          [1, "↓", i === list.members.length - 1],
-                        ] as const
-                      ).map(([step, arrow, end]) => (
-                        <Button
-                          key={arrow}
-                          size="sm"
-                          variant="ghost"
-                          isDisabled={end}
-                          onPress={() =>
-                            edit([
-                              {
-                                edit: { case: "move", value: { id: m.id, position: i + step } },
-                              },
-                            ])
-                          }
-                        >
-                          {arrow}
-                        </Button>
-                      ))}
+                  <td className="whitespace-nowrap">
+                    {(
+                      [
+                        [-1, "↑", i === 0],
+                        [1, "↓", i === list.members.length - 1],
+                      ] as const
+                    ).map(([step, arrow, end]) => (
                       <Button
+                        key={arrow}
                         size="sm"
-                        variant="danger-soft"
-                        onPress={() => edit([{ edit: { case: "remove", value: { id: m.id } } }])}
+                        variant="ghost"
+                        isDisabled={end}
+                        onPress={() =>
+                          edit([
+                            {
+                              edit: { case: "move", value: { id: m.id, position: i + step } },
+                            },
+                          ])
+                        }
                       >
-                        削除
+                        {arrow}
                       </Button>
-                    </td>
-                  )}
+                    ))}
+                    <Button
+                      size="sm"
+                      variant="danger-soft"
+                      onPress={() => edit([{ edit: { case: "remove", value: { id: m.id } } }])}
+                    >
+                      削除
+                    </Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {modeler && (
-            <>
-              <div className="flex gap-2">
-                <Input
-                  aria-label="新しいメンバー"
-                  placeholder="新しいメンバー"
-                  value={newMember}
-                  onChange={(e) => setNewMember(e.target.value)}
-                />
-                <Button
-                  onPress={() =>
-                    edit([{ edit: { case: "add", value: { id: newId(), name: newMember } } }]).then(
-                      (ok) => ok && setNewMember(""),
-                    )
-                  }
-                >
-                  メンバーを追加
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Input
-                  aria-label="プロパティ名"
-                  placeholder="プロパティ名"
-                  value={prop.name}
-                  onChange={(e) => setProp({ ...prop, name: e.target.value })}
-                />
-                <Sel
-                  label="型"
-                  value={prop.type}
-                  onChange={(type) => setProp({ ...prop, type })}
-                  options={PROP_TYPES}
-                />
-                {prop.type === String(PropertyType.DIMENSION) && (
-                  <Sel
-                    label="対象リスト"
-                    value={prop.target}
-                    onChange={(target) => setProp({ ...prop, target })}
-                    empty=""
-                    options={listOptions(model)}
-                  />
-                )}
-                <Button
-                  onPress={() => {
-                    const id = newId();
-                    return mutate(async (clientOpId) => {
-                      await api.addProperty({
-                        clientOpId,
-                        appId,
-                        list: sel,
-                        property: {
-                          id,
-                          name: prop.name,
-                          type: Number(prop.type),
-                          target: prop.target,
-                        },
-                      });
-                      setProp({ ...prop, name: "" });
-                    });
-                  }}
-                >
-                  プロパティを追加
-                </Button>
-              </div>
-            </>
-          )}
+          <div className="flex gap-2">
+            <Input
+              aria-label="新しいメンバー"
+              placeholder="新しいメンバー"
+              value={newMember}
+              onChange={(e) => setNewMember(e.target.value)}
+            />
+            <Button
+              onPress={() =>
+                edit([{ edit: { case: "add", value: { id: newId(), name: newMember } } }]).then(
+                  (ok) => ok && setNewMember(""),
+                )
+              }
+            >
+              メンバーを追加
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              aria-label="プロパティ名"
+              placeholder="プロパティ名"
+              value={prop.name}
+              onChange={(e) => setProp({ ...prop, name: e.target.value })}
+            />
+            <Sel
+              label="型"
+              value={prop.type}
+              onChange={(type) => setProp({ ...prop, type })}
+              options={PROP_TYPES}
+            />
+            {prop.type === String(PropertyType.DIMENSION) && (
+              <Sel
+                label="対象リスト"
+                value={prop.target}
+                onChange={(target) => setProp({ ...prop, target })}
+                empty=""
+                options={listOptions(model)}
+              />
+            )}
+            <Button
+              onPress={() => {
+                const id = newId();
+                return mutate(async (clientOpId) => {
+                  await api.addProperty({
+                    clientOpId,
+                    appId,
+                    list: sel,
+                    property: {
+                      id,
+                      name: prop.name,
+                      type: Number(prop.type),
+                      target: prop.target,
+                    },
+                  });
+                  setProp({ ...prop, name: "" });
+                });
+              }}
+            >
+              プロパティを追加
+            </Button>
+          </div>
         </Section>
       )}
     </div>
@@ -297,7 +278,7 @@ export function ListsPage() {
 }
 
 export function CalendarPage() {
-  const { appId, model, can } = useApp();
+  const { appId, model } = useApp();
   const mutate = useMutate();
   const [start, setStart] = useState(String(new Date().getFullYear()));
   const [years, setYears] = useState("2");
@@ -309,42 +290,40 @@ export function CalendarPage() {
           ? cal.map((l) => `${l.name}（${l.members.length}）`).join("、")
           : "カレンダーはまだありません。"}
       </p>
-      {can(Role.MODELER) && (
-        <div className="flex gap-2">
-          <Input
-            aria-label="開始年"
-            type="number"
-            value={start}
-            onChange={(e) => setStart(e.target.value)}
-          />
-          <Input
-            aria-label="年数"
-            type="number"
-            value={years}
-            onChange={(e) => setYears(e.target.value)}
-          />
-          <Button
-            onPress={() =>
-              mutate((clientOpId) =>
-                api.createCalendar({
-                  appId,
-                  clientOpId,
-                  startYear: Number(start),
-                  years: Number(years),
-                }),
-              )
-            }
-          >
-            カレンダーを作成
-          </Button>
-        </div>
-      )}
+      <div className="flex gap-2">
+        <Input
+          aria-label="開始年"
+          type="number"
+          value={start}
+          onChange={(e) => setStart(e.target.value)}
+        />
+        <Input
+          aria-label="年数"
+          type="number"
+          value={years}
+          onChange={(e) => setYears(e.target.value)}
+        />
+        <Button
+          onPress={() =>
+            mutate((clientOpId) =>
+              api.createCalendar({
+                appId,
+                clientOpId,
+                startYear: Number(start),
+                years: Number(years),
+              }),
+            )
+          }
+        >
+          カレンダーを作成
+        </Button>
+      </div>
     </Section>
   );
 }
 
 export function ScenariosPage() {
-  const { appId, model, can } = useApp();
+  const { appId, model } = useApp();
   const mutate = useMutate();
   const [name, setName] = useState("");
   const [from, setFrom] = useState("");
@@ -360,33 +339,31 @@ export function ScenariosPage() {
         シナリオを比較するには、メトリックのディメンションに Scenario を入れて、Scenario
         を列に置きます。
       </p>
-      {can(Role.MODELER) && (
-        <div className="flex gap-2">
-          <Input
-            aria-label="シナリオ名"
-            placeholder="シナリオ名"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-          <Sel
-            label="コピー元"
-            value={from}
-            onChange={setFrom}
-            empty="（空）"
-            options={members.map((m): [string, string] => [m.id, m.name])}
-          />
-          <Button
-            onPress={() => {
-              const id = newId();
-              return mutate((clientOpId) =>
-                api.createScenario({ appId, clientOpId, id, name, copyFrom: from }),
-              );
-            }}
-          >
-            シナリオを作成
-          </Button>
-        </div>
-      )}
+      <div className="flex gap-2">
+        <Input
+          aria-label="シナリオ名"
+          placeholder="シナリオ名"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <Sel
+          label="コピー元"
+          value={from}
+          onChange={setFrom}
+          empty="（空）"
+          options={members.map((m): [string, string] => [m.id, m.name])}
+        />
+        <Button
+          onPress={() => {
+            const id = newId();
+            return mutate((clientOpId) =>
+              api.createScenario({ appId, clientOpId, id, name, copyFrom: from }),
+            );
+          }}
+        >
+          シナリオを作成
+        </Button>
+      </div>
     </Section>
   );
 }

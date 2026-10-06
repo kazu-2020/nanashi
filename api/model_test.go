@@ -109,7 +109,7 @@ func TestCalendarOps(t *testing.T) {
 	}
 }
 
-func TestModelDefHidesMembersAndPropertyMetrics(t *testing.T) {
+func TestModelDefHidesPropertyMetrics(t *testing.T) {
 	em := model(t)
 	peer := "0192f3a4-0000-7000-8000-0000000000c1"
 	em.Dims[2].Props = []engineProp{{ID: peer, Name: "Peer", Target: region, Values: map[string]string{east: west}}}
@@ -121,8 +121,8 @@ func TestModelDefHidesMembersAndPropertyMetrics(t *testing.T) {
 		{ListID: sales, ID: salesProduct, Name: "Product", Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION},
 	}}
 	cells := map[string]engineCube{amount: {Dims: []string{sales}, Cells: [][]any{{sale1, 10.5}}}}
-	lists, metrics := modelDef(em, meta, cells, eastOnly())
-	if r := lists[2]; len(r.Members) != 1 || r.Members[0].Id != east || r.Members[0].Name != "East" || r.Members[0].Properties[peer] != "" || len(r.Properties) != 1 {
+	lists, metrics := modelDef(em, meta, cells)
+	if r := lists[2]; len(r.Members) != 2 || r.Members[0].Id != east || r.Members[0].Name != "East" || r.Members[0].Properties[peer] != west || len(r.Properties) != 1 {
 		t.Errorf("Region: %v", r)
 	}
 	if s := lists[1].Members[0].Properties; s[amountProp] != "10.5" || s[salesProduct] != memberA {
@@ -134,9 +134,6 @@ func TestModelDefHidesMembersAndPropertyMetrics(t *testing.T) {
 	for _, m := range metrics {
 		if m.Id == amount {
 			t.Error("a property Metric must not be in the Metrics")
-		}
-		if m.Id == revenue {
-			t.Error("a formula Metric without the limited list Region must be hidden")
 		}
 	}
 }

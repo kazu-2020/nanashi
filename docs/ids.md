@@ -4,7 +4,7 @@ This note gives the identifier rules for `web/`, `api/` and `tessera/`. It follo
 
 ## Rules
 
-- The system makes each identifier that goes out of the system as a UUIDv7. `api/` accepts any UUID version in the canonical form. It does not check the version. Examples: an application, a Metric, a dimension (list), a member, a property, an item, an access rule, a comment, a snapshot and a `client_op_id`.
+- The system makes each identifier that goes out of the system as a UUIDv7. `api/` accepts any UUID version in the canonical form. It does not check the version. Examples: an application, a Metric, a dimension (list), a member, a property, an item, a comment, a snapshot and a `client_op_id`.
 - Usually `web/` makes the identifier. If `api/` makes an object for the user, `api/` makes the identifier one time, in the plan of the RPC.
 - A name is an attribute. It is not an identifier.
 - Each identifier in a request must be in the canonical form (lowercase, with hyphens). If it is not, `api/` returns InvalidArgument and does not change it. `tessera/` does not parse identifiers. It compares them as strings, so each identifier has one spelling only.
