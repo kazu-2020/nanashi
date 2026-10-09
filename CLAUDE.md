@@ -9,9 +9,9 @@ nanashi is a monorepo for an EPM and FP&A service (issue #30). It has these dire
 - `api/`: the Go application server. `api/CLAUDE.md` gives the guidance for it.
 - `web/`: the frontend (SPA). `web/CLAUDE.md` gives the guidance for it.
 - `proto/`: the Connect contract between `api/` and `web/`. `buf.gen.yaml` makes `api/gen/` and `web/src/gen/` from it.
-- `docs/`: design notes that span more than one directory (for example `docs/engine-lifecycle.md`). `docs/glossary.md` gives the product terms.
+- `docs/`: design notes that span more than one directory (for example `docs/engine-lifecycle.md`). `docs/glossary.md` gives the product terms. `docs/spec/` has the Quint specifications.
 - `compose.yaml`: PostgreSQL (port 55432) and RustFS (port 59000) for development and tests. Start them with `docker compose up -d`.
-- `mise.toml`: the versions of Go, Rust, Python, Node.js, pnpm, and the LSP servers. Local development and CI use them. Run `mise install` to install them. In a cloud session, the SessionStart hook `.claude/hooks/mise-install.sh` installs them. The setup script of the cloud environment runs `.claude/hooks/cloud-setup.sh`. It installs the plugins in `.claude/settings.json` and the tools.
+- `mise.toml`: the versions of Go, Rust, Python, Node.js, pnpm, Quint, and the LSP servers. Local development and CI use them. Run `mise install` to install them. In a cloud session, the SessionStart hook `.claude/hooks/mise-install.sh` installs them. The setup script of the cloud environment runs `.claude/hooks/cloud-setup.sh`. It installs the plugins in `.claude/settings.json` and the tools.
 - `dev.sh`: starts the full local stack (PostgreSQL, router with the engines, `api/`, `web/`).
 
 ## Skills for the work
@@ -56,6 +56,17 @@ Each directory has its own workflow in `.github/workflows/`. A workflow starts o
 - `router-test.yml`: `go vet` and `go test` of `router/`.
 - `api-test.yml`: `go vet` and `go test` of `api/`.
 - `web-test.yml`: `vp check`, `vp test` and the build of `web/`. It also makes sure that the generated code agrees with `proto/`.
+- `spec-check.yml`: `quint typecheck`, `quint test` and `quint run` of each specification in `docs/spec/`.
+
+## Specifications
+
+```bash
+# In a cloud session, the SessionStart hook runs docs/spec/install-evaluator.sh. Quint cannot download the evaluator there.
+for f in docs/spec/*.qnt; do quint typecheck "$f" && quint test "$f" && quint run --invariant inv "$f"; done
+```
+
+- Write a specification for the states and the concurrency. Each specification has `init`, `step` and the invariant `inv`.
+- Do not check strings in Quint. Quint has no string operations. Use an opaque value for a name, and check the characters in the tests of the code.
 
 ## Router
 

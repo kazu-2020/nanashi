@@ -10,6 +10,8 @@ command -v mise >/dev/null || (curl -fsSL https://mise.run | MISE_QUIET=1 sh) >/
 command -v mise >/dev/null || exit 0
 mise trust --yes mise.toml >/dev/null 2>&1
 mise install >&2 || true
+# Quint cannot download its Rust evaluator through the GitHub proxy (docs/spec/install-evaluator.sh).
+docs/spec/install-evaluator.sh >&2 || true
 
 # Use the tools from mise in this script and in the Bash tool.
 # Do not use "mise exec". It stops if one tool in mise.toml is not installed.
