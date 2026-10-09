@@ -1,6 +1,6 @@
 // The creation of a dimension list (docs/glossary.md).
 //
-// Requirements (the api does not do all of them yet):
+// Requirements:
 // - The request has the id and the name of the list. It has no members.
 // - The api changes each run of control characters in the name to one space.
 //   Then it removes the white space at the start and at the end.
@@ -9,7 +9,7 @@
 // - A refused operation makes nothing. The api deletes the app_list row of a refused operation.
 //
 // This specification checks the states. A name is an opaque value: NORMALIZE and valid stand for the
-// normalization and the checks. The Go tests check the characters. The resend of a client_op_id is out of scope.
+// normalization and the checks (listName in api/model.go). The resend of a client_op_id is out of scope.
 module dimension_list {
   type Status = Pending | Done | Failed
   type Op = { list: str, name: str }

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
@@ -68,6 +70,35 @@ var propKind = map[nanashiv1.PropertyType]string{
 
 // propMetric is the name of the input Metric that holds a NUMBER or BOOLEAN property.
 func propMetric(list, prop string) string { return list + "." + prop }
+
+// maxNameLen is the maximum length of a list name, in code points.
+const maxNameLen = 200
+
+// listName normalizes and checks the name of a new list (docs/spec/dimension_list.qnt). It changes each run of
+// control characters to one space, then removes the white space at the start and at the end.
+func listName(raw string) (string, error) {
+	var b strings.Builder
+	ctrl := false
+	for _, r := range raw {
+		if unicode.IsControl(r) {
+			if !ctrl {
+				b.WriteRune(' ')
+			}
+			ctrl = true
+			continue
+		}
+		ctrl = false
+		b.WriteRune(r)
+	}
+	name := strings.TrimSpace(b.String())
+	switch {
+	case name == "":
+		return "", errors.New("リスト名が要る")
+	case utf8.RuneCountInString(name) > maxNameLen:
+		return "", fmt.Errorf("リスト名は %d 文字以下にする", maxNameLen)
+	}
+	return name, nil
+}
 
 // editOps changes member edits into the plan: engine operations, the statements for the TEXT values, and the
 // old and new TEXT values for the compensation. The engine keeps the DIMENSION property values and the member
@@ -567,9 +598,12 @@ func (s *PlanServer) CreateList(ctx context.Context, req *connect.Request[nanash
 	if m.Kind != nanashiv1.ListKind_LIST_KIND_DIMENSION && m.Kind != nanashiv1.ListKind_LIST_KIND_TRANSACTION {
 		return nil, invalid(errors.New("作れるリストは DIMENSION か TRANSACTION"))
 	}
-	name := strings.TrimSpace(m.Name)
-	if name == "" || m.Id == "" {
-		return nil, invalid(errors.New("リストの id と名前が要る"))
+	if m.Id == "" {
+		return nil, invalid(errors.New("リストの id が要る"))
+	}
+	name, err := listName(m.Name)
+	if err != nil {
+		return nil, invalid(err)
 	}
 	return ackOf(s.change(ctx, m.AppId, m, func(em engineModel, _ appMeta) (plan, error) {
 		if _, ok := em.dim(m.Id); ok {
