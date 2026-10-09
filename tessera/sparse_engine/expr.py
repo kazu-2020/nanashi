@@ -151,6 +151,12 @@ def references_metric(e: Expr, name: str) -> bool:
     return here or any(references_metric(c, name) for _, c in _children(e))
 
 
+def mentions_dim(e: Expr, dim: str) -> bool:
+    """Tell if the formula holds the dimension id (each node keeps a dimension in the field dim or dims)."""
+    here = getattr(e, "dim", None) == dim or dim in getattr(e, "dims", ())
+    return here or any(mentions_dim(c, dim) for _, c in _children(e))
+
+
 def uses_property(e: Expr, dim: str, prop: str) -> bool:
     """式が `[BY: dim.prop]` を書いているか。"""
     here = isinstance(e, By) and e.dim == dim and e.prop == prop

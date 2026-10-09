@@ -32,6 +32,7 @@ If you give an existing name to `add_formula` or `add_input`, the new Metric rep
 - **Replace a property**: The engine handles each formula that uses the property (`[BY: dimension.property]`) as a replaced formula.
 - **Rename a Metric** (`rename_metric`): The formulas hold the Metric id, so only the name changes and the display of each formula shows the new name. The values do not change, so the engine does not calculate again.
 - **Remove a Metric** (`remove_metric`): You can remove only a Metric that no formula refers to. No other values change, so the engine does not calculate again.
+- **Remove a dimension** (`remove_dimension`): The members and the properties go with the dimension. You can remove only a dimension that nothing uses: no Metric has it in its dimensions or as its kind, no formula holds it, and no property of another dimension points to it. No value changes, so the engine does not calculate again.
 - **Rename a member, a dimension or a property** (`rename_member`, `rename_dimension`, `rename_property`): The formulas, the property maps and the stored data hold the id, so only the name changes. The engine does not calculate again.
 
 ```python

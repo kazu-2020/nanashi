@@ -124,6 +124,9 @@ class Named:
     def rename_dimension(self, dim: str, new: str) -> None:
         self.model.rename_dimension(self._dim(dim), new)
 
+    def remove_dimension(self, dim: str) -> None:
+        self.model.remove_dimension(self._dim(dim))
+
     def add_property(self, dim: str, prop: str, target: str, mapping: Mapping[str, str], *,
                      id: str | None = None) -> str:
         """Add the property ({member name of dim: member name of target}). Return the property id."""

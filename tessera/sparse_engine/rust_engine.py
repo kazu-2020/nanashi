@@ -261,7 +261,13 @@ class RustEngine:
         return self.core.repartition(store, None if partition is None else self._dim(cat, partition))
 
     def dimension_changed(self, cat, dim, renumbered=False):
-        """Send the member count of dim (an id) and the mappings that use dim to Rust."""
+        """Send the member count of dim (an id) and the mappings that use dim to Rust. If the catalog does not
+        have dim (a removed dimension), forget it and its mappings. Rust keeps its numbers, and nothing uses them."""
+        if dim not in cat.dimensions:
+            self._dims.pop(dim, None)
+            self._widths.pop(dim, None)
+            self._maps = {k: v for k, v in self._maps.items() if k[0] != dim}
+            return
         if renumbered:  # 変換済みの式はメンバーの番号（定数、SELECT）を持っているので作り直す
             self._exprs.clear()
             self.planner.forget()

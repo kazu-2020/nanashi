@@ -217,6 +217,24 @@ class Journal(JournalCase, unittest.TestCase):
         self.m.add_input("Stock", ["Product", "Month"], {("A", "Jan"): 1}, id=self.m.metric("Stock").id)  # a formula Metric becomes an input
         check_same_state(self, self.m, self.reopen())
 
+    def test_dimension_removal_replays(self):
+        m = self.m
+        reader = Named(self.journals.journal().open(self.engine()))
+        reader.recalc()
+        with m.transaction():
+            m.add_dimension("Team", ["T1", "T2"])
+            m.add_property("Team", "Cat", "Category", {"T1": "X"})
+            m.add_input("Load", ["Team"], {("T1",): 1.0})
+        team = m.dimension("Team").id
+        with m.transaction() as txn:
+            m.remove_metric("Load")  # the api removes the Metric of a property in the same write
+            m.remove_dimension("Team")
+        self.assertEqual(txn.record["changes"]["dimensions_removed"], [team])
+        self.assertTrue(self.journals.journal().catch_up(reader.model))
+        reader.recalc()
+        check_same_state(self, m, reader)
+        check_same_state(self, m, self.reopen())
+
     def test_rolled_back_transactions_are_not_recorded(self):
         with self.assertRaises(Abort):
             with self.m.transaction():

@@ -195,11 +195,13 @@ def structure(before, after) -> dict:
         if o is None or d != _definition(o) | {"name": m.name}:
             defs.append(d)
     removed = [i for i in before.metrics if i not in after.metrics]
+    dims_removed = [i for i in before.dimensions if i not in after.dimensions]
     tombstones = sorted(after.tombstones - before.tombstones)
 
     for key, value in (("dimensions", added_dims), ("renamed", renamed), ("members", members),
                        ("member_order", orders), ("properties", props), ("metrics", defs),
-                       ("metrics_removed", removed), ("tombstones", tombstones)):
+                       ("metrics_removed", removed), ("dimensions_removed", dims_removed),
+                       ("tombstones", tombstones)):
         if value:
             out[key] = value
     return out
@@ -263,7 +265,8 @@ def _by_id(model, m, store) -> dict:
 
 # ---------------------------------------------------------------- 再生
 
-STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # not renamed or member_order
+# not renamed or member_order
+STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed", "dimensions_removed")
 
 
 def _rename(model, renamed: list) -> None:
@@ -312,6 +315,9 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     for i in ch.get("metrics_removed", []):
         del model.metrics[i]
         model._state.pop(i, None)
+    for i in ch.get("dimensions_removed", []):
+        del model.dimensions[i]
+        model.engine.dimension_changed(model, i)
     _rename(model, ch.get("renamed", []))
     model._dim_ids = {d.name: i for i, d in model.dimensions.items()}
     for e in ch.get("members", []):

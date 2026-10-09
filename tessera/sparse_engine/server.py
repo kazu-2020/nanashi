@@ -92,7 +92,7 @@ log = logging.getLogger(__name__)
 
 WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "move_member", "rename_member", "remove_member", "add_formula",
                        "add_input", "add_property", "set_property_values", "add_dimension", "remove_metric",
-                       "rename_metric", "rename_dimension", "rename_property"})
+                       "rename_metric", "rename_dimension", "rename_property", "remove_dimension"})
 READ_PARAMS = frozenset({"offset", "limit", "keep", "agg"})
 
 
@@ -259,6 +259,10 @@ def _op_remove_member(m, n, dim, id):
 
 def _op_rename_dimension(m, n, id, name):
     m.rename_dimension(n.dim(id).id, name)
+
+
+def _op_remove_dimension(m, n, id):
+    m.remove_dimension(n.dim(id).id)
 
 
 def _op_add_property(m, n, dim, id, name, target):

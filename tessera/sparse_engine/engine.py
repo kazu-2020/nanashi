@@ -48,7 +48,8 @@ class Store(Protocol):
         （並び順は決めない）。write_many と対になる。"""
     def dimension_changed(self, cat: Catalog, dim: str, renumbered: bool = False) -> None:
         """軸 dim のメンバーが変わった（プロパティの対応表も変わりうる）ことを知らせる。
-        renumbered なら、メンバーを消して後ろのメンバーの番号が詰まった。"""
+        renumbered なら、メンバーを消して後ろのメンバーの番号が詰まった。
+        If cat does not have dim, the dimension was removed: forget it."""
     def fit(self, storage: Any, cat: Catalog) -> Any:
         """メンバーが増えたあとも格納データが使えるようにする（必要なら詰め直す）。"""
     def region_of_value(self, storage: Any, value: float, cat: Catalog) -> Restrict | None:

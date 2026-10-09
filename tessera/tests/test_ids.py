@@ -516,6 +516,70 @@ class RustDimensionRenames(DimensionRenames):
     engine = staticmethod(RustEngine)
 
 
+class RemoveDimension(unittest.TestCase):
+    engine = staticmethod(ReferenceEngine)
+
+    def setUp(self):
+        self.m = build_with(self.engine())
+        self.m.add_dimension("Team", ["T1", "T2"])
+        self.m.add_property("Team", "Lead", "Team", {"T1": "T2"})  # a property of the list itself goes with it
+        self.m.add_property("Team", "Cat", "Category", {"T1": "X"})
+        self.m.recalc()
+
+    def test_unused(self):
+        m, team = self.m, self.m.dimension("Team")
+        gone = {team.id, *team.ids, *team.properties}
+        m.add_input("Load", ["Team"], {("T1",): 2.0})
+        m.add_formula("ByCat", ["Category"], "Load[BY SUM: Team.Cat]")  # the engine now holds Team and its mapping
+        m.recalc()
+        m.remove_metric("ByCat")
+        m.remove_metric("Load")
+        before = snapshot(m)
+        m.eval_log.clear()
+        m.remove_dimension("Team")
+        m.recalc()
+        self.assertEqual(list(m.eval_log), [])  # nothing uses it, so nothing is calculated again
+        self.assertNotIn("Team", m._dim_ids)
+        self.assertNotIn(team.id, m.dimensions)
+        self.assertLessEqual(gone, m.tombstones)
+        self.assertEqual(snapshot(m), before)
+        with self.assertRaises(DuplicateId):
+            m.add_dimension("Team", [], id=team.id)
+        fork = m.fork()
+        fork.set_cell("Price", 7, Product="A")
+        check_full(self, fork)
+        m.add_property("Product", "Other", "Category", {"A": "X"})  # the engine still changes other mappings
+        m.add_dimension("Team", ["T9"])  # the name is free again, with a new id
+        m.add_input("Load", ["Team"], {("T9",): 1.0})
+        m.set_cell("Price", 7, Product="A")
+        check_full(self, m)
+
+    def test_used(self):
+        m = self.m
+        m.add_input("Load", ["Team"], {("T1",): 1.0})
+        m.add_formula("TeamSum", [], "Load[REMOVE SUM: Team]")  # only its formula holds Team
+        with self.assertRaisesRegex(ValueError, "^Team は Load, TeamSum が使っているので消せない$"):
+            m.remove_dimension("Team")
+        m.remove_metric("TeamSum")
+        m.remove_metric("Load")
+        m.add_input("Owner", ["Product"], kind="member:Team")
+        with self.assertRaisesRegex(ValueError, "^Team は Owner が"):
+            m.remove_dimension("Team")
+        m.remove_metric("Owner")
+        m.add_property("Product", "Team", "Team", {})
+        with self.assertRaisesRegex(ValueError, "^Team は Product.Team が"):
+            m.remove_dimension("Team")
+        self.assertIn("Team", m._dim_ids)
+        with self.assertRaisesRegex(ValueError, "^Product は .*Price.* が使っているので消せない$"):
+            m.remove_dimension("Product")
+        check_full(self, m)
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustRemoveDimension(RemoveDimension):
+    engine = staticmethod(RustEngine)
+
+
 class MemberRenames(unittest.TestCase):
     """rename_member changes only the name and the name index: no recalculation, and the property maps, the
     stored data and the formulas stay as they are (they hold the member id)."""

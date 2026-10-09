@@ -34,8 +34,8 @@ from .core import Cube, Dimension, Key, uuid7
 from .delta import DeltaPlan
 from .engine import Store, default_engine
 from .evaluate import Edge, FormulaError, Kind, Restrict, Type, bind, combos, member_kind, union_region
-from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_member, references_metric,
-                   uses_property)
+from .expr import (AGGREGATIONS, PUBLIC_AGGREGATIONS, Coalesce, Expr, Ref, mentions_dim, mentions_member,
+                   references_metric, uses_property)
 from .journal import LOG_VERSION, AlreadyCommitted, Transaction, changes, jsonable, now
 from .messages import Msg, msg, render
 from .parser import parse
@@ -519,6 +519,26 @@ class Model:
         del self._dim_ids[d.name]
         d.name = new
         self._dim_ids[new] = d.id
+
+    @_operation
+    def remove_dimension(self, dim: str) -> None:
+        """Remove the dimension (an id) with its members and properties. Only a dimension that nothing uses can
+        go: no Metric has it in dims or as the kind, no formula holds it, and no property of another dimension
+        points to it. Thus no value changes. The ids of the dimension, its members and its properties become
+        tombstones."""
+        d = self.dimension(dim)
+        kind = member_kind(dim)
+        users = [m.name for m in self.metrics.values() if not m.name.startswith("__") and (
+            dim in m.dims or m.kind == kind or (m.written is not None and mentions_dim(m.written, dim)))]
+        users += [f"{o.name}.{o.property_names[p]}" for o in self.dimensions.values() if o.id != dim
+                  for p, (target, _) in o.properties.items() if target == dim]
+        if users:
+            raise ValueError(f"{d.name} は {', '.join(users)} が使っているので消せない")
+        self.slice_log._flush()  # the log can hold member numbers: make them ids while the dimension is here
+        self.tombstones.update([dim, *d.ids, *d.properties])
+        del self.dimensions[dim]
+        del self._dim_ids[d.name]
+        self.engine.dimension_changed(self, dim)  # the engine forgets the dimension
 
     def _check_dim_name(self, name: str) -> None:
         # A replaced dimension would leave the Metrics on it with keys of the old members.

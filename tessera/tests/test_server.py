@@ -453,6 +453,28 @@ class Api:
         self.assertEqual(self.c.get("/")[1]["dimensions"]["d-region"]["members"][0], {"id": "r-n", "name": "North"})
         self.assertEqual(cell(), 7.5)
 
+    def test_remove_dimension(self):
+        post = lambda op_id, *ops: self.c.post("/writes", {"client_op_id": op_id, "ops": list(ops)})
+        status, body = post(
+            "x-1", {"op": "add_dimension", "id": "d-team", "name": "Team"},
+            {"op": "add_member", "dim": "d-team", "id": "t-1", "name": "T1"},
+            {"op": "add_property", "dim": "d-team", "id": "p-lead", "name": "Lead", "target": "d-team"},
+            {"op": "add_input", "id": "m-load", "name": "Load", "dims": ["d-team"], "cells": [[["t-1"], 1.0]]})
+        self.assertEqual(status, 200, body)
+        status, body = post("x-2", {"op": "remove_dimension", "id": "d-team"})
+        self.assertEqual((status, body["error"]), (400, "bad_request"))
+        self.assertIn("Team は Load が使っているので消せない", body["message"])
+        remove = [{"op": "remove_metric", "id": "m-load"}, {"op": "remove_dimension", "id": "d-team"}]
+        done = post("x-3", *remove)
+        self.assertEqual(done[0], 200, done[1])
+        self.assertEqual(post("x-3", *remove), done)  # the resend does not commit two times
+        self.assertNotIn("d-team", self.c.get("/")[1]["dimensions"])
+        self.assertEqual(post("x-4", {"op": "remove_dimension", "id": "d-team"})[0], 400)  # unknown now
+        status, body = post("x-5", {"op": "add_dimension", "id": "d-team", "name": "Team"})
+        self.assertEqual((status, body["error"]), (409, "duplicate_id"))
+        status, body = post("x-6", {"op": "add_member", "dim": did(self.ws, "Product"), "id": "t-1", "name": "t1"})
+        self.assertEqual((status, body["error"]), (409, "duplicate_id"))
+
     def test_member_order_through_the_api(self):
         ws = self.ws
         product = did(ws, "Product")

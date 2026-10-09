@@ -58,6 +58,7 @@ An op is a flat object: `{"op": "<name>", <argument>: <value>, ...}`, for exampl
 |---|---|
 | `add_dimension` | `id`, `name`, `ordered`? |
 | `rename_dimension` | `id`, `name` |
+| `remove_dimension` | `id` |
 | `add_member` | `dim`, `id`, `name`, `at`? |
 | `rename_member` | `dim`, `id`, `name` |
 | `move_member` | `dim`, `id`, `at` |

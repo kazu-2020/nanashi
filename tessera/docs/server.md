@@ -28,7 +28,7 @@ In a result, a dimension is a dimension UUID, a member is a member UUID, and a v
 An op is an object with `op` (the operation name) and the arguments by name, for example `{"op": "add_member", "dim": "<uuid>", "id": "<uuid>", "name": "A"}`.
 `WRITE_OPS` in `server.py` lists the permitted operations:
 
-- Definitions: `add_dimension`, `rename_dimension`, `add_member`, `rename_member`, `move_member`, `remove_member`, `add_property`, `rename_property`, `set_property_values`, `add_input`, `add_formula`, `rename_metric`, `remove_metric`.
+- Definitions: `add_dimension`, `rename_dimension`, `remove_dimension`, `add_member`, `rename_member`, `move_member`, `remove_member`, `add_property`, `rename_property`, `set_property_values`, `add_input`, `add_formula`, `rename_metric`, `remove_metric`.
 - Cells: `set_cell`, `spread`.
 
 With `--pg`, if a request has the header `X-Nanashi-Model` and its value is not the `--model-id` of the server, the server answers 421 `not_leader` without a `leader` field.
