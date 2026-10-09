@@ -61,8 +61,10 @@ Each directory has its own workflow in `.github/workflows/`. A workflow starts o
 ## Specifications
 
 ```bash
-# In a cloud session, the SessionStart hook runs docs/spec/install-evaluator.sh. Quint cannot download the evaluator there.
-for f in docs/spec/*.qnt; do quint typecheck "$f" && quint test "$f" && quint run --invariant inv "$f"; done
+# In a cloud session, the SessionStart hook runs docs/spec/install-evaluator.sh.
+(set -e; for f in docs/spec/*.qnt; do
+  quint typecheck "$f"; quint test "$f"; quint run --invariant inv --max-samples 10000 --max-steps 12 "$f"
+done)
 ```
 
 - Write a specification for the states and the concurrency. Each specification has `init`, `step` and the invariant `inv`.

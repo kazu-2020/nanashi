@@ -1,6 +1,7 @@
 #!/bin/bash
 # Install the tools in mise.toml. Run only in a cloud session.
-# The environment must allow mise.run, mise-versions.jdx.dev, go.dev, and dl.google.com.
+# The environment must allow mise.run, mise-versions.jdx.dev, go.dev, dl.google.com, registry.npmjs.org,
+# github.com, and release-assets.githubusercontent.com.
 # If mise-versions.jdx.dev is blocked, mise uses the GitHub API for the versions, and the GitHub proxy blocks it.
 # A failure does not stop the session.
 [ "$CLAUDE_CODE_REMOTE" = "true" ] || exit 0
