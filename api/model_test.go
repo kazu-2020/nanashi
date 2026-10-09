@@ -12,6 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
 )
@@ -345,5 +346,98 @@ func TestRenamePropertyRefusalRestoresName(t *testing.T) {
 	}
 	if got := nameOf(); got != "Item" {
 		t.Errorf("name after the refusal: %q, want Item", got)
+	}
+}
+
+func TestDeleteListPlan(t *testing.T) {
+	em := model(t)
+	amountProp := "0192f3a4-0000-7000-8000-0000000000f1"
+	meta := appMeta{Kinds: map[string]nanashiv1.ListKind{sales: nanashiv1.ListKind_LIST_KIND_TRANSACTION}, Props: []propRow{
+		{ListID: sales, ID: amountProp, Name: "Amount", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, MetricID: amount},
+		{ListID: sales, ID: salesProduct, Name: "Product", Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION},
+	}}
+	// The Metric of a property is part of the list. The formula of Revenue holds Sales: only the engine sees it.
+	p, err := deleteListPlan("app", em, meta, nil, sales)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(`[{"id":%q,"op":"remove_metric"},{"id":%q,"op":"remove_dimension"}]`, amount, sales)
+	if got := opsJSON(t, p.ops); got != want {
+		t.Errorf("got %s\nwant %s", got, want)
+	}
+	if len(p.stmts) != 2 || len(p.made) != 3 || p.made[0].Prop.MetricID != amount || p.made[2].Kind != nanashiv1.ListKind_LIST_KIND_TRANSACTION {
+		t.Errorf("the plan must delete and remember the rows: %v %+v", p.stmts, p.made)
+	}
+	_, err = deleteListPlan("app", em, meta, nil, product)
+	if connect.CodeOf(connectError(err)) != connect.CodeFailedPrecondition || err.Error() != "Product は Budget, Revenue, Owner, Sales.Product が使っているので消せない" {
+		t.Errorf("a used list: got %v", err)
+	}
+	// A view and a board use Region. The engine does not know them.
+	em.Metrics = nil
+	view, _ := protojson.Marshal(&nanashiv1.ViewDef{Name: "View", Filters: map[string]*nanashiv1.Members{region: {Ids: []string{east}}}})
+	board, _ := protojson.Marshal(&nanashiv1.BoardDef{Name: "Board", PageSelectors: []string{region}})
+	other, _ := protojson.Marshal(&nanashiv1.ViewDef{Name: "Other", Rows: []string{product}})
+	items := []itemRow{{Type: nanashiv1.ItemType_ITEM_TYPE_VIEW, Def: view}, {Type: nanashiv1.ItemType_ITEM_TYPE_BOARD, Def: board}, {Type: nanashiv1.ItemType_ITEM_TYPE_VIEW, Def: other}}
+	if _, err := deleteListPlan("app", em, meta, items, region); err == nil || err.Error() != "Region は View, Board が使っているので消せない" {
+		t.Errorf("a list in a view and a board: got %v", err)
+	}
+	if _, err := deleteListPlan("app", em, meta, nil, newMember); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
+		t.Errorf("an unknown list: got %v, want NOT_FOUND", err)
+	}
+}
+
+// TestDeleteListRefusalRestoresRows: the engine refuses the delete, so the rows of the list come back. Then the
+// engine takes it, and the rows go.
+func TestDeleteListRefusalRestoresRows(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := testPool(t, ctx)
+	app := testApp(t, ctx, pool)
+	amountProp, note := uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()
+	for _, st := range []stmt{
+		{sql: "insert into app_list (app_id, id, kind) values ($1, $2, $3)", args: []any{app, sales, nanashiv1.ListKind_LIST_KIND_TRANSACTION}},
+		{sql: "insert into app_property (app_id, list_id, id, name, type, metric_id) values ($1, $2, $3, 'Amount', $4, $5)",
+			args: []any{app, sales, amountProp, nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, amount}},
+		{sql: "insert into app_property (app_id, list_id, id, name, type, text_values) values ($1, $2, $3, 'Note', $4, $5)",
+			args: []any{app, sales, note, nanashiv1.PropertyType_PROPERTY_TYPE_TEXT, fmt.Sprintf(`{%q: "a"}`, sale1)}},
+	} {
+		if _, err := pool.Exec(ctx, st.sql, st.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := func() string {
+		var out string
+		if err := pool.QueryRow(ctx, `select coalesce(string_agg(name || ':' || coalesce(metric_id::text, '') || ':' || text_values::text, ' ' order by ord), '') ||
+			' lists ' || (select count(*) from app_list where app_id = $1) from app_property where app_id = $1`, app).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := rows()
+	e := newFakeEngine(t, sample)
+	e.reply = func(int, map[string]any) (int, string) {
+		return 400, `{"error": "bad_request", "message": "Sales は Revenue が使っているので消せない"}`
+	}
+	alice := testClient(t, pool, e)("alice")
+	remove := func(opID string) error {
+		_, err := alice.DeleteList(ctx, connect.NewRequest(&nanashiv1.DeleteListRequest{AppId: app, ClientOpId: opID, Id: sales}))
+		return err
+	}
+	if err := remove(uuid.NewString()); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("got %v, want the refusal", err)
+	}
+	if got := rows(); got != before {
+		t.Errorf("rows after the refusal: %s, want %s", got, before)
+	}
+	e.reply = func(int, map[string]any) (int, string) { return 200, `{"seq": 8}` }
+	opID := uuid.NewString()
+	if err := remove(opID); err != nil {
+		t.Fatal(err)
+	}
+	if err := remove(opID); err != nil || len(e.writes) != 2 {
+		t.Errorf("the resend must not write again: %v, %d writes", err, len(e.writes))
+	}
+	if got := rows(); got != " lists 0" {
+		t.Errorf("rows after the delete: %q", got)
 	}
 }

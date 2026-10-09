@@ -45,6 +45,8 @@ const (
 	PlanServiceCreateListProcedure = "/nanashi.v1.PlanService/CreateList"
 	// PlanServiceRenameListProcedure is the fully-qualified name of the PlanService's RenameList RPC.
 	PlanServiceRenameListProcedure = "/nanashi.v1.PlanService/RenameList"
+	// PlanServiceDeleteListProcedure is the fully-qualified name of the PlanService's DeleteList RPC.
+	PlanServiceDeleteListProcedure = "/nanashi.v1.PlanService/DeleteList"
 	// PlanServiceAddPropertyProcedure is the fully-qualified name of the PlanService's AddProperty RPC.
 	PlanServiceAddPropertyProcedure = "/nanashi.v1.PlanService/AddProperty"
 	// PlanServiceRenamePropertyProcedure is the fully-qualified name of the PlanService's
@@ -117,6 +119,9 @@ type PlanServiceClient interface {
 	// RenameList changes the name of a list. It also renames the Metric "<list>.<property>" of each NUMBER or
 	// BOOLEAN property.
 	RenameList(context.Context, *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error)
+	// DeleteList deletes a list with its members and properties. If a Metric, a view, a board or a DIMENSION
+	// property of another list uses the list, it gives FAILED_PRECONDITION.
+	DeleteList(context.Context, *connect.Request[v1.DeleteListRequest]) (*connect.Response[v1.Ack], error)
 	AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error)
 	// RenameProperty changes the name of a property. The name of a NUMBER or BOOLEAN property is also in the name
 	// of its Metric "<list>.<property>".
@@ -195,6 +200,12 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+PlanServiceRenameListProcedure,
 			connect.WithSchema(planServiceMethods.ByName("RenameList")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteList: connect.NewClient[v1.DeleteListRequest, v1.Ack](
+			httpClient,
+			baseURL+PlanServiceDeleteListProcedure,
+			connect.WithSchema(planServiceMethods.ByName("DeleteList")),
 			connect.WithClientOptions(opts...),
 		),
 		addProperty: connect.NewClient[v1.AddPropertyRequest, v1.Ack](
@@ -351,6 +362,7 @@ type planServiceClient struct {
 	getModel          *connect.Client[v1.GetModelRequest, v1.ModelDef]
 	createList        *connect.Client[v1.CreateListRequest, v1.Ack]
 	renameList        *connect.Client[v1.RenameListRequest, v1.Ack]
+	deleteList        *connect.Client[v1.DeleteListRequest, v1.Ack]
 	addProperty       *connect.Client[v1.AddPropertyRequest, v1.Ack]
 	renameProperty    *connect.Client[v1.RenamePropertyRequest, v1.Ack]
 	editMembers       *connect.Client[v1.EditMembersRequest, v1.Ack]
@@ -400,6 +412,11 @@ func (c *planServiceClient) CreateList(ctx context.Context, req *connect.Request
 // RenameList calls nanashi.v1.PlanService.RenameList.
 func (c *planServiceClient) RenameList(ctx context.Context, req *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error) {
 	return c.renameList.CallUnary(ctx, req)
+}
+
+// DeleteList calls nanashi.v1.PlanService.DeleteList.
+func (c *planServiceClient) DeleteList(ctx context.Context, req *connect.Request[v1.DeleteListRequest]) (*connect.Response[v1.Ack], error) {
+	return c.deleteList.CallUnary(ctx, req)
 }
 
 // AddProperty calls nanashi.v1.PlanService.AddProperty.
@@ -534,6 +551,9 @@ type PlanServiceHandler interface {
 	// RenameList changes the name of a list. It also renames the Metric "<list>.<property>" of each NUMBER or
 	// BOOLEAN property.
 	RenameList(context.Context, *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error)
+	// DeleteList deletes a list with its members and properties. If a Metric, a view, a board or a DIMENSION
+	// property of another list uses the list, it gives FAILED_PRECONDITION.
+	DeleteList(context.Context, *connect.Request[v1.DeleteListRequest]) (*connect.Response[v1.Ack], error)
 	AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error)
 	// RenameProperty changes the name of a property. The name of a NUMBER or BOOLEAN property is also in the name
 	// of its Metric "<list>.<property>".
@@ -608,6 +628,12 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		PlanServiceRenameListProcedure,
 		svc.RenameList,
 		connect.WithSchema(planServiceMethods.ByName("RenameList")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceDeleteListHandler := connect.NewUnaryHandler(
+		PlanServiceDeleteListProcedure,
+		svc.DeleteList,
+		connect.WithSchema(planServiceMethods.ByName("DeleteList")),
 		connect.WithHandlerOptions(opts...),
 	)
 	planServiceAddPropertyHandler := connect.NewUnaryHandler(
@@ -766,6 +792,8 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceCreateListHandler.ServeHTTP(w, r)
 		case PlanServiceRenameListProcedure:
 			planServiceRenameListHandler.ServeHTTP(w, r)
+		case PlanServiceDeleteListProcedure:
+			planServiceDeleteListHandler.ServeHTTP(w, r)
 		case PlanServiceAddPropertyProcedure:
 			planServiceAddPropertyHandler.ServeHTTP(w, r)
 		case PlanServiceRenamePropertyProcedure:
@@ -841,6 +869,10 @@ func (UnimplementedPlanServiceHandler) CreateList(context.Context, *connect.Requ
 
 func (UnimplementedPlanServiceHandler) RenameList(context.Context, *connect.Request[v1.RenameListRequest]) (*connect.Response[v1.Ack], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.RenameList is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) DeleteList(context.Context, *connect.Request[v1.DeleteListRequest]) (*connect.Response[v1.Ack], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.DeleteList is not implemented"))
 }
 
 func (UnimplementedPlanServiceHandler) AddProperty(context.Context, *connect.Request[v1.AddPropertyRequest]) (*connect.Response[v1.Ack], error) {

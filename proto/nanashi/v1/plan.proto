@@ -34,6 +34,9 @@ service PlanService {
   // RenameList changes the name of a list. It also renames the Metric "<list>.<property>" of each NUMBER or
   // BOOLEAN property.
   rpc RenameList(RenameListRequest) returns (Ack) {}
+  // DeleteList deletes a list with its members and properties. If a Metric, a view, a board or a DIMENSION
+  // property of another list uses the list, it gives FAILED_PRECONDITION.
+  rpc DeleteList(DeleteListRequest) returns (Ack) {}
   rpc AddProperty(AddPropertyRequest) returns (Ack) {}
   // RenameProperty changes the name of a property. The name of a NUMBER or BOOLEAN property is also in the name
   // of its Metric "<list>.<property>".
@@ -259,6 +262,21 @@ message RenameListRequest {
   ];
   string name = 3;
   string client_op_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+}
+
+message DeleteListRequest {
+  string app_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string id = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.(nanashi.v1.id) = true
+  ];
+  string client_op_id = 3 [
     (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
     (buf.validate.field).string.(nanashi.v1.id) = true
   ];

@@ -1247,6 +1247,66 @@ func (x *RenameListRequest) GetClientOpId() string {
 	return ""
 }
 
+type DeleteListRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	ClientOpId    string                 `protobuf:"bytes,3,opt,name=client_op_id,json=clientOpId,proto3" json:"client_op_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteListRequest) Reset() {
+	*x = DeleteListRequest{}
+	mi := &file_nanashi_v1_plan_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteListRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteListRequest) ProtoMessage() {}
+
+func (x *DeleteListRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nanashi_v1_plan_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteListRequest.ProtoReflect.Descriptor instead.
+func (*DeleteListRequest) Descriptor() ([]byte, []int) {
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *DeleteListRequest) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *DeleteListRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *DeleteListRequest) GetClientOpId() string {
+	if x != nil {
+		return x.ClientOpId
+	}
+	return ""
+}
+
 type AddPropertyRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
@@ -1261,7 +1321,7 @@ type AddPropertyRequest struct {
 
 func (x *AddPropertyRequest) Reset() {
 	*x = AddPropertyRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[14]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1273,7 +1333,7 @@ func (x *AddPropertyRequest) String() string {
 func (*AddPropertyRequest) ProtoMessage() {}
 
 func (x *AddPropertyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[14]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1286,7 +1346,7 @@ func (x *AddPropertyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddPropertyRequest.ProtoReflect.Descriptor instead.
 func (*AddPropertyRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{14}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *AddPropertyRequest) GetAppId() string {
@@ -1332,7 +1392,7 @@ type RenamePropertyRequest struct {
 
 func (x *RenamePropertyRequest) Reset() {
 	*x = RenamePropertyRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[15]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1344,7 +1404,7 @@ func (x *RenamePropertyRequest) String() string {
 func (*RenamePropertyRequest) ProtoMessage() {}
 
 func (x *RenamePropertyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[15]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1357,7 +1417,7 @@ func (x *RenamePropertyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenamePropertyRequest.ProtoReflect.Descriptor instead.
 func (*RenamePropertyRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{15}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RenamePropertyRequest) GetAppId() string {
@@ -1408,7 +1468,7 @@ type EditMembersRequest struct {
 
 func (x *EditMembersRequest) Reset() {
 	*x = EditMembersRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[16]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1420,7 +1480,7 @@ func (x *EditMembersRequest) String() string {
 func (*EditMembersRequest) ProtoMessage() {}
 
 func (x *EditMembersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[16]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1433,7 +1493,7 @@ func (x *EditMembersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EditMembersRequest.ProtoReflect.Descriptor instead.
 func (*EditMembersRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{16}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *EditMembersRequest) GetAppId() string {
@@ -1480,7 +1540,7 @@ type MemberEdit struct {
 
 func (x *MemberEdit) Reset() {
 	*x = MemberEdit{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[17]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1492,7 +1552,7 @@ func (x *MemberEdit) String() string {
 func (*MemberEdit) ProtoMessage() {}
 
 func (x *MemberEdit) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[17]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1505,7 +1565,7 @@ func (x *MemberEdit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MemberEdit.ProtoReflect.Descriptor instead.
 func (*MemberEdit) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{17}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *MemberEdit) GetEdit() isMemberEdit_Edit {
@@ -1606,7 +1666,7 @@ type AddMember struct {
 
 func (x *AddMember) Reset() {
 	*x = AddMember{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[18]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1618,7 +1678,7 @@ func (x *AddMember) String() string {
 func (*AddMember) ProtoMessage() {}
 
 func (x *AddMember) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[18]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1631,7 +1691,7 @@ func (x *AddMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddMember.ProtoReflect.Descriptor instead.
 func (*AddMember) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{18}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *AddMember) GetId() string {
@@ -1665,7 +1725,7 @@ type RenameMember struct {
 
 func (x *RenameMember) Reset() {
 	*x = RenameMember{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[19]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1677,7 +1737,7 @@ func (x *RenameMember) String() string {
 func (*RenameMember) ProtoMessage() {}
 
 func (x *RenameMember) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[19]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1690,7 +1750,7 @@ func (x *RenameMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenameMember.ProtoReflect.Descriptor instead.
 func (*RenameMember) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{19}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RenameMember) GetId() string {
@@ -1716,7 +1776,7 @@ type RemoveMember struct {
 
 func (x *RemoveMember) Reset() {
 	*x = RemoveMember{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[20]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1728,7 +1788,7 @@ func (x *RemoveMember) String() string {
 func (*RemoveMember) ProtoMessage() {}
 
 func (x *RemoveMember) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[20]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1741,7 +1801,7 @@ func (x *RemoveMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveMember.ProtoReflect.Descriptor instead.
 func (*RemoveMember) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{20}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RemoveMember) GetId() string {
@@ -1761,7 +1821,7 @@ type MoveMember struct {
 
 func (x *MoveMember) Reset() {
 	*x = MoveMember{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[21]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1773,7 +1833,7 @@ func (x *MoveMember) String() string {
 func (*MoveMember) ProtoMessage() {}
 
 func (x *MoveMember) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[21]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1786,7 +1846,7 @@ func (x *MoveMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MoveMember.ProtoReflect.Descriptor instead.
 func (*MoveMember) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{21}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *MoveMember) GetId() string {
@@ -1814,7 +1874,7 @@ type SetProperties struct {
 
 func (x *SetProperties) Reset() {
 	*x = SetProperties{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[22]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1826,7 +1886,7 @@ func (x *SetProperties) String() string {
 func (*SetProperties) ProtoMessage() {}
 
 func (x *SetProperties) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[22]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1839,7 +1899,7 @@ func (x *SetProperties) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetProperties.ProtoReflect.Descriptor instead.
 func (*SetProperties) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{22}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SetProperties) GetId() string {
@@ -1871,7 +1931,7 @@ type CreateCalendarRequest struct {
 
 func (x *CreateCalendarRequest) Reset() {
 	*x = CreateCalendarRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[23]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1883,7 +1943,7 @@ func (x *CreateCalendarRequest) String() string {
 func (*CreateCalendarRequest) ProtoMessage() {}
 
 func (x *CreateCalendarRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[23]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1896,7 +1956,7 @@ func (x *CreateCalendarRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateCalendarRequest.ProtoReflect.Descriptor instead.
 func (*CreateCalendarRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{23}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CreateCalendarRequest) GetAppId() string {
@@ -1942,7 +2002,7 @@ type CreateScenarioRequest struct {
 
 func (x *CreateScenarioRequest) Reset() {
 	*x = CreateScenarioRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[24]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1954,7 +2014,7 @@ func (x *CreateScenarioRequest) String() string {
 func (*CreateScenarioRequest) ProtoMessage() {}
 
 func (x *CreateScenarioRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[24]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1967,7 +2027,7 @@ func (x *CreateScenarioRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateScenarioRequest.ProtoReflect.Descriptor instead.
 func (*CreateScenarioRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{24}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *CreateScenarioRequest) GetAppId() string {
@@ -2017,7 +2077,7 @@ type CreateMetricRequest struct {
 
 func (x *CreateMetricRequest) Reset() {
 	*x = CreateMetricRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[25]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2029,7 +2089,7 @@ func (x *CreateMetricRequest) String() string {
 func (*CreateMetricRequest) ProtoMessage() {}
 
 func (x *CreateMetricRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[25]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2042,7 +2102,7 @@ func (x *CreateMetricRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateMetricRequest.ProtoReflect.Descriptor instead.
 func (*CreateMetricRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{25}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *CreateMetricRequest) GetAppId() string {
@@ -2077,7 +2137,7 @@ type UpdateMetricRequest struct {
 
 func (x *UpdateMetricRequest) Reset() {
 	*x = UpdateMetricRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[26]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2089,7 +2149,7 @@ func (x *UpdateMetricRequest) String() string {
 func (*UpdateMetricRequest) ProtoMessage() {}
 
 func (x *UpdateMetricRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[26]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2102,7 +2162,7 @@ func (x *UpdateMetricRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateMetricRequest.ProtoReflect.Descriptor instead.
 func (*UpdateMetricRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{26}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *UpdateMetricRequest) GetAppId() string {
@@ -2138,7 +2198,7 @@ type RenameMetricRequest struct {
 
 func (x *RenameMetricRequest) Reset() {
 	*x = RenameMetricRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[27]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2150,7 +2210,7 @@ func (x *RenameMetricRequest) String() string {
 func (*RenameMetricRequest) ProtoMessage() {}
 
 func (x *RenameMetricRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[27]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2163,7 +2223,7 @@ func (x *RenameMetricRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenameMetricRequest.ProtoReflect.Descriptor instead.
 func (*RenameMetricRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{27}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *RenameMetricRequest) GetAppId() string {
@@ -2205,7 +2265,7 @@ type DeleteMetricRequest struct {
 
 func (x *DeleteMetricRequest) Reset() {
 	*x = DeleteMetricRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[28]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2217,7 +2277,7 @@ func (x *DeleteMetricRequest) String() string {
 func (*DeleteMetricRequest) ProtoMessage() {}
 
 func (x *DeleteMetricRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[28]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2230,7 +2290,7 @@ func (x *DeleteMetricRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteMetricRequest.ProtoReflect.Descriptor instead.
 func (*DeleteMetricRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{28}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *DeleteMetricRequest) GetAppId() string {
@@ -2264,7 +2324,7 @@ type Members struct {
 
 func (x *Members) Reset() {
 	*x = Members{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[29]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2276,7 +2336,7 @@ func (x *Members) String() string {
 func (*Members) ProtoMessage() {}
 
 func (x *Members) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[29]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2289,7 +2349,7 @@ func (x *Members) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Members.ProtoReflect.Descriptor instead.
 func (*Members) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{29}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Members) GetIds() []string {
@@ -2313,7 +2373,7 @@ type Value struct {
 
 func (x *Value) Reset() {
 	*x = Value{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[30]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2325,7 +2385,7 @@ func (x *Value) String() string {
 func (*Value) ProtoMessage() {}
 
 func (x *Value) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[30]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2338,7 +2398,7 @@ func (x *Value) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Value.ProtoReflect.Descriptor instead.
 func (*Value) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{30}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Value) GetValue() isValue_Value {
@@ -2416,7 +2476,7 @@ type QueryRequest struct {
 
 func (x *QueryRequest) Reset() {
 	*x = QueryRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[31]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2428,7 +2488,7 @@ func (x *QueryRequest) String() string {
 func (*QueryRequest) ProtoMessage() {}
 
 func (x *QueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[31]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2441,7 +2501,7 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
 func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{31}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *QueryRequest) GetAppId() string {
@@ -2498,7 +2558,7 @@ type QueryCell struct {
 
 func (x *QueryCell) Reset() {
 	*x = QueryCell{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[32]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2510,7 +2570,7 @@ func (x *QueryCell) String() string {
 func (*QueryCell) ProtoMessage() {}
 
 func (x *QueryCell) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[32]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2523,7 +2583,7 @@ func (x *QueryCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryCell.ProtoReflect.Descriptor instead.
 func (*QueryCell) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{32}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *QueryCell) GetMetric() string {
@@ -2558,7 +2618,7 @@ type QueryResponse struct {
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[33]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2570,7 +2630,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[33]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2583,7 +2643,7 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{33}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *QueryResponse) GetDimensions() []string {
@@ -2613,7 +2673,7 @@ type CellWrite struct {
 
 func (x *CellWrite) Reset() {
 	*x = CellWrite{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[34]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2625,7 +2685,7 @@ func (x *CellWrite) String() string {
 func (*CellWrite) ProtoMessage() {}
 
 func (x *CellWrite) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[34]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2638,7 +2698,7 @@ func (x *CellWrite) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CellWrite.ProtoReflect.Descriptor instead.
 func (*CellWrite) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{34}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *CellWrite) GetMetric() string {
@@ -2673,7 +2733,7 @@ type WriteCellsRequest struct {
 
 func (x *WriteCellsRequest) Reset() {
 	*x = WriteCellsRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[35]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2685,7 +2745,7 @@ func (x *WriteCellsRequest) String() string {
 func (*WriteCellsRequest) ProtoMessage() {}
 
 func (x *WriteCellsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[35]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2698,7 +2758,7 @@ func (x *WriteCellsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteCellsRequest.ProtoReflect.Descriptor instead.
 func (*WriteCellsRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{35}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *WriteCellsRequest) GetAppId() string {
@@ -2739,7 +2799,7 @@ type ImportRequest struct {
 
 func (x *ImportRequest) Reset() {
 	*x = ImportRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[36]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2751,7 +2811,7 @@ func (x *ImportRequest) String() string {
 func (*ImportRequest) ProtoMessage() {}
 
 func (x *ImportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[36]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2764,7 +2824,7 @@ func (x *ImportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportRequest.ProtoReflect.Descriptor instead.
 func (*ImportRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{36}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ImportRequest) GetAppId() string {
@@ -2843,7 +2903,7 @@ type ListImport struct {
 
 func (x *ListImport) Reset() {
 	*x = ListImport{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[37]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2855,7 +2915,7 @@ func (x *ListImport) String() string {
 func (*ListImport) ProtoMessage() {}
 
 func (x *ListImport) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[37]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2868,7 +2928,7 @@ func (x *ListImport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListImport.ProtoReflect.Descriptor instead.
 func (*ListImport) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{37}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ListImport) GetList() string {
@@ -2907,7 +2967,7 @@ type MetricImport struct {
 
 func (x *MetricImport) Reset() {
 	*x = MetricImport{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[38]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2919,7 +2979,7 @@ func (x *MetricImport) String() string {
 func (*MetricImport) ProtoMessage() {}
 
 func (x *MetricImport) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[38]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2932,7 +2992,7 @@ func (x *MetricImport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricImport.ProtoReflect.Descriptor instead.
 func (*MetricImport) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{38}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *MetricImport) GetMetric() string {
@@ -2972,7 +3032,7 @@ type ImportResponse struct {
 
 func (x *ImportResponse) Reset() {
 	*x = ImportResponse{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[39]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2984,7 +3044,7 @@ func (x *ImportResponse) String() string {
 func (*ImportResponse) ProtoMessage() {}
 
 func (x *ImportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[39]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2997,7 +3057,7 @@ func (x *ImportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportResponse.ProtoReflect.Descriptor instead.
 func (*ImportResponse) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{39}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ImportResponse) GetRows() int32 {
@@ -3019,7 +3079,7 @@ type CreateTableRequest struct {
 
 func (x *CreateTableRequest) Reset() {
 	*x = CreateTableRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[40]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3031,7 +3091,7 @@ func (x *CreateTableRequest) String() string {
 func (*CreateTableRequest) ProtoMessage() {}
 
 func (x *CreateTableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[40]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3044,7 +3104,7 @@ func (x *CreateTableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateTableRequest.ProtoReflect.Descriptor instead.
 func (*CreateTableRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{40}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *CreateTableRequest) GetAppId() string {
@@ -3079,7 +3139,7 @@ type UpdateTableRequest struct {
 
 func (x *UpdateTableRequest) Reset() {
 	*x = UpdateTableRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[41]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3091,7 +3151,7 @@ func (x *UpdateTableRequest) String() string {
 func (*UpdateTableRequest) ProtoMessage() {}
 
 func (x *UpdateTableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[41]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3104,7 +3164,7 @@ func (x *UpdateTableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateTableRequest.ProtoReflect.Descriptor instead.
 func (*UpdateTableRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{41}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *UpdateTableRequest) GetAppId() string {
@@ -3141,7 +3201,7 @@ type TableDef struct {
 
 func (x *TableDef) Reset() {
 	*x = TableDef{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[42]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3153,7 +3213,7 @@ func (x *TableDef) String() string {
 func (*TableDef) ProtoMessage() {}
 
 func (x *TableDef) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[42]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3166,7 +3226,7 @@ func (x *TableDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TableDef.ProtoReflect.Descriptor instead.
 func (*TableDef) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{42}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *TableDef) GetAppId() string {
@@ -3210,7 +3270,7 @@ type CreateViewRequest struct {
 
 func (x *CreateViewRequest) Reset() {
 	*x = CreateViewRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[43]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3222,7 +3282,7 @@ func (x *CreateViewRequest) String() string {
 func (*CreateViewRequest) ProtoMessage() {}
 
 func (x *CreateViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[43]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3235,7 +3295,7 @@ func (x *CreateViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateViewRequest.ProtoReflect.Descriptor instead.
 func (*CreateViewRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{43}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *CreateViewRequest) GetAppId() string {
@@ -3270,7 +3330,7 @@ type UpdateViewRequest struct {
 
 func (x *UpdateViewRequest) Reset() {
 	*x = UpdateViewRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[44]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3282,7 +3342,7 @@ func (x *UpdateViewRequest) String() string {
 func (*UpdateViewRequest) ProtoMessage() {}
 
 func (x *UpdateViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[44]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3295,7 +3355,7 @@ func (x *UpdateViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateViewRequest.ProtoReflect.Descriptor instead.
 func (*UpdateViewRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{44}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *UpdateViewRequest) GetAppId() string {
@@ -3336,7 +3396,7 @@ type ViewDef struct {
 
 func (x *ViewDef) Reset() {
 	*x = ViewDef{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[45]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3348,7 +3408,7 @@ func (x *ViewDef) String() string {
 func (*ViewDef) ProtoMessage() {}
 
 func (x *ViewDef) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[45]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3361,7 +3421,7 @@ func (x *ViewDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ViewDef.ProtoReflect.Descriptor instead.
 func (*ViewDef) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{45}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ViewDef) GetAppId() string {
@@ -3440,7 +3500,7 @@ type Widget struct {
 
 func (x *Widget) Reset() {
 	*x = Widget{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[46]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3452,7 +3512,7 @@ func (x *Widget) String() string {
 func (*Widget) ProtoMessage() {}
 
 func (x *Widget) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[46]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3465,7 +3525,7 @@ func (x *Widget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Widget.ProtoReflect.Descriptor instead.
 func (*Widget) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{46}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *Widget) GetContent() isWidget_Content {
@@ -3521,7 +3581,7 @@ type CreateBoardRequest struct {
 
 func (x *CreateBoardRequest) Reset() {
 	*x = CreateBoardRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[47]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3533,7 +3593,7 @@ func (x *CreateBoardRequest) String() string {
 func (*CreateBoardRequest) ProtoMessage() {}
 
 func (x *CreateBoardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[47]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3546,7 +3606,7 @@ func (x *CreateBoardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateBoardRequest.ProtoReflect.Descriptor instead.
 func (*CreateBoardRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{47}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *CreateBoardRequest) GetAppId() string {
@@ -3581,7 +3641,7 @@ type UpdateBoardRequest struct {
 
 func (x *UpdateBoardRequest) Reset() {
 	*x = UpdateBoardRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[48]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3593,7 +3653,7 @@ func (x *UpdateBoardRequest) String() string {
 func (*UpdateBoardRequest) ProtoMessage() {}
 
 func (x *UpdateBoardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[48]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3606,7 +3666,7 @@ func (x *UpdateBoardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateBoardRequest.ProtoReflect.Descriptor instead.
 func (*UpdateBoardRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{48}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *UpdateBoardRequest) GetAppId() string {
@@ -3644,7 +3704,7 @@ type BoardDef struct {
 
 func (x *BoardDef) Reset() {
 	*x = BoardDef{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[49]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3656,7 +3716,7 @@ func (x *BoardDef) String() string {
 func (*BoardDef) ProtoMessage() {}
 
 func (x *BoardDef) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[49]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3669,7 +3729,7 @@ func (x *BoardDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoardDef.ProtoReflect.Descriptor instead.
 func (*BoardDef) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{49}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *BoardDef) GetAppId() string {
@@ -3719,7 +3779,7 @@ type DeleteItemRequest struct {
 
 func (x *DeleteItemRequest) Reset() {
 	*x = DeleteItemRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[50]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3731,7 +3791,7 @@ func (x *DeleteItemRequest) String() string {
 func (*DeleteItemRequest) ProtoMessage() {}
 
 func (x *DeleteItemRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[50]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3744,7 +3804,7 @@ func (x *DeleteItemRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteItemRequest.ProtoReflect.Descriptor instead.
 func (*DeleteItemRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{50}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *DeleteItemRequest) GetAppId() string {
@@ -3787,7 +3847,7 @@ type AddCommentRequest struct {
 
 func (x *AddCommentRequest) Reset() {
 	*x = AddCommentRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[51]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3799,7 +3859,7 @@ func (x *AddCommentRequest) String() string {
 func (*AddCommentRequest) ProtoMessage() {}
 
 func (x *AddCommentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[51]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3812,7 +3872,7 @@ func (x *AddCommentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddCommentRequest.ProtoReflect.Descriptor instead.
 func (*AddCommentRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{51}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *AddCommentRequest) GetAppId() string {
@@ -3854,7 +3914,7 @@ type Comment struct {
 
 func (x *Comment) Reset() {
 	*x = Comment{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[52]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3866,7 +3926,7 @@ func (x *Comment) String() string {
 func (*Comment) ProtoMessage() {}
 
 func (x *Comment) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[52]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3879,7 +3939,7 @@ func (x *Comment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Comment.ProtoReflect.Descriptor instead.
 func (*Comment) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{52}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *Comment) GetAppId() string {
@@ -3942,7 +4002,7 @@ type ListCommentsRequest struct {
 
 func (x *ListCommentsRequest) Reset() {
 	*x = ListCommentsRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[53]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3954,7 +4014,7 @@ func (x *ListCommentsRequest) String() string {
 func (*ListCommentsRequest) ProtoMessage() {}
 
 func (x *ListCommentsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[53]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3967,7 +4027,7 @@ func (x *ListCommentsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCommentsRequest.ProtoReflect.Descriptor instead.
 func (*ListCommentsRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{53}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ListCommentsRequest) GetAppId() string {
@@ -3993,7 +4053,7 @@ type ListCommentsResponse struct {
 
 func (x *ListCommentsResponse) Reset() {
 	*x = ListCommentsResponse{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4005,7 +4065,7 @@ func (x *ListCommentsResponse) String() string {
 func (*ListCommentsResponse) ProtoMessage() {}
 
 func (x *ListCommentsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[54]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4018,7 +4078,7 @@ func (x *ListCommentsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCommentsResponse.ProtoReflect.Descriptor instead.
 func (*ListCommentsResponse) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{54}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *ListCommentsResponse) GetComments() []*Comment {
@@ -4043,7 +4103,7 @@ type AuditEntry struct {
 
 func (x *AuditEntry) Reset() {
 	*x = AuditEntry{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[55]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4055,7 +4115,7 @@ func (x *AuditEntry) String() string {
 func (*AuditEntry) ProtoMessage() {}
 
 func (x *AuditEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[55]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4068,7 +4128,7 @@ func (x *AuditEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
 func (*AuditEntry) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{55}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *AuditEntry) GetId() string {
@@ -4116,7 +4176,7 @@ type ListAuditRequest struct {
 
 func (x *ListAuditRequest) Reset() {
 	*x = ListAuditRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[56]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4128,7 +4188,7 @@ func (x *ListAuditRequest) String() string {
 func (*ListAuditRequest) ProtoMessage() {}
 
 func (x *ListAuditRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[56]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4141,7 +4201,7 @@ func (x *ListAuditRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAuditRequest.ProtoReflect.Descriptor instead.
 func (*ListAuditRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{56}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *ListAuditRequest) GetAppId() string {
@@ -4167,7 +4227,7 @@ type ListAuditResponse struct {
 
 func (x *ListAuditResponse) Reset() {
 	*x = ListAuditResponse{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[57]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4179,7 +4239,7 @@ func (x *ListAuditResponse) String() string {
 func (*ListAuditResponse) ProtoMessage() {}
 
 func (x *ListAuditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[57]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4192,7 +4252,7 @@ func (x *ListAuditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAuditResponse.ProtoReflect.Descriptor instead.
 func (*ListAuditResponse) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{57}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *ListAuditResponse) GetEntries() []*AuditEntry {
@@ -4214,7 +4274,7 @@ type Snapshot struct {
 
 func (x *Snapshot) Reset() {
 	*x = Snapshot{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[58]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4226,7 +4286,7 @@ func (x *Snapshot) String() string {
 func (*Snapshot) ProtoMessage() {}
 
 func (x *Snapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[58]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4239,7 +4299,7 @@ func (x *Snapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
 func (*Snapshot) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{58}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *Snapshot) GetId() string {
@@ -4279,7 +4339,7 @@ type ListSnapshotsRequest struct {
 
 func (x *ListSnapshotsRequest) Reset() {
 	*x = ListSnapshotsRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[59]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4291,7 +4351,7 @@ func (x *ListSnapshotsRequest) String() string {
 func (*ListSnapshotsRequest) ProtoMessage() {}
 
 func (x *ListSnapshotsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[59]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4304,7 +4364,7 @@ func (x *ListSnapshotsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSnapshotsRequest.ProtoReflect.Descriptor instead.
 func (*ListSnapshotsRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{59}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ListSnapshotsRequest) GetAppId() string {
@@ -4323,7 +4383,7 @@ type ListSnapshotsResponse struct {
 
 func (x *ListSnapshotsResponse) Reset() {
 	*x = ListSnapshotsResponse{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[60]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4335,7 +4395,7 @@ func (x *ListSnapshotsResponse) String() string {
 func (*ListSnapshotsResponse) ProtoMessage() {}
 
 func (x *ListSnapshotsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[60]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4348,7 +4408,7 @@ func (x *ListSnapshotsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSnapshotsResponse.ProtoReflect.Descriptor instead.
 func (*ListSnapshotsResponse) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{60}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ListSnapshotsResponse) GetSnapshots() []*Snapshot {
@@ -4371,7 +4431,7 @@ type CreateSnapshotRequest struct {
 
 func (x *CreateSnapshotRequest) Reset() {
 	*x = CreateSnapshotRequest{}
-	mi := &file_nanashi_v1_plan_proto_msgTypes[61]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4383,7 +4443,7 @@ func (x *CreateSnapshotRequest) String() string {
 func (*CreateSnapshotRequest) ProtoMessage() {}
 
 func (x *CreateSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nanashi_v1_plan_proto_msgTypes[61]
+	mi := &file_nanashi_v1_plan_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4396,7 +4456,7 @@ func (x *CreateSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*CreateSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{61}
+	return file_nanashi_v1_plan_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *CreateSnapshotRequest) GetAppId() string {
@@ -4510,6 +4570,11 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x02id\x18\x02 \x01(\tB\v\xbaH\b\xd8\x01\x01r\x03\xc0>\x01R\x02id\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12-\n" +
 	"\fclient_op_id\x18\x04 \x01(\tB\v\xbaH\b\xd8\x01\x01r\x03\xc0>\x01R\n" +
+	"clientOpId\"\x83\x01\n" +
+	"\x11DeleteListRequest\x12\"\n" +
+	"\x06app_id\x18\x01 \x01(\tB\v\xbaH\b\xd8\x01\x01r\x03\xc0>\x01R\x05appId\x12\x1b\n" +
+	"\x02id\x18\x02 \x01(\tB\v\xbaH\b\xd8\x01\x01r\x03\xc0>\x01R\x02id\x12-\n" +
+	"\fclient_op_id\x18\x03 \x01(\tB\v\xbaH\b\xd8\x01\x01r\x03\xc0>\x01R\n" +
 	"clientOpId\"\xbd\x01\n" +
 	"\x12AddPropertyRequest\x12\"\n" +
 	"\x06app_id\x18\x01 \x01(\tB\v\xbaH\b\xd8\x01\x01r\x03\xc0>\x01R\x05appId\x12\x1f\n" +
@@ -4829,7 +4894,7 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\x15ITEM_TYPE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fITEM_TYPE_TABLE\x10\x01\x12\x12\n" +
 	"\x0eITEM_TYPE_VIEW\x10\x02\x12\x13\n" +
-	"\x0fITEM_TYPE_BOARD\x10\x032\x86\x10\n" +
+	"\x0fITEM_TYPE_BOARD\x10\x032\xc6\x10\n" +
 	"\vPlanService\x12_\n" +
 	"\x10ListApplications\x12#.nanashi.v1.ListApplicationsRequest\x1a$.nanashi.v1.ListApplicationsResponse\"\x00\x12T\n" +
 	"\x11CreateApplication\x12$.nanashi.v1.CreateApplicationRequest\x1a\x17.nanashi.v1.Application\"\x00\x12?\n" +
@@ -4837,7 +4902,9 @@ const file_nanashi_v1_plan_proto_rawDesc = "" +
 	"\n" +
 	"CreateList\x12\x1d.nanashi.v1.CreateListRequest\x1a\x0f.nanashi.v1.Ack\"\x00\x12>\n" +
 	"\n" +
-	"RenameList\x12\x1d.nanashi.v1.RenameListRequest\x1a\x0f.nanashi.v1.Ack\"\x00\x12@\n" +
+	"RenameList\x12\x1d.nanashi.v1.RenameListRequest\x1a\x0f.nanashi.v1.Ack\"\x00\x12>\n" +
+	"\n" +
+	"DeleteList\x12\x1d.nanashi.v1.DeleteListRequest\x1a\x0f.nanashi.v1.Ack\"\x00\x12@\n" +
 	"\vAddProperty\x12\x1e.nanashi.v1.AddPropertyRequest\x1a\x0f.nanashi.v1.Ack\"\x00\x12F\n" +
 	"\x0eRenameProperty\x12!.nanashi.v1.RenamePropertyRequest\x1a\x0f.nanashi.v1.Ack\"\x00\x12@\n" +
 	"\vEditMembers\x12\x1e.nanashi.v1.EditMembersRequest\x1a\x0f.nanashi.v1.Ack\"\x00\x12F\n" +
@@ -4881,7 +4948,7 @@ func file_nanashi_v1_plan_proto_rawDescGZIP() []byte {
 }
 
 var file_nanashi_v1_plan_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_nanashi_v1_plan_proto_msgTypes = make([]protoimpl.MessageInfo, 71)
+var file_nanashi_v1_plan_proto_msgTypes = make([]protoimpl.MessageInfo, 72)
 var file_nanashi_v1_plan_proto_goTypes = []any{
 	(ListKind)(0),                    // 0: nanashi.v1.ListKind
 	(PropertyType)(0),                // 1: nanashi.v1.PropertyType
@@ -4903,179 +4970,182 @@ var file_nanashi_v1_plan_proto_goTypes = []any{
 	(*NewMember)(nil),                // 17: nanashi.v1.NewMember
 	(*CreateListRequest)(nil),        // 18: nanashi.v1.CreateListRequest
 	(*RenameListRequest)(nil),        // 19: nanashi.v1.RenameListRequest
-	(*AddPropertyRequest)(nil),       // 20: nanashi.v1.AddPropertyRequest
-	(*RenamePropertyRequest)(nil),    // 21: nanashi.v1.RenamePropertyRequest
-	(*EditMembersRequest)(nil),       // 22: nanashi.v1.EditMembersRequest
-	(*MemberEdit)(nil),               // 23: nanashi.v1.MemberEdit
-	(*AddMember)(nil),                // 24: nanashi.v1.AddMember
-	(*RenameMember)(nil),             // 25: nanashi.v1.RenameMember
-	(*RemoveMember)(nil),             // 26: nanashi.v1.RemoveMember
-	(*MoveMember)(nil),               // 27: nanashi.v1.MoveMember
-	(*SetProperties)(nil),            // 28: nanashi.v1.SetProperties
-	(*CreateCalendarRequest)(nil),    // 29: nanashi.v1.CreateCalendarRequest
-	(*CreateScenarioRequest)(nil),    // 30: nanashi.v1.CreateScenarioRequest
-	(*CreateMetricRequest)(nil),      // 31: nanashi.v1.CreateMetricRequest
-	(*UpdateMetricRequest)(nil),      // 32: nanashi.v1.UpdateMetricRequest
-	(*RenameMetricRequest)(nil),      // 33: nanashi.v1.RenameMetricRequest
-	(*DeleteMetricRequest)(nil),      // 34: nanashi.v1.DeleteMetricRequest
-	(*Members)(nil),                  // 35: nanashi.v1.Members
-	(*Value)(nil),                    // 36: nanashi.v1.Value
-	(*QueryRequest)(nil),             // 37: nanashi.v1.QueryRequest
-	(*QueryCell)(nil),                // 38: nanashi.v1.QueryCell
-	(*QueryResponse)(nil),            // 39: nanashi.v1.QueryResponse
-	(*CellWrite)(nil),                // 40: nanashi.v1.CellWrite
-	(*WriteCellsRequest)(nil),        // 41: nanashi.v1.WriteCellsRequest
-	(*ImportRequest)(nil),            // 42: nanashi.v1.ImportRequest
-	(*ListImport)(nil),               // 43: nanashi.v1.ListImport
-	(*MetricImport)(nil),             // 44: nanashi.v1.MetricImport
-	(*ImportResponse)(nil),           // 45: nanashi.v1.ImportResponse
-	(*CreateTableRequest)(nil),       // 46: nanashi.v1.CreateTableRequest
-	(*UpdateTableRequest)(nil),       // 47: nanashi.v1.UpdateTableRequest
-	(*TableDef)(nil),                 // 48: nanashi.v1.TableDef
-	(*CreateViewRequest)(nil),        // 49: nanashi.v1.CreateViewRequest
-	(*UpdateViewRequest)(nil),        // 50: nanashi.v1.UpdateViewRequest
-	(*ViewDef)(nil),                  // 51: nanashi.v1.ViewDef
-	(*Widget)(nil),                   // 52: nanashi.v1.Widget
-	(*CreateBoardRequest)(nil),       // 53: nanashi.v1.CreateBoardRequest
-	(*UpdateBoardRequest)(nil),       // 54: nanashi.v1.UpdateBoardRequest
-	(*BoardDef)(nil),                 // 55: nanashi.v1.BoardDef
-	(*DeleteItemRequest)(nil),        // 56: nanashi.v1.DeleteItemRequest
-	(*AddCommentRequest)(nil),        // 57: nanashi.v1.AddCommentRequest
-	(*Comment)(nil),                  // 58: nanashi.v1.Comment
-	(*ListCommentsRequest)(nil),      // 59: nanashi.v1.ListCommentsRequest
-	(*ListCommentsResponse)(nil),     // 60: nanashi.v1.ListCommentsResponse
-	(*AuditEntry)(nil),               // 61: nanashi.v1.AuditEntry
-	(*ListAuditRequest)(nil),         // 62: nanashi.v1.ListAuditRequest
-	(*ListAuditResponse)(nil),        // 63: nanashi.v1.ListAuditResponse
-	(*Snapshot)(nil),                 // 64: nanashi.v1.Snapshot
-	(*ListSnapshotsRequest)(nil),     // 65: nanashi.v1.ListSnapshotsRequest
-	(*ListSnapshotsResponse)(nil),    // 66: nanashi.v1.ListSnapshotsResponse
-	(*CreateSnapshotRequest)(nil),    // 67: nanashi.v1.CreateSnapshotRequest
-	nil,                              // 68: nanashi.v1.Member.PropertiesEntry
-	nil,                              // 69: nanashi.v1.AddMember.PropertiesEntry
-	nil,                              // 70: nanashi.v1.SetProperties.PropertiesEntry
-	nil,                              // 71: nanashi.v1.QueryRequest.FiltersEntry
-	nil,                              // 72: nanashi.v1.CellWrite.CoordsEntry
-	nil,                              // 73: nanashi.v1.ListImport.PropertyColumnsEntry
-	nil,                              // 74: nanashi.v1.MetricImport.DimensionColumnsEntry
-	nil,                              // 75: nanashi.v1.ViewDef.FiltersEntry
-	nil,                              // 76: nanashi.v1.Comment.CellEntry
+	(*DeleteListRequest)(nil),        // 20: nanashi.v1.DeleteListRequest
+	(*AddPropertyRequest)(nil),       // 21: nanashi.v1.AddPropertyRequest
+	(*RenamePropertyRequest)(nil),    // 22: nanashi.v1.RenamePropertyRequest
+	(*EditMembersRequest)(nil),       // 23: nanashi.v1.EditMembersRequest
+	(*MemberEdit)(nil),               // 24: nanashi.v1.MemberEdit
+	(*AddMember)(nil),                // 25: nanashi.v1.AddMember
+	(*RenameMember)(nil),             // 26: nanashi.v1.RenameMember
+	(*RemoveMember)(nil),             // 27: nanashi.v1.RemoveMember
+	(*MoveMember)(nil),               // 28: nanashi.v1.MoveMember
+	(*SetProperties)(nil),            // 29: nanashi.v1.SetProperties
+	(*CreateCalendarRequest)(nil),    // 30: nanashi.v1.CreateCalendarRequest
+	(*CreateScenarioRequest)(nil),    // 31: nanashi.v1.CreateScenarioRequest
+	(*CreateMetricRequest)(nil),      // 32: nanashi.v1.CreateMetricRequest
+	(*UpdateMetricRequest)(nil),      // 33: nanashi.v1.UpdateMetricRequest
+	(*RenameMetricRequest)(nil),      // 34: nanashi.v1.RenameMetricRequest
+	(*DeleteMetricRequest)(nil),      // 35: nanashi.v1.DeleteMetricRequest
+	(*Members)(nil),                  // 36: nanashi.v1.Members
+	(*Value)(nil),                    // 37: nanashi.v1.Value
+	(*QueryRequest)(nil),             // 38: nanashi.v1.QueryRequest
+	(*QueryCell)(nil),                // 39: nanashi.v1.QueryCell
+	(*QueryResponse)(nil),            // 40: nanashi.v1.QueryResponse
+	(*CellWrite)(nil),                // 41: nanashi.v1.CellWrite
+	(*WriteCellsRequest)(nil),        // 42: nanashi.v1.WriteCellsRequest
+	(*ImportRequest)(nil),            // 43: nanashi.v1.ImportRequest
+	(*ListImport)(nil),               // 44: nanashi.v1.ListImport
+	(*MetricImport)(nil),             // 45: nanashi.v1.MetricImport
+	(*ImportResponse)(nil),           // 46: nanashi.v1.ImportResponse
+	(*CreateTableRequest)(nil),       // 47: nanashi.v1.CreateTableRequest
+	(*UpdateTableRequest)(nil),       // 48: nanashi.v1.UpdateTableRequest
+	(*TableDef)(nil),                 // 49: nanashi.v1.TableDef
+	(*CreateViewRequest)(nil),        // 50: nanashi.v1.CreateViewRequest
+	(*UpdateViewRequest)(nil),        // 51: nanashi.v1.UpdateViewRequest
+	(*ViewDef)(nil),                  // 52: nanashi.v1.ViewDef
+	(*Widget)(nil),                   // 53: nanashi.v1.Widget
+	(*CreateBoardRequest)(nil),       // 54: nanashi.v1.CreateBoardRequest
+	(*UpdateBoardRequest)(nil),       // 55: nanashi.v1.UpdateBoardRequest
+	(*BoardDef)(nil),                 // 56: nanashi.v1.BoardDef
+	(*DeleteItemRequest)(nil),        // 57: nanashi.v1.DeleteItemRequest
+	(*AddCommentRequest)(nil),        // 58: nanashi.v1.AddCommentRequest
+	(*Comment)(nil),                  // 59: nanashi.v1.Comment
+	(*ListCommentsRequest)(nil),      // 60: nanashi.v1.ListCommentsRequest
+	(*ListCommentsResponse)(nil),     // 61: nanashi.v1.ListCommentsResponse
+	(*AuditEntry)(nil),               // 62: nanashi.v1.AuditEntry
+	(*ListAuditRequest)(nil),         // 63: nanashi.v1.ListAuditRequest
+	(*ListAuditResponse)(nil),        // 64: nanashi.v1.ListAuditResponse
+	(*Snapshot)(nil),                 // 65: nanashi.v1.Snapshot
+	(*ListSnapshotsRequest)(nil),     // 66: nanashi.v1.ListSnapshotsRequest
+	(*ListSnapshotsResponse)(nil),    // 67: nanashi.v1.ListSnapshotsResponse
+	(*CreateSnapshotRequest)(nil),    // 68: nanashi.v1.CreateSnapshotRequest
+	nil,                              // 69: nanashi.v1.Member.PropertiesEntry
+	nil,                              // 70: nanashi.v1.AddMember.PropertiesEntry
+	nil,                              // 71: nanashi.v1.SetProperties.PropertiesEntry
+	nil,                              // 72: nanashi.v1.QueryRequest.FiltersEntry
+	nil,                              // 73: nanashi.v1.CellWrite.CoordsEntry
+	nil,                              // 74: nanashi.v1.ListImport.PropertyColumnsEntry
+	nil,                              // 75: nanashi.v1.MetricImport.DimensionColumnsEntry
+	nil,                              // 76: nanashi.v1.ViewDef.FiltersEntry
+	nil,                              // 77: nanashi.v1.Comment.CellEntry
 }
 var file_nanashi_v1_plan_proto_depIdxs = []int32{
 	7,  // 0: nanashi.v1.ListApplicationsResponse.applications:type_name -> nanashi.v1.Application
 	1,  // 1: nanashi.v1.PropertyDef.type:type_name -> nanashi.v1.PropertyType
-	68, // 2: nanashi.v1.Member.properties:type_name -> nanashi.v1.Member.PropertiesEntry
+	69, // 2: nanashi.v1.Member.properties:type_name -> nanashi.v1.Member.PropertiesEntry
 	0,  // 3: nanashi.v1.ListDef.kind:type_name -> nanashi.v1.ListKind
 	13, // 4: nanashi.v1.ListDef.members:type_name -> nanashi.v1.Member
 	12, // 5: nanashi.v1.ListDef.properties:type_name -> nanashi.v1.PropertyDef
 	2,  // 6: nanashi.v1.MetricDef.kind:type_name -> nanashi.v1.ValueKind
 	14, // 7: nanashi.v1.ModelDef.lists:type_name -> nanashi.v1.ListDef
 	15, // 8: nanashi.v1.ModelDef.metrics:type_name -> nanashi.v1.MetricDef
-	48, // 9: nanashi.v1.ModelDef.tables:type_name -> nanashi.v1.TableDef
-	51, // 10: nanashi.v1.ModelDef.views:type_name -> nanashi.v1.ViewDef
-	55, // 11: nanashi.v1.ModelDef.boards:type_name -> nanashi.v1.BoardDef
+	49, // 9: nanashi.v1.ModelDef.tables:type_name -> nanashi.v1.TableDef
+	52, // 10: nanashi.v1.ModelDef.views:type_name -> nanashi.v1.ViewDef
+	56, // 11: nanashi.v1.ModelDef.boards:type_name -> nanashi.v1.BoardDef
 	0,  // 12: nanashi.v1.CreateListRequest.kind:type_name -> nanashi.v1.ListKind
 	17, // 13: nanashi.v1.CreateListRequest.members:type_name -> nanashi.v1.NewMember
 	12, // 14: nanashi.v1.AddPropertyRequest.property:type_name -> nanashi.v1.PropertyDef
-	23, // 15: nanashi.v1.EditMembersRequest.edits:type_name -> nanashi.v1.MemberEdit
-	24, // 16: nanashi.v1.MemberEdit.add:type_name -> nanashi.v1.AddMember
-	25, // 17: nanashi.v1.MemberEdit.rename:type_name -> nanashi.v1.RenameMember
-	26, // 18: nanashi.v1.MemberEdit.remove:type_name -> nanashi.v1.RemoveMember
-	27, // 19: nanashi.v1.MemberEdit.move:type_name -> nanashi.v1.MoveMember
-	28, // 20: nanashi.v1.MemberEdit.set:type_name -> nanashi.v1.SetProperties
-	69, // 21: nanashi.v1.AddMember.properties:type_name -> nanashi.v1.AddMember.PropertiesEntry
-	70, // 22: nanashi.v1.SetProperties.properties:type_name -> nanashi.v1.SetProperties.PropertiesEntry
+	24, // 15: nanashi.v1.EditMembersRequest.edits:type_name -> nanashi.v1.MemberEdit
+	25, // 16: nanashi.v1.MemberEdit.add:type_name -> nanashi.v1.AddMember
+	26, // 17: nanashi.v1.MemberEdit.rename:type_name -> nanashi.v1.RenameMember
+	27, // 18: nanashi.v1.MemberEdit.remove:type_name -> nanashi.v1.RemoveMember
+	28, // 19: nanashi.v1.MemberEdit.move:type_name -> nanashi.v1.MoveMember
+	29, // 20: nanashi.v1.MemberEdit.set:type_name -> nanashi.v1.SetProperties
+	70, // 21: nanashi.v1.AddMember.properties:type_name -> nanashi.v1.AddMember.PropertiesEntry
+	71, // 22: nanashi.v1.SetProperties.properties:type_name -> nanashi.v1.SetProperties.PropertiesEntry
 	15, // 23: nanashi.v1.CreateMetricRequest.metric:type_name -> nanashi.v1.MetricDef
 	15, // 24: nanashi.v1.UpdateMetricRequest.metric:type_name -> nanashi.v1.MetricDef
-	71, // 25: nanashi.v1.QueryRequest.filters:type_name -> nanashi.v1.QueryRequest.FiltersEntry
+	72, // 25: nanashi.v1.QueryRequest.filters:type_name -> nanashi.v1.QueryRequest.FiltersEntry
 	3,  // 26: nanashi.v1.QueryRequest.aggregation:type_name -> nanashi.v1.Aggregation
-	36, // 27: nanashi.v1.QueryCell.value:type_name -> nanashi.v1.Value
-	38, // 28: nanashi.v1.QueryResponse.cells:type_name -> nanashi.v1.QueryCell
-	72, // 29: nanashi.v1.CellWrite.coords:type_name -> nanashi.v1.CellWrite.CoordsEntry
-	36, // 30: nanashi.v1.CellWrite.value:type_name -> nanashi.v1.Value
-	40, // 31: nanashi.v1.WriteCellsRequest.writes:type_name -> nanashi.v1.CellWrite
-	43, // 32: nanashi.v1.ImportRequest.list:type_name -> nanashi.v1.ListImport
-	44, // 33: nanashi.v1.ImportRequest.metric:type_name -> nanashi.v1.MetricImport
-	73, // 34: nanashi.v1.ListImport.property_columns:type_name -> nanashi.v1.ListImport.PropertyColumnsEntry
-	74, // 35: nanashi.v1.MetricImport.dimension_columns:type_name -> nanashi.v1.MetricImport.DimensionColumnsEntry
-	48, // 36: nanashi.v1.CreateTableRequest.table:type_name -> nanashi.v1.TableDef
-	48, // 37: nanashi.v1.UpdateTableRequest.table:type_name -> nanashi.v1.TableDef
-	51, // 38: nanashi.v1.CreateViewRequest.view:type_name -> nanashi.v1.ViewDef
-	51, // 39: nanashi.v1.UpdateViewRequest.view:type_name -> nanashi.v1.ViewDef
-	75, // 40: nanashi.v1.ViewDef.filters:type_name -> nanashi.v1.ViewDef.FiltersEntry
+	37, // 27: nanashi.v1.QueryCell.value:type_name -> nanashi.v1.Value
+	39, // 28: nanashi.v1.QueryResponse.cells:type_name -> nanashi.v1.QueryCell
+	73, // 29: nanashi.v1.CellWrite.coords:type_name -> nanashi.v1.CellWrite.CoordsEntry
+	37, // 30: nanashi.v1.CellWrite.value:type_name -> nanashi.v1.Value
+	41, // 31: nanashi.v1.WriteCellsRequest.writes:type_name -> nanashi.v1.CellWrite
+	44, // 32: nanashi.v1.ImportRequest.list:type_name -> nanashi.v1.ListImport
+	45, // 33: nanashi.v1.ImportRequest.metric:type_name -> nanashi.v1.MetricImport
+	74, // 34: nanashi.v1.ListImport.property_columns:type_name -> nanashi.v1.ListImport.PropertyColumnsEntry
+	75, // 35: nanashi.v1.MetricImport.dimension_columns:type_name -> nanashi.v1.MetricImport.DimensionColumnsEntry
+	49, // 36: nanashi.v1.CreateTableRequest.table:type_name -> nanashi.v1.TableDef
+	49, // 37: nanashi.v1.UpdateTableRequest.table:type_name -> nanashi.v1.TableDef
+	52, // 38: nanashi.v1.CreateViewRequest.view:type_name -> nanashi.v1.ViewDef
+	52, // 39: nanashi.v1.UpdateViewRequest.view:type_name -> nanashi.v1.ViewDef
+	76, // 40: nanashi.v1.ViewDef.filters:type_name -> nanashi.v1.ViewDef.FiltersEntry
 	4,  // 41: nanashi.v1.ViewDef.display:type_name -> nanashi.v1.Display
 	3,  // 42: nanashi.v1.ViewDef.aggregation:type_name -> nanashi.v1.Aggregation
-	55, // 43: nanashi.v1.CreateBoardRequest.board:type_name -> nanashi.v1.BoardDef
-	55, // 44: nanashi.v1.UpdateBoardRequest.board:type_name -> nanashi.v1.BoardDef
-	52, // 45: nanashi.v1.BoardDef.widgets:type_name -> nanashi.v1.Widget
+	56, // 43: nanashi.v1.CreateBoardRequest.board:type_name -> nanashi.v1.BoardDef
+	56, // 44: nanashi.v1.UpdateBoardRequest.board:type_name -> nanashi.v1.BoardDef
+	53, // 45: nanashi.v1.BoardDef.widgets:type_name -> nanashi.v1.Widget
 	5,  // 46: nanashi.v1.DeleteItemRequest.type:type_name -> nanashi.v1.ItemType
-	58, // 47: nanashi.v1.AddCommentRequest.comment:type_name -> nanashi.v1.Comment
-	76, // 48: nanashi.v1.Comment.cell:type_name -> nanashi.v1.Comment.CellEntry
-	58, // 49: nanashi.v1.ListCommentsResponse.comments:type_name -> nanashi.v1.Comment
-	61, // 50: nanashi.v1.ListAuditResponse.entries:type_name -> nanashi.v1.AuditEntry
-	64, // 51: nanashi.v1.ListSnapshotsResponse.snapshots:type_name -> nanashi.v1.Snapshot
-	35, // 52: nanashi.v1.QueryRequest.FiltersEntry.value:type_name -> nanashi.v1.Members
-	35, // 53: nanashi.v1.ViewDef.FiltersEntry.value:type_name -> nanashi.v1.Members
+	59, // 47: nanashi.v1.AddCommentRequest.comment:type_name -> nanashi.v1.Comment
+	77, // 48: nanashi.v1.Comment.cell:type_name -> nanashi.v1.Comment.CellEntry
+	59, // 49: nanashi.v1.ListCommentsResponse.comments:type_name -> nanashi.v1.Comment
+	62, // 50: nanashi.v1.ListAuditResponse.entries:type_name -> nanashi.v1.AuditEntry
+	65, // 51: nanashi.v1.ListSnapshotsResponse.snapshots:type_name -> nanashi.v1.Snapshot
+	36, // 52: nanashi.v1.QueryRequest.FiltersEntry.value:type_name -> nanashi.v1.Members
+	36, // 53: nanashi.v1.ViewDef.FiltersEntry.value:type_name -> nanashi.v1.Members
 	8,  // 54: nanashi.v1.PlanService.ListApplications:input_type -> nanashi.v1.ListApplicationsRequest
 	10, // 55: nanashi.v1.PlanService.CreateApplication:input_type -> nanashi.v1.CreateApplicationRequest
 	11, // 56: nanashi.v1.PlanService.GetModel:input_type -> nanashi.v1.GetModelRequest
 	18, // 57: nanashi.v1.PlanService.CreateList:input_type -> nanashi.v1.CreateListRequest
 	19, // 58: nanashi.v1.PlanService.RenameList:input_type -> nanashi.v1.RenameListRequest
-	20, // 59: nanashi.v1.PlanService.AddProperty:input_type -> nanashi.v1.AddPropertyRequest
-	21, // 60: nanashi.v1.PlanService.RenameProperty:input_type -> nanashi.v1.RenamePropertyRequest
-	22, // 61: nanashi.v1.PlanService.EditMembers:input_type -> nanashi.v1.EditMembersRequest
-	29, // 62: nanashi.v1.PlanService.CreateCalendar:input_type -> nanashi.v1.CreateCalendarRequest
-	30, // 63: nanashi.v1.PlanService.CreateScenario:input_type -> nanashi.v1.CreateScenarioRequest
-	31, // 64: nanashi.v1.PlanService.CreateMetric:input_type -> nanashi.v1.CreateMetricRequest
-	32, // 65: nanashi.v1.PlanService.UpdateMetric:input_type -> nanashi.v1.UpdateMetricRequest
-	33, // 66: nanashi.v1.PlanService.RenameMetric:input_type -> nanashi.v1.RenameMetricRequest
-	34, // 67: nanashi.v1.PlanService.DeleteMetric:input_type -> nanashi.v1.DeleteMetricRequest
-	37, // 68: nanashi.v1.PlanService.Query:input_type -> nanashi.v1.QueryRequest
-	41, // 69: nanashi.v1.PlanService.WriteCells:input_type -> nanashi.v1.WriteCellsRequest
-	42, // 70: nanashi.v1.PlanService.Import:input_type -> nanashi.v1.ImportRequest
-	46, // 71: nanashi.v1.PlanService.CreateTable:input_type -> nanashi.v1.CreateTableRequest
-	47, // 72: nanashi.v1.PlanService.UpdateTable:input_type -> nanashi.v1.UpdateTableRequest
-	49, // 73: nanashi.v1.PlanService.CreateView:input_type -> nanashi.v1.CreateViewRequest
-	50, // 74: nanashi.v1.PlanService.UpdateView:input_type -> nanashi.v1.UpdateViewRequest
-	53, // 75: nanashi.v1.PlanService.CreateBoard:input_type -> nanashi.v1.CreateBoardRequest
-	54, // 76: nanashi.v1.PlanService.UpdateBoard:input_type -> nanashi.v1.UpdateBoardRequest
-	56, // 77: nanashi.v1.PlanService.DeleteItem:input_type -> nanashi.v1.DeleteItemRequest
-	59, // 78: nanashi.v1.PlanService.ListComments:input_type -> nanashi.v1.ListCommentsRequest
-	57, // 79: nanashi.v1.PlanService.AddComment:input_type -> nanashi.v1.AddCommentRequest
-	62, // 80: nanashi.v1.PlanService.ListAudit:input_type -> nanashi.v1.ListAuditRequest
-	65, // 81: nanashi.v1.PlanService.ListSnapshots:input_type -> nanashi.v1.ListSnapshotsRequest
-	67, // 82: nanashi.v1.PlanService.CreateSnapshot:input_type -> nanashi.v1.CreateSnapshotRequest
-	9,  // 83: nanashi.v1.PlanService.ListApplications:output_type -> nanashi.v1.ListApplicationsResponse
-	7,  // 84: nanashi.v1.PlanService.CreateApplication:output_type -> nanashi.v1.Application
-	16, // 85: nanashi.v1.PlanService.GetModel:output_type -> nanashi.v1.ModelDef
-	6,  // 86: nanashi.v1.PlanService.CreateList:output_type -> nanashi.v1.Ack
-	6,  // 87: nanashi.v1.PlanService.RenameList:output_type -> nanashi.v1.Ack
-	6,  // 88: nanashi.v1.PlanService.AddProperty:output_type -> nanashi.v1.Ack
-	6,  // 89: nanashi.v1.PlanService.RenameProperty:output_type -> nanashi.v1.Ack
-	6,  // 90: nanashi.v1.PlanService.EditMembers:output_type -> nanashi.v1.Ack
-	6,  // 91: nanashi.v1.PlanService.CreateCalendar:output_type -> nanashi.v1.Ack
-	6,  // 92: nanashi.v1.PlanService.CreateScenario:output_type -> nanashi.v1.Ack
-	6,  // 93: nanashi.v1.PlanService.CreateMetric:output_type -> nanashi.v1.Ack
-	6,  // 94: nanashi.v1.PlanService.UpdateMetric:output_type -> nanashi.v1.Ack
-	6,  // 95: nanashi.v1.PlanService.RenameMetric:output_type -> nanashi.v1.Ack
-	6,  // 96: nanashi.v1.PlanService.DeleteMetric:output_type -> nanashi.v1.Ack
-	39, // 97: nanashi.v1.PlanService.Query:output_type -> nanashi.v1.QueryResponse
-	6,  // 98: nanashi.v1.PlanService.WriteCells:output_type -> nanashi.v1.Ack
-	45, // 99: nanashi.v1.PlanService.Import:output_type -> nanashi.v1.ImportResponse
-	6,  // 100: nanashi.v1.PlanService.CreateTable:output_type -> nanashi.v1.Ack
-	6,  // 101: nanashi.v1.PlanService.UpdateTable:output_type -> nanashi.v1.Ack
-	6,  // 102: nanashi.v1.PlanService.CreateView:output_type -> nanashi.v1.Ack
-	6,  // 103: nanashi.v1.PlanService.UpdateView:output_type -> nanashi.v1.Ack
-	6,  // 104: nanashi.v1.PlanService.CreateBoard:output_type -> nanashi.v1.Ack
-	6,  // 105: nanashi.v1.PlanService.UpdateBoard:output_type -> nanashi.v1.Ack
-	6,  // 106: nanashi.v1.PlanService.DeleteItem:output_type -> nanashi.v1.Ack
-	60, // 107: nanashi.v1.PlanService.ListComments:output_type -> nanashi.v1.ListCommentsResponse
-	58, // 108: nanashi.v1.PlanService.AddComment:output_type -> nanashi.v1.Comment
-	63, // 109: nanashi.v1.PlanService.ListAudit:output_type -> nanashi.v1.ListAuditResponse
-	66, // 110: nanashi.v1.PlanService.ListSnapshots:output_type -> nanashi.v1.ListSnapshotsResponse
-	64, // 111: nanashi.v1.PlanService.CreateSnapshot:output_type -> nanashi.v1.Snapshot
-	83, // [83:112] is the sub-list for method output_type
-	54, // [54:83] is the sub-list for method input_type
+	20, // 59: nanashi.v1.PlanService.DeleteList:input_type -> nanashi.v1.DeleteListRequest
+	21, // 60: nanashi.v1.PlanService.AddProperty:input_type -> nanashi.v1.AddPropertyRequest
+	22, // 61: nanashi.v1.PlanService.RenameProperty:input_type -> nanashi.v1.RenamePropertyRequest
+	23, // 62: nanashi.v1.PlanService.EditMembers:input_type -> nanashi.v1.EditMembersRequest
+	30, // 63: nanashi.v1.PlanService.CreateCalendar:input_type -> nanashi.v1.CreateCalendarRequest
+	31, // 64: nanashi.v1.PlanService.CreateScenario:input_type -> nanashi.v1.CreateScenarioRequest
+	32, // 65: nanashi.v1.PlanService.CreateMetric:input_type -> nanashi.v1.CreateMetricRequest
+	33, // 66: nanashi.v1.PlanService.UpdateMetric:input_type -> nanashi.v1.UpdateMetricRequest
+	34, // 67: nanashi.v1.PlanService.RenameMetric:input_type -> nanashi.v1.RenameMetricRequest
+	35, // 68: nanashi.v1.PlanService.DeleteMetric:input_type -> nanashi.v1.DeleteMetricRequest
+	38, // 69: nanashi.v1.PlanService.Query:input_type -> nanashi.v1.QueryRequest
+	42, // 70: nanashi.v1.PlanService.WriteCells:input_type -> nanashi.v1.WriteCellsRequest
+	43, // 71: nanashi.v1.PlanService.Import:input_type -> nanashi.v1.ImportRequest
+	47, // 72: nanashi.v1.PlanService.CreateTable:input_type -> nanashi.v1.CreateTableRequest
+	48, // 73: nanashi.v1.PlanService.UpdateTable:input_type -> nanashi.v1.UpdateTableRequest
+	50, // 74: nanashi.v1.PlanService.CreateView:input_type -> nanashi.v1.CreateViewRequest
+	51, // 75: nanashi.v1.PlanService.UpdateView:input_type -> nanashi.v1.UpdateViewRequest
+	54, // 76: nanashi.v1.PlanService.CreateBoard:input_type -> nanashi.v1.CreateBoardRequest
+	55, // 77: nanashi.v1.PlanService.UpdateBoard:input_type -> nanashi.v1.UpdateBoardRequest
+	57, // 78: nanashi.v1.PlanService.DeleteItem:input_type -> nanashi.v1.DeleteItemRequest
+	60, // 79: nanashi.v1.PlanService.ListComments:input_type -> nanashi.v1.ListCommentsRequest
+	58, // 80: nanashi.v1.PlanService.AddComment:input_type -> nanashi.v1.AddCommentRequest
+	63, // 81: nanashi.v1.PlanService.ListAudit:input_type -> nanashi.v1.ListAuditRequest
+	66, // 82: nanashi.v1.PlanService.ListSnapshots:input_type -> nanashi.v1.ListSnapshotsRequest
+	68, // 83: nanashi.v1.PlanService.CreateSnapshot:input_type -> nanashi.v1.CreateSnapshotRequest
+	9,  // 84: nanashi.v1.PlanService.ListApplications:output_type -> nanashi.v1.ListApplicationsResponse
+	7,  // 85: nanashi.v1.PlanService.CreateApplication:output_type -> nanashi.v1.Application
+	16, // 86: nanashi.v1.PlanService.GetModel:output_type -> nanashi.v1.ModelDef
+	6,  // 87: nanashi.v1.PlanService.CreateList:output_type -> nanashi.v1.Ack
+	6,  // 88: nanashi.v1.PlanService.RenameList:output_type -> nanashi.v1.Ack
+	6,  // 89: nanashi.v1.PlanService.DeleteList:output_type -> nanashi.v1.Ack
+	6,  // 90: nanashi.v1.PlanService.AddProperty:output_type -> nanashi.v1.Ack
+	6,  // 91: nanashi.v1.PlanService.RenameProperty:output_type -> nanashi.v1.Ack
+	6,  // 92: nanashi.v1.PlanService.EditMembers:output_type -> nanashi.v1.Ack
+	6,  // 93: nanashi.v1.PlanService.CreateCalendar:output_type -> nanashi.v1.Ack
+	6,  // 94: nanashi.v1.PlanService.CreateScenario:output_type -> nanashi.v1.Ack
+	6,  // 95: nanashi.v1.PlanService.CreateMetric:output_type -> nanashi.v1.Ack
+	6,  // 96: nanashi.v1.PlanService.UpdateMetric:output_type -> nanashi.v1.Ack
+	6,  // 97: nanashi.v1.PlanService.RenameMetric:output_type -> nanashi.v1.Ack
+	6,  // 98: nanashi.v1.PlanService.DeleteMetric:output_type -> nanashi.v1.Ack
+	40, // 99: nanashi.v1.PlanService.Query:output_type -> nanashi.v1.QueryResponse
+	6,  // 100: nanashi.v1.PlanService.WriteCells:output_type -> nanashi.v1.Ack
+	46, // 101: nanashi.v1.PlanService.Import:output_type -> nanashi.v1.ImportResponse
+	6,  // 102: nanashi.v1.PlanService.CreateTable:output_type -> nanashi.v1.Ack
+	6,  // 103: nanashi.v1.PlanService.UpdateTable:output_type -> nanashi.v1.Ack
+	6,  // 104: nanashi.v1.PlanService.CreateView:output_type -> nanashi.v1.Ack
+	6,  // 105: nanashi.v1.PlanService.UpdateView:output_type -> nanashi.v1.Ack
+	6,  // 106: nanashi.v1.PlanService.CreateBoard:output_type -> nanashi.v1.Ack
+	6,  // 107: nanashi.v1.PlanService.UpdateBoard:output_type -> nanashi.v1.Ack
+	6,  // 108: nanashi.v1.PlanService.DeleteItem:output_type -> nanashi.v1.Ack
+	61, // 109: nanashi.v1.PlanService.ListComments:output_type -> nanashi.v1.ListCommentsResponse
+	59, // 110: nanashi.v1.PlanService.AddComment:output_type -> nanashi.v1.Comment
+	64, // 111: nanashi.v1.PlanService.ListAudit:output_type -> nanashi.v1.ListAuditResponse
+	67, // 112: nanashi.v1.PlanService.ListSnapshots:output_type -> nanashi.v1.ListSnapshotsResponse
+	65, // 113: nanashi.v1.PlanService.CreateSnapshot:output_type -> nanashi.v1.Snapshot
+	84, // [84:114] is the sub-list for method output_type
+	54, // [54:84] is the sub-list for method input_type
 	54, // [54:54] is the sub-list for extension type_name
 	54, // [54:54] is the sub-list for extension extendee
 	0,  // [0:54] is the sub-list for field type_name
@@ -5087,23 +5157,23 @@ func file_nanashi_v1_plan_proto_init() {
 		return
 	}
 	file_nanashi_v1_id_proto_init()
-	file_nanashi_v1_plan_proto_msgTypes[17].OneofWrappers = []any{
+	file_nanashi_v1_plan_proto_msgTypes[18].OneofWrappers = []any{
 		(*MemberEdit_Add)(nil),
 		(*MemberEdit_Rename)(nil),
 		(*MemberEdit_Remove)(nil),
 		(*MemberEdit_Move)(nil),
 		(*MemberEdit_Set)(nil),
 	}
-	file_nanashi_v1_plan_proto_msgTypes[30].OneofWrappers = []any{
+	file_nanashi_v1_plan_proto_msgTypes[31].OneofWrappers = []any{
 		(*Value_Number)(nil),
 		(*Value_Boolean)(nil),
 		(*Value_Member)(nil),
 	}
-	file_nanashi_v1_plan_proto_msgTypes[36].OneofWrappers = []any{
+	file_nanashi_v1_plan_proto_msgTypes[37].OneofWrappers = []any{
 		(*ImportRequest_List)(nil),
 		(*ImportRequest_Metric)(nil),
 	}
-	file_nanashi_v1_plan_proto_msgTypes[46].OneofWrappers = []any{
+	file_nanashi_v1_plan_proto_msgTypes[47].OneofWrappers = []any{
 		(*Widget_ViewId)(nil),
 		(*Widget_Text)(nil),
 	}
@@ -5113,7 +5183,7 @@ func file_nanashi_v1_plan_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nanashi_v1_plan_proto_rawDesc), len(file_nanashi_v1_plan_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   71,
+			NumMessages:   72,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

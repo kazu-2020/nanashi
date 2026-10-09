@@ -445,6 +445,80 @@ func renameListPlan(em engineModel, meta appMeta, id, name string) (plan, error)
 	return plan{ops: ops}, nil
 }
 
+// deleteListPlan deletes the list id with its members and properties (docs/lists.md). If a Metric, a DIMENSION
+// property of another list, a view or a board uses the list, it gives errPrecondition. The Metrics of the NUMBER
+// and BOOLEAN properties are part of the list: the same engine write removes them first. The engine does the
+// last check, so a formula that holds the list also stops the delete. A refusal inserts the deleted rows again.
+func deleteListPlan(app string, em engineModel, meta appMeta, items []itemRow, id string) (plan, error) {
+	dim, ok := em.dim(id)
+	if !ok {
+		return plan{}, tag(errNotFound, "リスト %s がない", id)
+	}
+	own := map[string]bool{}
+	for _, p := range meta.Props {
+		if p.ListID == id && p.MetricID != "" {
+			own[p.MetricID] = true
+		}
+	}
+	var users []string
+	for _, m := range em.Metrics {
+		if !own[m.ID] && (slices.Contains(m.Dims, id) || m.Kind == "member:"+id) {
+			users = append(users, m.Name)
+		}
+	}
+	for _, d := range em.Dims {
+		for _, p := range d.Props {
+			if d.ID != id && p.Target == id {
+				users = append(users, d.Name+"."+p.Name)
+			}
+		}
+	}
+	for _, it := range items {
+		var name string
+		var refs []string
+		switch it.Type {
+		case nanashiv1.ItemType_ITEM_TYPE_VIEW:
+			v := &nanashiv1.ViewDef{}
+			if err := protojson.Unmarshal(it.Def, v); err != nil {
+				return plan{}, err
+			}
+			name, refs = v.Name, slices.Concat(v.Rows, v.Columns, slices.Collect(maps.Keys(v.Filters)))
+		case nanashiv1.ItemType_ITEM_TYPE_BOARD:
+			b := &nanashiv1.BoardDef{}
+			if err := protojson.Unmarshal(it.Def, b); err != nil {
+				return plan{}, err
+			}
+			name, refs = b.Name, b.PageSelectors
+		}
+		if slices.Contains(refs, id) {
+			users = append(users, name)
+		}
+	}
+	if len(users) > 0 {
+		return plan{}, tag(errPrecondition, "%s は %s が使っているので消せない", dim.Name, strings.Join(users, ", "))
+	}
+	var out plan
+	for _, m := range em.Metrics {
+		if own[m.ID] {
+			out.ops = append(out.ops, newOp("remove_metric", map[string]any{"id": m.ID}))
+		}
+	}
+	out.ops = append(out.ops, newOp("remove_dimension", map[string]any{"id": id}))
+	out.stmts = []stmt{
+		{sql: "delete from app_property where app_id = $1 and list_id = $2", args: []any{app, id}},
+		{sql: "delete from app_list where app_id = $1 and id = $2", args: []any{app, id}},
+	}
+	for _, p := range meta.Props {
+		if p.ListID == id {
+			out.made = append(out.made, madeRow{Table: "app_property_deleted", ID: p.ID, ListID: id, Prop: &p})
+		}
+	}
+	if kind, ok := meta.Kinds[id]; ok {
+		out.made = append(out.made, madeRow{Table: "app_list_deleted", ID: id, Kind: kind})
+	}
+	return out, nil
+}
+
 // renamePropertyPlan renames the property id of the list in app_property. The engine also gets the new name: as
 // a property for a DIMENSION property, in the Metric name for a NUMBER or BOOLEAN property. A TEXT property has no
 // engine object.
@@ -632,6 +706,17 @@ func (s *PlanServer) RenameList(ctx context.Context, req *connect.Request[nanash
 	}
 	return ackOf(s.change(ctx, req.Msg.AppId, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
 		return renameListPlan(em, meta, req.Msg.Id, name)
+	}))
+}
+
+func (s *PlanServer) DeleteList(ctx context.Context, req *connect.Request[nanashiv1.DeleteListRequest]) (*ack, error) {
+	m := req.Msg
+	return ackOf(s.change(ctx, m.AppId, m, func(em engineModel, meta appMeta) (plan, error) {
+		items, err := itemsIn(ctx, s.Pool, m.AppId)
+		if err != nil {
+			return plan{}, err
+		}
+		return deleteListPlan(m.AppId, em, meta, items, m.Id)
 	}))
 }
 

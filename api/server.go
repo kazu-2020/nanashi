@@ -185,6 +185,9 @@ type madeRow struct {
 	// app_property_name only: the name of the property ID before and after the change.
 	OldName string `json:"old_name,omitempty"`
 	NewName string `json:"new_name,omitempty"`
+	// app_list_deleted and app_property_deleted only: the deleted row. A refusal inserts it again.
+	Kind nanashiv1.ListKind `json:"kind,omitempty"`
+	Prop *propRow           `json:"prop,omitempty"`
 }
 
 // plan is one change to an application: the engine operations, the statements for the api tables, the rows
@@ -235,6 +238,16 @@ func compensation(app string, made []madeRow) []stmt {
 			out = append(out, stmt{sql: "delete from app_list where app_id = $1 and id = $2", args: []any{app, m.ID}})
 		case "app_property":
 			out = append(out, stmt{sql: "delete from app_property where app_id = $1 and list_id = $2 and id = $3", args: []any{app, m.ListID, m.ID}})
+		case "app_list_deleted":
+			out = append(out, stmt{sql: "insert into app_list (app_id, id, kind) values ($1, $2, $3) on conflict do nothing", args: []any{app, m.ID, m.Kind}})
+		case "app_property_deleted":
+			p := m.Prop
+			var metric *string
+			if p.MetricID != "" {
+				metric = &p.MetricID
+			}
+			out = append(out, stmt{sql: "insert into app_property (app_id, list_id, id, name, type, metric_id, text_values) values ($1, $2, $3, $4, $5, $6, $7) on conflict do nothing",
+				args: []any{app, p.ListID, p.ID, p.Name, p.Type, metric, textJSON(p.Text)}})
 		case "app_metric":
 			key := "where app_id = $1 and metric_id = $2 and description = $3 and folder = $4"
 			args := []any{app, m.ID, m.New.Description, m.New.Folder}
