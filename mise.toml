@@ -7,6 +7,8 @@ node = "26.10.0"
 # Node 25 and later do not include corepack. Keep the same version in "packageManager" of web/package.json.
 # Get pnpm from the npm registry, not from GitHub releases.
 "npm:pnpm" = "12.9.1"
+# Quint checks the specifications in docs/spec/.
+"npm:@informalsystems/quint" = "0.33.0"
 # The LSP servers for the gopls-lsp and typescript-lsp plugins. CI does not install them.
 # typescript-language-server uses the TypeScript in web/node_modules.
 "go:golang.org/x/tools/gopls" = "0.23.0"
