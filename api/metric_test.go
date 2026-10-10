@@ -32,6 +32,13 @@ func TestMetricOpCreateAndUpdate(t *testing.T) {
 		opsJSON(t, ops) != fmt.Sprintf(`[{"cells":[],"dims":[],"id":%q,"kind":"number","name":"New","op":"add_input"}]`, newMember) {
 		t.Errorf("create: got %s, %v", opsJSON(t, ops), err)
 	}
+	if ops, err := metricOp(em, &nanashiv1.MetricDef{Id: newMember, Name: " New\r\nPlan "}, "number", true); err != nil ||
+		!strings.Contains(opsJSON(t, ops), `"name":"New Plan"`) {
+		t.Errorf("create normalizes the name: got %s, %v", opsJSON(t, ops), err)
+	}
+	if _, err := metricOp(em, &nanashiv1.MetricDef{Id: newMember, Name: " \n"}, "number", true); connect.CodeOf(connectError(err)) != connect.CodeInvalidArgument {
+		t.Errorf("create with a blank name: got %v, want InvalidArgument", err)
+	}
 	if ops, err := metricOp(em, budgetDef(product, region), "number", false); err != nil || len(ops) != 0 {
 		t.Errorf("same input Metric: got %v, %v, want no operation", ops, err)
 	}

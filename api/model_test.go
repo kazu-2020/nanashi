@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
+	"github.com/kazu-2020/nanashi/api/internal/block"
 )
 
 const newMember = "0192f3a4-0000-7000-8000-0000000000aa"
@@ -266,7 +267,7 @@ func TestRenameListRenamesThePropertyMetrics(t *testing.T) {
 		{ListID: sales, ID: text, Name: "Gone", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, MetricID: newMember}, // Its Metric is pending.
 		{ListID: sales, ID: salesProduct, Name: "Product", Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION},
 	}}
-	p, err := renameListPlan(em, meta, sales, "Orders")
+	p, err := renameListPlan(em, meta, sales, mustName(t, "Orders"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +275,7 @@ func TestRenameListRenamesThePropertyMetrics(t *testing.T) {
 	if got := opsJSON(t, p.ops); got != want || len(p.stmts) != 0 {
 		t.Errorf("got %s %v\nwant %s and no statement", got, p.stmts, want)
 	}
-	if _, err := renameListPlan(em, meta, newMember, "X"); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
+	if _, err := renameListPlan(em, meta, newMember, mustName(t, "X")); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
 		t.Errorf("an unknown list: got %v, want NOT_FOUND", err)
 	}
 }
@@ -346,4 +347,13 @@ func TestRenamePropertyRefusalRestoresName(t *testing.T) {
 	if got := nameOf(); got != "Item" {
 		t.Errorf("name after the refusal: %q, want Item", got)
 	}
+}
+
+func mustName(t *testing.T, raw string) block.Name {
+	t.Helper()
+	n, err := block.ParseName(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

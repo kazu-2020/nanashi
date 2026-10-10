@@ -11,6 +11,8 @@ The language and writing rules are in `../CLAUDE.md`.
 
 ## Glossary
 
+These are the engine terms. `../docs/glossary.md` gives the product terms.
+
 | Term | Meaning |
 |---|---|
 | dimension | A named axis of a Metric (for example, `Employee`, `Month`). |

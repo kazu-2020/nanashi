@@ -1,0 +1,37 @@
+name: spec-check
+
+# Start only when docs/spec/, mise.toml or this file changes.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - docs/spec/**
+      - mise.toml
+      - .github/workflows/spec-check.yml
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5  # Use the versions in mise.toml
+        with:
+          install_args: node npm:@informalsystems/quint
+      - name: Install the Rust evaluator of Quint
+        run: docs/spec/install-evaluator.sh
+      - name: Check
+        run: |
+          for f in docs/spec/*.qnt; do
+            quint typecheck "$f"
+            quint test "$f"
+            quint run --invariant inv --max-samples 10000 --max-steps 12 "$f"
+          done

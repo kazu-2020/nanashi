@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
+	"github.com/kazu-2020/nanashi/api/internal/block"
 )
 
 // propRow is a row of app_property. The api keeps the name of each property. The engine keeps the values of a
@@ -432,14 +433,14 @@ func pruneItems(out *nanashiv1.ModelDef, em engineModel) {
 
 // renameListPlan renames the list id. The Metric "<list>.<property>" of each NUMBER or BOOLEAN property gets the
 // new list name. The api keeps no list name, so no api row changes.
-func renameListPlan(em engineModel, meta appMeta, id, name string) (plan, error) {
+func renameListPlan(em engineModel, meta appMeta, id string, name block.Name) (plan, error) {
 	if _, ok := em.dim(id); !ok {
 		return plan{}, tag(errNotFound, "リスト %s がない", id)
 	}
-	ops := []op{newOp("rename_dimension", map[string]any{"id": id, "name": name})}
+	ops := []op{newOp("rename_dimension", map[string]any{"id": id, "name": name.String()})}
 	for _, p := range meta.Props {
 		if _, ok := em.metric(p.MetricID); p.ListID == id && p.MetricID != "" && ok {
-			ops = append(ops, newOp("rename_metric", map[string]any{"id": p.MetricID, "name": propMetric(name, p.Name)}))
+			ops = append(ops, newOp("rename_metric", map[string]any{"id": p.MetricID, "name": propMetric(name.String(), p.Name)}))
 		}
 	}
 	return plan{ops: ops}, nil
@@ -567,10 +568,14 @@ func (s *PlanServer) CreateList(ctx context.Context, req *connect.Request[nanash
 	if m.Kind != nanashiv1.ListKind_LIST_KIND_DIMENSION && m.Kind != nanashiv1.ListKind_LIST_KIND_TRANSACTION {
 		return nil, invalid(errors.New("作れるリストは DIMENSION か TRANSACTION"))
 	}
-	name := strings.TrimSpace(m.Name)
-	if name == "" || m.Id == "" {
-		return nil, invalid(errors.New("リストの id と名前が要る"))
+	if m.Id == "" {
+		return nil, invalid(errors.New("リストの id が要る"))
 	}
+	n, err := block.ParseName(m.Name)
+	if err != nil {
+		return nil, invalid(err)
+	}
+	name := n.String()
 	return ackOf(s.change(ctx, m.AppId, m, func(em engineModel, _ appMeta) (plan, error) {
 		if _, ok := em.dim(m.Id); ok {
 			return plan{}, tag(errExists, "リスト %s はすでにある", name)
@@ -626,9 +631,9 @@ func (s *PlanServer) AddProperty(ctx context.Context, req *connect.Request[nanas
 }
 
 func (s *PlanServer) RenameList(ctx context.Context, req *connect.Request[nanashiv1.RenameListRequest]) (*ack, error) {
-	name := strings.TrimSpace(req.Msg.Name)
-	if name == "" {
-		return nil, invalid(errors.New("リストの名前が空"))
+	name, err := block.ParseName(req.Msg.Name)
+	if err != nil {
+		return nil, invalid(err)
 	}
 	return ackOf(s.change(ctx, req.Msg.AppId, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
 		return renameListPlan(em, meta, req.Msg.Id, name)

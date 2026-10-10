@@ -1,6 +1,7 @@
 #!/bin/bash
 # Install the tools in mise.toml. Run only in a cloud session.
-# The environment must allow mise.run, mise-versions.jdx.dev, go.dev, and dl.google.com.
+# The environment must allow mise.run, mise-versions.jdx.dev, go.dev, dl.google.com, registry.npmjs.org,
+# github.com, and release-assets.githubusercontent.com.
 # If mise-versions.jdx.dev is blocked, mise uses the GitHub API for the versions, and the GitHub proxy blocks it.
 # A failure does not stop the session.
 [ "$CLAUDE_CODE_REMOTE" = "true" ] || exit 0
@@ -10,6 +11,8 @@ command -v mise >/dev/null || (curl -fsSL https://mise.run | MISE_QUIET=1 sh) >/
 command -v mise >/dev/null || exit 0
 mise trust --yes mise.toml >/dev/null 2>&1
 mise install >&2 || true
+# Quint cannot download its Rust evaluator through the GitHub proxy (docs/spec/install-evaluator.sh).
+docs/spec/install-evaluator.sh >&2 || true
 
 # Use the tools from mise in this script and in the Bash tool.
 # Do not use "mise exec". It stops if one tool in mise.toml is not installed.
