@@ -27,5 +27,7 @@ It uses `connect-go` on `net/http` of the Go standard library. It does not use a
 - The audit trail `app_audit` gets one row for each `client_op_id` that is done: `change` writes it when the row flips to done, `apiOnly` in its transaction. The interceptor audits only `WriteCells`, which has no row.
 - The Metric catalog `app_metric` keeps the description, the folder and the owner of a Metric. The engine keeps the name. A change of the catalog goes in the outbox plan of the Metric RPC (`../docs/ids.md`).
 - Put the code of a feature in the file of the feature. `server.go` has the parts that every feature uses (the server, the interceptor, `change`, `apiOnly` and the errors). `engine.go` has the engine data and the HTTP client. The feature files are `audit.go`, `model.go` (lists, properties and members), `metric.go`, `data.go` (queries, writes and comments), `import.go`, `snapshot.go` and `item.go`.
+- Put a domain primitive in a package in `internal/` (for example `internal/block`). Its fields are not exported, so other code must use its parse function.
+- A block name that a user gives goes through `block.ParseName` (`CreateList`, `RenameList`, `CreateMetric`, `RenameMetric`). A name that the api makes (the Metric "<list>.<property>") does not.
 - In each file, put the calculations and types first and the actions (I/O) after them. The comment `// The actions follow.` marks the start of the actions.
 - Put the tests of a function in the `_test.go` file of its feature. `server_test.go` has the shared test helpers.

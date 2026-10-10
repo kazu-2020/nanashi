@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
+	"github.com/kazu-2020/nanashi/api/internal/block"
 )
 
 const newMember = "0192f3a4-0000-7000-8000-0000000000aa"
@@ -266,7 +267,7 @@ func TestRenameListRenamesThePropertyMetrics(t *testing.T) {
 		{ListID: sales, ID: text, Name: "Gone", Type: nanashiv1.PropertyType_PROPERTY_TYPE_NUMBER, MetricID: newMember}, // Its Metric is pending.
 		{ListID: sales, ID: salesProduct, Name: "Product", Type: nanashiv1.PropertyType_PROPERTY_TYPE_DIMENSION},
 	}}
-	p, err := renameListPlan(em, meta, sales, "Orders")
+	p, err := renameListPlan(em, meta, sales, mustName(t, "Orders"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +275,7 @@ func TestRenameListRenamesThePropertyMetrics(t *testing.T) {
 	if got := opsJSON(t, p.ops); got != want || len(p.stmts) != 0 {
 		t.Errorf("got %s %v\nwant %s and no statement", got, p.stmts, want)
 	}
-	if _, err := renameListPlan(em, meta, newMember, "X"); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
+	if _, err := renameListPlan(em, meta, newMember, mustName(t, "X")); connect.CodeOf(connectError(err)) != connect.CodeNotFound {
 		t.Errorf("an unknown list: got %v, want NOT_FOUND", err)
 	}
 }
@@ -348,31 +349,11 @@ func TestRenamePropertyRefusalRestoresName(t *testing.T) {
 	}
 }
 
-func TestListName(t *testing.T) {
-	long := strings.Repeat("あ", maxNameLen)
-	for _, c := range []struct{ raw, want, err string }{
-		{"部門", "部門", ""},
-		{" \t部門\r\n", "部門", ""},
-		{"営業\r\n部", "営業 部", ""},
-		{"営業\t部", "営業 部", ""},
-		{"営業  部", "営業  部", ""},
-		{"営業\x00\x7f\u0085部", "営業 部", ""},
-		{"　部門　", "部門", ""},
-		{long, long, ""},
-		{" " + long + "\n", long, ""},
-		{"", "", "リスト名が要る"},
-		{" \t\r\n　", "", "リスト名が要る"},
-		{long + "あ", "", "200 文字以下"},
-	} {
-		got, err := listName(c.raw)
-		if c.err != "" {
-			if err == nil || !strings.Contains(err.Error(), c.err) {
-				t.Errorf("listName(%q): got %q, %v, want an error with %q", c.raw, got, err, c.err)
-			}
-			continue
-		}
-		if err != nil || got != c.want {
-			t.Errorf("listName(%q): got %q, %v, want %q", c.raw, got, err, c.want)
-		}
+func mustName(t *testing.T, raw string) block.Name {
+	t.Helper()
+	n, err := block.ParseName(raw)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return n
 }

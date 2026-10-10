@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	nanashiv1 "github.com/kazu-2020/nanashi/api/gen/nanashi/v1"
+	"github.com/kazu-2020/nanashi/api/internal/block"
 )
 
 func engineKind(em engineModel, m *nanashiv1.MetricDef) (string, error) {
@@ -55,7 +56,15 @@ func metricOp(em engineModel, m *nanashiv1.MetricDef, kind string, create bool) 
 			return nil, fmt.Errorf("リスト %s がない", d)
 		}
 	}
+	// An update keeps the name, so only a create checks it.
 	name := strings.TrimSpace(m.Name)
+	if create {
+		n, err := block.ParseName(m.Name)
+		if err != nil {
+			return nil, err
+		}
+		name = n.String()
+	}
 	old, found := em.metric(m.Id)
 	if !create && found {
 		name = old.Name
@@ -109,8 +118,8 @@ func (s *PlanServer) UpdateMetric(ctx context.Context, req *connect.Request[nana
 }
 
 func (s *PlanServer) saveMetric(ctx context.Context, app string, req proto.Message, m *nanashiv1.MetricDef, create bool) (*ack, error) {
-	if m == nil || m.Id == "" || (create && strings.TrimSpace(m.Name) == "") {
-		return nil, invalid(errors.New("Metric の id と名前が要る"))
+	if m == nil || m.Id == "" {
+		return nil, invalid(errors.New("Metric の id が要る"))
 	}
 	return ackOf(s.change(ctx, app, req, func(em engineModel, meta appMeta) (plan, error) {
 		if err := meta.refuseProperty(m.Id); err != nil {
@@ -131,9 +140,10 @@ func (s *PlanServer) saveMetric(ctx context.Context, app string, req proto.Messa
 }
 
 func (s *PlanServer) RenameMetric(ctx context.Context, req *connect.Request[nanashiv1.RenameMetricRequest]) (*ack, error) {
-	app, id, name := req.Msg.AppId, req.Msg.Id, strings.TrimSpace(req.Msg.Name)
-	if name == "" {
-		return nil, invalid(errors.New("Metric の名前が空"))
+	app, id := req.Msg.AppId, req.Msg.Id
+	name, err := block.ParseName(req.Msg.Name)
+	if err != nil {
+		return nil, invalid(err)
 	}
 	// Tables, views and comments refer to the Metric by id, so no api row changes.
 	return ackOf(s.change(ctx, app, req.Msg, func(em engineModel, meta appMeta) (plan, error) {
@@ -143,7 +153,7 @@ func (s *PlanServer) RenameMetric(ctx context.Context, req *connect.Request[nana
 		if _, ok := em.metric(id); !ok {
 			return plan{}, tag(errNotFound, "Metric %s がない", id)
 		}
-		return plan{ops: []op{newOp("rename_metric", map[string]any{"id": id, "name": name})}}, nil
+		return plan{ops: []op{newOp("rename_metric", map[string]any{"id": id, "name": name.String()})}}, nil
 	}))
 }
 

@@ -9,7 +9,7 @@
 // - A refused operation makes nothing. The api deletes the app_list row of a refused operation.
 //
 // This specification checks the states. A name is an opaque value: NORMALIZE and valid stand for the
-// normalization and the checks (listName in api/model.go). The resend of a client_op_id is out of scope.
+// normalization and the checks (block.ParseName in api/internal/block). The resend of a client_op_id is out of scope.
 module dimension_list {
   type Status = Pending | Done | Failed
   type Op = { list: str, name: str }
