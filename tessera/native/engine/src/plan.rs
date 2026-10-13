@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{eval_with, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{chain, chain_scan, eval_with, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -831,6 +831,13 @@ impl<'a> Run<'a> {
                 self.stores[*n] = Arc::new(self.stores[*n].empty_like());
             }
         }
+        // If only one Metric of the scan is active, the other Metrics do not change, thus the operands can read their stored data
+        if let [(n, r)] = &active[..] {
+            if self.chain_scan(dim, *n, r)? {
+                self.log.push((*n, false, r.clone()));
+                return Ok(());
+            }
+        }
         // 格納データにその場で 1 時点ずつ書き込む。次の時点の前月参照は、書き込んだばかりの時点を読む
         for t in 0..self.cat.dims[dim].size {
             for (n, r) in &active {
@@ -846,5 +853,27 @@ impl<'a> Run<'a> {
             self.log.push((n, false, r));
         }
         Ok(())
+    }
+
+    /// If the formula of the scan Metric n is a chain of +, -, *, / and COALESCE around PREVIOUS, calculate all periods of
+    /// the range r in one pass and write them back. Return false for other formulas.
+    fn chain_scan(&mut self, dim: DimId, n: usize, r: &Reg) -> Result<bool> {
+        let f = self.formula(n);
+        let Some(links) = chain(&f.node, dim, &|i| f.refs[i] == n) else { return Ok(false) };
+        let ts: Vec<u32> = (0..self.cat.dims[dim].size).filter(|&t| r.has(dim, t)).collect();
+        // The periods just before a gap in ts: PREVIOUS reads the stored values there
+        let gaps: Vec<u32> = ts.iter().filter(|&&t| t > 0 && !r.has(dim, t - 1)).map(|t| t - 1).collect();
+        let store = &self.stores[n];
+        let before = if gaps.is_empty() {
+            Cube { pack: store.pack.clone(), kind: store.kind, cells: Vec::new() }
+        } else {
+            store.read(&r.set(dim, gaps).restrict(self.cat))
+        };
+        let src: Vec<Src> = f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect();
+        let rr = r.restrict(self.cat);
+        let b = Budget::new(self.cat.cfg.max_bytes);
+        let Some(value) = chain_scan(&links, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b)? else { return Ok(false) };
+        Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
+        Ok(true)
     }
 }

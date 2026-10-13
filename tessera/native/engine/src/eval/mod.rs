@@ -6,9 +6,11 @@ use crate::*;
 mod agg;
 mod fuse;
 mod join;
+mod scan;
 pub(crate) use agg::*;
 pub(crate) use fuse::*;
 pub(crate) use join::*;
+pub(crate) use scan::{chain, chain_scan};
 
 #[inline]
 pub(crate) fn b2f(x: bool) -> f64 {
