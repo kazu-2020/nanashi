@@ -60,8 +60,12 @@ For an aggregation (`REMOVE`, `BY`) with few aggregation targets, the engine doe
 If the aggregation source is stored data, the engine reads the base directly by row number.
 The type check rewrites a `BY` aggregation with a Metric into a join with `On` and `AsAxis` and an aggregation. In a full evaluation, the engine puts the mapping table (for example, employee and month → department) into an array of all combinations. It looks up the targets in this array and does not make the join result.
 If there are many aggregation targets but all their combinations are few, the engine adds the values into an array of all combinations. "Few" means that the total of the arrays for all threads is half or less of the size of the (target, value) pairs.
-The engine divides the rows into one part for each thread, and each part has its own array. At the end, the engine adds the arrays in order. Thus, with the same number of threads, each run gives the same result.
+The engine divides the rows into one part for each thread, and each part has its own array. At the end, the engine adds the arrays in order.
 In other cases, the engine converts the rows to (target, value) pairs, sorts them, and then aggregates them. The engine makes the pairs directly in one array and does not copy the aggregation source to a Cube.
+
+`SUM` and `AVG` add the values into an exact sum (Shewchuk partials, the same algorithm as Python `math.fsum`) and round one time at the end. Thus the result does not change with the order of the rows, the aggregation path, or the number of threads. The reference implementation uses `math.fsum` and gives the same bits.
+The exact sum keeps 2 partials inline (24 bytes). If it needs more, it moves them to the heap.
+A finite value of 2^960 or more makes the sum NaN. Below this limit the partials cannot overflow, so an overflow does not depend on the order of the rows.
 
 Rust also does the schedule of the incremental recalculation. This includes the propagation of the affected range, the evaluation and write-back of a range, the filter by changed values, the incremental aggregation, and scan.
 The Model sends the changed range of the inputs in one call. The engine propagates the affected range as sets of member numbers, not member names.

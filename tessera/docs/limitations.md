@@ -11,5 +11,5 @@
 - There is one rayon thread pool for the full process. You cannot have a different pool for each model. You can change the tuning values (for example, the threshold for parallel operation) for each engine.
 - Optimistic concurrency control compares only input cells. It does not find conflicts between definition changes or member changes.
 - The engine holds the affected range as the Cartesian product of a set for each dimension. Thus, a change to two cells that are far apart makes a range that contains both cells.
-- If incremental aggregation continues for a long time, floating-point errors accumulate. A full recalculation with `refresh()` removes the errors.
+- A SUM is exact only up to the final rounding. If the sum has a value of 2^960 or more, the result is NaN. If the exact sum of a group needs more than 2 doubles, incremental aggregation of that group falls back to a recalculation of the range. This continues until a full or partial recalculation gives a residual that is one double again.
 - For a change to one cell in a model of about 1000 Metrics, most of the time goes to the evaluation of scan for one period at a time and the write-back of the result. Each evaluation takes a few microseconds, but one change causes more than 1000 evaluations.

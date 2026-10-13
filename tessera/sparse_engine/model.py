@@ -366,7 +366,8 @@ class Model:
         return CompiledPlan(self._plan, self._levels, self._delta, frozenset(self._delta_sources()))
 
     def refresh(self) -> None:
-        """全体を計算し直す。差分集計を続けてたまった浮動小数点の誤差もなくなる。"""
+        """Calculate all the formula Metrics again. Incremental aggregation is exact, so this does not change the
+        values. Use it after a failure or to rebuild the stored data of incremental aggregation."""
         if self._frozen:
             raise ValueError("公開済みの版は計算し直せない（Workspace.write の中で計算し直す）")
         self._pending.full = True
