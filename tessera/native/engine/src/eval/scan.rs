@@ -72,9 +72,8 @@ fn outer(op: Option<Op>, l: Option<f64>, r: Option<f64>) -> Option<f64> {
 
 /// Calculate the scan for the periods `ts` (ascending) in the range r (r limits the time dimension to ts).
 /// `before` has the values of the Metric at each period t - 1 that is not in ts. The result is in the packing `pack`.
-/// Return None if an operand does not have the dimensions that the per-period evaluation expects.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Option<Cube>> {
+pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
     use Operand::*;
     let cfg = &cat.cfg;
     let p = pack.pos(dim).expect("scan の軸");
@@ -87,6 +86,8 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
         out
     };
     let mut operands = Vec::with_capacity(links.len());
+    // eval_with already counts each operand. The budget must also count the expanded operands and `before`
+    let mut held = before.cells.len();
     for l in links {
         let c = eval_with(l.operand, cat, src, r, b)?;
         // COALESCE does not expand its operand, thus it needs all dimensions of the Metric
@@ -95,14 +96,19 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
             Some(_) => c.dims().iter().all(|d| pack.dims.contains(d)),
         };
         if !fits {
-            return Ok(None);
+            return Err("scan の式の軸が Metric の軸と一致しない".into());
         }
         operands.push(match l.op {
             Some(Op::Mul | Op::Div) => {
                 let proj = Proj::new(pack, &c.pack);
                 Lookup(c.cells.into_iter().collect(), c.pack, proj)
             }
-            _ => ByPeriod(by_period(&expand(&c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack).cells)),
+            _ => {
+                let e = expand(&c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
+                held += e.cells.len();
+                b.need(held, "scan の加数")?;
+                ByPeriod(by_period(&e.cells))
+            }
         });
     }
     let mut before = by_period(&before.repack(cfg, pack).cells);
@@ -145,8 +151,31 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
                 }),
             }
         }
-        b.need(out.len() + acc.len(), "scan の結果")?;
+        b.need(held + out.len() + acc.len(), "scan の結果")?;
         out.extend(acc.iter().map(|(&k, &v)| (k | pack.put(p, t), v)));
     }
-    Ok(Some(Cube { pack: pack.clone(), kind: Kind::Num, cells: out }))
+    Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells: out })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prev(n: i64) -> Box<Node> {
+        Box::new(Node::Shift { child: Box::new(Node::Ref(0)), dim: 0, n })
+    }
+
+    fn bin(op: Op, l: Box<Node>, r: Node) -> Node {
+        Node::Bin(op, l, Box::new(r), vec![])
+    }
+
+    #[test]
+    fn chain_finds_only_the_supported_shapes() {
+        let me = |i: usize| i == 0;
+        let affine = bin(Op::Add, Box::new(bin(Op::Mul, prev(1), Node::Const(0.9, Kind::Num))), Node::Ref(1));
+        assert_eq!(chain(&affine, 0, &me).map(|l| l.len()), Some(2));
+        assert!(chain(&bin(Op::Add, prev(2), Node::Ref(1)), 0, &me).is_none(), "PREVIOUS(dim, 2)");
+        let agg = Node::Remove { child: Box::new(Node::Ref(1)), dim: 1, agg: Agg::Sum };
+        assert!(chain(&bin(Op::Add, prev(1), agg), 0, &me).is_none(), "an aggregation in an operand");
+    }
 }

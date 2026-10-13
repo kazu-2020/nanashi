@@ -855,8 +855,9 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    /// If the formula of the scan Metric n is a chain of +, -, *, / and COALESCE around PREVIOUS, calculate all periods of
-    /// the range r in one pass and write them back. Return false for other formulas.
+    /// Calculate all periods of the range r for the scan Metric n in one pass, and write them back.
+    /// The formula must be a chain of +, -, *, / and COALESCE around PREVIOUS.
+    /// Return false if the pass cannot calculate the Metric. Then the per-period path calculates it.
     fn chain_scan(&mut self, dim: DimId, n: usize, r: &Reg) -> Result<bool> {
         let f = self.formula(n);
         let Some(links) = chain(&f.node, dim, &|i| f.refs[i] == n) else { return Ok(false) };
@@ -872,7 +873,8 @@ impl<'a> Run<'a> {
         let src: Vec<Src> = f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect();
         let rr = r.restrict(self.cat);
         let b = Budget::new(self.cat.cfg.max_bytes);
-        let Some(value) = chain_scan(&links, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b)? else { return Ok(false) };
+        // An error here also occurs in the per-period path, except a budget error. That path uses less memory
+        let Ok(value) = chain_scan(&links, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
         Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
         Ok(true)
     }

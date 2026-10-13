@@ -72,9 +72,12 @@ The Metrics in one stage do not read each other. Thus, the engine sets their aff
 If the range is the full Metric, the parallel step also makes the new stored data and compares the old and new values. The write-back then only replaces the data.
 If the work of a stage is small (the estimate of recalculated rows is less than 16,384), the cost of the parallel handoff is larger. Thus, the engine calculates the stage in sequence.
 A scan writes to its own stored data for each time period. Thus, the engine calculates scans in sequence at the end of the stage.
-If a scan has one Metric and its formula is a chain of `+`, `-`, `*`, `/` and `COALESCE` (the override of an overridable Metric) around `PREVIOUS` (for example `PREVIOUS(Month) * 0.9 + Margin`), the engine does not evaluate one period at a time (`eval/scan.rs`).
+Some scans do not need an evaluation for each period (`eval/scan.rs`). This applies if only one Metric of the scan changes.
+The formula of that Metric must be a chain of `+`, `-`, `*`, `/` and `COALESCE` around `PREVIOUS`, for example `PREVIOUS(Month) * 0.9 + Margin`.
+`COALESCE` is the override of an overridable Metric.
 It evaluates each operand one time for all periods in the range. Then it calculates the chain for each key along the time dimension and writes all periods back one time.
 Each cell gets the same operations in the same order as in the evaluation for each period. Thus, the result is the same bit for bit.
 The engine does not use this path if an operand has an aggregation, because an aggregation of all periods can add the values in a different order.
+If the operands of all periods do not fit in the memory budget (`max_bytes`), the engine evaluates one period at a time.
 In the reference implementation, Python (`Model.recalc`) does the same schedule.
 Tests match the two results. This makes sure that the Rust schedule gives the same result as the Python schedule.

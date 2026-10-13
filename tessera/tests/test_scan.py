@@ -52,5 +52,20 @@ class MatchesReference(unittest.TestCase):
                     self.assertEqual(rs.value(scan).cells, ref.value(scan).cells)
 
 
+    def test_small_budget_uses_the_per_period_path(self):
+        """If the operands of all periods do not fit in max_bytes, the engine evaluates one period at a time."""
+        products = [f"p{i:03d}" for i in range(200)]
+        values = {(p, mo): float(i % 7) / 3 for i, (p, mo) in enumerate((p, mo) for p in products for mo in MONTHS)}
+        results = []
+        for engine in (ReferenceEngine(), RustEngine(max_bytes=32 << 10)):
+            m = Named(Model(engine=engine))
+            m.add_dimension("Product", products)
+            m.add_dimension("Month", MONTHS, ordered=True)
+            m.add_input("A", ["Product", "Month"], values)
+            m.add_formula("Stock", ["Product", "Month"], "PREVIOUS(Month) * 0.9 + A + A")
+            results.append(m.value("Stock").cells)
+        self.assertEqual(results[1], results[0])
+
+
 if __name__ == "__main__":
     unittest.main()
