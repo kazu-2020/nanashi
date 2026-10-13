@@ -155,13 +155,23 @@ def build(engine_name: str, size: str):
 
 
 def run(engine_name: str, size: str, repeats: int) -> dict:
+    heap = None
+    if engine_name == "rust":
+        import nanashi_core
+        nanashi_core.track_heap(True)  # Start before the model exists. Frees of older allocations are subtracted.
     t0 = time.perf_counter()
     m = build(engine_name, size)
     load = time.perf_counter() - t0
 
+    if engine_name == "rust":
+        nanashi_core.reset_heap_peak()
+        loaded = nanashi_core.heap()[0]
     t0 = time.perf_counter()
     m.recalc()
     full = time.perf_counter() - t0
+    if engine_name == "rust":
+        now, peak_heap = nanashi_core.heap()
+        heap = {"increase_mb": (peak_heap - loaded) / 1e6, "after_mb": now / 1e6}  # MB = 1e6, as in docs/performance.md
 
     cells = {n: m.engine.size(m.raw(n)) for n in m.metrics}
     total_value = m.value("Total").cells.get(())
@@ -169,10 +179,11 @@ def run(engine_name: str, size: str, repeats: int) -> dict:
     first_edit, timings = time_edits(m, EDITS, repeats)
     edits = {label: t for label, (t, _) in timings.items()}
 
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # macOS はバイト単位
+    # ru_maxrss is in bytes on macOS and in KiB on Linux.
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10)
     return {"engine": engine_name, "size": size, "load": load, "full": full, "edits": edits,
-            "first_edit": first_edit,
-            "cells": cells, "total": total_value, "peak_mb": peak / 2**20,
+            "first_edit": first_edit, "heap": heap,
+            "cells": cells, "total": total_value, "peak_mb": peak,
             "layout": dict(m.layout), "delta_metrics": sorted(m._delta)}
 
 
