@@ -119,7 +119,7 @@ class RustBoundary(unittest.TestCase):
         stores = [m._values[n] for n in names]
         stores[1] = stores[0]  # 同じハンドルを 2 回渡す（2 つ目は書き換えの途中で借りられない）
         with self.assertRaisesRegex(RuntimeError, "使用中"):
-            engine.core.recalc_changes(rplan, stores, [None] * len(names), [], [], [], [])
+            engine.core.recalc_changes(rplan, stores, [None] * len(names), [None] * len(names), [], [], [], [])
         check_values(self, m)
 
 

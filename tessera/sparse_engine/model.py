@@ -192,6 +192,7 @@ class MetricState:
     まだ持っていない状態は _UNSET。"""
     value: Any = _UNSET           # 格納データ（エンジンごとの形式）
     count: Any = _UNSET           # 差分集計する SUM の各グループの件数
+    low: Any = _UNSET             # The residual of each group of an incremental SUM (exact sum - value)
     delta: Any = _UNSET           # 差分集計の計画（DeltaPlan）
     partition: Any = _UNSET       # 分割軸（layout）
     warnings: Any = _UNSET        # 型検査の警告
@@ -205,8 +206,8 @@ class MetricState:
         """Model.fork 用の複製。格納データは share で共有し、書き足していく状態（samples）は写す。
         ほかの状態は定義だけに依存し、書き換えるときは丸ごと入れ替えるので、そのまま引き継ぐ。"""
         own = lambda v, f: v if v is _UNSET else f(v)
-        return MetricState(own(self.value, share), own(self.count, share), self.delta, self.partition,
-                           self.warnings, self.edges, own(self.samples, dict),
+        return MetricState(own(self.value, share), own(self.count, share), own(self.low, share), self.delta,
+                           self.partition, self.warnings, self.edges, own(self.samples, dict),
                            self.estimate, self.estimate_refs, self.estimate_users)
 
 
@@ -298,6 +299,7 @@ class Model:
     # Show each per-Metric state (_state) as a dict of Metric id -> value
     _values = _per_metric("value", "格納データ（エンジンごとの形式）")
     _counts = _per_metric("count", "差分集計する SUM の各グループの件数")
+    _lows = _per_metric("low", "The residual of each group of an incremental SUM (only the cells that are not 0)")
     _delta = _per_metric("delta", "差分集計する Metric -> 計画")
     layout = _per_metric("partition", "Metric ごとの分割軸")
     _warnings = _per_metric("warnings", "The type check warnings of each Metric (Msg, with ids in the values)")
@@ -363,7 +365,8 @@ class Model:
         return CompiledPlan(self._plan, self._levels, self._delta, frozenset(self._delta_sources()))
 
     def refresh(self) -> None:
-        """全体を計算し直す。差分集計を続けてたまった浮動小数点の誤差もなくなる。"""
+        """Calculate all the formula Metrics again. Incremental aggregation is exact, so this does not change the
+        values. Use it after a failure or to rebuild the stored data of incremental aggregation."""
         if self._frozen:
             raise ValueError("公開済みの版は計算し直せない（Workspace.write の中で計算し直す）")
         self._pending.full = True
@@ -373,16 +376,17 @@ class Model:
         """The memory (bytes) of the stored data of each Metric (Metric id -> row). Intermediate results and the
         plan are not included.
 
-        rows は本体の行数、base・delta・index は本体・差分・索引、counts は差分集計の件数の格納データ
-        （本体と差分と索引の合計）。バイト数を測れないエンジン（参照実装）は rows だけを返す。
+        rows is the number of base rows. base, delta and index are the base, the delta and the index. counts is
+        the stored data of incremental aggregation: the counts and the residuals (base, delta and index). An engine
+        that cannot measure bytes (the reference implementation) returns only rows.
         """
         mem = self.engine.memory
         out = {}
         for n, v in self._values.items():
             row = mem(v)
             if n in self._counts and "base" in row:
-                c = mem(self._counts[n])
-                row["counts"] = c["base"] + c["delta"] + c["index"]
+                row["counts"] = sum(c["base"] + c["delta"] + c["index"]
+                                    for c in (mem(self._counts[n]), mem(self._lows[n])))
             out[n] = row
         return out
 
@@ -948,7 +952,7 @@ class Model:
         """軸 dim にメンバーを足したことをエンジンと格納データに反映する。"""
         self.engine.dimension_changed(self, dim)
         # メンバーが増えて、格納データのキーに収まらなくなったら詰め直す
-        for store in (self._values, self._counts):
+        for store in (self._values, self._counts, self._lows):
             for name in store:
                 store[name] = self.engine.fit(store[name], self)
 
@@ -1046,6 +1050,7 @@ class Model:
                 self._values[name] = self.engine.remove_member(self._values[name], dim, index, member, values, self)
             if dim in m.dims and name in self._counts:
                 self._counts[name] = self.engine.remove_member(self._counts[name], dim, index, member, False, self)
+                self._lows[name] = self.engine.remove_member(self._lows[name], dim, index, member, False, self)
 
     # ------------------------------------------------ 入力
 
@@ -1292,6 +1297,8 @@ class Model:
                         self._delta[m.id] = plan
         self._counts = {n: self.engine.empty(self.metrics[n].dims, "number", self.layout[n], cat=self)
                         for n, plan in self._delta.items() if plan.count is not None}
+        self._lows = {n: self.engine.empty(self.metrics[n].dims, "number", self.layout[n], cat=self)
+                      for n in self._counts}
         self._pending.dirty.clear()
         self._pending.forced.clear()
 
@@ -1325,12 +1332,14 @@ class Model:
         for n in {*dirty, *moved}:
             self._delta.pop(n, None)
             self._counts.pop(n, None)
+            self._lows.pop(n, None)
             m = self.metrics[n]
             if self.delta_aggregation and m.formula is not None and n not in in_scan:
                 if (dp := self._delta_plan(m.formula)) is not None:
                     self._delta[n] = dp
                     if dp.count is not None:
                         self._counts[n] = self.engine.empty(m.dims, "number", self.layout[n], cat=self)
+                        self._lows[n] = self.engine.empty(m.dims, "number", self.layout[n], cat=self)
             if m.formula is not None:
                 self._pending.forced[n] = {}  # 件数も含めて、全体を計算し直す
         self._pending.dirty.clear()
@@ -1572,8 +1581,8 @@ class Model:
         self._pending.old_cells.clear()
         self._pending.old_slices.clear()
         self._pending.forced = {}
-        done, named = self.engine.planner.recalc(self.compiled(), self._values, self._counts, self, regions,
-                                                 added, olds, forced, full)
+        done, named = self.engine.planner.recalc(self.compiled(), self._values, self._counts, self._lows, self,
+                                                 regions, added, olds, forced, full)
         self.eval_log.extend(n for n, _ in done)
         self.delta_log.extend(n for n, delta in done if delta)
         self.slice_log.extend_later(named)

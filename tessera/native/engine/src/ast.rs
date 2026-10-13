@@ -19,7 +19,7 @@ pub enum Op {
     Or,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agg {
     Sum,
     Avg,
@@ -27,6 +27,7 @@ pub enum Agg {
     Max,
     Count,
     First, // 値が 1 つしかないグループ用（引き下ろしの内部で使う）
+    Low,   // internal: the exact sum minus the rounded SUM, if that is one f64 (else NaN). See eval_sums
 }
 
 /// 式の構文木。Bin、If、IsBlank、IfBlank の Vec<DimId> は、軸にメンバーを追加したときに

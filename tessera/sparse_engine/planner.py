@@ -9,6 +9,8 @@ ReferenceEngine が使う。RustEngine は同じ段取りを Rust で行う Rust
 """
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
@@ -16,7 +18,7 @@ from .delta import DeltaPlan, plan_for, rename
 from .evaluate import (Catalog, Edge, FormulaError, Restrict, Type, affected, collect_refs, estimate, infer,
                        resolve, union_region)
 from .messages import Msg
-from .expr import BinOp, Const, Expr, Filter, Ref
+from .expr import BinOp, Const, Expr, Filter, Ref, exact_sum, residual
 
 
 @dataclass
@@ -69,20 +71,24 @@ class Planner(Protocol):
         """The ranges that change when the member (an id) of the dimension dim goes, after its inputs became
         blank (formula Metric -> the range without the removed member)."""
 
-    def recalc(self, plan: CompiledPlan, stores: dict[str, Any], counts: dict[str, Any], cat: Catalog,
-               changed: dict[str, Restrict], added: dict[str, frozenset[str]], olds: dict[str, Any],
+    def recalc(self, plan: CompiledPlan, stores: dict[str, Any], counts: dict[str, Any], lows: dict[str, Any],
+               cat: Catalog, changed: dict[str, Restrict], added: dict[str, frozenset[str]], olds: dict[str, Any],
                forced: dict[str, Restrict], full: bool = False) -> tuple[list[tuple[str, bool]], Callable]:
-        """差分再計算。stores と counts（Metric ごとの格納データと差分集計の件数）をその場で書き換える。
-        changed は入力の変更範囲、added は追加したメンバー、olds は差分集計の集計元になる入力の変更前の値、
-        forced は必ず計算し直す計算 Metric の範囲。full なら全体を計算し直す（changed などは使わない）。
-        返すのは、計算し直した (Metric, 差分集計か) の列と、(Metric, 範囲) の列を返す関数。
-        途中で失敗したら、途中まで書き換えた計算 Metric が残ってよい（Model が次に全体を計算し直す）。"""
+        """Incremental recalculation. stores, counts and lows (the stored data, and the counts and residuals of
+        incremental aggregation of each Metric) change in place. changed is the changed range of the inputs, and
+        added is the added members. olds is the old values of the inputs that are a source of incremental
+        aggregation. forced is the range of each formula Metric to calculate again. If full is true, calculate
+        all again (changed and the other arguments are not used).
+        Returns the list of recalculated (Metric, incremental aggregation or not), and a function that returns
+        the list of (Metric, range). After a failure, formula Metrics can stay half written (Model then
+        calculates all again)."""
 
 
-# 差分集計の後半で使う式（名前は _apply_delta の作業データ）
+# The formulas of the second half of incremental aggregation (the names are work data of _apply_delta). _NEW_VALUE
+# is for COUNT only: there the value is the count
 _ALIVE = BinOp(">", Ref("__new_count"), Const(0.0))
 _NEW_COUNT = Ref("__old_count") + Ref("__d_count")
-_NEW_VALUE = Filter(Ref("__old_value") + Ref("__d_value"), _ALIVE)
+_NEW_VALUE = Filter(Ref("__old_value") + Ref("__d_count"), _ALIVE)
 _KEPT_COUNT = Filter(Ref("__new_count"), _ALIVE)
 
 
@@ -190,17 +196,18 @@ class PyPlanner:
 
     # ------------------------------------------------ 再計算
 
-    def recalc(self, plan, stores, counts, cat, changed, added, olds, forced, full=False):
-        run = _Run(self, plan, stores, counts, cat)
+    def recalc(self, plan, stores, counts, lows, cat, changed, added, olds, forced, full=False):
+        run = _Run(self, plan, stores, counts, lows, cat)
         if full:
             run.all()
         else:
             run.changes(dict(changed), added, dict(olds), forced)
         return run.done, lambda: run.named
 
-    def delta_exprs(self, name: str, formula: Expr, plan: DeltaPlan) -> tuple[Expr, Expr]:
-        """件数と値の差分を求める式。Metric ごとに一度だけ作る（エンジンが変換結果をキャッシュできるように）。
-        式が読む __new{i} と __old{i} は、集計元と対応表（plan.source、plan.aux）の変更後と変更前の値。"""
+    def delta_exprs(self, name: str, formula: Expr, plan: DeltaPlan) -> tuple[Expr, tuple[Expr, ...]]:
+        """The formula for the change of the counts, and for a SUM the formula and the residual formula on the new
+        values, then on the old values. Make them once for each Metric (so the engine can cache its compiled form).
+        __new{i} and __old{i} are the new and old values of the source and the maps (plan.source, plan.aux)."""
         cached = self._delta_exprs.get(name)
         if cached is None or cached[0] is not plan or cached[1] is not formula:
             names = (plan.source, *plan.aux)
@@ -211,21 +218,24 @@ class PyPlanner:
                 return BinOp("-", rename(f, new), rename(f, old))
 
             count_f = plan.count if plan.count is not None else formula
-            cached = self._delta_exprs[name] = (plan, formula, diff(count_f), diff(formula))
+            sums = () if plan.low is None else (rename(formula, new), rename(plan.low, new), rename(formula, old),
+                                                rename(plan.low, old))
+            cached = self._delta_exprs[name] = (plan, formula, diff(count_f), sums)
         return cached[2], cached[3]
 
 
 class _Run:
     """PyPlanner.recalc の 1 回分。"""
 
-    def __init__(self, planner: PyPlanner, plan: CompiledPlan, stores: dict, counts: dict, cat):
+    def __init__(self, planner: PyPlanner, plan: CompiledPlan, stores: dict, counts: dict, lows: dict, cat):
         self.planner, self.eng, self.plan = planner, planner.engine, plan
-        self.stores, self.counts, self.cat = stores, counts, cat
+        self.stores, self.counts, self.lows, self.cat = stores, counts, lows, cat
         self.done: list[tuple[str, bool]] = []
         self.named: list[tuple[str, Restrict]] = []
 
     def all(self) -> None:
-        """全体を計算し直す。同じ段の Metric はまとめて評価し、差分集計する SUM は件数も同時に求める。"""
+        """Calculate all again. Evaluate the Metrics of one level together. For an incremental SUM, also get the
+        counts and the residuals."""
         eng, cat = self.eng, self.cat
         for level in self.plan.levels:
             batch = [cat.metrics[s.names[0]] for s in level
@@ -235,9 +245,7 @@ class _Run:
             for m, result in zip(plain, eng.evaluate_many([(m.formula, {}) for m in plain], cat)):
                 self._replace(m, {}, result)
             for m in fused:
-                value, count = eng.evaluate_with_count(m.formula, self.plan.delta[m.id].count, cat, {})
-                self._replace(m, {}, value)
-                self.counts[m.id] = eng.replace(self.counts[m.id], {}, eng.reorder(count, m.dims), cat)
+                self._replace(m, {}, self._replace_side(m, {}))
             for step in level:
                 if step.scan_dim is not None:
                     self._scan(step, {n: {} for n in step.names}, True)
@@ -276,24 +284,32 @@ class _Run:
                 regions[m.id] = changed
 
     def _recompute(self, m, region: Restrict) -> Restrict | None:
-        """m の region を式から計算し直す。差分集計する SUM は、各グループの件数も求め直す。"""
-        eng, cat = self.eng, self.cat
+        """Calculate the region of m again from the formula. For an incremental SUM, also the counts and residuals."""
         dp = self.plan.delta.get(m.id)
         if dp is not None and dp.count is not None:
-            value, counts = eng.evaluate_with_count(m.formula, dp.count, cat, region)
-            changed = self._replace(m, region, value, diff=True)
-            self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(counts, m.dims), cat)
-            return changed
-        return self._replace(m, region, eng.evaluate(m.formula, cat, region), diff=True)
+            return self._replace(m, region, self._replace_side(m, region), diff=True)
+        return self._replace(m, region, self.eng.evaluate(m.formula, self.cat, region), diff=True)
+
+    def _replace_side(self, m, region: Restrict) -> Any:
+        """Evaluate the value, count and residual formulas of an incremental SUM over region. Write the counts and
+        residuals (only the cells that are not 0) and return the values."""
+        eng, cat = self.eng, self.cat
+        dp = self.plan.delta[m.id]
+        value, count, low = eng.evaluate_many([(m.formula, region), (dp.count, region), (dp.low, region)], cat)
+        self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(count, m.dims), cat)
+        low = eng.drop_value(eng.reorder(low, m.dims), 0.0, cat)
+        self.lows[m.id] = eng.replace(self.lows[m.id], region, low, cat)
+        return value
 
     @staticmethod
     def _delta_range(dp: DeltaPlan, regions: dict[str, Restrict]) -> Restrict | None:
-        """集計元と対応表の変更範囲を合わせた範囲。どれも変わっていなければ None。"""
+        """The union of the changed ranges of the source and the maps, without the widen dimensions. None if nothing
+        changed."""
         r = None
         for n in (dp.source, *dp.aux):
             if n in regions:
                 r = union_region(r, regions[n])
-        return r
+        return None if r is None else {d: ms for d, ms in r.items() if d not in dp.widen}
 
     def _delta_applicable(self, dp: DeltaPlan, regions: dict[str, Restrict], olds: dict[str, Any]) -> bool:
         changed = [n for n in (dp.source, *dp.aux) if n in regions]
@@ -302,21 +318,24 @@ class _Run:
 
     def _apply_delta(self, m, dp: DeltaPlan, region: Restrict, regions: dict[str, Restrict],
                      olds: dict[str, Any]) -> Restrict | None:
-        """集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込む。
+        """Aggregate the change of the source (and the maps) and add it to the values and counts in region.
 
-        集計元と対応表を、変更範囲を合わせた範囲 r で切り出す。変更後はそのまま、変更前は
-        変わった部分だけ変更前の値に戻したもの。両者で同じ集計をして引けば、変わった行の寄与の差になる。
+        Take the source and the maps in r, the union of their changed ranges without the widen dimensions. The new
+        data is the stored data. The old data has the old values in the changed range. The change of the count is
+        the count formula on the new data minus that on the old data. For a SUM, the new value of each group is the
+        exact sum of the stored value, the stored residual, and the value and residual on the new data minus those
+        on the old data. If a residual is not one float, calculate the region again with _recompute.
         """
         eng, cat = self.eng, self.cat
         r = self._delta_range(dp, regions)
-        d_count_f, d_value_f = self.planner.delta_exprs(m.id, m.formula, dp)
+        d_count_f, sums = self.planner.delta_exprs(m.id, m.formula, dp)
         work, types = {}, {}
         for i, n in enumerate((dp.source, *dp.aux)):
             new = eng.filter(self.stores[n], r, cat)
             old = new
             if n in regions:
-                # 変更前の値は、実際に変わった範囲（regions[n]）の分だけ戻す。格納全体ではなく、
-                # 切り出したばかりの小さな new から複製して作る
+                # Put back the old values only in the changed range (regions[n]). Copy the small new data, not
+                # all the stored data
                 before = eng.filter(olds[n], regions[n], cat)
                 old = eng.replace(eng.filter(new, r, cat), regions[n], before, cat)
             work[f"__new{i}"], work[f"__old{i}"] = new, old
@@ -325,23 +344,49 @@ class _Run:
         old_value = eng.filter(self.stores[m.id], region or None, cat)
         old_count = eng.filter(self.counts[m.id], region or None, cat) if dp.count is not None else old_value
         own = Type(m.dims, "number")
-        types |= {"__old_value": own, "__old_count": own, "__d_value": own, "__d_count": own, "__new_count": own}
+        types |= {"__old_value": own, "__old_count": own, "__d_count": own, "__new_count": own}
         view = _Overlay(cat, eng, work, types)
         d_count = eng.evaluate(d_count_f, view, None)
-        d_value = eng.evaluate(d_value_f, view, None) if dp.count is not None else d_count
-        view = _Overlay(cat, eng, {"__old_value": old_value, "__old_count": old_count,
-                                   "__d_value": d_value, "__d_count": d_count}, types)
+        parts = [eng.evaluate(f, view, None) for f in sums]
+        view = _Overlay(cat, eng, {"__old_value": old_value, "__old_count": old_count, "__d_count": d_count}, types)
         view._work["__new_count"] = eng.evaluate(_NEW_COUNT, view, None)
-        new_value = eng.evaluate(_NEW_VALUE, view, None)  # 件数が 0 になったグループは空にする
         kept_count = eng.evaluate(_KEPT_COUNT, view, None)
+        low = None
+        if dp.count is None:  # COUNT: the counts are exact integers, and the value is the count
+            new_value = eng.evaluate(_NEW_VALUE, view, None)  # a group with a count of 0 becomes blank
+        else:
+            new_value, low = self._exact(m, region, old_value, parts, kept_count)
+            if new_value is None:  # a residual is not one float: calculate the region again
+                return self._recompute(m, region)
 
         self.stores[m.id], changed = eng.replace_diff(self.stores[m.id], region,
                                                         eng.reorder(new_value, m.dims), cat)
         if dp.count is not None:
             self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(kept_count, m.dims), cat)
+            self.lows[m.id] = eng.replace(self.lows[m.id], region, low, cat)
         self.done.append((m.id, True))
         self.named.append((m.id, region))
         return self._widened(changed)
+
+    def _exact(self, m, region: Restrict, old_value: Any, parts: list, kept: Any) -> tuple[Any, Any]:
+        """The new values and residuals of the groups in kept, from the exact sum of the stored value, the stored
+        residual, and the value and residual of the new and old work data. (None, None) if a residual is not one
+        float (also if a value is not finite or is HUGE or more)."""
+        eng, cat = self.eng, self.cat
+        vs: dict = defaultdict(list)
+        olds = [(old_value, 1), (eng.filter(self.lows[m.id], region or None, cat), 1)]
+        for c, sign in olds + list(zip(parts, (1, 1, -1, -1))):
+            for k, v in eng.to_cube(eng.reorder(c, m.dims), cat).cells.items():
+                vs[k].append(sign * v)
+        values, lows = {}, {}
+        for k in eng.to_cube(eng.reorder(kept, m.dims), cat).cells:
+            low = residual(vs[k])
+            if math.isnan(low):
+                return None, None
+            values[k] = exact_sum(vs[k])
+            if low != 0:
+                lows[k] = low
+        return eng.from_cells(m.dims, "number", values, cat), eng.from_cells(m.dims, "number", lows, cat)
 
     def _widened(self, changed: Restrict | None) -> Restrict | None:
         """値が変わったセルの範囲から、全メンバーにわたる軸を外す（その軸は「全体」として扱う）。

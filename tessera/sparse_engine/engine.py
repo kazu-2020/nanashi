@@ -63,9 +63,6 @@ class Store(Protocol):
     def evaluate(self, expr: Expr, cat: Catalog, restrict: Restrict) -> Any: ...
     def evaluate_many(self, items: list[tuple[Expr, Restrict]], cat: Catalog) -> list[Any]:
         """互いに独立な式をまとめて評価する。並列に実行できるエンジンはそうしてよい。"""
-    def evaluate_with_count(self, expr: Expr, count_expr: Expr, cat: Catalog,
-                            restrict: Restrict) -> tuple[Any, Any]:
-        """差分集計する SUM の値と各グループの件数。1 回の集計で求められるエンジンはそうしてよい。"""
     def filter(self, storage: Any, restrict: Restrict | None, cat: Catalog) -> Any:
         """restrict の範囲に絞った格納データ（実体化したもの）を返す。"""
     def view(self, storage: Any, restrict: Restrict | None, cat: Catalog) -> Any:
@@ -194,9 +191,6 @@ class ReferenceEngine:
 
     def evaluate_many(self, items, cat):
         return [self.evaluate(expr, cat, restrict) for expr, restrict in items]
-
-    def evaluate_with_count(self, expr, count_expr, cat, restrict):
-        return self.evaluate(expr, cat, restrict), self.evaluate(count_expr, cat, restrict)
 
     def filter(self, storage: Cube, restrict, cat):
         return _filter(storage, restrict)
