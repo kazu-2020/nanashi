@@ -17,10 +17,9 @@ const withUser: Interceptor = (next) => (req) => {
   return next(req);
 };
 
-export const api = createClient(
-  PlanService,
-  createConnectTransport({ baseUrl: "/", interceptors: [withUser] }),
-);
+export const transport = createConnectTransport({ baseUrl: "/", interceptors: [withUser] });
+
+export const api = createClient(PlanService, transport);
 
 export const newId = () => uuidv7(Date.now(), crypto.getRandomValues(new Uint8Array(16)));
 
