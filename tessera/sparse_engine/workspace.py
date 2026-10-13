@@ -530,7 +530,7 @@ class Workspace:
         except Exception:
             log.warning("記録先の記録に追いつけなかったので、開き直す", exc_info=True)
             try:
-                model = self.journal.open(self._version.engine)
+                model = self.journal.open(self._version.engine.fresh())  # readers still use the old version
             except Exception as e:
                 log.exception("記録先からの開き直しに失敗した")
                 self.stats.add(reopen_failures=1)

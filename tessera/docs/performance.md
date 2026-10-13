@@ -32,6 +32,9 @@ A model with more formula Metrics (`bench_metrics.py`):
 | 300 | 25.22 million | 516 ms | 1.4 ms (95) |
 | 1000 | 76.99 million | 1,150 ms | 4.6 ms (394) |
 
+The one-pass scan (67 of the 1000 Metrics are scans) made the full recalculation 44% faster: 5.0 s before and 2.8 s after (median of 9 runs each, `bench_metrics.py --metrics 1000` compared with `bench_ab.py` from PR #88, a cloud machine with 4 cores, so the values are different from the table).
+The change to 1 Volume cell went from 17 ms to 11 ms, but the ranges of the runs overlap. In the profit and loss plan (`bench.py --size large`, one scan), the full recalculation did not change.
+
 The same model (1000 Metrics), when you change definitions. Before this work, each of these changes took a full recalculation of about 1,350 ms:
 
 | Definition change | Time |

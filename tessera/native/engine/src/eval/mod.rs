@@ -7,10 +7,12 @@ mod agg;
 mod exact;
 mod fuse;
 mod join;
+mod scan;
 pub(crate) use agg::*;
 pub(crate) use exact::ExactSum;
 pub(crate) use fuse::*;
 pub(crate) use join::*;
+pub(crate) use scan::{chain, chain_scan};
 
 #[inline]
 pub(crate) fn b2f(x: bool) -> f64 {

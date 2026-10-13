@@ -38,6 +38,7 @@ class RustEngine:
 
     def __init__(self, **config):
         """config has the tuning values for the speed of Rust (nanashi_core.Core gets them; the results do not change)."""
+        self._config = config
         self.core = nanashi_core.Core(**config)
         self._dims: dict[str, tuple[Any, int]] = {}  # dimension id -> (Dimension, Rust number)
         self._names: dict[int, str] = {}  # Rust number -> dimension id
@@ -49,6 +50,7 @@ class RustEngine:
     def fork(self, cat: Catalog) -> RustEngine:
         """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
         other = RustEngine.__new__(RustEngine)
+        other._config = self._config
         other.core = self.core.fork()
         other._dims = {d: (cat.dimension(d), i) for d, (_, i) in self._dims.items()}
         other._names = dict(self._names)
@@ -57,6 +59,9 @@ class RustEngine:
         other._widths = dict(self._widths)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
         other.planner = self.planner.fork(other)
         return other
+
+    def fresh(self) -> RustEngine:
+        return RustEngine(**self._config)  # settings from the constructor only, not later core.configure calls
 
     def share(self, store):
         return self.core.share(store)
