@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "nanashi システム全体図",
+    "output": ".archify/architecture-nanashi-20261006-213445/nanashi.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/kazu-2020/nanashi.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "ff89fd0ec554d29821fbd674e10917d1c30e11d7"
+    }
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "利用者", "sublabel": "ブラウザ", "pos": [40, 200], "size": [120, 64] },
+    { "id": "web", "type": "frontend", "label": "web/ SPA", "sublabel": "React + HeroUI", "pos": [240, 200], "size": [140, 64],
+      "sources": [{ "path": "web/CLAUDE.md", "line": 3, "end_line": 4 }, { "path": "web/vite.config.ts", "line": 20 }] },
+    { "id": "api", "type": "backend", "label": "nanashi-api", "sublabel": "Connect :8080", "pos": [460, 200], "size": [140, 64],
+      "sources": [{ "path": "api/cmd/nanashi-api/main.go", "line": 22, "end_line": 58 }, { "path": "api/CLAUDE.md", "line": 3, "end_line": 4 }] },
+    { "id": "router", "type": "backend", "label": "nanashi-router", "sublabel": "Go :8090", "pos": [760, 200], "size": [140, 64],
+      "sources": [{ "path": "router/README.md", "line": 3, "end_line": 6 }, { "path": "router/cmd/nanashi-router/main.go", "line": 46, "end_line": 48 }, { "path": "router/router.go", "line": 306 }] },
+    { "id": "engine", "type": "backend", "label": "tessera エンジン", "sublabel": "1 モデルに 1 writer", "pos": [1080, 200], "size": [160, 64], "tag": "Python / Rust",
+      "sources": [{ "path": "tessera/sparse_engine/server.py", "line": 736, "end_line": 766 }, { "path": "docs/engine-lifecycle.md", "line": 19, "end_line": 29 }] },
+    { "id": "files", "type": "database", "label": "エンジンのファイル", "sublabel": "ディレクトリ or s3://", "pos": [1080, 40], "size": [160, 64],
+      "sources": [{ "path": "tessera/sparse_engine/objects.py", "line": 5 }, { "path": "tessera/sparse_engine/objects.py", "line": 81, "end_line": 92 }, { "path": "compose.yaml", "line": 14, "end_line": 19 }] },
+    { "id": "pg", "type": "database", "label": "PostgreSQL", "sublabel": ":55432", "pos": [760, 380], "size": [140, 64],
+      "sources": [{ "path": "compose.yaml", "line": 4, "end_line": 12 }, { "path": "api/schema.sql", "line": 98 }, { "path": "tessera/sparse_engine/pg_journal.py", "line": 61, "end_line": 67 }] }
+  ],
+  "connections": [
+    { "id": "user-web", "from": "user", "to": "web", "label": "ブラウザ" },
+    { "id": "web-api", "from": "web", "to": "api", "label": "Connect RPC", "variant": "emphasis" },
+    { "id": "api-router", "from": "api", "to": "router", "label": "/models/<id>/...", "variant": "emphasis" },
+    { "id": "router-engine", "from": "router", "to": "engine", "label": "転送（なければ起動）", "variant": "emphasis" },
+    { "id": "engine-files", "from": "engine", "to": "files", "label": "スナップショット" },
+    { "id": "api-pg", "from": "api", "to": "pg", "label": "app_* と outbox" },
+    { "id": "router-pg", "from": "router", "to": "pg", "label": "リース参照" },
+    { "id": "engine-pg", "from": "engine", "to": "pg", "label": "ジャーナル・リース" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "nanashi-api", "items": ["engine と api テーブルの両方への変更は outbox（app_operation）を通す", "エンジンへの要求はすべてルーター経由。エンジンを自分で起動しない"] },
+    { "dot": "violet", "title": "nanashi-router", "items": ["nanashi_model の lease_endpoint で writer を探す", "--tessera のとき、writer のないモデルのエンジンを起動する", "失敗した書き込みは client_op_id があるので再送しても二重にならない"] },
+    { "dot": "amber", "title": "エンジン", "items": ["要求がない時間が --idle-exit を超えると自分で止まる", "3 回続けて落ちると、ルーターは 503 engine_failing を返す"] }
+  ]
+}

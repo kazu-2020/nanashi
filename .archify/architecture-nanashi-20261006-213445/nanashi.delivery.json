@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "88b8cd22-232e-4822-9859-092305852680",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/matazou/repo/github.com/kazu-2020/nanashi/.archify/architecture-nanashi-20261006-213445/candidate.json",
+  "output": "/Users/matazou/repo/github.com/kazu-2020/nanashi/.archify/architecture-nanashi-20261006-213445/nanashi.html",
+  "specification": {
+    "sha256": "58c5719c26ad7595dcf5d70ba54ec8f3bb2dfe1e679ee9598dba3149171e62b1",
+    "bytes": 4057
+  },
+  "artifact": {
+    "sha256": "954810869ac47d9422b0a9047d11d369e44d3fddc3378da4c696c0171150e985",
+    "bytes": 761236
+  }
+}
