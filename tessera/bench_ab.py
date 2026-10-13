@@ -111,7 +111,7 @@ def build(t):
     start = time.perf_counter()
     subprocess.run([venv / "bin/maturin", "develop", "--release", "-m", t / "native/Cargo.toml"],
                    check=True, stdout=sys.stderr,
-                   # A shared CARGO_TARGET_DIR lets cargo take one side's build as fresh for the other side.
+                   # One target dir per side. If the sides share one, cargo can take a stale build as fresh.
                    env={**os.environ, "VIRTUAL_ENV": str(venv), "CARGO_TARGET_DIR": str(t / "native/target")})
     print(f"built {t} in {time.perf_counter() - start:.1f} s", file=sys.stderr)
 
@@ -149,6 +149,8 @@ def main():
         return self_test()
     if not args.base or not args.bench:
         ap.error("give --base REF and a benchmark command after --")
+    if args.runs < 1:
+        ap.error("--runs must be 1 or more")
     sha, base = base_dir(args.base)
     head = args.head.resolve()
     sides = {"base": base, "head": head}
@@ -165,7 +167,7 @@ def main():
             print(f"{side}: the last line of the output is not JSON, thus only wall_s and max_rss_mb",
                   file=sys.stderr)
         runs.append({"side": side, "dir": str(sides[side]), "run": i // 2, "rc": rc,
-                     "metrics": {"wall_s": wall, "max_rss_mb": rss, **metrics},
+                     "metrics": {**metrics, "wall_s": wall, "max_rss_mb": rss},  # the harness values win
                      **({"stderr_tail": err[-2000:]} if rc else {})})
         print(f"{side} run {i // 2}: rc {rc}, {wall:.2f} s", file=sys.stderr, flush=True)
     load_after = os.getloadavg()
