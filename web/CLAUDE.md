@@ -24,6 +24,9 @@ It calls the application server (`api/`) with Connect.
 - Put each page in `src/routes/` (TanStack Router, file-based routing). The router plugin makes `src/routeTree.gen.ts`. Do not edit it.
 - Call the API with the hooks of `@connectrpc/connect-query` (`useQuery(PlanService.method.x)`). They use TanStack Query.
 - Make tables with `@tanstack/react-table` (v9, `useTable`) and the HeroUI `Table`. `src/routes/index.tsx` is an example.
+- Make forms with `@tanstack/react-form`. Validate them with `zod` schemas.
+- If a list or a grid has many rows, render only the visible rows with `@tanstack/react-virtual`.
+- Keep UI state that the URL must keep (filters, the selected tab) in search params with `nuqs`.
 
 ## HeroUI docs for agents
 
