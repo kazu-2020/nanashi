@@ -46,6 +46,7 @@ def model(engine=None, seed: int = 7) -> Model:
     f("Total", [], "Amount[REMOVE SUM: Employee, Region, Month]")
     f("HomeTotal", ["Department"], "Amount[BY SUM: Employee.Home][REMOVE SUM: Region, Month]")
     f("DeptOfTotal", ["Department"], "Amount[BY SUM: Employee.DeptOf][REMOVE SUM: Region, Month]")
+    f("DeptOfAll", [], "Amount[BY SUM: Employee.DeptOf][REMOVE SUM: Department, Month, Region]")
     f("NorthByMonth", ["Month"], 'Amount[SELECT: Region."N"][REMOVE SUM: Employee]')
     f("Avg", ["Region"], "Amount[REMOVE AVG: Employee, Month]")
     return m
@@ -77,7 +78,7 @@ class SameBitsOnEveryPath(unittest.TestCase):
             m = model(engine)
             m.recalc()
             got = {n: cells(m, n) for n in ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "DeptOfTotal",
-                                            "NorthByMonth", "Avg"]}
+                                            "DeptOfAll", "NorthByMonth", "Avg"]}
             if want is None:
                 want = got
                 self.assertEqual(got["Total"][()], math.fsum(cells(m, "Amount").values()))
@@ -137,7 +138,7 @@ class RustResidualStore(ResidualStore):
     engine = staticmethod(lambda: RustEngine())
 
 
-DELTA = ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "DeptOfTotal", "NorthByMonth"]
+DELTA = ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "DeptOfTotal", "DeptOfAll", "NorthByMonth"]
 
 
 def snapshot(m: Model) -> dict:
@@ -202,6 +203,32 @@ class IncrementalIsExact(unittest.TestCase):
                 full = Named(m.fork())
                 full._invalidate()
                 self.assertEqual(snapshot(m), snapshot(full))
+
+    def test_residual_store_with_a_different_key_packing(self):
+        # The redefinition makes new residual and count stores with a wider key packing than the value store
+        for engine in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
+            with self.subTest(engine=engine.__name__):
+                rng = random.Random(1)
+                m = Named(Model(engine=engine()))
+                members = {d: [f"{d.lower()}{i}" for i in range(3)] for d in "ABC"}
+                for d, ms in members.items():
+                    m.add_dimension(d, ms)
+                m.add_input("X", ["A", "B", "C"], {(a, b, c): rng.choice(VALUES) for a in members["A"]
+                                                   for b in members["B"] for c in members["C"]})
+                m.add_formula("T", ["B", "C"], "X[REMOVE SUM: A]")
+                m.recalc()
+                m.add_member("C", "c3")
+                m.add_member("C", "c4")
+                m.recalc()
+                m.add_formula("T", ["B", "C"], "X[REMOVE SUM: A]", id=m.metric("T").id)
+                m.recalc()
+                m.delta_log.clear()
+                for _ in range(30):
+                    m.set_cell("X", value(rng), **{d: rng.choice(ms) for d, ms in members.items()})
+                    full = Named(m.fork())
+                    full._invalidate()
+                    self.assertEqual(cells(m, "T"), cells(full, "T"))
+                self.assertIn("T", m.delta_log)
 
 
 if __name__ == "__main__":

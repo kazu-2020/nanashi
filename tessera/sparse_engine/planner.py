@@ -9,16 +9,16 @@ ReferenceEngine が使う。RustEngine は同じ段取りを Rust で行う Rust
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Any, Callable, Protocol
 
 from .delta import DeltaPlan, plan_for, rename
 from .evaluate import (Catalog, Edge, FormulaError, Restrict, Type, affected, collect_refs, estimate, infer,
                        resolve, union_region)
 from .messages import Msg
-from .expr import HUGE, BinOp, Const, Expr, Filter, Ref
+from .expr import BinOp, Const, Expr, Filter, Ref, exact_sum, residual
 
 
 @dataclass
@@ -74,18 +74,21 @@ class Planner(Protocol):
     def recalc(self, plan: CompiledPlan, stores: dict[str, Any], counts: dict[str, Any], lows: dict[str, Any],
                cat: Catalog, changed: dict[str, Restrict], added: dict[str, frozenset[str]], olds: dict[str, Any],
                forced: dict[str, Restrict], full: bool = False) -> tuple[list[tuple[str, bool]], Callable]:
-        """差分再計算。stores と counts（Metric ごとの格納データと差分集計の件数）をその場で書き換える。
-        lows (the residuals of incremental aggregation) also change in place.
-        changed は入力の変更範囲、added は追加したメンバー、olds は差分集計の集計元になる入力の変更前の値、
-        forced は必ず計算し直す計算 Metric の範囲。full なら全体を計算し直す（changed などは使わない）。
-        返すのは、計算し直した (Metric, 差分集計か) の列と、(Metric, 範囲) の列を返す関数。
-        途中で失敗したら、途中まで書き換えた計算 Metric が残ってよい（Model が次に全体を計算し直す）。"""
+        """Incremental recalculation. stores, counts and lows (the stored data, and the counts and residuals of
+        incremental aggregation of each Metric) change in place. changed is the changed range of the inputs, and
+        added is the added members. olds is the old values of the inputs that are a source of incremental
+        aggregation. forced is the range of each formula Metric to calculate again. If full is true, calculate
+        all again (changed and the other arguments are not used).
+        Returns the list of recalculated (Metric, incremental aggregation or not), and a function that returns
+        the list of (Metric, range). After a failure, formula Metrics can stay half written (Model then
+        calculates all again)."""
 
 
-# 差分集計の後半で使う式（名前は _apply_delta の作業データ）
+# The formulas of the second half of incremental aggregation (the names are work data of _apply_delta). _NEW_VALUE
+# is for COUNT only: there the value is the count
 _ALIVE = BinOp(">", Ref("__new_count"), Const(0.0))
 _NEW_COUNT = Ref("__old_count") + Ref("__d_count")
-_NEW_VALUE = Filter(Ref("__old_value") + Ref("__d_value"), _ALIVE)
+_NEW_VALUE = Filter(Ref("__old_value") + Ref("__d_count"), _ALIVE)
 _KEPT_COUNT = Filter(Ref("__new_count"), _ALIVE)
 
 
@@ -315,10 +318,13 @@ class _Run:
 
     def _apply_delta(self, m, dp: DeltaPlan, region: Restrict, regions: dict[str, Restrict],
                      olds: dict[str, Any]) -> Restrict | None:
-        """集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込む。
+        """Aggregate the change of the source (and the maps) and add it to the values and counts in region.
 
-        集計元と対応表を、変更範囲を合わせた範囲 r で切り出す。変更後はそのまま、変更前は
-        変わった部分だけ変更前の値に戻したもの。両者で同じ集計をして引けば、変わった行の寄与の差になる。
+        Take the source and the maps in r, the union of their changed ranges without the widen dimensions. The new
+        data is the stored data. The old data has the old values in the changed range. The change of the count is
+        the count formula on the new data minus that on the old data. For a SUM, the new value of each group is the
+        exact sum of the stored value, the stored residual, and the value and residual on the new data minus those
+        on the old data. If a residual is not one float, calculate the region again with _recompute.
         """
         eng, cat = self.eng, self.cat
         r = self._delta_range(dp, regions)
@@ -328,8 +334,8 @@ class _Run:
             new = eng.filter(self.stores[n], r, cat)
             old = new
             if n in regions:
-                # 変更前の値は、実際に変わった範囲（regions[n]）の分だけ戻す。格納全体ではなく、
-                # 切り出したばかりの小さな new から複製して作る
+                # Put back the old values only in the changed range (regions[n]). Copy the small new data, not
+                # all the stored data
                 before = eng.filter(olds[n], regions[n], cat)
                 old = eng.replace(eng.filter(new, r, cat), regions[n], before, cat)
             work[f"__new{i}"], work[f"__old{i}"] = new, old
@@ -338,17 +344,16 @@ class _Run:
         old_value = eng.filter(self.stores[m.id], region or None, cat)
         old_count = eng.filter(self.counts[m.id], region or None, cat) if dp.count is not None else old_value
         own = Type(m.dims, "number")
-        types |= {"__old_value": own, "__old_count": own, "__d_value": own, "__d_count": own, "__new_count": own}
+        types |= {"__old_value": own, "__old_count": own, "__d_count": own, "__new_count": own}
         view = _Overlay(cat, eng, work, types)
         d_count = eng.evaluate(d_count_f, view, None)
         parts = [eng.evaluate(f, view, None) for f in sums]
-        view = _Overlay(cat, eng, {"__old_value": old_value, "__old_count": old_count,
-                                   "__d_value": d_count, "__d_count": d_count}, types)
+        view = _Overlay(cat, eng, {"__old_value": old_value, "__old_count": old_count, "__d_count": d_count}, types)
         view._work["__new_count"] = eng.evaluate(_NEW_COUNT, view, None)
         kept_count = eng.evaluate(_KEPT_COUNT, view, None)
         low = None
         if dp.count is None:  # COUNT: the counts are exact integers, and the value is the count
-            new_value = eng.evaluate(_NEW_VALUE, view, None)  # 件数が 0 になったグループは空にする
+            new_value = eng.evaluate(_NEW_VALUE, view, None)  # a group with a count of 0 becomes blank
         else:
             new_value, low = self._exact(m, region, old_value, parts, kept_count)
             if new_value is None:  # a residual is not one float: calculate the region again
@@ -364,24 +369,21 @@ class _Run:
         return self._widened(changed)
 
     def _exact(self, m, region: Restrict, old_value: Any, parts: list, kept: Any) -> tuple[Any, Any]:
-        """The new values and residuals of the groups in kept, from the exact sum (Fraction) of the stored value,
-        the stored residual, and the value and residual of the new and old work data. (None, None) if a value is
-        not finite or HUGE, or if a residual is not one float."""
+        """The new values and residuals of the groups in kept, from the exact sum of the stored value, the stored
+        residual, and the value and residual of the new and old work data. (None, None) if a residual is not one
+        float (also if a value is not finite or is HUGE or more)."""
         eng, cat = self.eng, self.cat
-        exact: dict = defaultdict(Fraction)
+        vs: dict = defaultdict(list)
         olds = [(old_value, 1), (eng.filter(self.lows[m.id], region or None, cat), 1)]
         for c, sign in olds + list(zip(parts, (1, 1, -1, -1))):
             for k, v in eng.to_cube(eng.reorder(c, m.dims), cat).cells.items():
-                if not abs(v) < HUGE:
-                    return None, None
-                exact[k] += sign * Fraction(v)
+                vs[k].append(sign * v)
         values, lows = {}, {}
         for k in eng.to_cube(eng.reorder(kept, m.dims), cat).cells:
-            x = exact[k]
-            values[k] = v = float(x)
-            low = float(x - Fraction(v))
-            if Fraction(low) != x - Fraction(v):
+            low = residual(vs[k])
+            if math.isnan(low):
                 return None, None
+            values[k] = exact_sum(vs[k])
             if low != 0:
                 lows[k] = low
         return eng.from_cells(m.dims, "number", values, cat), eng.from_cells(m.dims, "number", lows, cat)

@@ -302,7 +302,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
     let cfg = &cat.cfg;
     match node {
         Node::ByAgg { child, src: s, dst, map, .. } => {
-            // 集約: src のメンバーを dst のメンバーへ寄せて集計する
+            // Aggregate each member of src into its member of dst
             let mp = &cat.maps[*map];
             let mut sub = r.without(&[*s, *dst]);
             if let Some(sel) = r.get(*dst) {
@@ -332,7 +332,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
             if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, target) {
                 return Ok(c);
             }
-            // 集計元を写さずに、(集計先, 値) の組を 1 つの配列へ直接作って並べ替える
+            // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
             let pairs = collect_rows(cfg, rows.len(), |i| {
                 let (k, v) = rows.get(i);
                 let t = mp.fwd[xp.get(k, ps) as usize];
@@ -345,7 +345,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
         Node::Remove { child, dim, agg } => {
             let (dims, child) = remove_run(*dim, *agg, child);
             let sub = r.without(&dims);
-            // Metric を使った BY の集約（Remove(On(x, AsAxis(V, T)), D)）は、対応表を引きながら集計する
+            // A BY aggregation with a Metric (Remove(On(x, AsAxis(V, T)), D)) looks up the mapping table
             if let Node::On(x, edges) = child {
                 if let Node::AsAxis { child: v, dim: target } = &**edges {
                     if let (Node::Ref(vi), true) = (&**v, sub.is_all()) {
@@ -354,7 +354,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                             if let Some(c) = remove_by_table(&rows, &dims, *target, vs, aggs, cat, r)? {
                                 return Ok(c);
                             }
-                            // 引けなければ、結合してから集計する（On と同じ）
+                            // If the table cannot be used, join and then aggregate (the same as On)
                             let xc = rows.into_cube();
                             let o = match semi(&sub, &xc, cat) {
                                 Some(r2) => eval_with(edges, cat, src, &r2, bud)?,
@@ -373,8 +373,8 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
     }
 }
 
-/// Evaluate a SUM formula with one aggregation level (only SELECT above it, see plan::Sums). Gives the value, the
-/// count and the residual of each group from one pass over the source.
+/// Evaluate a SUM formula (an aggregation with only SELECT above it, see plan::Method::OnePass). Gives the value,
+/// the count and the residual of each group from one pass over the source of the outermost aggregation.
 pub fn eval_sums(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<[Cube; 3]> {
     let mark = b.used();
     let out = match node {

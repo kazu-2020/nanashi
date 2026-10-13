@@ -463,12 +463,14 @@ class RustPlanner:
 
     def recalc(self, plan, stores: dict, counts: dict, lows: dict, cat: Catalog, changed: dict, added: dict,
                olds: dict, forced: dict, full: bool = False) -> tuple[list, Any]:
-        """PyPlanner.recalc と同じ段取りを Rust で行う。plan は Model.compiled()、stores と counts は
-        Metric ごとの格納データと差分集計の件数、changed は入力の変更範囲、added は追加したメンバー、
-        olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
-        格納データはその場で書き換わる。
+        """Do the same schedule as PyPlanner.recalc in Rust. plan is Model.compiled(). stores, counts and lows are
+        the stored data, the counts and the residuals of incremental aggregation of each Metric. changed is the
+        changed range of the inputs, and added is the added members. olds is the old values of the inputs that are
+        a source of incremental aggregation. forced is the range of each formula Metric to calculate again.
+        stores, counts and lows change in place.
 
-        再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
+        Returns the log of recalculated (Metric number, incremental aggregation or not, range), and a function
+        that changes it to names.
         """
         rplan, names = self._plan_for(plan, cat)
         index = {n: i for i, n in enumerate(names)}

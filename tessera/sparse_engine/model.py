@@ -207,8 +207,7 @@ class MetricState:
         ほかの状態は定義だけに依存し、書き換えるときは丸ごと入れ替えるので、そのまま引き継ぐ。"""
         own = lambda v, f: v if v is _UNSET else f(v)
         return MetricState(own(self.value, share), own(self.count, share), own(self.low, share), self.delta,
-                           self.partition,
-                           self.warnings, self.edges, own(self.samples, dict),
+                           self.partition, self.warnings, self.edges, own(self.samples, dict),
                            self.estimate, self.estimate_refs, self.estimate_users)
 
 

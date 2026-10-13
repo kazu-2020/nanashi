@@ -872,21 +872,18 @@ impl Core {
         plan::delta_pattern(&expr.node)
     }
 
-    /// 差分再計算の計算計画を作る。
+    /// Make the plan of the incremental recalculation.
     ///
-    /// metrics は Metric ごとの (式, 差分集計するか, 集計元か)。式は (Expr, 読み出す Metric の番号) で、
-    /// 差分集計する Metric は、件数の式と差分の式をここで作る。levels は依存の段ごとの
-    /// (scan の軸または None, Metric の番号) の並び。
+    /// metrics is (formula, incremental aggregation or not, source or not) for each Metric. A formula is (Expr, the
+    /// numbers of the Metrics that it reads). For incremental aggregation, this makes the work formulas
+    /// (plan::derive_delta). levels is a list of (scan dimension or None, Metric numbers) for each level.
     fn make_plan(&self, metrics: Vec<Bound<'_, PyTuple>>, levels: Vec<Vec<(Option<DimId>, Vec<usize>)>>) -> PyResult<PlanHandle> {
         let mut out = Vec::with_capacity(metrics.len());
         for t in &metrics {
             let f = formula(&t.get_item(0)?)?;
             let wants_delta: bool = t.get_item(1)?.extract()?;
             let delta = match (&f, wants_delta) {
-                (Some(f), true) => match plan::derive_delta(f) {
-                    Some(d) => Some(d),
-                    None => return Err(err("差分集計の対象でない式に差分集計を指定した".into())),
-                },
+                (Some(f), true) => Some(plan::derive_delta(f).ok_or_else(|| err("差分集計の対象でない式に差分集計を指定した".into()))?),
                 _ => None,
             };
             out.push(Metric { formula: f, delta, source: t.get_item(2)?.extract()? });
@@ -965,10 +962,13 @@ impl Core {
         Ok(env.affected(&expr.node, &refs).map(|r| r.into_parts()))
     }
 
-    /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
-    /// 格納データで、その場で書き換える。lows (the residual stores, in Metric number order) also change in place.changed は入力の変更範囲、added は軸ごとの追加したメンバー、
-    /// olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
-    /// 再計算した (Metric, 差分集計か, 範囲) を返す。full なら全体の再計算で、段を必ず並列に計算する。
+    /// Do an incremental recalculation in one call, without the GIL. stores is the stored data in Metric number
+    /// order. counts and lows are the counts and the residuals (exact sum minus value, only the cells that are not
+    /// 0) of incremental aggregation, in the same order. All three change in place. changed is the changed range
+    /// of the inputs, and added is the added members of each dimension. olds is the old values of the inputs
+    /// that are a source of incremental aggregation. forced is the range of each formula Metric to calculate
+    /// again. Returns each recalculated (Metric, incremental aggregation or not, range). If full is true, it is a
+    /// full recalculation, and the levels always run in parallel.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (plan, stores, counts, lows, changed, added, olds, forced, full = false))]
     fn recalc_changes(
@@ -993,12 +993,17 @@ impl Core {
         let forced: Vec<(usize, Reg)> = forced.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
         self.added(&added)?;
         if stores.len() != n || counts.len() != n || lows.len() != n {
-            return Err(err(format!("格納データの数 {} が計算計画の Metric の数 {n} と合わない", stores.len())));
+            return Err(err(format!(
+                "格納データの数 {}、件数の数 {}、残差の数 {} が計算計画の Metric の数 {n} と合わない",
+                stores.len(),
+                counts.len(),
+                lows.len()
+            )));
         }
-        // 格納データをハンドルから取り出して渡し、終わったら戻す（参照を増やすと書き込み時に複製されるため）。
-        // 失敗しても panic しても必ず戻す（途中まで書いた計算 Metric が残るので、呼び出し側は次に全体を
-        // 計算し直す）。入力の格納データは書き換えないので取り出さずに渡す。終わるまでハンドルを借りたままに
-        // して、ほかのスレッドが途中で触れないようにする
+        // Take the stored data out of the handles and put it back at the end (one more reference makes a copy at
+        // a write). Always put it back, also after an error or a panic. Formula Metrics can then be half written,
+        // so the caller does a full recalculation next. The inputs do not change, so they stay in the handles.
+        // Keep the handles borrowed until the end, so other threads cannot touch them
         let empty = Arc::new(Store::new(&[], None, Kind::Num, &self.cat).map_err(err)?);
         let mut guard = Returned { stores: Vec::new(), counts: Vec::new(), own: Vec::new(), own_counts: Vec::new() };
         for (h, m) in stores.iter().zip(&plan.plan.metrics) {

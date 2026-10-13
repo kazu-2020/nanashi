@@ -10,6 +10,8 @@ pub(crate) struct ExactSum {
     spill: Option<Box<Spill>>,
 }
 
+// The Budget does not count a Spill: only a group with more than 2 partials has one, and it holds at most about
+// 40 partials (non-overlapping partials below HUGE cover 2^-1074 to 2^960, 53 bits each)
 #[derive(Clone, Default, Debug)]
 struct Spill {
     parts: Vec<f64>,
@@ -226,7 +228,7 @@ mod tests {
         // A huge input gives NaN in every order (no order-dependent overflow)
         assert!(sum(&[f64::MAX, f64::MAX, -f64::MAX]).finish().is_nan());
         assert!(sum(&[f64::MAX, -f64::MAX, f64::MAX]).finish().is_nan());
-        assert!(sum(&[HUGE * 0.75, HUGE * 0.75, -HUGE * 0.75]).finish() == HUGE * 0.75);
+        assert_eq!(sum(&[HUGE * 0.75, HUGE * 0.75, -HUGE * 0.75]).finish(), HUGE * 0.75);
         assert!(sum(&[1.0, f64::INFINITY]).residual().is_nan());
         assert_eq!(std::mem::size_of::<ExactSum>(), 24);
     }

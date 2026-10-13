@@ -185,12 +185,14 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option
     })
 }
 
+/// Finish each group into one cell for each of aggs, then sort the cells (16 B each, not the 64 B groups).
 pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, aggs: &[Agg]) -> Vec<Cube> {
-    let mut groups: Vec<(u64, Acc)> = groups.into_iter().collect();
-    groups.sort_unstable_by_key(|g| g.0);
-    let mut cells = vec![Vec::new(); aggs.len()];
-    for (k, x) in &groups {
-        push_group(&mut cells, aggs, *k, |a| x.finish(a));
+    let mut cells: Vec<Vec<(u64, f64)>> = aggs.iter().map(|&a| Vec::with_capacity(if a == Agg::Low { 0 } else { groups.len() })).collect();
+    for (k, x) in groups {
+        push_group(&mut cells, aggs, k, |a| x.finish(a));
+    }
+    for c in &mut cells {
+        c.sort_unstable_by_key(|c| c.0);
     }
     cubes(pack, cells)
 }
@@ -226,7 +228,7 @@ pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Cat
     if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, |k| Some(proj.apply(xp, &out, k))) {
         return Ok(c);
     }
-    // 集計元を写さずに、(集計先, 値) の組を 1 つの配列へ直接作って並べ替える
+    // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
     let pairs = collect_rows(cfg, rows.len(), |i| {
         let (k, v) = rows.get(i);
         Some((proj.apply(xp, &out, k), v))
@@ -267,27 +269,29 @@ impl Table {
     }
 }
 
-/// `x[BY agg: D.V]`（型検査が Remove(On(x, AsAxis(V, T)), D) に書き換えたもの）を、結合の結果を
-/// 作らずに集計する。x の各セルについて、対応表から行き先 T のメンバーを引いて足し込む。
-/// 範囲の絞り込みがない全体の評価で、対応表が格納データのときだけ使い、使えなければ None。
+/// Aggregate `x[BY agg: D.V]` (the type check makes it Remove(On(x, AsAxis(V, T)), D)) with no join result. For
+/// each cell of x, look up its target member of T in the mapping table and add the value to that group.
+/// removed are the dimensions of the REMOVE run. If T is one of them, the result has no T.
+/// Use it only for a full evaluation with no range limit and a mapping table in stored data. Else returns None.
 pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &Store, aggs: &[Agg], cat: &Catalog, r: &Restrict) -> Result<Option<Vec<Cube>>> {
     let cfg = &cat.cfg;
     let xp = x.pack();
-    if removed.iter().any(|d| xp.pos(*d).is_none()) || !v.pack.dims.iter().all(|d| xp.pos(*d).is_some()) {
+    if removed.iter().any(|d| *d != target && xp.pos(*d).is_none()) || !v.pack.dims.iter().all(|d| xp.pos(*d).is_some()) {
         return Ok(None);
     }
-    let dims: Vec<DimId> = xp.dims.iter().copied().filter(|d| !removed.contains(d)).chain([target]).collect();
+    let keep = (!removed.contains(&target)).then_some(target);
+    let dims: Vec<DimId> = xp.dims.iter().copied().filter(|d| !removed.contains(d)).chain(keep).collect();
     if !few_groups(cfg, aggs, combos_in(&dims, cat, r), x.len()) {
         return Ok(None);
     }
     let Some(table) = Table::of(v, target, cat) else { return Ok(None) };
     let out = Packing::new(&dims, cat)?;
-    let (proj, pt) = (Proj::new(xp, &out), out.pos(target).unwrap());
+    let (proj, pt) = (Proj::new(xp, &out), out.pos(target));
     let at: Vec<(usize, usize)> = table.strides.iter().map(|&(d, s)| (xp.pos(d).unwrap(), s)).collect();
     let groups = fold_groups(cfg, x, |k| {
         let i: usize = at.iter().map(|&(p, s)| xp.get(k, p) as usize * s).sum();
         let t = table.cells[i];
-        (t != u32::MAX).then(|| proj.apply(xp, &out, k) | out.put(pt, t))
+        (t != u32::MAX).then(|| proj.apply(xp, &out, k) | pt.map_or(0, |p| out.put(p, t)))
     });
     Ok(Some(finish_groups(groups, out, aggs)))
 }
@@ -298,15 +302,15 @@ const DENSE_MAX: usize = 1 << 26;
 /// Add the rows into an array of all the group combinations (all members of each dimension of out). The work
 /// divides the rows into one part for each thread. Each part has its own array, and the parts merge in order
 /// at the end. If the arrays are larger than the (group, value) pairs (16 B a row) of the sort path, returns
-/// None. key gives the group key (packed as out) of a row key. Gives one Cube for each of aggs (Min, Max
-/// and First only alone), in key order.
+/// None. For MIN, MAX or COUNT alone, the limit is half of the pairs. key gives the group key (packed as out) of
+/// a row key. Gives one Cube for each of aggs (Min, Max and First only alone), in key order.
 pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, aggs: &[Agg], key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Vec<Cube>> {
     let d = Dense { cfg, rows, out, cat, aggs, key };
     match aggs {
         [Agg::First] => None,
-        [Agg::Min] => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _, _| *x),
-        [Agg::Max] => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _, _| *x),
-        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64),
+        [Agg::Min] => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _, _| *x, [12, 8]),
+        [Agg::Max] => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _, _| *x, [12, 8]),
+        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64, [12, 8]),
         _ => d.fold(
             ExactSum::default(),
             |s, v| s.add(v),
@@ -318,6 +322,7 @@ pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catal
                 Agg::Count => n as f64,
                 Agg::Min | Agg::Max | Agg::First => unreachable!("only alone"),
             },
+            [std::mem::size_of::<ExactSum>() + 4, 16],
         ),
     }
 }
@@ -332,21 +337,22 @@ struct Dense<'a, K> {
 }
 
 impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
-    /// Each slot holds a T and a count (u32).
+    /// Each slot holds a T and a count (u32). limit is [bytes a slot, bytes a row]: if the arrays are larger
+    /// than the rows, returns None.
     fn fold<T: Clone + Send + Sync>(
         &self,
         init: T,
         add: impl Fn(&mut T, f64) + Sync,
         merge: impl Fn(&mut T, &T),
         finish: impl Fn(&T, u32, Agg) -> f64,
+        [slot_bytes, row_bytes]: [usize; 2],
     ) -> Option<Vec<Cube>> {
         let (cfg, rows, out) = (self.cfg, self.rows, self.out);
         let n = rows.len();
         let sizes: Vec<usize> = out.dims.iter().map(|&d| self.cat.dims[d].size.max(1) as usize).collect();
         let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
         let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
-        let slot_bytes = std::mem::size_of::<T>() + 4;
-        if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(slot_bytes) > n.saturating_mul(16) {
+        if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(slot_bytes) > n.saturating_mul(row_bytes) {
             return None;
         }
         // group key -> array index (the first dimension is the highest digit, so the index order is the key order)

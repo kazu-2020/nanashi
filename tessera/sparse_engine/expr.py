@@ -33,7 +33,7 @@ def residual(vs) -> float:
     finite) nan."""
     if not all(abs(v) < HUGE for v in vs):
         return math.nan
-    r = sum(map(Fraction, vs), Fraction(0)) - Fraction(math.fsum(vs))
+    r = sum(map(Fraction, vs)) - Fraction(math.fsum(vs))
     return float(r) if Fraction(float(r)) == r else math.nan
 
 
