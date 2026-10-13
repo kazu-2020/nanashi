@@ -116,6 +116,7 @@ python3 bench_ab.py --base origin/main -- bench.py --engine rust --size large
 Before you compare a change, run base against base (`--base HEAD` with no uncommitted changes) one time. This A/A run shows the noise of the computer.
 Keep a change only if the ranges of base and head do not overlap (the column "ranges overlap" is "no").
 `max_rss_mb` includes the pages of shared libraries such as numpy. In an A/A run in a cloud session, it was different by 8 MB between two virtual environments. Thus use it only for changes of more than some tens of MB.
+For memory, use `heap.increase_mb` of `bench.py` (the maximum increase of the Rust heap during the full recalculation). For speed, use `full`. `load` is mostly the time that Python uses to make the input cells, not the engine.
 
 ## Test policy
 
