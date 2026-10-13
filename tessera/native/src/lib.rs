@@ -882,15 +882,14 @@ impl Core {
         for t in &metrics {
             let f = formula(&t.get_item(0)?)?;
             let wants_delta: bool = t.get_item(1)?.extract()?;
-            let (delta, count) = match (&f, wants_delta) {
+            let delta = match (&f, wants_delta) {
                 (Some(f), true) => match plan::derive_delta(f) {
-                    Some((d, c)) => (Some(d), c),
+                    Some(d) => Some(d),
                     None => return Err(err("差分集計の対象でない式に差分集計を指定した".into())),
                 },
-                _ => (None, None),
+                _ => None,
             };
-            let (count, low) = count.unzip();
-            out.push(Metric { formula: f, count, low, delta, source: t.get_item(2)?.extract()? });
+            out.push(Metric { formula: f, delta, source: t.get_item(2)?.extract()? });
         }
         let n = out.len();
         check_refs(out.iter().map(|m| &m.formula), n)?;

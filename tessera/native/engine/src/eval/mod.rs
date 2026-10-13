@@ -229,47 +229,6 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
             Ok(Cube { pack: c.pack, kind: c.kind, cells })
         }
 
-        Node::ByAgg { child, src: s, dst, map, agg } => {
-            // 集約: src のメンバーを dst のメンバーへ寄せて集計する
-            let mp = &cat.maps[*map];
-            let mut sub = r.without(&[*s, *dst]);
-            if let Some(sel) = r.get(*dst) {
-                let ms = (0..cat.dims[*s].size).filter(|&m| mp.fwd[m as usize] >= 0 && sel.has(mp.fwd[m as usize] as u32)).collect();
-                sub = sub.with(*s, Sel::new(ms, cat.dims[*s].size));
-            }
-            let rows = rows_of(child, cat, src, &sub, bud)?;
-            let dims = replace_dim(&rows.pack().dims, *s, *dst);
-            let out = Packing::new(&dims, cat)?;
-            if few_groups(cfg, *agg, combos_in(&dims, cat, r), rows.len()) {
-                let xp = rows.pack();
-                let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
-                let rest = Proj::new(xp, &out);
-                let groups = fold_groups(cfg, &rows, |k| {
-                    let t = mp.fwd[xp.get(k, ps) as usize];
-                    (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
-                });
-                return Ok(finish_groups(groups, out, *agg));
-            }
-            let xp = rows.pack();
-            let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
-            let rest = Proj::new(xp, &out);
-            let target = |k: u64| {
-                let t = mp.fwd[xp.get(k, ps) as usize];
-                (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
-            };
-            if let Some(c) = dense_groups(cfg, &rows, &out, cat, *agg, target) {
-                return Ok(c);
-            }
-            // 集計元を写さずに、(集計先, 値) の組を 1 つの配列へ直接作って並べ替える
-            let pairs = collect_rows(cfg, rows.len(), |i| {
-                let (k, v) = rows.get(i);
-                let t = mp.fwd[xp.get(k, ps) as usize];
-                (t >= 0).then(|| (rest.apply(xp, &out, k) | out.put(pd, t as u32), v))
-            });
-            drop(rows);
-            Ok(group(cfg, pairs, out, *agg))
-        }
-
         Node::ByLookup { child, src: s, dst, map } => {
             // 引き下ろし: dst の値を、そこへ対応する src の各メンバーへ配る
             let mp = &cat.maps[*map];
@@ -295,32 +254,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
             Ok(Cube { pack: out, kind: c.kind, cells })
         }
 
-        Node::Remove { child, dim, agg } => {
-            let (dims, child) = remove_run(*dim, *agg, child);
-            let sub = r.without(&dims);
-            // Metric を使った BY の集約（Remove(On(x, AsAxis(V, T)), D)）は、対応表を引きながら集計する
-            if let Node::On(x, edges) = child {
-                if let Node::AsAxis { child: v, dim: target } = &**edges {
-                    if let (Node::Ref(vi), true) = (&**v, sub.is_all()) {
-                        if let Src::Store(vs) = &src[*vi] {
-                            let rows = rows_of(x, cat, src, &sub, bud)?;
-                            if let Some(c) = remove_by_table(&rows, &dims, *target, vs, *agg, cat, r)? {
-                                return Ok(c);
-                            }
-                            // 引けなければ、結合してから集計する（On と同じ）
-                            let xc = rows.into_cube();
-                            let o = match semi(&sub, &xc, cat) {
-                                Some(r2) => eval_with(edges, cat, src, &r2, bud)?,
-                                None => eval_with(edges, cat, src, &sub, bud)?,
-                            };
-                            let joined = intersect(&xc, &o, xc.kind, cat, |a, _| Some(a))?;
-                            return remove_rows(Rows::Owned(joined), &dims, *agg, cat, r);
-                        }
-                    }
-                }
-            }
-            remove_rows(rows_of(child, cat, src, &sub, bud)?, &dims, *agg, cat, r)
-        }
+        Node::ByAgg { agg, .. } | Node::Remove { agg, .. } => Ok(aggregate(node, cat, src, r, bud, &[*agg])?.remove(0)),
 
         Node::AsAxis { child, dim } => {
             // メンバー番号を値に持つ Cube を、そのメンバーを dim の座標に持つ表（値は 1）にする
@@ -335,14 +269,8 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         }
 
         Node::Select { child, dim, member, .. } => {
-            // member の切り口を取り出し、dim を外す
             let c = eval_with(child, cat, src, &r.with(*dim, Sel::new(vec![*member], cat.dims[*dim].size)), bud)?;
-            let p = c.pack.pos(*dim).unwrap();
-            let dims: Vec<DimId> = c.dims().iter().copied().filter(|d| d != dim).collect();
-            let out = Packing::new(&dims, cat)?;
-            let proj = Proj::new(&c.pack, &out);
-            let cells = map_cells(cfg, &c.cells, |k, v| (c.pack.get(k, p) == *member).then(|| (proj.apply(&c.pack, &out, k), v)));
-            Ok(Cube { pack: out, kind: c.kind, cells })
+            select(c, *dim, *member, cat)
         }
 
         Node::Shift { child, dim, n } => {
@@ -366,4 +294,110 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
             Ok(Cube { pack: c.pack, kind: c.kind, cells }.filter(cfg, r))
         }
     }
+}
+
+/// Evaluate an aggregation node (ByAgg or Remove) and give one Cube for each of aggs (in place of the agg of the
+/// node), from one pass over the source. Min, Max and First only alone.
+fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget, aggs: &[Agg]) -> Result<Vec<Cube>> {
+    let cfg = &cat.cfg;
+    match node {
+        Node::ByAgg { child, src: s, dst, map, .. } => {
+            // 集約: src のメンバーを dst のメンバーへ寄せて集計する
+            let mp = &cat.maps[*map];
+            let mut sub = r.without(&[*s, *dst]);
+            if let Some(sel) = r.get(*dst) {
+                let ms = (0..cat.dims[*s].size).filter(|&m| mp.fwd[m as usize] >= 0 && sel.has(mp.fwd[m as usize] as u32)).collect();
+                sub = sub.with(*s, Sel::new(ms, cat.dims[*s].size));
+            }
+            let rows = rows_of(child, cat, src, &sub, bud)?;
+            let dims = replace_dim(&rows.pack().dims, *s, *dst);
+            let out = Packing::new(&dims, cat)?;
+            if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
+                let xp = rows.pack();
+                let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
+                let rest = Proj::new(xp, &out);
+                let groups = fold_groups(cfg, &rows, |k| {
+                    let t = mp.fwd[xp.get(k, ps) as usize];
+                    (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
+                });
+                return Ok(finish_groups(groups, out, aggs));
+            }
+            let xp = rows.pack();
+            let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
+            let rest = Proj::new(xp, &out);
+            let target = |k: u64| {
+                let t = mp.fwd[xp.get(k, ps) as usize];
+                (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
+            };
+            if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, target) {
+                return Ok(c);
+            }
+            // 集計元を写さずに、(集計先, 値) の組を 1 つの配列へ直接作って並べ替える
+            let pairs = collect_rows(cfg, rows.len(), |i| {
+                let (k, v) = rows.get(i);
+                let t = mp.fwd[xp.get(k, ps) as usize];
+                (t >= 0).then(|| (rest.apply(xp, &out, k) | out.put(pd, t as u32), v))
+            });
+            drop(rows);
+            Ok(group(cfg, pairs, out, aggs))
+        }
+
+        Node::Remove { child, dim, agg } => {
+            let (dims, child) = remove_run(*dim, *agg, child);
+            let sub = r.without(&dims);
+            // Metric を使った BY の集約（Remove(On(x, AsAxis(V, T)), D)）は、対応表を引きながら集計する
+            if let Node::On(x, edges) = child {
+                if let Node::AsAxis { child: v, dim: target } = &**edges {
+                    if let (Node::Ref(vi), true) = (&**v, sub.is_all()) {
+                        if let Src::Store(vs) = &src[*vi] {
+                            let rows = rows_of(x, cat, src, &sub, bud)?;
+                            if let Some(c) = remove_by_table(&rows, &dims, *target, vs, aggs, cat, r)? {
+                                return Ok(c);
+                            }
+                            // 引けなければ、結合してから集計する（On と同じ）
+                            let xc = rows.into_cube();
+                            let o = match semi(&sub, &xc, cat) {
+                                Some(r2) => eval_with(edges, cat, src, &r2, bud)?,
+                                None => eval_with(edges, cat, src, &sub, bud)?,
+                            };
+                            let joined = intersect(&xc, &o, xc.kind, cat, |a, _| Some(a))?;
+                            return remove_rows(Rows::Owned(joined), &dims, aggs, cat, r);
+                        }
+                    }
+                }
+            }
+            remove_rows(rows_of(child, cat, src, &sub, bud)?, &dims, aggs, cat, r)
+        }
+
+        _ => unreachable!("an aggregation node"),
+    }
+}
+
+/// Evaluate a SUM formula with one aggregation level (only SELECT above it, see plan::Sums). Gives the value, the
+/// count and the residual of each group from one pass over the source.
+pub fn eval_sums(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<[Cube; 3]> {
+    let mark = b.used();
+    let out = match node {
+        Node::Select { child, dim, member, .. } => {
+            let [v, c, l] = eval_sums(child, cat, src, &r.with(*dim, Sel::new(vec![*member], cat.dims[*dim].size)), b)?;
+            [select(v, *dim, *member, cat)?, select(c, *dim, *member, cat)?, select(l, *dim, *member, cat)?]
+        }
+        _ => aggregate(node, cat, src, r, b, &[Agg::Sum, Agg::Count, Agg::Low])?.try_into().expect("3 Cubes"),
+    };
+    let mut at = mark;
+    for c in &out {
+        b.settle(at, c)?;
+        at = b.used();
+    }
+    Ok(out)
+}
+
+/// The cells of c at member of dim, without dim (SELECT).
+fn select(c: Cube, dim: DimId, member: u32, cat: &Catalog) -> Result<Cube> {
+    let p = c.pack.pos(dim).unwrap();
+    let dims: Vec<DimId> = c.dims().iter().copied().filter(|d| *d != dim).collect();
+    let out = Packing::new(&dims, cat)?;
+    let proj = Proj::new(&c.pack, &out);
+    let cells = map_cells(&cat.cfg, &c.cells, |k, v| (c.pack.get(k, p) == member).then(|| (proj.apply(&c.pack, &out, k), v)));
+    Ok(Cube { pack: out, kind: c.kind, cells })
 }

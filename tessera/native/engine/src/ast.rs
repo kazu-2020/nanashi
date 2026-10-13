@@ -19,7 +19,7 @@ pub enum Op {
     Or,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agg {
     Sum,
     Avg,

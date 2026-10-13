@@ -40,10 +40,11 @@ impl Acc {
     }
 }
 
-/// (集計先のキー, 値) を並べ替え、同じキーが続く区間ごとに集計する。結果はキー順に並ぶ。
-pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, agg: Agg) -> Cube {
+/// Sort the (group key, value) pairs and aggregate each run of the same key. Gives one Cube for each of aggs,
+/// in key order.
+pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, aggs: &[Agg]) -> Vec<Cube> {
     sort_cells(cfg, &mut pairs);
-    let mut cells = Vec::new();
+    let mut cells = vec![Vec::new(); aggs.len()];
     let mut i = 0;
     while i < pairs.len() {
         let mut acc = Acc::new();
@@ -52,9 +53,16 @@ pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, agg
             acc.add(pairs[i].1);
             i += 1;
         }
-        cells.push((k, acc.finish(agg)));
+        for (c, a) in cells.iter_mut().zip(aggs) {
+            c.push((k, acc.finish(*a)));
+        }
     }
-    Cube { pack, kind: Kind::Num, cells }
+    cubes(pack, cells)
+}
+
+/// One Cube of numbers with pack for each cell list.
+fn cubes(pack: Packing, cells: Vec<Vec<(u64, f64)>>) -> Vec<Cube> {
+    cells.into_iter().map(|cells| Cube { pack: pack.clone(), kind: Kind::Num, cells }).collect()
 }
 
 impl Acc {
@@ -139,8 +147,8 @@ pub(crate) fn combos_in(dims: &[DimId], cat: &Catalog, r: &Restrict) -> f64 {
 /// Thus the limit is 1/(16 x thread count) of the source rows. With more groups, the merge time and memory
 /// come near the cost to copy the source to (group, value) pairs and sort them. First is not used here,
 /// because the order of the rows has a meaning for it.
-pub(crate) fn few_groups(cfg: &Config, agg: Agg, groups: f64, rows: usize) -> bool {
-    if matches!(agg, Agg::First) {
+pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -> bool {
+    if aggs.contains(&Agg::First) {
         return false;
     }
     cfg.stream_always || groups * (rayon::current_num_threads() * 16) as f64 <= rows as f64
@@ -168,10 +176,10 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option
     })
 }
 
-pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, agg: Agg) -> Cube {
-    let mut cells: Vec<(u64, f64)> = groups.into_iter().map(|(k, a)| (k, a.finish(agg))).collect();
-    cells.sort_unstable_by_key(|c| c.0);
-    Cube { pack, kind: Kind::Num, cells }
+pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, aggs: &[Agg]) -> Vec<Cube> {
+    let mut groups: Vec<(u64, Acc)> = groups.into_iter().collect();
+    groups.sort_unstable_by_key(|g| g.0);
+    cubes(pack, aggs.iter().map(|a| groups.iter().map(|(k, x)| (*k, x.finish(*a))).collect()).collect())
 }
 
 /// A run of nested REMOVE SUM nodes (the parser makes `REMOVE SUM: A, B` into nested nodes) is one aggregation
@@ -191,18 +199,18 @@ pub(crate) fn remove_run(dim: DimId, agg: Agg, child: &Node) -> (Vec<DimId>, &No
 
 /// Aggregate rows without the dimensions removed (REMOVE). r is the range of the result (to estimate the number
 /// of groups).
-pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Cube> {
+pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Catalog, r: &Restrict) -> Result<Vec<Cube>> {
     let cfg = &cat.cfg;
     let dims: Vec<DimId> = rows.pack().dims.iter().copied().filter(|d| !removed.contains(d)).collect();
     let out = Packing::new(&dims, cat)?;
-    if few_groups(cfg, agg, combos_in(&dims, cat, r), rows.len()) {
+    if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
         let proj = Proj::new(rows.pack(), &out);
         let groups = fold_groups(cfg, &rows, |k| Some(proj.apply(rows.pack(), &out, k)));
-        return Ok(finish_groups(groups, out, agg));
+        return Ok(finish_groups(groups, out, aggs));
     }
     let xp = rows.pack();
     let proj = Proj::new(xp, &out);
-    if let Some(c) = dense_groups(cfg, &rows, &out, cat, agg, |k| Some(proj.apply(xp, &out, k))) {
+    if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, |k| Some(proj.apply(xp, &out, k))) {
         return Ok(c);
     }
     // 集計元を写さずに、(集計先, 値) の組を 1 つの配列へ直接作って並べ替える
@@ -211,7 +219,7 @@ pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], agg: Agg, cat: &Catalog
         Some((proj.apply(xp, &out, k), v))
     });
     drop(rows);
-    Ok(group(cfg, pairs, out, agg))
+    Ok(group(cfg, pairs, out, aggs))
 }
 
 /// 対応表（メンバー型の Metric、例: 社員・月 -> 部署）を、その軸の全組み合わせの配列にしたもの。
@@ -249,14 +257,14 @@ impl Table {
 /// `x[BY agg: D.V]`（型検査が Remove(On(x, AsAxis(V, T)), D) に書き換えたもの）を、結合の結果を
 /// 作らずに集計する。x の各セルについて、対応表から行き先 T のメンバーを引いて足し込む。
 /// 範囲の絞り込みがない全体の評価で、対応表が格納データのときだけ使い、使えなければ None。
-pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &Store, agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Option<Cube>> {
+pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &Store, aggs: &[Agg], cat: &Catalog, r: &Restrict) -> Result<Option<Vec<Cube>>> {
     let cfg = &cat.cfg;
     let xp = x.pack();
     if removed.iter().any(|d| xp.pos(*d).is_none()) || !v.pack.dims.iter().all(|d| xp.pos(*d).is_some()) {
         return Ok(None);
     }
     let dims: Vec<DimId> = xp.dims.iter().copied().filter(|d| !removed.contains(d)).chain([target]).collect();
-    if !few_groups(cfg, agg, combos_in(&dims, cat, r), x.len()) {
+    if !few_groups(cfg, aggs, combos_in(&dims, cat, r), x.len()) {
         return Ok(None);
     }
     let Some(table) = Table::of(v, target, cat) else { return Ok(None) };
@@ -268,7 +276,7 @@ pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &St
         let t = table.cells[i];
         (t != u32::MAX).then(|| proj.apply(xp, &out, k) | out.put(pt, t))
     });
-    Ok(Some(finish_groups(groups, out, agg)))
+    Ok(Some(finish_groups(groups, out, aggs)))
 }
 
 /// 集計先の全組み合わせの数がこれ以下なら、全組み合わせの配列へ足し込む経路を考える。
@@ -277,24 +285,27 @@ const DENSE_MAX: usize = 1 << 26;
 /// Add the rows into an array of all the group combinations (all members of each dimension of out). The work
 /// divides the rows into one part for each thread. Each part has its own array, and the parts merge in order
 /// at the end. If the arrays are larger than half of the (group, value) pairs (8 B a row) of the sort path,
-/// returns None. key gives the group key (packed as out) of a row key. The result is in key order.
-pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, agg: Agg, key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Cube> {
-    let d = Dense { cfg, rows, out, cat, key };
-    match agg {
-        Agg::First => None,
-        Agg::Sum | Agg::Avg | Agg::Low => d.fold(
+/// returns None. key gives the group key (packed as out) of a row key. Gives one Cube for each of aggs (Min, Max
+/// and First only alone), in key order.
+pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, aggs: &[Agg], key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Vec<Cube>> {
+    let d = Dense { cfg, rows, out, cat, aggs, key };
+    match aggs {
+        [Agg::First] => None,
+        [Agg::Min] => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _, _| *x),
+        [Agg::Max] => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _, _| *x),
+        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64),
+        _ => d.fold(
             ExactSum::default(),
             |s, v| s.add(v),
             |s, o| s.merge(o),
-            |s, n| match agg {
+            |s, n, agg| match agg {
+                Agg::Sum => s.finish(),
                 Agg::Avg => s.finish() / n as f64,
                 Agg::Low => s.residual(),
-                _ => s.finish(),
+                Agg::Count => n as f64,
+                Agg::Min | Agg::Max | Agg::First => unreachable!("only alone"),
             },
         ),
-        Agg::Min => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _| *x),
-        Agg::Max => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _| *x),
-        Agg::Count => d.fold((), |_, _| {}, |_, _| {}, |_, n| n as f64),
     }
 }
 
@@ -303,6 +314,7 @@ struct Dense<'a, K> {
     rows: &'a Rows,
     out: &'a Packing,
     cat: &'a Catalog,
+    aggs: &'a [Agg],
     key: K,
 }
 
@@ -313,8 +325,8 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         init: T,
         add: impl Fn(&mut T, f64) + Sync,
         merge: impl Fn(&mut T, &T),
-        finish: impl Fn(&T, u32) -> f64,
-    ) -> Option<Cube> {
+        finish: impl Fn(&T, u32, Agg) -> f64,
+    ) -> Option<Vec<Cube>> {
         let (cfg, rows, out) = (self.cfg, self.rows, self.out);
         let n = rows.len();
         let sizes: Vec<usize> = out.dims.iter().map(|&d| self.cat.dims[d].size.max(1) as usize).collect();
@@ -353,7 +365,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 }
             }
         }
-        let mut cells = Vec::new();
+        let mut cells = vec![Vec::new(); self.aggs.len()];
         for s in 0..slots {
             if cnt[s] == 0 {
                 continue;
@@ -363,8 +375,10 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 k |= out.put(j, (rest % sizes[j]) as u32);
                 rest /= sizes[j];
             }
-            cells.push((k, finish(&vals[s], cnt[s])));
+            for (c, a) in cells.iter_mut().zip(self.aggs) {
+                c.push((k, finish(&vals[s], cnt[s], *a)));
+            }
         }
-        Some(Cube { pack: out.clone(), kind: Kind::Num, cells })
+        Some(cubes(out.clone(), cells))
     }
 }

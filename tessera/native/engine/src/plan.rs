@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{eval_with, remove_run, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{eval_sums, eval_with, remove_run, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -308,23 +308,31 @@ pub struct Formula {
     pub refs: Vec<usize>,
 }
 
-/// 差分集計の計画。inputs は [集計元, 対応表...]。d_count と sums の refs は作業データの番号で、
-/// inputs の i 番目の変更後が 2i、変更前が 2i + 1。
+/// The plan of an incremental aggregation. inputs is [source, maps...]. The refs of the work formulas are work
+/// data numbers: the new data of the i-th input is 2i, the old data is 2i + 1.
 pub struct Delta {
     pub inputs: Vec<usize>,
-    /// The dimensions that the aggregations under the outermost one remove (SUM only). The delta range does not
+    /// The dimensions that the aggregations under the outermost one remove (Method::Formulas only). The delta range does not
     /// limit them, so each inner group with a changed row is read in full and rounds as in a full evaluation.
     pub widen: Vec<DimId>,
-    pub d_count: Formula,
-    /// SUM: the formula and its residual formula on the new work data, then on the old work data. None for
-    /// COUNT (d_count is then the change of the value).
-    pub sums: Option<[Formula; 4]>,
+    pub method: Method,
+}
+
+/// How a Metric with incremental aggregation gets its values, counts and residuals.
+pub enum Method {
+    /// COUNT: d_count is the change of the value on the work data (the value is the count).
+    Count { d_count: Formula },
+    /// A SUM with one aggregation level: the formula on the new and on the old work data. eval_sums gives the
+    /// value, the count and the residual from one pass, also in a compute without incremental aggregation.
+    OnePass { work: [Formula; 2] },
+    /// A SUM with more levels: the count formula and the residual formula (see inner_count and outer_low), the
+    /// change of the count on the work data, and the formula and the residual formula on the new work data, then
+    /// on the old work data.
+    Formulas { count: Formula, low: Formula, d_count: Formula, work: [Formula; 4] },
 }
 
 pub struct Metric {
     pub formula: Option<Formula>, // None なら入力
-    pub count: Option<Formula>,   // 差分集計する SUM の、各グループの件数の式
-    pub low: Option<Formula>,     // the residual formula of an incremental SUM (see outer_low). Some if count is
     pub delta: Option<Delta>,
     pub source: bool, // 差分集計の集計元か対応表（変更前の値を取っておく）
 }
@@ -408,6 +416,16 @@ pub fn outer_low(e: &Node) -> Node {
     }
 }
 
+/// True if the formula has one aggregation level (a run of REMOVE SUM is one level), with only SELECT above it.
+fn one_level(e: &Node) -> bool {
+    match e {
+        Node::Select { child, .. } => one_level(child),
+        Node::Remove { child, dim, agg } => !has_agg(remove_run(*dim, *agg, child).1),
+        Node::ByAgg { child, .. } => !has_agg(child),
+        _ => false,
+    }
+}
+
 /// Add to out the dimensions that the aggregations under the outermost one remove. A run of REMOVE SUM is one
 /// aggregation (see remove_run).
 fn inner_dims(e: &Node, outer: bool, out: &mut Vec<DimId>) {
@@ -449,12 +467,12 @@ fn shift_refs(e: &Node, offset: usize) -> Node {
     }
 }
 
-/// 差分集計の計画と、件数の式と残差の式（SUM の集計だけ）。意味は Python の Model.delta_exprs と同じ。
+/// 差分集計の計画。意味は Python の Model.delta_exprs と同じ。
 ///
 /// 差分の式は「新しい値での集計 - 古い値での集計」で、集計元と対応表の変更後を作業データの 2i 番、
 /// 変更前を 2i + 1 番から読む。式の refs は、元の式の Ref の番号（変更後）と、それを式の Ref の数だけ
 /// ずらした番号（変更前）を、作業データの番号に写す。
-pub fn derive_delta(f: &Formula) -> Option<(Delta, Option<(Formula, Formula)>)> {
+pub fn derive_delta(f: &Formula) -> Option<Delta> {
     let (source, aux, needs_count) = delta_pattern(&f.node)?;
     let mut input_refs = vec![source];
     input_refs.extend(aux.iter().copied().filter(|a| *a != source));
@@ -463,17 +481,23 @@ pub fn derive_delta(f: &Formula) -> Option<(Delta, Option<(Formula, Formula)>)> 
     let slot = |i: usize, old: bool| input_refs.iter().position(|&r| r == i).map(|j| 2 * j + old as usize).unwrap_or(0);
     let refs: Vec<usize> = (0..n).map(|i| slot(i, false)).chain((0..n).map(|i| slot(i, true))).collect();
     let diff = |node: &Node| Formula { node: Arc::new(Node::Bin(Op::Sub, Box::new(node.clone()), Box::new(shift_refs(node, n)), vec![])), refs: refs.clone() };
-    let count_node = if needs_count { inner_count(&f.node) } else { (*f.node).clone() };
-    let d_count = diff(&count_node);
-    let low = outer_low(&f.node);
     let work = |node: &Node, old: bool| Formula { node: Arc::new(if old { shift_refs(node, n) } else { node.clone() }), refs: refs.clone() };
-    let sums = needs_count.then(|| [work(&f.node, false), work(&low, false), work(&f.node, true), work(&low, true)]);
     let mut widen = Vec::new();
-    if needs_count {
+    let method = if !needs_count {
+        Method::Count { d_count: diff(&f.node) }
+    } else if one_level(&f.node) {
+        Method::OnePass { work: [work(&f.node, false), work(&f.node, true)] }
+    } else {
         inner_dims(&f.node, true, &mut widen);
-    }
-    let count = needs_count.then(|| (Formula { node: Arc::new(count_node), refs: f.refs.clone() }, Formula { node: Arc::new(low), refs: f.refs.clone() }));
-    Some((Delta { inputs, widen, d_count, sums }, count))
+        let (count, low) = (inner_count(&f.node), outer_low(&f.node));
+        Method::Formulas {
+            d_count: diff(&count),
+            work: [work(&f.node, false), work(&low, false), work(&f.node, true), work(&low, true)],
+            count: Formula { node: Arc::new(count), refs: f.refs.clone() },
+            low: Formula { node: Arc::new(low), refs: f.refs.clone() },
+        }
+    };
+    Some(Delta { inputs, widen, method })
 }
 
 pub enum Step {
@@ -518,6 +542,11 @@ struct Done {
 pub const WIDEN_SHARE: f64 = 0.5;
 /// 再計算した Metric の記録: (Metric の番号, 差分集計なら true, 範囲)。
 pub type Log = Vec<(usize, bool, Reg)>;
+
+/// The change of the count: the new count minus the old count (a missing cell is 0).
+fn sub() -> Node {
+    Node::Bin(Op::Sub, Box::new(Node::Ref(0)), Box::new(Node::Ref(1)), vec![])
+}
 
 // 差分集計の後半で使う式（読み出し元は、変更前の値、値の差分、新しい件数の順）
 fn new_count() -> Node {
@@ -675,12 +704,21 @@ impl<'a> Run<'a> {
         plan.metrics[m].formula.as_ref().expect("計算 Metric")
     }
 
-    fn eval(&self, f: &Formula, work: Option<&[Src]>, r: &Restrict, b: &Budget) -> Result<Cube> {
-        let src: Vec<Src> = match work {
+    /// The sources of f: the work data, or the stored data if work is None.
+    fn srcs(&self, f: &Formula, work: Option<&[Src]>) -> Vec<Src> {
+        match work {
             Some(w) => f.refs.iter().map(|&i| w[i].clone()).collect(),
             None => f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect(),
-        };
-        eval_with(&f.node, self.cat, &src, r, b)
+        }
+    }
+
+    fn eval(&self, f: &Formula, work: Option<&[Src]>, r: &Restrict, b: &Budget) -> Result<Cube> {
+        eval_with(&f.node, self.cat, &self.srcs(f, work), r, b)
+    }
+
+    /// The value, the count and the residual of a SUM with one aggregation level (Method::OnePass).
+    fn sums(&self, f: &Formula, work: Option<&[Src]>, r: &Restrict, b: &Budget) -> Result<[Cube; 3]> {
+        eval_sums(&f.node, self.cat, &self.srcs(f, work), r, b)
     }
 
     fn slice(&self, m: usize, r: &Reg) -> Src {
@@ -727,18 +765,22 @@ impl<'a> Run<'a> {
             Some(done) => done,
             None => {
                 let r = t.region.restrict(self.cat);
-                match (&metric.count, &metric.low) {
+                match metric.delta.as_ref().map(|d| &d.method) {
+                    Some(Method::OnePass { .. }) => {
+                        let [value, count, low] = self.sums(self.formula(t.m), None, &r, &Budget::new(limit))?;
+                        (value, Some(count), Some(nonzero(low)))
+                    }
                     // The count and residual formulas read the same source as the value formula. If the work
                     // is large, evaluate them in parallel. With a limited budget, evaluate them in sequence and
                     // count all of them in the budget
-                    (Some(c), Some(l)) if (self.full || t.weight >= self.cat.cfg.par_min) && limit == usize::MAX => {
+                    Some(Method::Formulas { count: c, low: l, .. }) if (self.full || t.weight >= self.cat.cfg.par_min) && limit == usize::MAX => {
                         let (value, (count, low)) = rayon::join(
                             || self.eval(self.formula(t.m), None, &r, &Budget::new(limit)),
                             || rayon::join(|| self.eval(c, None, &r, &Budget::new(limit)), || self.eval(l, None, &r, &Budget::new(limit))),
                         );
                         (value?, Some(count?), Some(nonzero(low?)))
                     }
-                    (Some(c), Some(l)) => {
+                    Some(Method::Formulas { count: c, low: l, .. }) => {
                         let b = Budget::new(limit);
                         let value = self.eval(self.formula(t.m), None, &r, &b)?;
                         let count = self.eval(c, None, &r, &b)?;
@@ -856,24 +898,38 @@ impl<'a> Run<'a> {
             work.push(Src::Store(Arc::new(new)));
             work.push(Src::Store(old));
         }
-        let plan: &'a Plan = self.plan;
-        let metric = &plan.metrics[m];
         let r = region.restrict(cat);
         let store = &self.stores[m];
         let old_value = Src::Store(Arc::new(store.slice(&r)));
-        let old_count = match (&metric.count, &self.counts[m]) {
-            (Some(_), Some(c)) => Src::Store(Arc::new(c.slice(&r))),
-            _ => old_value.clone(),
+        let cube = |c: Cube| Src::Cube(Arc::new(c));
+        // The change of the count, and the parts of the change of the exact sum with their signs
+        let (d_count, parts) = match &d.method {
+            Method::Count { d_count } => {
+                // COUNT: the counts are exact integers, and the value is the count
+                let d_count = Arc::new(self.eval(d_count, Some(&work), &all, b)?);
+                let count = eval_with(&new_count(), cat, &[old_value.clone(), Src::Cube(d_count.clone())], &all, b)?;
+                let value = eval_with(&new_value(), cat, &[old_value, Src::Cube(d_count), cube(count)], &all, b)?;
+                return Ok(Some((value, None, None)));
+            }
+            Method::OnePass { work: [new, old] } => {
+                let [v_new, c_new, l_new] = self.sums(new, Some(&work), &all, b)?;
+                let [v_old, c_old, l_old] = self.sums(old, Some(&work), &all, b)?;
+                let d_count = eval_with(&sub(), cat, &[cube(c_new), cube(c_old)], &all, b)?;
+                (d_count, vec![(v_new, 1.0), (l_new, 1.0), (v_old, -1.0), (l_old, -1.0)])
+            }
+            Method::Formulas { d_count, work: fs, .. } => {
+                let d_count = self.eval(d_count, Some(&work), &all, b)?;
+                let mut parts = Vec::with_capacity(4);
+                for (i, f) in fs.iter().enumerate() {
+                    parts.push((self.eval(f, Some(&work), &all, b)?, if i < 2 { 1.0 } else { -1.0 }));
+                }
+                (d_count, parts)
+            }
         };
-        let d_count = Arc::new(self.eval(&d.d_count, Some(&work), &all, b)?);
-        let count = Arc::new(eval_with(&new_count(), cat, &[old_count, Src::Cube(d_count.clone())], &all, b)?);
-        let Some(sums) = &d.sums else {
-            // COUNT: the counts are exact integers, and the value is the count
-            let value = eval_with(&new_value(), cat, &[old_value, Src::Cube(d_count), Src::Cube(count)], &all, b)?;
-            return Ok(Some((value, None, None)));
-        };
+        let old_count = Src::Store(Arc::new(self.counts[m].as_ref().expect("件数の格納").slice(&r)));
+        let count = eval_with(&new_count(), cat, &[old_count, cube(d_count)], &all, b)?;
         // 件数が 0 になったグループは消す
-        let kept = eval_with(&kept_count(), cat, &[Src::Cube(count)], &all, b)?.into_repacked(&cat.cfg, &store.pack);
+        let kept = eval_with(&kept_count(), cat, &[cube(count)], &all, b)?.into_repacked(&cat.cfg, &store.pack);
         let mut exact: FxHashMap<u64, ExactSum> = FxHashMap::default();
         let mut put = |c: &Cube, sign: f64| {
             for &(k, v) in &c.cells {
@@ -882,8 +938,8 @@ impl<'a> Run<'a> {
         };
         put(&store.read(&r), 1.0);
         put(&self.lows[m].as_ref().expect("残差の格納").read(&r), 1.0);
-        for (i, f) in sums.iter().enumerate() {
-            put(&self.eval(f, Some(&work), &all, b)?.into_repacked(&cat.cfg, &store.pack), if i < 2 { 1.0 } else { -1.0 });
+        for (c, sign) in parts {
+            put(&c.into_repacked(&cat.cfg, &store.pack), sign);
         }
         let (mut values, mut lows) = (Vec::with_capacity(kept.cells.len()), Vec::new());
         let zero = ExactSum::default();
@@ -900,8 +956,8 @@ impl<'a> Run<'a> {
         }
         values.sort_unstable_by_key(|c| c.0);
         lows.sort_unstable_by_key(|c| c.0);
-        let cube = |cells| Cube { pack: store.pack.clone(), kind: Kind::Num, cells };
-        Ok(Some((cube(values), Some(kept), Some(cube(lows)))))
+        let num = |cells| Cube { pack: store.pack.clone(), kind: Kind::Num, cells };
+        Ok(Some((num(values), Some(kept), Some(num(lows)))))
     }
 
     /// scan の Metric の影響範囲を、増えなくなるまで伝えてから、時間軸に沿って 1 時点ずつ計算する。
