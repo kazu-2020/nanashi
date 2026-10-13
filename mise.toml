@@ -11,3 +11,6 @@ node = "26.10.0"
 # typescript-language-server uses the TypeScript in web/node_modules.
 "go:golang.org/x/tools/gopls" = "0.23.0"
 "npm:typescript-language-server" = "6.0.1"
+# The linter and the formatter of api/. CI uses it. Build it from the Go module, because the cloud session blocks
+# the GitHub API that the aqua backend uses to verify the release.
+"go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "2.14.0"

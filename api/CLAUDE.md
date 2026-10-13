@@ -7,6 +7,8 @@ It uses `connect-go` on `net/http` of the Go standard library. It does not use a
 
 ```bash
 (cd api && go vet ./... && go test ./...)
+# The linter and the formatter. .golangci.yml gives the linters. CI runs both.
+(cd api && golangci-lint fmt ./... && golangci-lint run ./...)
 # ../dev.sh starts the full stack.
 (cd api && go run ./cmd/nanashi-api --pg postgresql://postgres@127.0.0.1:55432/nanashi)
 ```
@@ -17,5 +19,6 @@ It uses `connect-go` on `net/http` of the Go standard library. It does not use a
 - Do not edit `gen/`. `buf generate` makes it.
 - The API trusts the header `X-Nanashi-User` only from this host or from `--trusted-proxy`. If you listen on an address other than loopback, give `--trusted-proxy`. Otherwise the API does not start.
 - If you add a field that holds an id to `proto/`, give it the rule `nanashi.v1.id` (`proto/nanashi/v1/id.proto`).
+- In tests, use `cmp.Diff` of `github.com/google/go-cmp` to compare structs and slices. Do not use `reflect.DeepEqual`.
 - Put the code of a feature in the file of the feature.
 - In each file, put the calculations and types first and the actions (I/O) after them. The comment `// The actions follow.` marks the start of the actions.

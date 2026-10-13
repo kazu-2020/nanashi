@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260709200747-435963d16310.1
 	connectrpc.com/connect v1.21.0
+	github.com/google/go-cmp v0.7.0
 	github.com/jackc/pgx/v5 v5.8.0
 	google.golang.org/protobuf v1.36.12
 )

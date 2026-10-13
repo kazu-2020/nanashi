@@ -1,0 +1,16 @@
+# The golangci-lint configuration of api/. Run "golangci-lint run" and "golangci-lint fmt" in api/.
+version: "2"
+linters:
+  # The standard set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - bodyclose # Make sure that each HTTP response body is closed.
+    - errorlint # Use errors.Is and errors.As with wrapped errors.
+    - gosec
+    - nilerr # Do not return nil after an error check.
+    - noctx # Give a context to each HTTP request and each database query.
+    - usestdlibvars # Use http.MethodGet and other constants of the standard library.
+formatters:
+  enable:
+    - gofmt
+    - goimports

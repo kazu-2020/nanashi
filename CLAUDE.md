@@ -54,7 +54,7 @@ Each directory has its own workflow in `.github/workflows/`. A workflow starts o
 
 - `tessera-test.yml`: the Python and Rust tests and the static checks of `tessera/`.
 - `router-test.yml`: `go vet` and `go test` of `router/`.
-- `api-test.yml`: `go vet` and `go test` of `api/`.
+- `api-test.yml`: `golangci-lint`, `go vet` and `go test` of `api/`.
 - `web-test.yml`: `vp check`, `vp test` and the build of `web/`. It also makes sure that the generated code agrees with `proto/`.
 
 ## Router
