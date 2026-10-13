@@ -254,7 +254,7 @@ struct Fuse<'a> {
     src: &'a [Src],
     bud: &'a Budget,
     merged: &'a [OnceCell<Cube>], // Per src index: the stored data merged with its delta, made on first use
-    copied: usize,                // The cells in `merged`. Later budget checks add them, because Budget::need does not keep them
+    copied: usize,                // The cell capacity of `merged`. Later budget checks add it, because Budget::need does not keep it
     leaves: Vec<Leaf<'a>>,
     ids: Vec<usize>, // leaves の番号 -> src の番号
 }
@@ -270,7 +270,7 @@ impl<'a> Fuse<'a> {
                 // The merge of the base and the delta is in key order. The copy counts against the budget.
                 self.bud.need(self.copied + s.rows_hint(), "").ok()?;
                 let c = self.merged[i].get_or_init(|| s.read(&Restrict::all(self.cat.dims.len())));
-                self.copied += c.cells.len();
+                self.copied += c.cells.capacity(); // the Vec of the merge can grow past its length
                 Leaf { col: Col::Cells(&c.cells), pack: &s.pack, kind: s.kind }
             }
             Src::Cube(c) if c.cells.windows(2).all(|w| w[0].0 < w[1].0) => Leaf { col: Col::Cells(&c.cells), pack: &c.pack, kind: c.kind },

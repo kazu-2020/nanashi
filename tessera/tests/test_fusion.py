@@ -137,7 +137,7 @@ def run(test: unittest.TestCase, seed: int, rounds: int, configs: list[dict]) ->
 class FusionMatchesReference(unittest.TestCase):
     def test_random(self):
         # With the default compact_min, an edit leaves a delta, so fusion reads the merge of the base and the delta.
-        # compact_min=0 merges the delta into the base at each write, so fusion reads the base directly.
+        # compact_min=0 merges the delta into the base when it has more than 1/8 of the base rows, so fusion reads both kinds.
         run(self, seed=61, rounds=60, configs=[
             {"fuse": False},
             {"fuse": True},

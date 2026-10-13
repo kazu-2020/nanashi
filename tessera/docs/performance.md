@@ -183,7 +183,7 @@ On 1 thread, the time of the profit and loss plan is almost the same before and 
 
 At first, fusion rejected stored data with a delta. After an edit, an input has a delta, so `Volume * Price` fell back to one operation at a time.
 Now the engine merges the base and the delta into one array and fuses ([Engine](engine.md)).
-We measured a full recalculation after an edit of 1 Volume cell and 1 Price cell (`full_after_edit` of `bench.py`, retail xlarge, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
+We measured a full recalculation after the edits of `bench.py`, when Volume, Price, Cost and Target have a delta (`full_after_edit` of `bench.py`, retail xlarge, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
 
 | Measurement | Before | After |
 |---|---|---|
@@ -191,7 +191,7 @@ We measured a full recalculation after an edit of 1 Volume cell and 1 Price cell
 | Maximum increase of the heap during it | 1,356 MB | 1,120 MB |
 
 The heap decrease is the same in each run. The time ranges overlap, so the time difference is inside the noise of this VM.
-Most of the time after the edit is the write-back and the aggregations, not `Volume * Price`. The maximum heap is now the same as for a full recalculation without a delta (1,124 MB).
+Most of the time after the edit is the write-back and the aggregations, not `Volume * Price`. The maximum heap is now lower than for the first full recalculation (1,194 MB).
 
 RSS is larger than the Rust heap because the standard macOS allocator keeps large released blocks for reuse (MALLOC_LARGE (empty) in `vmmap`).
 In the version from before the engine aggregated while it read, RSS increased with each recalculation (1,919 MB the first time, 2,559 MB the fourth time).
