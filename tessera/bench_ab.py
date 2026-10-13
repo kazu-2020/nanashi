@@ -104,7 +104,6 @@ def base_dir(ref):
 
 
 def build(t):
-    """Make sure that nanashi_core in t/.venv is built from the current source of t."""
     venv = t / ".venv"
     if not venv.exists():
         subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
@@ -118,16 +117,16 @@ def build(t):
 
 
 def run_once(t, args):
-    """Run one benchmark process. Return its exit code, wall time, peak RSS, stdout and stderr."""
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         start = time.perf_counter()
-        p = subprocess.Popen([t / ".venv/bin/python", *args], cwd=t, stdout=out, stderr=err, text=True)
+        p = subprocess.Popen([t / ".venv/bin/python", *args], cwd=t, stdout=out, stderr=err)
         _, status, usage = os.wait4(p.pid, 0)
         wall = time.perf_counter() - start
-        p.returncode = os.waitstatus_to_exitcode(status)
-        out.seek(0), err.seek(0)
-        rss_mb = usage.ru_maxrss / (1024 * 1024 if sys.platform == "darwin" else 1024)
-        return p.returncode, wall, rss_mb, out.read(), err.read()
+        out.seek(0)
+        err.seek(0)
+        # ru_maxrss is in bytes on macOS and in KiB on Linux.
+        rss_mb = usage.ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10)
+        return os.waitstatus_to_exitcode(status), wall, rss_mb, out.read(), err.read()
 
 
 def environment(args, sha, head):
@@ -161,11 +160,12 @@ def main():
     for i in range(2 * args.runs):
         side = ("base", "head")[i % 2]
         rc, wall, rss, out, err = run_once(sides[side], args.bench)
-        if rc == 0 and not parse_metrics(out):
+        metrics = parse_metrics(out)
+        if rc == 0 and not metrics:
             print(f"{side}: the last line of the output is not JSON, thus only wall_s and max_rss_mb",
                   file=sys.stderr)
         runs.append({"side": side, "dir": str(sides[side]), "run": i // 2, "rc": rc,
-                     "metrics": {"wall_s": wall, "max_rss_mb": rss, **parse_metrics(out)},
+                     "metrics": {"wall_s": wall, "max_rss_mb": rss, **metrics},
                      **({"stderr_tail": err[-2000:]} if rc else {})})
         print(f"{side} run {i // 2}: rc {rc}, {wall:.2f} s", file=sys.stderr, flush=True)
     load_after = os.getloadavg()
