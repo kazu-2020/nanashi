@@ -1,0 +1,5 @@
+node_modules
+dist
+*.local
+# heroui-agents-md
+.heroui-docs/

@@ -11,3 +11,5 @@ bench_metrics_table.md
 .venv-ft/
 router/nanashi-router
 .nanashi-data/
+# The mise hook links web/node_modules/typescript here for typescript-language-server.
+/node_modules/
