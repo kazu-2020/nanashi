@@ -69,10 +69,11 @@ class Planner(Protocol):
         """The ranges that change when the member (an id) of the dimension dim goes, after its inputs became
         blank (formula Metric -> the range without the removed member)."""
 
-    def recalc(self, plan: CompiledPlan, stores: dict[str, Any], counts: dict[str, Any], cat: Catalog,
-               changed: dict[str, Restrict], added: dict[str, frozenset[str]], olds: dict[str, Any],
+    def recalc(self, plan: CompiledPlan, stores: dict[str, Any], counts: dict[str, Any], lows: dict[str, Any],
+               cat: Catalog, changed: dict[str, Restrict], added: dict[str, frozenset[str]], olds: dict[str, Any],
                forced: dict[str, Restrict], full: bool = False) -> tuple[list[tuple[str, bool]], Callable]:
         """差分再計算。stores と counts（Metric ごとの格納データと差分集計の件数）をその場で書き換える。
+        lows (the residuals of incremental aggregation) also change in place.
         changed は入力の変更範囲、added は追加したメンバー、olds は差分集計の集計元になる入力の変更前の値、
         forced は必ず計算し直す計算 Metric の範囲。full なら全体を計算し直す（changed などは使わない）。
         返すのは、計算し直した (Metric, 差分集計か) の列と、(Metric, 範囲) の列を返す関数。
@@ -190,8 +191,8 @@ class PyPlanner:
 
     # ------------------------------------------------ 再計算
 
-    def recalc(self, plan, stores, counts, cat, changed, added, olds, forced, full=False):
-        run = _Run(self, plan, stores, counts, cat)
+    def recalc(self, plan, stores, counts, lows, cat, changed, added, olds, forced, full=False):
+        run = _Run(self, plan, stores, counts, lows, cat)
         if full:
             run.all()
         else:
@@ -218,14 +219,15 @@ class PyPlanner:
 class _Run:
     """PyPlanner.recalc の 1 回分。"""
 
-    def __init__(self, planner: PyPlanner, plan: CompiledPlan, stores: dict, counts: dict, cat):
+    def __init__(self, planner: PyPlanner, plan: CompiledPlan, stores: dict, counts: dict, lows: dict, cat):
         self.planner, self.eng, self.plan = planner, planner.engine, plan
-        self.stores, self.counts, self.cat = stores, counts, cat
+        self.stores, self.counts, self.lows, self.cat = stores, counts, lows, cat
         self.done: list[tuple[str, bool]] = []
         self.named: list[tuple[str, Restrict]] = []
 
     def all(self) -> None:
-        """全体を計算し直す。同じ段の Metric はまとめて評価し、差分集計する SUM は件数も同時に求める。"""
+        """Calculate all again. Evaluate the Metrics of one level together. For an incremental SUM, also get the
+        counts and the residuals."""
         eng, cat = self.eng, self.cat
         for level in self.plan.levels:
             batch = [cat.metrics[s.names[0]] for s in level
@@ -235,9 +237,7 @@ class _Run:
             for m, result in zip(plain, eng.evaluate_many([(m.formula, {}) for m in plain], cat)):
                 self._replace(m, {}, result)
             for m in fused:
-                value, count = eng.evaluate_with_count(m.formula, self.plan.delta[m.id].count, cat, {})
-                self._replace(m, {}, value)
-                self.counts[m.id] = eng.replace(self.counts[m.id], {}, eng.reorder(count, m.dims), cat)
+                self._replace(m, {}, self._replace_side(m, {}))
             for step in level:
                 if step.scan_dim is not None:
                     self._scan(step, {n: {} for n in step.names}, True)
@@ -276,15 +276,22 @@ class _Run:
                 regions[m.id] = changed
 
     def _recompute(self, m, region: Restrict) -> Restrict | None:
-        """m の region を式から計算し直す。差分集計する SUM は、各グループの件数も求め直す。"""
-        eng, cat = self.eng, self.cat
+        """Calculate the region of m again from the formula. For an incremental SUM, also the counts and residuals."""
         dp = self.plan.delta.get(m.id)
         if dp is not None and dp.count is not None:
-            value, counts = eng.evaluate_with_count(m.formula, dp.count, cat, region)
-            changed = self._replace(m, region, value, diff=True)
-            self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(counts, m.dims), cat)
-            return changed
-        return self._replace(m, region, eng.evaluate(m.formula, cat, region), diff=True)
+            return self._replace(m, region, self._replace_side(m, region), diff=True)
+        return self._replace(m, region, self.eng.evaluate(m.formula, self.cat, region), diff=True)
+
+    def _replace_side(self, m, region: Restrict) -> Any:
+        """Evaluate the value, count and residual formulas of an incremental SUM over region. Write the counts and
+        residuals (only the cells that are not 0) and return the values."""
+        eng, cat = self.eng, self.cat
+        dp = self.plan.delta[m.id]
+        value, count, low = eng.evaluate_many([(m.formula, region), (dp.count, region), (dp.low, region)], cat)
+        self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(count, m.dims), cat)
+        low = eng.drop_value(eng.reorder(low, m.dims), 0.0, cat)
+        self.lows[m.id] = eng.replace(self.lows[m.id], region, low, cat)
+        return value
 
     @staticmethod
     def _delta_range(dp: DeltaPlan, regions: dict[str, Restrict]) -> Restrict | None:

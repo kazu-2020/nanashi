@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, fields
+from fractions import Fraction
 from typing import Any, Callable
 
 @dataclass(frozen=True)
@@ -27,6 +28,15 @@ def exact_sum(vs) -> float:
     return sum(v if math.isinf(v) else math.nan for v in big)
 
 
+def residual(vs) -> float:
+    """The exact sum minus exact_sum(vs), if that is one float exactly. Otherwise (also for a sum that is not
+    finite) nan."""
+    if not all(abs(v) < HUGE for v in vs):
+        return math.nan
+    r = sum(map(Fraction, vs), Fraction(0)) - Fraction(math.fsum(vs))
+    return float(r) if Fraction(float(r)) == r else math.nan
+
+
 AGGREGATIONS: dict[str, Aggregation] = {a.name: a for a in [
     Aggregation("sum", exact_sum, True, True),
     Aggregation("avg", lambda vs: exact_sum(vs) / len(vs), True, True),
@@ -35,6 +45,8 @@ AGGREGATIONS: dict[str, Aggregation] = {a.name: a for a in [
     Aggregation("count", lambda vs: float(len(vs)), True, False),
     # 値が 1 つしかないグループ用。Metric を使った BY の引き下ろしを書き換えた式の内部でだけ使う
     Aggregation("first", lambda vs: vs[0], False, False, None),
+    # The residual of a SUM. Only the residual formula of incremental aggregation uses it (delta.py)
+    Aggregation("low", residual, False, True),
 ]}
 PUBLIC_AGGREGATIONS = tuple(n for n, a in AGGREGATIONS.items() if a.public)
 AGGREGATORS = {n: a.fn for n, a in AGGREGATIONS.items()}

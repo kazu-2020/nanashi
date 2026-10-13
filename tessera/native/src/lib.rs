@@ -306,6 +306,7 @@ impl Core {
                 "max" => Agg::Max,
                 "count" => Agg::Count,
                 "first" => Agg::First,
+                "low" => Agg::Low,
                 _ => return Err(err(format!("未知の集計関数 {s}"))),
             })
         };
@@ -871,11 +872,6 @@ impl Core {
         plan::delta_pattern(&expr.node)
     }
 
-    /// 差分集計する SUM の、各グループの件数を求める式（一番内側の集計を COUNT にしたもの）。読み出し元は同じ。
-    fn count_formula(&self, expr: &Expr) -> Expr {
-        Expr { node: Arc::new(plan::inner_count(&expr.node)), refs: expr.refs }
-    }
-
     /// 差分再計算の計算計画を作る。
     ///
     /// metrics は Metric ごとの (式, 差分集計するか, 集計元か)。式は (Expr, 読み出す Metric の番号) で、
@@ -893,7 +889,8 @@ impl Core {
                 },
                 _ => (None, None),
             };
-            out.push(Metric { formula: f, count, delta, source: t.get_item(2)?.extract()? });
+            let (count, low) = count.unzip();
+            out.push(Metric { formula: f, count, low, delta, source: t.get_item(2)?.extract()? });
         }
         let n = out.len();
         check_refs(out.iter().map(|m| &m.formula), n)?;
@@ -970,17 +967,18 @@ impl Core {
     }
 
     /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
-    /// 格納データで、その場で書き換える。changed は入力の変更範囲、added は軸ごとの追加したメンバー、
+    /// 格納データで、その場で書き換える。lows (the residual stores, in Metric number order) also change in place.changed は入力の変更範囲、added は軸ごとの追加したメンバー、
     /// olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
     /// 再計算した (Metric, 差分集計か, 範囲) を返す。full なら全体の再計算で、段を必ず並列に計算する。
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (plan, stores, counts, changed, added, olds, forced, full = false))]
+    #[pyo3(signature = (plan, stores, counts, lows, changed, added, olds, forced, full = false))]
     fn recalc_changes(
         &self,
         py: Python<'_>,
         plan: &PlanHandle,
         stores: Vec<Bound<'_, StoreHandle>>,
         counts: Vec<Option<Bound<'_, StoreHandle>>>,
+        lows: Vec<Option<Bound<'_, StoreHandle>>>,
         changed: Vec<(usize, Region)>,
         added: Vec<(DimId, Vec<u32>)>,
         olds: Vec<(usize, Bound<'_, PyAny>)>,
@@ -995,7 +993,7 @@ impl Core {
         let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
         let forced: Vec<(usize, Reg)> = forced.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
         self.added(&added)?;
-        if stores.len() != n || counts.len() != n {
+        if stores.len() != n || counts.len() != n || lows.len() != n {
             return Err(err(format!("格納データの数 {} が計算計画の Metric の数 {n} と合わない", stores.len())));
         }
         // 格納データをハンドルから取り出して渡し、終わったら戻す（参照を増やすと書き込み時に複製されるため）。
@@ -1009,16 +1007,17 @@ impl Core {
             guard.own.push(if m.formula.is_some() { std::mem::replace(&mut h.store, empty.clone()) } else { h.store.clone() });
             guard.stores.push(h);
         }
-        for h in &counts {
+        // The counts and then the lows, in one list: own_counts[..n] are the counts, own_counts[n..] the lows
+        for h in counts.iter().chain(&lows) {
             let mut h = h.as_ref().map(|h| h.try_borrow_mut().map_err(busy)).transpose()?;
             guard.own_counts.push(h.as_mut().map(|h| std::mem::replace(&mut h.store, empty.clone())));
             guard.counts.push(h);
         }
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
-        let (own, own_counts) = (&mut guard.own, &mut guard.own_counts);
+        let (own, (own_counts, own_lows)) = (&mut guard.own, guard.own_counts.split_at_mut(n));
         let result = py.detach(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plan::recalc(&cat, &plan, own, own_counts, changed, &added, olds, forced, full)
+                plan::recalc(&cat, &plan, own, own_counts, own_lows, changed, &added, olds, forced, full)
             }))
         });
         drop(guard);

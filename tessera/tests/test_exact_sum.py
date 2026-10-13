@@ -1,6 +1,7 @@
 """SUM gives the correctly rounded exact sum. The result does not change with the order of the rows, the aggregation
 path (few groups, dense array, sort) or the thread count."""
 import math
+from fractions import Fraction
 import random
 import unittest
 
@@ -81,6 +82,41 @@ class SameBitsOnEveryPath(unittest.TestCase):
                 self.assertEqual(got["Total"][()], math.fsum(cells(m, "Amount").values()))
                 continue
             self.assertEqual(got, want, engine)
+
+
+def lows(m: Model, name: str) -> dict:
+    """The residual store of an incremental SUM, with member ids as keys."""
+    mid = Named(m).metric(name).id
+    return dict(m.engine.to_cube(m._lows[mid], m).cells)
+
+
+class ResidualStore(unittest.TestCase):
+    engine = staticmethod(ReferenceEngine)
+
+    def test_value_and_residual_hold_the_exact_sum(self):
+        m = model(self.engine())
+        m.recalc()
+        amount = Named(m).metric("Amount")
+        cube = m.engine.to_cube(m._values[amount.id], m)
+        month = amount.dims.index(Named(m).dimension("Month").id)
+        region = amount.dims.index(Named(m).dimension("Region").id)
+        exact: dict = {}
+        for k, v in cube.cells.items():
+            g = (k[region], k[month])
+            exact[g] = exact.get(g, Fraction(0)) + Fraction(v)
+        mid = Named(m).metric("ByMonth").id
+        values = m.engine.to_cube(m._values[mid], m).cells
+        low = dict(m.engine.to_cube(m._lows[mid], m).cells)
+        self.assertEqual(values.keys(), exact.keys())
+        for g, x in exact.items():
+            self.assertEqual(Fraction(values[g]) + Fraction(low.get(g, 0.0)), x, g)
+        self.assertTrue(low)  # the data has groups with a residual
+        self.assertNotIn(0.0, low.values())  # the store keeps only the cells that are not 0
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core must be built")
+class RustResidualStore(ResidualStore):
+    engine = staticmethod(lambda: RustEngine())
 
 
 if __name__ == "__main__":

@@ -319,6 +319,7 @@ pub struct Delta {
 pub struct Metric {
     pub formula: Option<Formula>, // None なら入力
     pub count: Option<Formula>,   // 差分集計する SUM の、各グループの件数の式
+    pub low: Option<Formula>,     // the residual formula of an incremental SUM (see outer_low). Some if count is
     pub delta: Option<Delta>,
     pub source: bool, // 差分集計の集計元か対応表（変更前の値を取っておく）
 }
@@ -388,6 +389,20 @@ pub fn inner_count(e: &Node) -> Node {
     }
 }
 
+/// The formula with the OUTERMOST aggregation changed to Low: for each group, the exact sum minus the rounded
+/// SUM (the residual). The inner aggregations stay SUM. Together with the value, it holds the exact sum.
+pub fn outer_low(e: &Node) -> Node {
+    match e {
+        Node::ByAgg { child, src, dst, map, .. } => Node::ByAgg { child: child.clone(), src: *src, dst: *dst, map: *map, agg: Agg::Low },
+        Node::Remove { child, dim, .. } => Node::Remove { child: child.clone(), dim: *dim, agg: Agg::Low },
+        Node::Select { child, dim, member, name } => {
+            Node::Select { child: Box::new(outer_low(child)), dim: *dim, member: *member, name: name.clone() }
+        }
+        Node::On(child, other) => Node::On(Box::new(outer_low(child)), other.clone()),
+        other => other.clone(),
+    }
+}
+
 /// Ref の番号を offset だけずらした複製（同じ式の変更前と変更後を 1 つの式の中で区別するため）。
 fn shift_refs(e: &Node, offset: usize) -> Node {
     let s = |n: &Node| Box::new(shift_refs(n, offset));
@@ -413,12 +428,12 @@ fn shift_refs(e: &Node, offset: usize) -> Node {
     }
 }
 
-/// 差分集計の計画と、件数の式。意味は Python の Model.delta_exprs と同じ。
+/// 差分集計の計画と、件数の式と残差の式（SUM の集計だけ）。意味は Python の Model.delta_exprs と同じ。
 ///
 /// 差分の式は「新しい値での集計 - 古い値での集計」で、集計元と対応表の変更後を作業データの 2i 番、
 /// 変更前を 2i + 1 番から読む。式の refs は、元の式の Ref の番号（変更後）と、それを式の Ref の数だけ
 /// ずらした番号（変更前）を、作業データの番号に写す。
-pub fn derive_delta(f: &Formula) -> Option<(Delta, Option<Formula>)> {
+pub fn derive_delta(f: &Formula) -> Option<(Delta, Option<(Formula, Formula)>)> {
     let (source, aux, needs_count) = delta_pattern(&f.node)?;
     let mut input_refs = vec![source];
     input_refs.extend(aux.iter().copied().filter(|a| *a != source));
@@ -430,7 +445,9 @@ pub fn derive_delta(f: &Formula) -> Option<(Delta, Option<Formula>)> {
     let count_node = if needs_count { inner_count(&f.node) } else { (*f.node).clone() };
     let d_count = diff(&count_node);
     let d_value = needs_count.then(|| diff(&f.node));
-    let count = needs_count.then(|| Formula { node: Arc::new(count_node), refs: f.refs.clone() });
+    let count = needs_count.then(|| {
+        (Formula { node: Arc::new(count_node), refs: f.refs.clone() }, Formula { node: Arc::new(outer_low(&f.node)), refs: f.refs.clone() })
+    });
     Some((Delta { inputs, d_count, d_value }, count))
 }
 
@@ -467,6 +484,7 @@ struct Done {
     delta: bool,
     value: Write,
     count: Option<Write>, // 差分集計する SUM の、各グループの件数（Whole の範囲は使わない）
+    low: Option<Write>,   // the residual of each group of an incremental SUM (cells that are not 0)
     old: Option<Src>,     // 書き戻す前の値（下流の差分集計の集計元なら）
 }
 
@@ -493,11 +511,18 @@ fn kept_count() -> Node {
     Node::Filter(Box::new(Node::Ref(0)), alive(0))
 }
 
+/// The residual store keeps only the cells that are not 0 (a missing cell means 0).
+fn nonzero(mut c: Cube) -> Cube {
+    c.cells.retain(|x| x.1 != 0.0);
+    c
+}
+
 struct Run<'a> {
     cat: &'a Catalog,
     plan: &'a Plan,
     stores: &'a mut [Arc<Store>],
     counts: &'a mut [Option<Arc<Store>>],
+    lows: &'a mut [Option<Arc<Store>>],
     added: &'a [(DimId, Vec<u32>)],
     forced: Vec<Option<Reg>>, // 定義を変えたので、影響範囲に関係なく計算し直す範囲
     full: bool,               // 全体の再計算（格納データが空で行数を見積もれなくても、段は並列に計算する）
@@ -531,13 +556,14 @@ fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
 
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
 /// forced は定義を変えたので必ず計算し直す計算 Metric の範囲。stores と counts（Metric の番号順）は
-/// その場で書き換える。
+/// その場で書き換える。lows (the residual stores, in Metric number order) also change in place.
 #[allow(clippy::too_many_arguments)]
 pub fn recalc(
     cat: &Catalog,
     plan: &Plan,
     stores: &mut [Arc<Store>],
     counts: &mut [Option<Arc<Store>>],
+    lows: &mut [Option<Arc<Store>>],
     changed: Vec<(usize, Reg)>,
     added: &[(DimId, Vec<u32>)],
     olds: Vec<(usize, Src)>,
@@ -551,6 +577,7 @@ pub fn recalc(
         plan,
         stores,
         counts,
+        lows,
         added: &added,
         forced: vec![None; n],
         full,
@@ -666,50 +693,59 @@ impl<'a> Run<'a> {
                 self.slice(t.m, &t.region)
             }
         });
-        let (value, count) = match (&metric.delta, t.delta) {
+        let delta = match (&metric.delta, t.delta) {
             (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::new(limit))?,
-            _ => {
+            _ => None,
+        };
+        let delta_used = delta.is_some();
+        let (value, count, low) = match delta {
+            Some(done) => done,
+            None => {
                 let r = t.region.restrict(self.cat);
-                match &metric.count {
-                    // 件数の式は値の式と同じ集計元を読むので、仕事が大きければ並列に評価する（予算に限りが
-                    // あれば、値を持ったまま件数を評価する順の計算にして、値の分も予算に数える）
-                    Some(c) if (self.full || t.weight >= self.cat.cfg.par_min) && limit == usize::MAX => {
-                        let (value, count) = rayon::join(
+                match (&metric.count, &metric.low) {
+                    // The count and residual formulas read the same source as the value formula. If the work
+                    // is large, evaluate them in parallel. With a limited budget, evaluate them in sequence and
+                    // count all of them in the budget
+                    (Some(c), Some(l)) if (self.full || t.weight >= self.cat.cfg.par_min) && limit == usize::MAX => {
+                        let (value, (count, low)) = rayon::join(
                             || self.eval(self.formula(t.m), None, &r, &Budget::new(limit)),
-                            || self.eval(c, None, &r, &Budget::new(limit)),
+                            || rayon::join(|| self.eval(c, None, &r, &Budget::new(limit)), || self.eval(l, None, &r, &Budget::new(limit))),
                         );
-                        (value?, Some(count?))
+                        (value?, Some(count?), Some(nonzero(low?)))
                     }
-                    Some(c) => {
+                    (Some(c), Some(l)) => {
                         let b = Budget::new(limit);
                         let value = self.eval(self.formula(t.m), None, &r, &b)?;
-                        (value, Some(self.eval(c, None, &r, &b)?))
+                        let count = self.eval(c, None, &r, &b)?;
+                        (value, Some(count), Some(nonzero(self.eval(l, None, &r, &b)?)))
                     }
-                    None => (self.eval(self.formula(t.m), None, &r, &Budget::new(limit))?, None),
+                    _ => (self.eval(self.formula(t.m), None, &r, &Budget::new(limit))?, None, None),
                 }
             }
         };
-        let (value, count) = if t.region.is_all() {
+        let (value, count, low) = if t.region.is_all() {
             let (cells, sets) = if self.full {
                 // 全体の再計算では下流も全体を計算し直すので、値が変わった範囲は求めない
                 (self.stores[t.m].sorted_cells(value)?, None)
             } else {
                 self.stores[t.m].replaced_all(value)?
             };
-            let count = match count {
-                Some(c) => Some(Write::Whole(self.counts[t.m].as_ref().expect("件数の格納").sorted_cells(c)?, None)),
-                None => None,
+            let whole = |side: &[Option<Arc<Store>>], c: Option<Cube>| -> Result<Option<Write>> {
+                Ok(match c {
+                    Some(c) => Some(Write::Whole(side[t.m].as_ref().expect("件数の格納").sorted_cells(c)?, None)),
+                    None => None,
+                })
             };
-            (Write::Whole(cells, sets), count)
+            (Write::Whole(cells, sets), whole(&*self.counts, count)?, whole(&*self.lows, low)?)
         } else {
-            (Write::Part(value), count.map(Write::Part))
+            (Write::Part(value), count.map(Write::Part), low.map(Write::Part))
         };
-        Ok(Done { m: t.m, region: t.region.clone(), delta: t.delta, value, count, old })
+        Ok(Done { m: t.m, region: t.region.clone(), delta: delta_used, value, count, low, old })
     }
 
     /// 計算した値を書き戻し、値が実際に変わったセルの範囲を下流への影響範囲にする。
     fn apply(&mut self, done: Done) -> Result<()> {
-        let Done { m, region, delta, value, count, old } = done;
+        let Done { m, region, delta, value, count, low, old } = done;
         match self.cat.cfg.fail_at {
             Some((f, false)) if f == m => return Err(format!("書き戻しの失敗（テスト用、Metric {m}）")),
             Some((f, true)) if f == m => panic!("書き戻しの panic（テスト用、Metric {m}）"),
@@ -723,13 +759,12 @@ impl<'a> Run<'a> {
             }
             Write::Part(value) => Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?,
         };
-        match count {
-            Some(Write::Whole(cells, _)) => {
-                let counts = self.counts[m].as_ref().expect("件数の格納").with_sorted(cells);
-                self.counts[m] = Some(Arc::new(counts));
+        for (side, w) in [(&mut *self.counts, count), (&mut *self.lows, low)] {
+            match w {
+                Some(Write::Whole(cells, _)) => side[m] = Some(Arc::new(side[m].as_ref().expect("件数の格納").with_sorted(cells))),
+                Some(Write::Part(c)) => Arc::make_mut(side[m].as_mut().expect("件数の格納")).replace(&r, &c)?,
+                None => {}
             }
-            Some(Write::Part(c)) => Arc::make_mut(self.counts[m].as_mut().expect("件数の格納")).replace(&r, &c)?,
-            None => {}
         }
         if old.is_some() {
             self.olds[m] = old;
@@ -770,7 +805,8 @@ impl<'a> Run<'a> {
     }
 
     /// 集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込んだ値と件数。
-    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, b: &Budget) -> Result<(Cube, Option<Cube>)> {
+    #[allow(clippy::type_complexity)]
+    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, b: &Budget) -> Result<Option<(Cube, Option<Cube>, Option<Cube>)>> {
         let cat = self.cat;
         let all = Restrict::all(cat.dims.len());
         let range = self.delta_range(d).expect("変更範囲").restrict(cat);
@@ -811,7 +847,7 @@ impl<'a> Run<'a> {
             Some(_) => Some(eval_with(&kept_count(), cat, &[Src::Cube(count)], &all, b)?),
             None => None,
         };
-        Ok((value, kept))
+        Ok(Some((value, kept, None)))
     }
 
     /// scan の Metric の影響範囲を、増えなくなるまで伝えてから、時間軸に沿って 1 時点ずつ計算する。

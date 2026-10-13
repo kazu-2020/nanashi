@@ -25,6 +25,7 @@ class DeltaPlan:
     source: str               # 集計元の Metric
     count: Expr | None        # 各グループの件数を求める式。None なら Metric 自身が件数（COUNT の集計）
     aux: tuple[str, ...] = ()  # 変わっていない前提で読む Metric（Metric を使った BY の対応表）
+    low: Expr | None = None   # The residual formula of a SUM (see _outer_low). None for COUNT
 
 
 # エンジンが件数の式と差分の式を自分で作るとき（Rust）に、count に置く印。「件数が要る」ことだけを表す
@@ -51,7 +52,9 @@ def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
         return None
     if aggs[-1] not in ("sum", "count") or any(a != "sum" for a in aggs[:-1]):
         return None
-    return DeltaPlan(e.name, None if aggs[-1] == "count" else _inner_count(formula), tuple(aux))
+    if aggs[-1] == "count":
+        return DeltaPlan(e.name, None, tuple(aux))
+    return DeltaPlan(e.name, _inner_count(formula), tuple(aux), _outer_low(formula))
 
 
 def _has_agg(e: Expr) -> bool:
@@ -63,6 +66,14 @@ def _inner_count(e: Expr) -> Expr:
     if isinstance(e, (By, Remove)) and not _has_agg(e.child):
         return replace(e, agg="count")
     return replace(e, child=_inner_count(e.child))
+
+
+def _outer_low(e: Expr) -> Expr:
+    """The formula with the OUTERMOST aggregation changed to "low": for each group, the exact sum minus the
+    rounded SUM. The inner aggregations stay SUM. Together with the value, it holds the exact sum."""
+    if isinstance(e, (By, Remove)):
+        return replace(e, agg="low")
+    return replace(e, child=_outer_low(e.child))
 
 
 def rename(e: Expr, names: dict[str, str]) -> Expr:

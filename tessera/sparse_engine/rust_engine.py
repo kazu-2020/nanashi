@@ -313,16 +313,6 @@ class RustEngine:
             jobs.append((compiled, [cat.source(n) for n in names], self._region(cat, restrict)))
         return self.core.evaluate_many(jobs)
 
-    def evaluate_with_count(self, expr, count_expr, cat, restrict):
-        if count_expr is COUNTED:  # 件数の式は Rust が式から作る
-            compiled, names = self._compile(expr, cat)
-            sources = [cat.source(n) for n in names]
-            region = self._region(cat, restrict)
-            value, count = self.core.evaluate_many([(compiled, sources, region),
-                                                    (self.core.count_formula(compiled), sources, region)])
-            return value, count
-        return self.evaluate_many([(expr, restrict), (count_expr, restrict)], cat)
-
     def filter(self, store, restrict, cat):
         return self.core.filter(store, self._region(cat, restrict))
 
@@ -471,7 +461,7 @@ class RustPlanner:
 
     # ------------------------------------------------ 差分再計算の段取り
 
-    def recalc(self, plan, stores: dict, counts: dict, cat: Catalog, changed: dict, added: dict,
+    def recalc(self, plan, stores: dict, counts: dict, lows: dict, cat: Catalog, changed: dict, added: dict,
                olds: dict, forced: dict, full: bool = False) -> tuple[list, Any]:
         """PyPlanner.recalc と同じ段取りを Rust で行う。plan は Model.compiled()、stores と counts は
         Metric ごとの格納データと差分集計の件数、changed は入力の変更範囲、added は追加したメンバー、
@@ -487,6 +477,7 @@ class RustPlanner:
             rplan,
             [stores[n] for n in names],
             [counts.get(n) for n in names],
+            [lows.get(n) for n in names],
             [(index[n], region(r)) for n, r in changed.items()],
             self._added(cat, added),
             [(index[n], h) for n, h in olds.items()],
