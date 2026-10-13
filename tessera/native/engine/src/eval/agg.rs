@@ -53,11 +53,20 @@ pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, agg
             acc.add(pairs[i].1);
             i += 1;
         }
-        for (c, a) in cells.iter_mut().zip(aggs) {
-            c.push((k, acc.finish(*a)));
-        }
+        push_group(&mut cells, aggs, k, |a| acc.finish(a));
     }
     cubes(pack, cells)
+}
+
+/// Push the result of each of aggs for group k. A Low (residual) of 0 is not a cell: a missing residual means 0,
+/// and the residual Cube of a one-pass SUM then stays small.
+fn push_group(cells: &mut [Vec<(u64, f64)>], aggs: &[Agg], k: u64, finish: impl Fn(Agg) -> f64) {
+    for (c, &a) in cells.iter_mut().zip(aggs) {
+        let v = finish(a);
+        if !(a == Agg::Low && v == 0.0) {
+            c.push((k, v));
+        }
+    }
 }
 
 /// One Cube of numbers with pack for each cell list.
@@ -179,7 +188,11 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option
 pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, aggs: &[Agg]) -> Vec<Cube> {
     let mut groups: Vec<(u64, Acc)> = groups.into_iter().collect();
     groups.sort_unstable_by_key(|g| g.0);
-    cubes(pack, aggs.iter().map(|a| groups.iter().map(|(k, x)| (*k, x.finish(*a))).collect()).collect())
+    let mut cells = vec![Vec::new(); aggs.len()];
+    for (k, x) in &groups {
+        push_group(&mut cells, aggs, *k, |a| x.finish(a));
+    }
+    cubes(pack, cells)
 }
 
 /// A run of nested REMOVE SUM nodes (the parser makes `REMOVE SUM: A, B` into nested nodes) is one aggregation
@@ -284,8 +297,8 @@ const DENSE_MAX: usize = 1 << 26;
 
 /// Add the rows into an array of all the group combinations (all members of each dimension of out). The work
 /// divides the rows into one part for each thread. Each part has its own array, and the parts merge in order
-/// at the end. If the arrays are larger than half of the (group, value) pairs (8 B a row) of the sort path,
-/// returns None. key gives the group key (packed as out) of a row key. Gives one Cube for each of aggs (Min, Max
+/// at the end. If the arrays are larger than the (group, value) pairs (16 B a row) of the sort path, returns
+/// None. key gives the group key (packed as out) of a row key. Gives one Cube for each of aggs (Min, Max
 /// and First only alone), in key order.
 pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, aggs: &[Agg], key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Vec<Cube>> {
     let d = Dense { cfg, rows, out, cat, aggs, key };
@@ -333,7 +346,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
         let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
         let slot_bytes = std::mem::size_of::<T>() + 4;
-        if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(slot_bytes) > n.saturating_mul(8) {
+        if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(slot_bytes) > n.saturating_mul(16) {
             return None;
         }
         // group key -> array index (the first dimension is the highest digit, so the index order is the key order)
@@ -375,9 +388,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 k |= out.put(j, (rest % sizes[j]) as u32);
                 rest /= sizes[j];
             }
-            for (c, a) in cells.iter_mut().zip(self.aggs) {
-                c.push((k, finish(&vals[s], cnt[s], *a)));
-            }
+            push_group(&mut cells, self.aggs, k, |a| finish(&vals[s], cnt[s], a));
         }
         Some(cubes(out.clone(), cells))
     }

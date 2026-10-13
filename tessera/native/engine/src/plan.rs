@@ -565,12 +565,6 @@ fn kept_count() -> Node {
     Node::Filter(Box::new(Node::Ref(0)), alive(0))
 }
 
-/// The residual store keeps only the cells that are not 0 (a missing cell means 0).
-fn nonzero(mut c: Cube) -> Cube {
-    c.cells.retain(|x| x.1 != 0.0);
-    c
-}
-
 struct Run<'a> {
     cat: &'a Catalog,
     plan: &'a Plan,
@@ -768,7 +762,7 @@ impl<'a> Run<'a> {
                 match metric.delta.as_ref().map(|d| &d.method) {
                     Some(Method::OnePass { .. }) => {
                         let [value, count, low] = self.sums(self.formula(t.m), None, &r, &Budget::new(limit))?;
-                        (value, Some(count), Some(nonzero(low)))
+                        (value, Some(count), Some(low))
                     }
                     // The count and residual formulas read the same source as the value formula. If the work
                     // is large, evaluate them in parallel. With a limited budget, evaluate them in sequence and
@@ -778,13 +772,13 @@ impl<'a> Run<'a> {
                             || self.eval(self.formula(t.m), None, &r, &Budget::new(limit)),
                             || rayon::join(|| self.eval(c, None, &r, &Budget::new(limit)), || self.eval(l, None, &r, &Budget::new(limit))),
                         );
-                        (value?, Some(count?), Some(nonzero(low?)))
+                        (value?, Some(count?), Some(low?))
                     }
                     Some(Method::Formulas { count: c, low: l, .. }) => {
                         let b = Budget::new(limit);
                         let value = self.eval(self.formula(t.m), None, &r, &b)?;
                         let count = self.eval(c, None, &r, &b)?;
-                        (value, Some(count), Some(nonzero(self.eval(l, None, &r, &b)?)))
+                        (value, Some(count), Some(self.eval(l, None, &r, &b)?))
                     }
                     _ => (self.eval(self.formula(t.m), None, &r, &Budget::new(limit))?, None, None),
                 }
