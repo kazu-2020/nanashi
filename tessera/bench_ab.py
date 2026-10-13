@@ -111,7 +111,9 @@ def build(t):
         subprocess.run([venv / "bin/pip", "install", "-q", "-e", f"{t}[dev]"], check=True)
     start = time.perf_counter()
     subprocess.run([venv / "bin/maturin", "develop", "--release", "-m", t / "native/Cargo.toml"],
-                   check=True, env={**os.environ, "VIRTUAL_ENV": str(venv)}, stdout=sys.stderr)
+                   check=True, stdout=sys.stderr,
+                   # A shared CARGO_TARGET_DIR lets cargo take one side's build as fresh for the other side.
+                   env={**os.environ, "VIRTUAL_ENV": str(venv), "CARGO_TARGET_DIR": str(t / "native/target")})
     print(f"built {t} in {time.perf_counter() - start:.1f} s", file=sys.stderr)
 
 
