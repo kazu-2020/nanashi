@@ -20,8 +20,10 @@
 //! 全組み合わせへ広げた結果）の 4 倍以下のときだけ使う。疎な結合（`X[P,S] * Y[S,M]`）を全組み合わせで
 //! 走査しないためである。
 //!
-//! 使うのは、範囲の絞り込みがない全体の評価で、読み出し元がすべて差分のない格納データか、
-//! キー順に並んだ Cube のときだけ。当てはまらなければ None を返し、演算ごとに評価する。
+//! Fusion applies only to a full evaluation with no range restriction, and only when each source
+//! is stored data or a Cube in key order. Stored data with a delta is first merged into a Cube in
+//! key order (one copy of its rows). Otherwise `fused` returns None and the engine evaluates one
+//! operation at a time.
 //!
 //! メモリの予算（Budget）には、結果の配列を確保する前に、その大きさを数える。演算ごとに評価したときに
 //! 必ず作る途中結果（mat）さえ予算に収まらないなら、融合せずに演算ごとの評価に任せる（その演算が、
@@ -29,6 +31,7 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use std::cell::OnceCell;
 
 /// 読み出し元の列。キーの昇順に並び、番号で読める。
 #[derive(Clone, Copy)]
@@ -249,6 +252,8 @@ impl<'a> Access<'a> {
 struct Fuse<'a> {
     cat: &'a Catalog,
     src: &'a [Src],
+    bud: &'a Budget,
+    merged: &'a [OnceCell<Cube>], // src の番号ごとの、差分を合わせた格納データ（必要になったら作る）
     leaves: Vec<Leaf<'a>>,
     ids: Vec<usize>, // leaves の番号 -> src の番号
 }
@@ -260,6 +265,14 @@ impl<'a> Fuse<'a> {
         }
         let leaf = match &self.src[i] {
             Src::Store(s) if s.base_rows().is_some() => Leaf { col: Col::Store(s), pack: &s.pack, kind: s.kind },
+            Src::Store(s) => {
+                // The merge of the base and the delta is in key order. The copy counts against the budget.
+                if self.merged[i].get().is_none() && self.bud.need(s.rows_hint(), "差分を合わせた格納データ").is_err() {
+                    return None;
+                }
+                let c = self.merged[i].get_or_init(|| s.read(&Restrict::all(self.cat.dims.len())));
+                Leaf { col: Col::Cells(&c.cells), pack: &s.pack, kind: s.kind }
+            }
             Src::Cube(c) if c.cells.windows(2).all(|w| w[0].0 < w[1].0) => Leaf { col: Col::Cells(&c.cells), pack: &c.pack, kind: c.kind },
             _ => return None,
         };
@@ -580,7 +593,8 @@ pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: 
     if !r.is_all() || matches!(node, Node::Ref(_) | Node::Const(..) | Node::MemberConst(..)) {
         return Ok(None);
     }
-    let mut fu = Fuse { cat, src, leaves: Vec::new(), ids: Vec::new() };
+    let merged: Vec<OnceCell<Cube>> = src.iter().map(|_| OnceCell::new()).collect();
+    let mut fu = Fuse { cat, src, bud, merged: &merged, leaves: Vec::new(), ids: Vec::new() };
     let Some(info) = fu.info(node) else { return Ok(None) };
     if info.mat > usize::MAX as f64 || bud.need(info.mat as usize, "").is_err() {
         return Ok(None);

@@ -54,7 +54,8 @@ The expression tree sets the keys that the engine scans:
 - The keys of a source that has all dimensions of the formula. For `Volume * Price`, these are the keys of Volume. For `A + B`, these are the union of the keys of A and B. The engine matches the keys in key order. It reads a source with the same key layout with a cursor.
 - The keys of one source × all members of the missing dimensions, or all combinations (for example, `Month >= HireMonth AND ...`). The engine counts the keys first, then allocates the result array and writes it. The engine does not fuse if the number of scanned keys is more than 4 times the intermediate results that the evaluation of one operation at a time must make. This prevents a scan of all combinations for a sparse join.
 
-The engine continues to evaluate one operation at a time for these: an incremental recalculation on a limited range, an aggregation, and a formula that reads stored data with a delta. For an aggregation, the engine fuses the expression inside the aggregation and makes it one time.
+If a source is stored data with a delta (the usual state of an input after edits), the engine first merges the base and the delta into one array in key order. This copy counts against the memory budget. Then the fused scan reads the copy.
+The engine continues to evaluate one operation at a time for these: an incremental recalculation on a limited range, and an aggregation. For an aggregation, the engine fuses the expression inside the aggregation and makes it one time.
 
 For an aggregation (`REMOVE`, `BY`) with few aggregation targets, the engine does not copy the aggregation source. "Few" means 1/(16 × number of threads) of the source rows or less. The engine reads the source and adds each value to the intermediate value of its target.
 If the aggregation source is stored data, the engine reads the base directly by row number.
