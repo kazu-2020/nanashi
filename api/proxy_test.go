@@ -3,8 +3,28 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
+
+func TestParseNetworks(t *testing.T) {
+	got, err := ParseNetworks([]string{"10.0.1.9/24", "10.0.2.5", "::ffff:10.0.3.5", "::1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("10.0.1.0/24"), // The host bits are masked.
+		netip.MustParsePrefix("10.0.2.5/32"),
+		netip.MustParsePrefix("10.0.3.5/32"), // An IPv4-mapped address is the IPv4 address.
+		netip.MustParsePrefix("::1/128"),
+	}
+	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.Prefix{})); diff != "" {
+		t.Errorf("ParseNetworks() mismatch (-want +got):\n%s", diff)
+	}
+}
 
 func TestTrustedProxy(t *testing.T) {
 	nets, err := ParseNetworks([]string{"10.0.1.0/24", "10.0.2.5", "::1"})
@@ -36,10 +56,13 @@ func TestTrustedProxy(t *testing.T) {
 }
 
 func TestTrustedOnly(t *testing.T) {
-	nets, _ := ParseNetworks([]string{"10.0.1.5"})
-	h := TrustedOnly(nets, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	nets, err := ParseNetworks([]string{"10.0.1.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := TrustedOnly(nets, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	for addr, want := range map[string]int{"10.0.1.5:4000": http.StatusOK, "10.0.1.6:4000": http.StatusUnauthorized} {
-		r := httptest.NewRequest(http.MethodPost, "/nanashi.v1.PlanService/GetModel", nil)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/nanashi.v1.PlanService/GetModel", nil)
 		r.RemoteAddr = addr
 		r.Header.Set("X-Nanashi-User", "alice")
 		w := httptest.NewRecorder()
