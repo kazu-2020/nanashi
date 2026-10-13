@@ -136,9 +136,8 @@ def run(test: unittest.TestCase, seed: int, rounds: int, configs: list[dict]) ->
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class FusionMatchesReference(unittest.TestCase):
     def test_random(self):
-        # With the default compact_min, an edit leaves a delta in the input, and fusion reads the merge of
-        # the base and the delta. compact_min=0 merges the delta into the base at each write, so fusion
-        # reads the base directly
+        # With the default compact_min, an edit leaves a delta, so fusion reads the merge of the base and the delta.
+        # compact_min=0 merges the delta into the base at each write, so fusion reads the base directly.
         run(self, seed=61, rounds=60, configs=[
             {"fuse": False},
             {"fuse": True},

@@ -253,7 +253,8 @@ struct Fuse<'a> {
     cat: &'a Catalog,
     src: &'a [Src],
     bud: &'a Budget,
-    merged: &'a [OnceCell<Cube>], // src の番号ごとの、差分を合わせた格納データ（必要になったら作る）
+    merged: &'a [OnceCell<Cube>], // Per src index: the stored data merged with its delta, made on first use
+    copied: usize,                // The cells in `merged`. Later budget checks add them, because Budget::need does not keep them
     leaves: Vec<Leaf<'a>>,
     ids: Vec<usize>, // leaves の番号 -> src の番号
 }
@@ -267,10 +268,9 @@ impl<'a> Fuse<'a> {
             Src::Store(s) if s.base_rows().is_some() => Leaf { col: Col::Store(s), pack: &s.pack, kind: s.kind },
             Src::Store(s) => {
                 // The merge of the base and the delta is in key order. The copy counts against the budget.
-                if self.merged[i].get().is_none() && self.bud.need(s.rows_hint(), "差分を合わせた格納データ").is_err() {
-                    return None;
-                }
+                self.bud.need(self.copied + s.rows_hint(), "").ok()?;
                 let c = self.merged[i].get_or_init(|| s.read(&Restrict::all(self.cat.dims.len())));
+                self.copied += c.cells.len();
                 Leaf { col: Col::Cells(&c.cells), pack: &s.pack, kind: s.kind }
             }
             Src::Cube(c) if c.cells.windows(2).all(|w| w[0].0 < w[1].0) => Leaf { col: Col::Cells(&c.cells), pack: &c.pack, kind: c.kind },
@@ -594,9 +594,9 @@ pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: 
         return Ok(None);
     }
     let merged: Vec<OnceCell<Cube>> = src.iter().map(|_| OnceCell::new()).collect();
-    let mut fu = Fuse { cat, src, bud, merged: &merged, leaves: Vec::new(), ids: Vec::new() };
+    let mut fu = Fuse { cat, src, bud, merged: &merged, copied: 0, leaves: Vec::new(), ids: Vec::new() };
     let Some(info) = fu.info(node) else { return Ok(None) };
-    if info.mat > usize::MAX as f64 || bud.need(info.mat as usize, "").is_err() {
+    if info.mat > usize::MAX as f64 || bud.need(info.mat as usize + fu.copied, "").is_err() {
         return Ok(None);
     }
     fused_with(node, &mut fu, info, bud)
@@ -612,7 +612,7 @@ fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Op
             let mut access = Vec::new();
             let Some(f) = fu.build(node, out, true, &mut access) else { return Ok(None) };
             let drivers: Vec<Col> = ls.iter().map(|&l| fu.leaves[l].col).collect();
-            bud.need(drivers.iter().map(|d| d.n()).sum(), "式の結果")?;
+            bud.need(drivers.iter().map(|d| d.n()).sum::<usize>() + fu.copied, "式の結果")?;
             let cells = run_sorted(cfg, &drivers, &access, &f);
             return Ok(Some(Cube { pack: out.clone(), kind: info.kind, cells }));
         }
@@ -653,7 +653,7 @@ fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Op
         .map(|(i, &d)| (i, (0..cat.dims[d].size).collect()))
         .collect();
     let space = Space { base: base.as_ref().map(|(c, p, pk)| (*c, p, *pk)), out: &out, fill: &fill };
-    let mut cells = run_space(cfg, &space, &access, &f, bud)?;
+    let mut cells = run_space(cfg, &space, &access, &f, bud, fu.copied)?;
     if !cells.windows(2).all(|w| w[0].0 < w[1].0) {
         sort_cells(cfg, &mut cells);
     }
@@ -772,7 +772,7 @@ impl Space<'_, '_> {
 /// space のキーを走査し、各キーで f の値を求める。件数を数えてから結果の配列を確保するので、
 /// 結果の分しか持たない（各キーで 2 回求める）。base の読み出し元の軸が結果のキーの先頭に並べば、
 /// 結果はキー順に並ぶ。
-fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget) -> Result<Vec<(u64, f64)>> {
+fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget, copied: usize) -> Result<Vec<(u64, f64)>> {
     let (n, combos) = (space.len(), space.combos());
     if n == 0 || combos == 0 {
         return Ok(Vec::new());
@@ -784,7 +784,7 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget
         (lo..hi).filter(|&i| cur.eval(f, space.key(i, combos)).is_some()).count()
     };
     let sizes: Vec<usize> = if cfg.par(n) { parts.par_iter().map(count).collect() } else { parts.iter().map(count).collect() };
-    bud.need(sizes.iter().sum(), "式の結果")?;
+    bud.need(sizes.iter().sum::<usize>() + copied, "式の結果")?;
     let mut cells = vec![(0u64, 0f64); sizes.iter().sum()];
     let mut slices = Vec::with_capacity(parts.len());
     let mut rest = &mut cells[..];
