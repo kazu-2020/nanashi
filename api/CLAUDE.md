@@ -9,6 +9,8 @@ It uses `connect-go` on `net/http` of the Go standard library. It does not use a
 (cd api && go vet ./... && go test ./...)
 # The linter and the formatter. .golangci.yml gives the linters. CI runs both.
 (cd api && golangci-lint fmt ./... && golangci-lint run ./...)
+# Find the known vulnerabilities in the code that api/ calls. CI runs it.
+(cd api && govulncheck ./...)
 # ../dev.sh starts the full stack.
 (cd api && go run ./cmd/nanashi-api --pg postgresql://postgres@127.0.0.1:55432/nanashi)
 ```
