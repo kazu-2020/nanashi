@@ -1,15 +1,39 @@
 # The golangci-lint configuration of api/. Run "golangci-lint run" and "golangci-lint fmt" in api/.
 version: "2"
 linters:
-  # The standard set: errcheck, govet, ineffassign, staticcheck, unused.
-  default: standard
+  # Enable only the linters in the list. A new golangci-lint version then does not add linters.
+  default: none
   enable:
-    - bodyclose # Make sure that each HTTP response body is closed.
+    # Find bugs.
+    - errcheck # Do not ignore a returned error.
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Find leaks and wrong error handling.
+    - bodyclose # Close each HTTP response body.
     - errorlint # Use errors.Is and errors.As with wrapped errors.
     - gosec
     - nilerr # Do not return nil after an error check.
     - noctx # Give a context to each HTTP request and each database query.
+    - sqlclosecheck # Close each database rows and statement.
+    # Keep the code easy to read.
+    - gocyclo
+    - misspell
+    - revive # Naming and comment conventions. It replaces golint.
+    - unconvert # Remove type conversions that are not necessary.
     - usestdlibvars # Use http.MethodGet and other constants of the standard library.
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # It asks to reorder struct fields only to save memory.
+    gocyclo:
+      min-complexity: 15
+issues:
+  # Show all issues.
+  max-issues-per-linter: 0
+  max-same-issues: 0
 formatters:
   enable:
     - gofmt

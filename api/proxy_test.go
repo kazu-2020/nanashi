@@ -57,7 +57,7 @@ func TestTrustedProxy(t *testing.T) {
 
 func TestTrustedOnly(t *testing.T) {
 	nets, _ := ParseNetworks([]string{"10.0.1.5"})
-	h := TrustedOnly(nets, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	h := TrustedOnly(nets, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	for addr, want := range map[string]int{"10.0.1.5:4000": http.StatusOK, "10.0.1.6:4000": http.StatusUnauthorized} {
 		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/nanashi.v1.PlanService/GetModel", nil)
 		r.RemoteAddr = addr

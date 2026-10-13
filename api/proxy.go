@@ -1,3 +1,4 @@
+// Package api is the application server of nanashi. It gives the Connect API to web/.
 package api
 
 import (
