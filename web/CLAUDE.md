@@ -27,6 +27,7 @@ It calls the application server (`api/`) with Connect.
 - Make forms with `@tanstack/react-form`. Validate them with `zod` schemas.
 - If a list or a grid has many rows, render only the visible rows with `@tanstack/react-virtual`.
 - Keep UI state that the URL must keep (filters, the selected tab) in search params with `nuqs`.
+- In development, the TanStack Devtools panel shows Query, Router and Form (`src/devtools.tsx`). To see the nuqs logs in the console, set `localStorage.debug = "nuqs"`.
 
 ## HeroUI docs for agents
 
