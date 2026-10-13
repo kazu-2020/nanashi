@@ -26,6 +26,9 @@ class DeltaPlan:
     count: Expr | None        # 各グループの件数を求める式。None なら Metric 自身が件数（COUNT の集計）
     aux: tuple[str, ...] = ()  # 変わっていない前提で読む Metric（Metric を使った BY の対応表）
     low: Expr | None = None   # The residual formula of a SUM (see _outer_low). None for COUNT
+    # The dimensions that the aggregations under the outermost one remove (SUM only). The delta range does not
+    # limit them, so each inner group with a changed row is read in full and rounds as in a full evaluation
+    widen: tuple[str, ...] = ()
 
 
 # エンジンが件数の式と差分の式を自分で作るとき（Rust）に、count に置く印。「件数が要る」ことだけを表す
@@ -34,6 +37,7 @@ COUNTED = Const(1.0)
 
 def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
     aggs: list[str] = []  # 外側から内側の順
+    agg_dims: list[str] = []  # the dimension that each aggregation removes, in the same order
     aux: list[str] = []
     e = formula
     while True:
@@ -41,8 +45,10 @@ def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
             if e.dim not in infer(e.child, cat, []).dims:
                 return None  # 引き下ろし（lookup）は集計ではない
             aggs.append(e.agg or "sum")
+            agg_dims.append(e.dim)
         elif isinstance(e, Remove):
             aggs.append(e.agg)
+            agg_dims.append(e.dim)
         elif isinstance(e, On) and isinstance(e.other, AsAxis) and isinstance(e.other.child, Ref):
             aux.append(e.other.child.name)  # 対応表との結合は、集計元について線形
         elif not isinstance(e, Select):  # SELECT は切り口を取り出すだけで、分解を崩さない
@@ -54,7 +60,7 @@ def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
         return None
     if aggs[-1] == "count":
         return DeltaPlan(e.name, None, tuple(aux))
-    return DeltaPlan(e.name, _inner_count(formula), tuple(aux), _outer_low(formula))
+    return DeltaPlan(e.name, _inner_count(formula), tuple(aux), _outer_low(formula), tuple(agg_dims[1:]))
 
 
 def _has_agg(e: Expr) -> bool:

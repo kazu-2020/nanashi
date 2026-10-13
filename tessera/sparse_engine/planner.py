@@ -9,14 +9,16 @@ ReferenceEngine が使う。RustEngine は同じ段取りを Rust で行う Rust
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any, Callable, Protocol
 
 from .delta import DeltaPlan, plan_for, rename
 from .evaluate import (Catalog, Edge, FormulaError, Restrict, Type, affected, collect_refs, estimate, infer,
                        resolve, union_region)
 from .messages import Msg
-from .expr import BinOp, Const, Expr, Filter, Ref
+from .expr import HUGE, BinOp, Const, Expr, Filter, Ref
 
 
 @dataclass
@@ -199,9 +201,10 @@ class PyPlanner:
             run.changes(dict(changed), added, dict(olds), forced)
         return run.done, lambda: run.named
 
-    def delta_exprs(self, name: str, formula: Expr, plan: DeltaPlan) -> tuple[Expr, Expr]:
-        """件数と値の差分を求める式。Metric ごとに一度だけ作る（エンジンが変換結果をキャッシュできるように）。
-        式が読む __new{i} と __old{i} は、集計元と対応表（plan.source、plan.aux）の変更後と変更前の値。"""
+    def delta_exprs(self, name: str, formula: Expr, plan: DeltaPlan) -> tuple[Expr, tuple[Expr, ...]]:
+        """The formula for the change of the counts, and for a SUM the formula and the residual formula on the new
+        values, then on the old values. Make them once for each Metric (so the engine can cache its compiled form).
+        __new{i} and __old{i} are the new and old values of the source and the maps (plan.source, plan.aux)."""
         cached = self._delta_exprs.get(name)
         if cached is None or cached[0] is not plan or cached[1] is not formula:
             names = (plan.source, *plan.aux)
@@ -212,7 +215,9 @@ class PyPlanner:
                 return BinOp("-", rename(f, new), rename(f, old))
 
             count_f = plan.count if plan.count is not None else formula
-            cached = self._delta_exprs[name] = (plan, formula, diff(count_f), diff(formula))
+            sums = () if plan.low is None else (rename(formula, new), rename(plan.low, new), rename(formula, old),
+                                                rename(plan.low, old))
+            cached = self._delta_exprs[name] = (plan, formula, diff(count_f), sums)
         return cached[2], cached[3]
 
 
@@ -295,12 +300,13 @@ class _Run:
 
     @staticmethod
     def _delta_range(dp: DeltaPlan, regions: dict[str, Restrict]) -> Restrict | None:
-        """集計元と対応表の変更範囲を合わせた範囲。どれも変わっていなければ None。"""
+        """The union of the changed ranges of the source and the maps, without the widen dimensions. None if nothing
+        changed."""
         r = None
         for n in (dp.source, *dp.aux):
             if n in regions:
                 r = union_region(r, regions[n])
-        return r
+        return None if r is None else {d: ms for d, ms in r.items() if d not in dp.widen}
 
     def _delta_applicable(self, dp: DeltaPlan, regions: dict[str, Restrict], olds: dict[str, Any]) -> bool:
         changed = [n for n in (dp.source, *dp.aux) if n in regions]
@@ -316,7 +322,7 @@ class _Run:
         """
         eng, cat = self.eng, self.cat
         r = self._delta_range(dp, regions)
-        d_count_f, d_value_f = self.planner.delta_exprs(m.id, m.formula, dp)
+        d_count_f, sums = self.planner.delta_exprs(m.id, m.formula, dp)
         work, types = {}, {}
         for i, n in enumerate((dp.source, *dp.aux)):
             new = eng.filter(self.stores[n], r, cat)
@@ -335,20 +341,50 @@ class _Run:
         types |= {"__old_value": own, "__old_count": own, "__d_value": own, "__d_count": own, "__new_count": own}
         view = _Overlay(cat, eng, work, types)
         d_count = eng.evaluate(d_count_f, view, None)
-        d_value = eng.evaluate(d_value_f, view, None) if dp.count is not None else d_count
+        parts = [eng.evaluate(f, view, None) for f in sums]
         view = _Overlay(cat, eng, {"__old_value": old_value, "__old_count": old_count,
-                                   "__d_value": d_value, "__d_count": d_count}, types)
+                                   "__d_value": d_count, "__d_count": d_count}, types)
         view._work["__new_count"] = eng.evaluate(_NEW_COUNT, view, None)
-        new_value = eng.evaluate(_NEW_VALUE, view, None)  # 件数が 0 になったグループは空にする
         kept_count = eng.evaluate(_KEPT_COUNT, view, None)
+        low = None
+        if dp.count is None:  # COUNT: the counts are exact integers, and the value is the count
+            new_value = eng.evaluate(_NEW_VALUE, view, None)  # 件数が 0 になったグループは空にする
+        else:
+            new_value, low = self._exact(m, region, old_value, parts, kept_count)
+            if new_value is None:  # a residual is not one float: calculate the region again
+                return self._recompute(m, region)
 
         self.stores[m.id], changed = eng.replace_diff(self.stores[m.id], region,
                                                         eng.reorder(new_value, m.dims), cat)
         if dp.count is not None:
             self.counts[m.id] = eng.replace(self.counts[m.id], region, eng.reorder(kept_count, m.dims), cat)
+            self.lows[m.id] = eng.replace(self.lows[m.id], region, low, cat)
         self.done.append((m.id, True))
         self.named.append((m.id, region))
         return self._widened(changed)
+
+    def _exact(self, m, region: Restrict, old_value: Any, parts: list, kept: Any) -> tuple[Any, Any]:
+        """The new values and residuals of the groups in kept, from the exact sum (Fraction) of the stored value,
+        the stored residual, and the value and residual of the new and old work data. (None, None) if a value is
+        not finite or HUGE, or if a residual is not one float."""
+        eng, cat = self.eng, self.cat
+        exact: dict = defaultdict(Fraction)
+        olds = [(old_value, 1), (eng.filter(self.lows[m.id], region or None, cat), 1)]
+        for c, sign in olds + list(zip(parts, (1, 1, -1, -1))):
+            for k, v in eng.to_cube(eng.reorder(c, m.dims), cat).cells.items():
+                if not abs(v) < HUGE:
+                    return None, None
+                exact[k] += sign * Fraction(v)
+        values, lows = {}, {}
+        for k in eng.to_cube(eng.reorder(kept, m.dims), cat).cells:
+            x = exact[k]
+            values[k] = v = float(x)
+            low = float(x - Fraction(v))
+            if Fraction(low) != x - Fraction(v):
+                return None, None
+            if low != 0:
+                lows[k] = low
+        return eng.from_cells(m.dims, "number", values, cat), eng.from_cells(m.dims, "number", lows, cat)
 
     def _widened(self, changed: Restrict | None) -> Restrict | None:
         """値が変わったセルの範囲から、全メンバーにわたる軸を外す（その軸は「全体」として扱う）。

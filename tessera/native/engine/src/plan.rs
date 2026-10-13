@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{eval_with, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{eval_with, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -308,12 +308,17 @@ pub struct Formula {
     pub refs: Vec<usize>,
 }
 
-/// 差分集計の計画。inputs は [集計元, 対応表...]。d_count と d_value の refs は作業データの番号で、
+/// 差分集計の計画。inputs は [集計元, 対応表...]。d_count と sums の refs は作業データの番号で、
 /// inputs の i 番目の変更後が 2i、変更前が 2i + 1。
 pub struct Delta {
     pub inputs: Vec<usize>,
+    /// The dimensions that the aggregations under the outermost one remove (SUM only). The delta range does not
+    /// limit them, so each inner group with a changed row is read in full and rounds as in a full evaluation.
+    pub widen: Vec<DimId>,
     pub d_count: Formula,
-    pub d_value: Option<Formula>, // None なら d_count が値の差分（COUNT の集計）
+    /// SUM: the formula and its residual formula on the new work data, then on the old work data. None for
+    /// COUNT (d_count is then the change of the value).
+    pub sums: Option<[Formula; 4]>,
 }
 
 pub struct Metric {
@@ -403,6 +408,20 @@ pub fn outer_low(e: &Node) -> Node {
     }
 }
 
+/// Add to out the dimensions that the aggregations under the outermost one remove.
+fn inner_dims(e: &Node, outer: bool, out: &mut Vec<DimId>) {
+    match e {
+        Node::ByAgg { child, src: d, .. } | Node::Remove { child, dim: d, .. } => {
+            if !outer {
+                out.push(*d);
+            }
+            inner_dims(child, false, out);
+        }
+        Node::Select { child, .. } | Node::On(child, _) => inner_dims(child, outer, out),
+        _ => {}
+    }
+}
+
 /// Ref の番号を offset だけずらした複製（同じ式の変更前と変更後を 1 つの式の中で区別するため）。
 fn shift_refs(e: &Node, offset: usize) -> Node {
     let s = |n: &Node| Box::new(shift_refs(n, offset));
@@ -444,11 +463,15 @@ pub fn derive_delta(f: &Formula) -> Option<(Delta, Option<(Formula, Formula)>)> 
     let diff = |node: &Node| Formula { node: Arc::new(Node::Bin(Op::Sub, Box::new(node.clone()), Box::new(shift_refs(node, n)), vec![])), refs: refs.clone() };
     let count_node = if needs_count { inner_count(&f.node) } else { (*f.node).clone() };
     let d_count = diff(&count_node);
-    let d_value = needs_count.then(|| diff(&f.node));
-    let count = needs_count.then(|| {
-        (Formula { node: Arc::new(count_node), refs: f.refs.clone() }, Formula { node: Arc::new(outer_low(&f.node)), refs: f.refs.clone() })
-    });
-    Some((Delta { inputs, d_count, d_value }, count))
+    let low = outer_low(&f.node);
+    let work = |node: &Node, old: bool| Formula { node: Arc::new(if old { shift_refs(node, n) } else { node.clone() }), refs: refs.clone() };
+    let sums = needs_count.then(|| [work(&f.node, false), work(&low, false), work(&f.node, true), work(&low, true)]);
+    let mut widen = Vec::new();
+    if needs_count {
+        inner_dims(&f.node, true, &mut widen);
+    }
+    let count = needs_count.then(|| (Formula { node: Arc::new(count_node), refs: f.refs.clone() }, Formula { node: Arc::new(low), refs: f.refs.clone() }));
+    Some((Delta { inputs, widen, d_count, sums }, count))
 }
 
 pub enum Step {
@@ -791,9 +814,10 @@ impl<'a> Run<'a> {
         Reg::new(dims.iter().copied().zip(sets).filter(|(d, ms)| ms.len() < size(*d)).collect())
     }
 
-    /// 集計元と対応表の変更範囲を合わせた範囲。どれも変わっていなければ None。
+    /// The union of the changed ranges of the source and the maps, without the widen dimensions. None if
+    /// nothing changed.
     fn delta_range(&self, d: &Delta) -> Option<Reg> {
-        d.inputs.iter().fold(None, |acc, &n| union(acc, self.regions[n].clone()))
+        d.inputs.iter().fold(None, |acc, &n| union(acc, self.regions[n].clone())).map(|r| r.without(&d.widen))
     }
 
     fn delta_applicable(&self, d: &Delta) -> bool {
@@ -804,7 +828,10 @@ impl<'a> Run<'a> {
             && self.delta_range(d).is_some_and(|r| !r.is_all())
     }
 
-    /// 集計元（と対応表）の変更前後の差分を集計し、region 内の既存の値と件数に足し込んだ値と件数。
+    /// Aggregate the change of the source (and the maps) and add it to the values and counts in region. Returns
+    /// (values, counts, residuals). A SUM is exact: the stored value, the stored residual and the changes go into
+    /// one ExactSum for each group, so the result has the same bits as a full evaluation. If a residual is not
+    /// one f64 (NaN), returns None and the caller calculates the region again.
     #[allow(clippy::type_complexity)]
     fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, b: &Budget) -> Result<Option<(Cube, Option<Cube>, Option<Cube>)>> {
         let cat = self.cat;
@@ -830,24 +857,49 @@ impl<'a> Run<'a> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[m];
         let r = region.restrict(cat);
-        let old_value = Src::Store(Arc::new(self.stores[m].slice(&r)));
+        let store = &self.stores[m];
+        let old_value = Src::Store(Arc::new(store.slice(&r)));
         let old_count = match (&metric.count, &self.counts[m]) {
             (Some(_), Some(c)) => Src::Store(Arc::new(c.slice(&r))),
             _ => old_value.clone(),
         };
-        let d_count = self.eval(&d.d_count, Some(&work), &all, b)?;
-        let d_value = match &d.d_value {
-            Some(f) => self.eval(f, Some(&work), &all, b)?,
-            None => d_count.clone(),
+        let d_count = Arc::new(self.eval(&d.d_count, Some(&work), &all, b)?);
+        let count = Arc::new(eval_with(&new_count(), cat, &[old_count, Src::Cube(d_count.clone())], &all, b)?);
+        let Some(sums) = &d.sums else {
+            // COUNT: the counts are exact integers, and the value is the count
+            let value = eval_with(&new_value(), cat, &[old_value, Src::Cube(d_count), Src::Cube(count)], &all, b)?;
+            return Ok(Some((value, None, None)));
         };
-        let count = Arc::new(eval_with(&new_count(), cat, &[old_count, Src::Cube(Arc::new(d_count))], &all, b)?);
-        let value = eval_with(&new_value(), cat, &[old_value, Src::Cube(Arc::new(d_value)), Src::Cube(count.clone())], &all, b)?;
         // 件数が 0 になったグループは消す
-        let kept = match metric.count {
-            Some(_) => Some(eval_with(&kept_count(), cat, &[Src::Cube(count)], &all, b)?),
-            None => None,
+        let kept = eval_with(&kept_count(), cat, &[Src::Cube(count)], &all, b)?.into_repacked(&cat.cfg, &store.pack);
+        let mut exact: FxHashMap<u64, ExactSum> = FxHashMap::default();
+        let mut put = |c: &Cube, sign: f64| {
+            for &(k, v) in &c.cells {
+                exact.entry(k).or_default().add(sign * v);
+            }
         };
-        Ok(Some((value, kept, None)))
+        put(&store.read(&r), 1.0);
+        put(&self.lows[m].as_ref().expect("残差の格納").read(&r), 1.0);
+        for (i, f) in sums.iter().enumerate() {
+            put(&self.eval(f, Some(&work), &all, b)?.into_repacked(&cat.cfg, &store.pack), if i < 2 { 1.0 } else { -1.0 });
+        }
+        let (mut values, mut lows) = (Vec::with_capacity(kept.cells.len()), Vec::new());
+        let zero = ExactSum::default();
+        for &(k, _) in &kept.cells {
+            let s = exact.get(&k).unwrap_or(&zero);
+            let low = s.residual();
+            if low.is_nan() {
+                return Ok(None);
+            }
+            values.push((k, s.finish()));
+            if low != 0.0 {
+                lows.push((k, low));
+            }
+        }
+        values.sort_unstable_by_key(|c| c.0);
+        lows.sort_unstable_by_key(|c| c.0);
+        let cube = |cells| Cube { pack: store.pack.clone(), kind: Kind::Num, cells };
+        Ok(Some((cube(values), Some(kept), Some(cube(lows)))))
     }
 
     /// scan の Metric の影響範囲を、増えなくなるまで伝えてから、時間軸に沿って 1 時点ずつ計算する。

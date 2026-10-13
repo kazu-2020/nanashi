@@ -8,6 +8,7 @@ mod exact;
 mod fuse;
 mod join;
 pub(crate) use agg::*;
+pub(crate) use exact::ExactSum;
 pub(crate) use fuse::*;
 pub(crate) use join::*;
 

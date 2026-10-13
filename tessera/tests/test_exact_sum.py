@@ -119,5 +119,72 @@ class RustResidualStore(ResidualStore):
     engine = staticmethod(lambda: RustEngine())
 
 
+DELTA = ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "NorthByMonth"]
+
+
+def snapshot(m: Model) -> dict:
+    return {n: cells(m, n) for n in Named(m)._metric_ids if n not in ("Amount", "DeptOf")}
+
+
+def edit(m: Model, rng: random.Random) -> None:
+    for _ in range(rng.randint(1, 3)):
+        e, t = rng.choice(EMPLOYEES), rng.choice(MONTHS)
+        if rng.random() < 0.2:
+            m.set_cell("DeptOf", rng.choice(DEPTS), Employee=e, Month=t)  # a transfer
+        else:
+            v = None if rng.random() < 0.25 else value(rng)
+            m.set_cell("Amount", v, Employee=e, Region=rng.choice(REGIONS), Month=t)
+
+
+class IncrementalIsExact(unittest.TestCase):
+    """After random edits with non-integer values of mixed magnitude, incremental aggregation gives the same bits
+    as a full recalculation and as the reference implementation."""
+
+    def test_random_edits(self):
+        rng = random.Random(20261013)
+        models = [model(ReferenceEngine())] + ([model(RustEngine())] if RustEngine is not None else [])
+        for m in models:
+            m.recalc()
+            m.delta_log.clear()
+        nan_lows = 0
+        for round_ in range(300):
+            state = rng.getstate()
+            results = []
+            for m in models:
+                rng.setstate(state)
+                edit(m, rng)
+                incremental = snapshot(m)
+                nan_lows += sum(math.isnan(v) for n in DELTA for v in lows(m, n).values())
+                full = Named(m.fork())
+                full._invalidate()
+                with self.subTest(round=round_, engine=m.engine.name):
+                    self.assertEqual(incremental, snapshot(full))
+                results.append(incremental)
+            self.assertEqual(results[0], results[-1], f"round {round_}: Rust and reference differ")
+        for m in models:
+            for name in DELTA:
+                with self.subTest(delta_used=name, engine=m.engine.name):
+                    self.assertGreater(list(m.delta_log).count(name), 50)
+        self.assertEqual(nan_lows, 0)
+
+    def test_residual_that_is_not_one_float_calculates_again(self):
+        for engine in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
+            with self.subTest(engine=engine.__name__):
+                m = model(engine())
+                for i, v in enumerate([1.0, 2.0 ** -60, 2.0 ** -130]):
+                    m.set_cell("Amount", v, Employee=EMPLOYEES[i], Region="N", Month="m0")
+                for e in EMPLOYEES[3:]:
+                    m.set_cell("Amount", None, Employee=e, Region="N", Month="m0")
+                m.recalc()
+                self.assertTrue(any(math.isnan(v) for v in lows(m, "ByMonth").values()))
+                m.delta_log.clear()
+                m.set_cell("Amount", 0.5, Employee=EMPLOYEES[5], Region="N", Month="m0")
+                self.assertEqual(m.get("ByMonth", Region="N", Month="m0"), 1.5)
+                self.assertNotIn("ByMonth", m.delta_log)  # the residual was NaN: no incremental aggregation
+                full = Named(m.fork())
+                full._invalidate()
+                self.assertEqual(snapshot(m), snapshot(full))
+
+
 if __name__ == "__main__":
     unittest.main()
