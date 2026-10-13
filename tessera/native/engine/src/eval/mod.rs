@@ -4,6 +4,7 @@
 use crate::*;
 
 mod agg;
+mod exact;
 mod fuse;
 mod join;
 pub(crate) use agg::*;

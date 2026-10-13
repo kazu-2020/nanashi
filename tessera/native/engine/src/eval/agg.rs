@@ -3,9 +3,11 @@
 #[allow(unused_imports)]
 use crate::*;
 
-#[derive(Clone, Copy)]
+use super::exact::ExactSum;
+
+#[derive(Clone)]
 pub(crate) struct Acc {
-    pub(crate) sum: f64,
+    pub(crate) sum: ExactSum,
     pub(crate) cnt: u64,
     pub(crate) min: f64,
     pub(crate) max: f64,
@@ -14,21 +16,22 @@ pub(crate) struct Acc {
 
 impl Acc {
     pub(crate) fn new() -> Acc {
-        Acc { sum: 0.0, cnt: 0, min: f64::INFINITY, max: f64::NEG_INFINITY, first: 0.0 }
+        Acc { sum: ExactSum::default(), cnt: 0, min: f64::INFINITY, max: f64::NEG_INFINITY, first: 0.0 }
     }
     pub(crate) fn add(&mut self, v: f64) {
         if self.cnt == 0 {
             self.first = v;
         }
-        self.sum += v;
+        self.sum.add(v);
         self.cnt += 1;
         self.min = self.min.min(v);
         self.max = self.max.max(v);
     }
     pub(crate) fn finish(&self, agg: Agg) -> f64 {
         match agg {
-            Agg::Sum => self.sum,
-            Agg::Avg => self.sum / self.cnt as f64,
+            Agg::Sum => self.sum.finish(),
+            Agg::Avg => self.sum.finish() / self.cnt as f64,
+            Agg::Low => self.sum.residual(),
             Agg::Min => self.min,
             Agg::Max => self.max,
             Agg::Count => self.cnt as f64,
@@ -60,10 +63,10 @@ impl Acc {
             return;
         }
         if self.cnt == 0 {
-            *self = *o;
+            *self = o.clone();
             return;
         }
-        self.sum += o.sum;
+        self.sum.merge(&o.sum);
         self.cnt += o.cnt;
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
@@ -131,10 +134,11 @@ pub(crate) fn combos_in(dims: &[DimId], cat: &Catalog, r: &Restrict) -> f64 {
     dims.iter().fold(1.0, |n, &d| n * r.get(d).map_or(cat.dims[d].size as usize, |s| s.members.len()) as f64)
 }
 
-/// 集計先がこの数以下なら、集計元を写さずに読みながら足し込む。集計先ごとの途中の値（約 50 B）を
-/// スレッドごとに持ち、最後にスレッドの間で合算するので、集計元の件数の 1/(16 × スレッド数) を
-/// 上限にする（それより多ければ、合算の手間とメモリが、集計元を (集計先, 値) に写して並べ替える
-/// 費用に近づく）。First は並びに意味があるので対象にしない。
+/// If the number of groups is this or less, read the source and add each value to its group, with no copy.
+/// Each thread keeps an intermediate value (about 64 B) for each group, and the threads merge them at the end.
+/// Thus the limit is 1/(16 x thread count) of the source rows. With more groups, the merge time and memory
+/// come near the cost to copy the source to (group, value) pairs and sort them. First is not used here,
+/// because the order of the rows has a meaning for it.
 pub(crate) fn few_groups(cfg: &Config, agg: Agg, groups: f64, rows: usize) -> bool {
     if matches!(agg, Agg::First) {
         return false;
@@ -254,77 +258,97 @@ pub(crate) fn remove_by_table(x: &Rows, dim: DimId, target: DimId, v: &Store, ag
 /// 集計先の全組み合わせの数がこれ以下なら、全組み合わせの配列へ足し込む経路を考える。
 const DENSE_MAX: usize = 1 << 26;
 
-/// 集計先の全組み合わせ（out の各軸の全メンバー）の配列へ足し込む。仕事は行をスレッド数に区切り、
-/// 区切りごとに 1 つの配列（1 組み合わせ 12 B）を持って最後に順に合わせる（スレッド数が同じなら、結果は実行ごとに同じ）。
-/// 配列の合計が、(集計先, 値) の組を集めて並べ替える経路の半分（1 行 8 B）を超えるなら None。
-/// key は行のキーから集計先のキー（out の詰め方）を返す。結果はキー順に並ぶ。
+/// Add the rows into an array of all the group combinations (all members of each dimension of out). The work
+/// divides the rows into one part for each thread. Each part has its own array, and the parts merge in order
+/// at the end. If the arrays are larger than half of the (group, value) pairs (8 B a row) of the sort path,
+/// returns None. key gives the group key (packed as out) of a row key. The result is in key order.
 pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, agg: Agg, key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Cube> {
-    if matches!(agg, Agg::First) {
-        return None;
+    let d = Dense { cfg, rows, out, cat, key };
+    match agg {
+        Agg::First => None,
+        Agg::Sum | Agg::Avg | Agg::Low => d.fold(
+            ExactSum::default(),
+            |s, v| s.add(v),
+            |s, o| s.merge(o),
+            |s, n| match agg {
+                Agg::Avg => s.finish() / n as f64,
+                Agg::Low => s.residual(),
+                _ => s.finish(),
+            },
+        ),
+        Agg::Min => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _| *x),
+        Agg::Max => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _| *x),
+        Agg::Count => d.fold((), |_, _| {}, |_, _| {}, |_, n| n as f64),
     }
-    let n = rows.len();
-    let sizes: Vec<usize> = out.dims.iter().map(|&d| cat.dims[d].size.max(1) as usize).collect();
-    let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
-    let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
-    if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(12) > n.saturating_mul(8) {
-        return None;
-    }
-    // 集計先のキー -> 配列の番号（先頭の軸が最上位の桁なので、番号の順がキーの順になる）
-    let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
-    let init = match agg {
-        Agg::Min => f64::INFINITY,
-        Agg::Max => f64::NEG_INFINITY,
-        _ => 0.0,
-    };
-    let add = |x: &mut f64, v: f64| match agg {
-        Agg::Min => *x = x.min(v),
-        Agg::Max => *x = x.max(v),
-        Agg::Sum | Agg::Avg => *x += v,
-        Agg::Count | Agg::First => {}
-    };
-    let fill = |lo: usize, hi: usize| {
-        let (mut vals, mut cnt) = (vec![init; slots], vec![0u32; slots]);
-        for i in lo..hi {
-            let (k, v) = rows.get(i);
-            if let Some(o) = key(k) {
-                let s = index(o);
-                add(&mut vals[s], v);
-                cnt[s] += 1;
+}
+
+struct Dense<'a, K> {
+    cfg: &'a Config,
+    rows: &'a Rows,
+    out: &'a Packing,
+    cat: &'a Catalog,
+    key: K,
+}
+
+impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
+    /// Each slot holds a T and a count (u32).
+    fn fold<T: Clone + Send + Sync>(
+        &self,
+        init: T,
+        add: impl Fn(&mut T, f64) + Sync,
+        merge: impl Fn(&mut T, &T),
+        finish: impl Fn(&T, u32) -> f64,
+    ) -> Option<Cube> {
+        let (cfg, rows, out) = (self.cfg, self.rows, self.out);
+        let n = rows.len();
+        let sizes: Vec<usize> = out.dims.iter().map(|&d| self.cat.dims[d].size.max(1) as usize).collect();
+        let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
+        let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
+        let slot_bytes = std::mem::size_of::<T>() + 4;
+        if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(slot_bytes) > n.saturating_mul(8) {
+            return None;
+        }
+        // group key -> array index (the first dimension is the highest digit, so the index order is the key order)
+        let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
+        let fill = |lo: usize, hi: usize| {
+            let (mut vals, mut cnt) = (vec![init.clone(); slots], vec![0u32; slots]);
+            for i in lo..hi {
+                let (k, v) = rows.get(i);
+                if let Some(o) = (self.key)(k) {
+                    let s = index(o);
+                    add(&mut vals[s], v);
+                    cnt[s] += 1;
+                }
             }
-        }
-        (vals, cnt)
-    };
-    let step = n.div_ceil(parts).max(1);
-    let mut acc: Vec<(Vec<f64>, Vec<u32>)> = if parts > 1 {
-        (0..parts).into_par_iter().map(|p| fill((p * step).min(n), ((p + 1) * step).min(n))).collect()
-    } else {
-        vec![fill(0, n)]
-    };
-    let (mut vals, mut cnt) = acc.remove(0);
-    for (v2, c2) in acc {
-        for s in 0..slots {
-            if c2[s] > 0 {
-                add(&mut vals[s], v2[s]);
-                cnt[s] += c2[s];
-            }
-        }
-    }
-    let mut cells = Vec::new();
-    for s in 0..slots {
-        if cnt[s] == 0 {
-            continue;
-        }
-        let v = match agg {
-            Agg::Avg => vals[s] / cnt[s] as f64,
-            Agg::Count => cnt[s] as f64,
-            _ => vals[s],
+            (vals, cnt)
         };
-        let (mut rest, mut k) = (s, 0u64);
-        for j in (0..sizes.len()).rev() {
-            k |= out.put(j, (rest % sizes[j]) as u32);
-            rest /= sizes[j];
+        let step = n.div_ceil(parts).max(1);
+        let mut acc: Vec<(Vec<T>, Vec<u32>)> = if parts > 1 {
+            (0..parts).into_par_iter().map(|p| fill((p * step).min(n), ((p + 1) * step).min(n))).collect()
+        } else {
+            vec![fill(0, n)]
+        };
+        let (mut vals, mut cnt) = acc.remove(0);
+        for (v2, c2) in acc {
+            for s in 0..slots {
+                if c2[s] > 0 {
+                    merge(&mut vals[s], &v2[s]);
+                    cnt[s] += c2[s];
+                }
+            }
         }
-        cells.push((k, v));
+        let mut cells = Vec::new();
+        for s in 0..slots {
+            if cnt[s] == 0 {
+                continue;
+            }
+            let (mut rest, mut k) = (s, 0u64);
+            for j in (0..sizes.len()).rev() {
+                k |= out.put(j, (rest % sizes[j]) as u32);
+                rest /= sizes[j];
+            }
+            cells.push((k, finish(&vals[s], cnt[s])));
+        }
+        Some(Cube { pack: out.clone(), kind: Kind::Num, cells })
     }
-    Some(Cube { pack: out.clone(), kind: Kind::Num, cells })
 }

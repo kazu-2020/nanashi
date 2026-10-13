@@ -27,6 +27,7 @@ pub enum Agg {
     Max,
     Count,
     First, // 値が 1 つしかないグループ用（引き下ろしの内部で使う）
+    Low,   // internal: the exact sum minus the rounded SUM, if that is one f64 (else NaN). See plan::outer_low
 }
 
 /// 式の構文木。Bin、If、IsBlank、IfBlank の Vec<DimId> は、軸にメンバーを追加したときに

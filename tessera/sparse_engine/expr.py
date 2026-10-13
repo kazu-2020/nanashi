@@ -1,6 +1,7 @@
 """式の AST。Metric 全体（ブロック）に対する演算だけを表現し、セル単位の式は持たない。"""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, fields
 from typing import Any, Callable
 
@@ -14,9 +15,21 @@ class Aggregation:
     kind: str | None = "number"  # 結果の値の種類（None なら集計元と同じ）
 
 
+HUGE = 2.0 ** 960  # the same limit as HUGE in the Rust engine (native/engine/src/eval/exact.rs)
+
+
+def exact_sum(vs) -> float:
+    """The correctly rounded exact sum, so the order of the values does not change the result. An infinite value
+    gives inf, -inf or nan (inf and -inf). A NaN or a finite value of HUGE or more gives nan."""
+    big = [v for v in vs if not abs(v) < HUGE]
+    if not big:
+        return math.fsum(vs)
+    return sum(v if math.isinf(v) else math.nan for v in big)
+
+
 AGGREGATIONS: dict[str, Aggregation] = {a.name: a for a in [
-    Aggregation("sum", sum, True, True),
-    Aggregation("avg", lambda vs: sum(vs) / len(vs), True, True),
+    Aggregation("sum", exact_sum, True, True),
+    Aggregation("avg", lambda vs: exact_sum(vs) / len(vs), True, True),
     Aggregation("min", min, True, True),
     Aggregation("max", max, True, True),
     Aggregation("count", lambda vs: float(len(vs)), True, False),
