@@ -113,6 +113,10 @@ python3 bench_ab.py --base origin/main -- bench.py --engine rust --size large
 - It shows the environment, the number of errors, and the median (minimum to maximum) of each metric. The metrics are the wall time, the peak memory, and each number in the JSON on the last line of the output.
 - It adds each run to `bench_ab_results.jsonl`. If a run fails, the exit code is not 0.
 
+Before you compare a change, run base against base (`--base HEAD` with no uncommitted changes) one time. This A/A run shows the noise of the computer.
+Keep a change only if the ranges of base and head do not overlap (the column "ranges overlap" is "no").
+`max_rss_mb` includes the pages of shared libraries such as numpy. In an A/A run in a cloud session, it was different by 8 MB between two virtual environments. Thus use it only for changes of more than some tens of MB.
+
 ## Test policy
 
 The same tests run with the reference implementation and with Rust.

@@ -62,10 +62,13 @@ def change_pct(base, head):
 def render(summary):
     base, head = summary.get("base", {}), summary.get("head", {})
     cell = lambda s: f"{s[0]:.4g} ({s[1]:.4g}–{s[2]:.4g})"
-    rows = ["| metric | base median (min–max) | head median (min–max) | change % |", "|---|---|---|---|"]
+    rows = ["| metric | base median (min–max) | head median (min–max) | change % | ranges overlap |",
+            "|---|---|---|---|---|"]
     for k in sorted(set(base) & set(head)):
         d = change_pct(base[k][0], head[k][0])
-        rows.append(f"| {k} | {cell(base[k])} | {cell(head[k])} | {'-' if d is None else f'{d:+.1f}'} |")
+        # If the ranges overlap, the change is not larger than the run-to-run noise.
+        overlap = "yes" if base[k][1] <= head[k][2] and head[k][1] <= base[k][2] else "no"
+        rows.append(f"| {k} | {cell(base[k])} | {cell(head[k])} | {'-' if d is None else f'{d:+.1f}'} | {overlap} |")
     # Keys such as ids change in each run, thus only the keys of both sides are compared.
     only = len(set(base) ^ set(head))
     return "\n".join(rows) + (f"\n\n{only} metrics are only on one side and are not shown." if only else "")
@@ -79,7 +82,7 @@ def self_test():
     assert summarize(runs) == {"base": {"t": (2, 1, 3)}}
     assert change_pct(2, 3) == 50.0 and change_pct(0, 1) is None
     table = render({"base": {"t": (2, 1, 3), "id1": (1, 1, 1)}, "head": {"t": (3, 3, 3), "id2": (1, 1, 1)}})
-    assert "| t | 2 (1–3) | 3 (3–3) | +50.0 |" in table and "2 metrics are only on one side" in table
+    assert "| t | 2 (1–3) | 3 (3–3) | +50.0 | yes |" in table and "2 metrics are only on one side" in table
     print("self-test ok")
 
 
@@ -95,6 +98,7 @@ def base_dir(ref):
     sha = sh("git", "rev-parse", "--short", f"{ref}^{{commit}}", cwd=HERE)
     wt = root / ".bench" / sha
     if not wt.exists():
+        sh("git", "worktree", "prune", cwd=root)  # forget a worktree whose directory was deleted
         sh("git", "worktree", "add", "--detach", str(wt), sha, cwd=root)
     return sha, wt / HERE.relative_to(root)
 
@@ -149,11 +153,15 @@ def main():
     sides = {"base": base, "head": head}
     for t in sides.values():
         build(t)
+    env = environment(args, sha, head)  # before the runs, so that a failure here does not lose them
     load_before = os.getloadavg()
     runs = []
     for i in range(2 * args.runs):
         side = ("base", "head")[i % 2]
         rc, wall, rss, out, err = run_once(sides[side], args.bench)
+        if rc == 0 and not parse_metrics(out):
+            print(f"{side}: the last line of the output is not JSON, thus only wall_s and max_rss_mb",
+                  file=sys.stderr)
         runs.append({"side": side, "dir": str(sides[side]), "run": i // 2, "rc": rc,
                      "metrics": {"wall_s": wall, "max_rss_mb": rss, **parse_metrics(out)},
                      **({"stderr_tail": err[-2000:]} if rc else {})})
@@ -162,7 +170,7 @@ def main():
     with open(head / "bench_ab_results.jsonl", "a") as f:
         f.writelines(json.dumps({"base": sha, **r}) + "\n" for r in runs)
     errors = {s: sum(r["rc"] != 0 for r in runs if r["side"] == s) for s in sides}
-    print("\n".join(environment(args, sha, head)))
+    print("\n".join(env))
     print(f"load average: before {load_before[0]:.2f}, after {load_after[0]:.2f}")
     print(f"errors: base {errors['base']}, head {errors['head']}")
     for r in runs:
