@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Start the full local stack: PostgreSQL, the router (it starts the engines), nanashi-api and the web dev server.
-# Before the first run, set up tessera/.venv (tessera/CLAUDE.md) and run "pnpm install" in web/.
-# Open http://127.0.0.1:5173 after the start. Ctrl+C stops all processes.
+# Start the local stack: PostgreSQL and the router (it starts the engines).
+# Before the first run, set up tessera/.venv (tessera/CLAUDE.md). Ctrl+C stops all processes.
 set -euo pipefail
 cd "$(dirname "$0")"
 DSN=${NANASHI_PG_DSN:-postgresql://postgres@127.0.0.1:55432/nanashi}
@@ -17,6 +16,4 @@ done
 trap 'kill 0' EXIT
 mkdir -p .nanashi-data
 (cd router && go run ./cmd/nanashi-router --pg "$DSN" --listen 127.0.0.1:8090 --tessera ../tessera --engine-dir ../.nanashi-data) &
-(cd api && go run ./cmd/nanashi-api --pg "$DSN" --router http://127.0.0.1:8090) &
-(cd web && pnpm dev --host 127.0.0.1) &
 wait
