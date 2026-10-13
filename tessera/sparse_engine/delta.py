@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 
-from .evaluate import Catalog, infer
+from .evaluate import Catalog, infer, remove_run
 from .expr import AsAxis, By, Const, Expr, On, Ref, Remove, Select
 
 
@@ -38,6 +38,7 @@ COUNTED = Const(1.0)
 def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
     aggs: list[str] = []  # 外側から内側の順
     agg_dims: list[str] = []  # the dimension that each aggregation removes, in the same order
+    outer = 1  # the number of aggregations in the outermost one (a run of REMOVE SUM is one, see remove_run)
     aux: list[str] = []
     e = formula
     while True:
@@ -47,6 +48,8 @@ def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
             aggs.append(e.agg or "sum")
             agg_dims.append(e.dim)
         elif isinstance(e, Remove):
+            if not aggs:
+                outer = len(remove_run(e)[0])
             aggs.append(e.agg)
             agg_dims.append(e.dim)
         elif isinstance(e, On) and isinstance(e.other, AsAxis) and isinstance(e.other.child, Ref):
@@ -60,7 +63,7 @@ def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
         return None
     if aggs[-1] == "count":
         return DeltaPlan(e.name, None, tuple(aux))
-    return DeltaPlan(e.name, _inner_count(formula), tuple(aux), _outer_low(formula), tuple(agg_dims[1:]))
+    return DeltaPlan(e.name, _inner_count(formula), tuple(aux), _outer_low(formula), tuple(agg_dims[outer:]))
 
 
 def _has_agg(e: Expr) -> bool:

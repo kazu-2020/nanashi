@@ -64,6 +64,7 @@ The engine divides the rows into one part for each thread, and each part has its
 In other cases, the engine converts the rows to (target, value) pairs, sorts them, and then aggregates them. The engine makes the pairs directly in one array and does not copy the aggregation source to a Cube.
 
 `SUM` and `AVG` add the values into an exact sum (Shewchuk partials, the same algorithm as Python `math.fsum`) and round one time at the end. Thus the result does not change with the order of the rows, the aggregation path, or the number of threads. The reference implementation uses `math.fsum` and gives the same bits.
+`X[REMOVE SUM: A, B]` is one aggregation with one rounding. It does not round one time for each dimension.
 The exact sum keeps 2 partials inline (24 bytes). If it needs more, it moves them to the heap.
 A finite value of 2^960 or more makes the sum NaN. Below this limit the partials cannot overflow, so an overflow does not depend on the order of the rows.
 

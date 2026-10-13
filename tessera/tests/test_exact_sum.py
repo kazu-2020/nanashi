@@ -45,6 +45,7 @@ def model(engine=None, seed: int = 7) -> Model:
     f("ByDeptOf", ["Department", "Region", "Month"], "Amount[BY SUM: Employee.DeptOf]")
     f("Total", [], "Amount[REMOVE SUM: Employee, Region, Month]")
     f("HomeTotal", ["Department"], "Amount[BY SUM: Employee.Home][REMOVE SUM: Region, Month]")
+    f("DeptOfTotal", ["Department"], "Amount[BY SUM: Employee.DeptOf][REMOVE SUM: Region, Month]")
     f("NorthByMonth", ["Month"], 'Amount[SELECT: Region."N"][REMOVE SUM: Employee]')
     f("Avg", ["Region"], "Amount[REMOVE AVG: Employee, Month]")
     return m
@@ -75,13 +76,30 @@ class SameBitsOnEveryPath(unittest.TestCase):
         for engine in engines:
             m = model(engine)
             m.recalc()
-            got = {n: cells(m, n) for n in ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "NorthByMonth",
-                                            "Avg"]}
+            got = {n: cells(m, n) for n in ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "DeptOfTotal",
+                                            "NorthByMonth", "Avg"]}
             if want is None:
                 want = got
                 self.assertEqual(got["Total"][()], math.fsum(cells(m, "Amount").values()))
                 continue
             self.assertEqual(got, want, engine)
+
+
+class OneRoundingForRemoveRun(unittest.TestCase):
+    def test_remove_sum_of_two_dimensions_rounds_one_time(self):
+        for engine in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
+            with self.subTest(engine=engine.__name__):
+                m = Named(Model(engine=engine()))
+                m.add_dimension("A", ["a0", "a1"])
+                m.add_dimension("B", ["b0", "b1"])
+                tiny = 2.0 ** -53
+                m.add_input("X", ["A", "B"], {("a0", "b0"): 1.0, ("a1", "b0"): tiny, ("a0", "b1"): tiny})
+                m.add_formula("T", [], "X[REMOVE SUM: A, B]")
+                self.assertEqual(m.get("T"), 1.0000000000000002)  # one rounding per dimension gives 1.0
+                m.delta_log.clear()
+                m.set_cell("X", tiny, A="a1", B="b1")
+                self.assertEqual(m.get("T"), 1.0000000000000004)
+                self.assertIn("T", m.delta_log)
 
 
 def lows(m: Model, name: str) -> dict:
@@ -119,7 +137,7 @@ class RustResidualStore(ResidualStore):
     engine = staticmethod(lambda: RustEngine())
 
 
-DELTA = ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "NorthByMonth"]
+DELTA = ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "DeptOfTotal", "NorthByMonth"]
 
 
 def snapshot(m: Model) -> dict:

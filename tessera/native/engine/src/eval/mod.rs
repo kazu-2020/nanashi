@@ -296,14 +296,15 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         }
 
         Node::Remove { child, dim, agg } => {
-            let sub = r.without(&[*dim]);
+            let (dims, child) = remove_run(*dim, *agg, child);
+            let sub = r.without(&dims);
             // Metric を使った BY の集約（Remove(On(x, AsAxis(V, T)), D)）は、対応表を引きながら集計する
-            if let Node::On(x, edges) = &**child {
+            if let Node::On(x, edges) = child {
                 if let Node::AsAxis { child: v, dim: target } = &**edges {
                     if let (Node::Ref(vi), true) = (&**v, sub.is_all()) {
                         if let Src::Store(vs) = &src[*vi] {
                             let rows = rows_of(x, cat, src, &sub, bud)?;
-                            if let Some(c) = remove_by_table(&rows, *dim, *target, vs, *agg, cat, r)? {
+                            if let Some(c) = remove_by_table(&rows, &dims, *target, vs, *agg, cat, r)? {
                                 return Ok(c);
                             }
                             // 引けなければ、結合してから集計する（On と同じ）
@@ -313,12 +314,12 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                                 None => eval_with(edges, cat, src, &sub, bud)?,
                             };
                             let joined = intersect(&xc, &o, xc.kind, cat, |a, _| Some(a))?;
-                            return remove_rows(Rows::Owned(joined), *dim, *agg, cat, r);
+                            return remove_rows(Rows::Owned(joined), &dims, *agg, cat, r);
                         }
                     }
                 }
             }
-            remove_rows(rows_of(child, cat, src, &sub, bud)?, *dim, *agg, cat, r)
+            remove_rows(rows_of(child, cat, src, &sub, bud)?, &dims, *agg, cat, r)
         }
 
         Node::AsAxis { child, dim } => {

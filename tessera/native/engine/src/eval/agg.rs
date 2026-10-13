@@ -174,10 +174,26 @@ pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, agg: Agg
     Cube { pack, kind: Kind::Num, cells }
 }
 
-/// rows から dim を外して集計する（REMOVE）。r は結果の範囲（集計先の数の見積もりに使う）。
-pub(crate) fn remove_rows(rows: Rows, dim: DimId, agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Cube> {
+/// A run of nested REMOVE SUM nodes (the parser makes `REMOVE SUM: A, B` into nested nodes) is one aggregation
+/// with one rounding. Returns the removed dimensions (outer first) and the child under the run. The top node can
+/// be Low (the residual formula). Any other node is a run of 1.
+pub(crate) fn remove_run(dim: DimId, agg: Agg, child: &Node) -> (Vec<DimId>, &Node) {
+    let mut dims = vec![dim];
+    let mut c = child;
+    if matches!(agg, Agg::Sum | Agg::Low) {
+        while let Node::Remove { child, dim, agg: Agg::Sum } = c {
+            dims.push(*dim);
+            c = child;
+        }
+    }
+    (dims, c)
+}
+
+/// Aggregate rows without the dimensions removed (REMOVE). r is the range of the result (to estimate the number
+/// of groups).
+pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Cube> {
     let cfg = &cat.cfg;
-    let dims: Vec<DimId> = rows.pack().dims.iter().copied().filter(|d| *d != dim).collect();
+    let dims: Vec<DimId> = rows.pack().dims.iter().copied().filter(|d| !removed.contains(d)).collect();
     let out = Packing::new(&dims, cat)?;
     if few_groups(cfg, agg, combos_in(&dims, cat, r), rows.len()) {
         let proj = Proj::new(rows.pack(), &out);
@@ -233,13 +249,13 @@ impl Table {
 /// `x[BY agg: D.V]`（型検査が Remove(On(x, AsAxis(V, T)), D) に書き換えたもの）を、結合の結果を
 /// 作らずに集計する。x の各セルについて、対応表から行き先 T のメンバーを引いて足し込む。
 /// 範囲の絞り込みがない全体の評価で、対応表が格納データのときだけ使い、使えなければ None。
-pub(crate) fn remove_by_table(x: &Rows, dim: DimId, target: DimId, v: &Store, agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Option<Cube>> {
+pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &Store, agg: Agg, cat: &Catalog, r: &Restrict) -> Result<Option<Cube>> {
     let cfg = &cat.cfg;
     let xp = x.pack();
-    if xp.pos(dim).is_none() || !v.pack.dims.iter().all(|d| xp.pos(*d).is_some()) {
+    if removed.iter().any(|d| xp.pos(*d).is_none()) || !v.pack.dims.iter().all(|d| xp.pos(*d).is_some()) {
         return Ok(None);
     }
-    let dims: Vec<DimId> = xp.dims.iter().copied().filter(|d| *d != dim).chain([target]).collect();
+    let dims: Vec<DimId> = xp.dims.iter().copied().filter(|d| !removed.contains(d)).chain([target]).collect();
     if !few_groups(cfg, agg, combos_in(&dims, cat, r), x.len()) {
         return Ok(None);
     }

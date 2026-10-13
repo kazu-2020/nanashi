@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{eval_with, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{eval_with, remove_run, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -408,9 +408,11 @@ pub fn outer_low(e: &Node) -> Node {
     }
 }
 
-/// Add to out the dimensions that the aggregations under the outermost one remove.
+/// Add to out the dimensions that the aggregations under the outermost one remove. A run of REMOVE SUM is one
+/// aggregation (see remove_run).
 fn inner_dims(e: &Node, outer: bool, out: &mut Vec<DimId>) {
     match e {
+        Node::Remove { child, dim, agg } if outer => inner_dims(remove_run(*dim, *agg, child).1, false, out),
         Node::ByAgg { child, src: d, .. } | Node::Remove { child, dim: d, .. } => {
             if !outer {
                 out.push(*d);
