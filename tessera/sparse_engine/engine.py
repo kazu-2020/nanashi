@@ -87,6 +87,8 @@ class Store(Protocol):
         """restrict の範囲を keep の軸だけ残して agg で集計した Cube。"""
     def fork(self, cat: Catalog) -> Store:
         """複製したモデル cat 用のエンジン。"""
+    def fresh(self) -> Store:
+        """An empty engine with the same settings, for a new model. Two models must not share one engine."""
     def share(self, storage: Any) -> Any:
         """複製したモデルに渡す格納データ。以後の書き込みが互いに影響しないこと。"""
     def size(self, storage: Any) -> int: ...
@@ -149,6 +151,9 @@ class ReferenceEngine:
 
     def fork(self, cat):
         return ReferenceEngine()
+
+    def fresh(self):
+        return type(self)()  # a subclass keeps its settings (for example, partitions)
 
     def share(self, storage: Cube) -> Cube:
         return Cube(storage.dims, dict(storage.cells))  # dict は書き換えるので複製する
