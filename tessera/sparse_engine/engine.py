@@ -153,7 +153,7 @@ class ReferenceEngine:
         return ReferenceEngine()
 
     def fresh(self):
-        return ReferenceEngine()
+        return type(self)()  # a subclass keeps its settings (for example, partitions)
 
     def share(self, storage: Cube) -> Cube:
         return Cube(storage.dims, dict(storage.cells))  # dict は書き換えるので複製する
