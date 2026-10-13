@@ -1,11 +1,12 @@
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { defineConfig, lazyPlugins } from "vite-plus";
 
 export default defineConfig({
-  fmt: { ignorePatterns: ["src/gen/**"] },
+  fmt: { ignorePatterns: ["src/gen/**", "src/routeTree.gen.ts"] },
   lint: {
-    ignorePatterns: ["src/gen/**"],
+    ignorePatterns: ["src/gen/**", "src/routeTree.gen.ts"],
     plugins: ["react", "typescript", "oxc"],
     rules: {
       "react/rules-of-hooks": "error",
@@ -15,7 +16,12 @@ export default defineConfig({
     options: { typeAware: true, typeCheck: true },
     jsPlugins: [{ name: "vite-plus", specifier: "vite-plus/oxlint-plugin" }],
   },
-  plugins: lazyPlugins(() => [react(), tailwindcss()]),
+  // The router plugin makes src/routeTree.gen.ts from src/routes/. It must come before react().
+  plugins: lazyPlugins(() => [
+    tanstackRouter({ target: "react", autoCodeSplitting: true }),
+    react(),
+    tailwindcss(),
+  ]),
   // The dev server sends the Connect requests to nanashi-api (api/).
   server: { proxy: { "/nanashi.v1.": "http://127.0.0.1:8080" } },
 });
