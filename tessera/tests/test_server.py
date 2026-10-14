@@ -640,8 +640,9 @@ class KeepAlive(unittest.TestCase):
                 self.assertEqual(c.getresponse().read()[:7], b'{"seq":')
         self.assertEqual(len({id(c.sock) for c in conns}), 3)  # each connection was kept open and used again
 
+    @mock.patch("sparse_engine.server.SLOT_WAIT", 0.5)
     def test_a_request_waits_for_a_slot_then_gets_503(self):
-        server = self.serve(max_threads=1, request_timeout=0.5)
+        server = self.serve(max_threads=1)
         release = hold(self.ws)
         self.addCleanup(release)  # a second call does nothing
         op = write(self.ws, "Stock", 1, Product="p0", Month="Jan")
@@ -662,7 +663,8 @@ class KeepAlive(unittest.TestCase):
         c.request("GET", "/health")  # the same connection: the slot frees up within the wait
         r = c.getresponse()
         self.assertEqual((r.status, json.loads(r.read())["seq"]), (200, 1))
-        t.join(10), waiter.join(10)
+        t.join(10)
+        waiter.join(10)
         self.assertEqual(posted, [(200, {"seq": 1})])
 
     def test_a_response_before_the_body_is_read_closes_the_connection(self):
@@ -681,6 +683,31 @@ class KeepAlive(unittest.TestCase):
         self.assertEqual((status, headers.get("connection")), (401, "close"))
         self.assertEqual(s.recv(100), b"")
         self.assertEqual(self.ws.seq, 1)
+
+    def test_transfer_encoding_is_refused(self):
+        server = self.serve()
+        s = self.connect(server)
+        req = (b"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t-alice\r\nContent-Length: 4\r\n"
+               b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+        status, headers, body = exchange(s, req)
+        self.assertEqual((status, headers.get("connection"), json.loads(body)["error"]), (400, "close", "bad_request"))
+        self.assertEqual(s.recv(100), b"")
+
+    def test_a_get_with_an_empty_body_keeps_the_connection(self):
+        s = self.connect(self.serve())
+        for _ in range(2):
+            status, headers, _ = exchange(s, b"GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+            self.assertEqual((status, headers.get("connection")), (200, None))
+
+    def test_after_shutdown_an_open_connection_gets_503(self):
+        server = self.serve()
+        s = self.connect(server)
+        req = b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n"
+        self.assertEqual(exchange(s, req)[0], 200)
+        server.shutdown()
+        status, headers, body = exchange(s, req)
+        self.assertEqual((status, headers.get("connection"), json.loads(body)["error"]), (503, "close", "closed"))
+        self.assertEqual(s.recv(100), b"")
 
 
 class ProxyHeader(JournalCase, unittest.TestCase):

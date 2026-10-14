@@ -51,21 +51,23 @@ Authentication, not the request body, sets the user that the audit records (user
 - With neither, the server does no authentication and the user is None (for local development).
   Then main refuses to listen on an address other than 127.0.0.1.
 
-The limits: a body has max_body bytes, slice, rows, and summary return max_cells cells, max_threads
-requests are processed at the same time, and max_connections connections are open at the same time. A request
-above max_threads waits for a slot, and gets 503 after request_timeout seconds. A connection above
-max_connections gets 503 and is closed. If the read or write of a request stops for request_timeout seconds,
-the server closes the connection.
+The server limits a body to max_body bytes, and slice, rows, and summary to max_cells cells.
+It processes up to max_threads requests and keeps up to max_connections connections open at the same time.
+A request above max_threads waits up to SLOT_WAIT seconds for a slot, then gets 503.
+A connection above max_connections gets 503, and the server closes it.
+If the read or write of a request stops for request_timeout seconds, the server closes the connection.
 
 SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き込みを確定させ、リースを手放してから止まる
 （ECS などのコンテナは SIGTERM で止める）。
 With --idle-exit SECONDS, the server stops on the same path when no request comes for that time.
 Requests to /health, /ready, and /stats do not count, so a monitor does not keep the server alive.
 
-The server is the HTTP server of the standard library, with 1 thread for each connection. It speaks
-HTTP/1.1 and keeps a connection open for the next request (keep-alive). An idle connection is closed after
-request_timeout seconds. In a process with many readers, --switch-interval makes the thread switch interval
-of Python shorter (docs/performance.md).
+The server uses the HTTP server of the standard library, with 1 thread for each connection.
+It speaks HTTP/1.1 and keeps a connection open for the next request (keep-alive).
+It closes an idle connection after request_timeout seconds.
+If the server answers before it reads the request body, the response carries Connection: close.
+After shutdown, a request on an open connection gets 503 closed, and the server closes the connection.
+In a process with many readers, --switch-interval makes the thread switch interval of Python shorter (docs/performance.md).
 """
 from __future__ import annotations
 
@@ -102,6 +104,8 @@ WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "move_member", "renam
                        "add_input", "add_property", "set_property_values", "add_dimension", "remove_metric",
                        "rename_metric", "rename_dimension", "rename_property"})
 READ_PARAMS = frozenset({"offset", "limit", "keep", "agg"})
+# The router gives an attempt 70 s: a slot wait of 5 s + the write queue 30 s + the commit 30 s stays below it.
+SLOT_WAIT = 5.0
 
 
 class ApiError(Exception):
@@ -362,15 +366,14 @@ def idle_for(active: int, last: float, now: float) -> float:
 
 class Handler(BaseHTTPRequestHandler):
     server: "Server"
-    protocol_version = "HTTP/1.1"  # keep the connection open for the next request (the router pools connections)
+    protocol_version = "HTTP/1.1"
     # The headers and the body go out in 2 writes. With Nagle, the second write waits for the ACK of the
     # first, and the client delays that ACK by 40 ms.
     disable_nagle_algorithm = True
-    unread_body = False  # _serve sets it for each request
+    unread_body = False
 
     def setup(self) -> None:
-        # Also the limit for an idle keep-alive connection. It is shorter than the 90 s pool of the router:
-        # Go drops a connection that the server closed and sends a GET again, the router resends a write.
+        # Also the idle limit of a keep-alive connection; see docs/server.md.
         self.timeout = self.server.request_timeout
         super().setup()
 
@@ -387,8 +390,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
-        # Tell the client when the connection closes after this response: an HTTP/1.0 request, a request with
-        # Connection: close, or a body that is still on the connection (it must not be read as the next request).
+        # send_header sets close_connection when it sends Connection: close, so an unread body is never read as the next request.
         if self.close_connection or self.unread_body:
             self.send_header("Connection", "close")
         self.end_headers()
@@ -430,18 +432,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve(self, fn) -> None:
         """Answer 1 request on this connection in a request slot (503 busy if no slot frees up in time)."""
-        srv = self.server
-        # A response that goes out before the body is read leaves the body on the connection. _json then
-        # closes the connection, so that the server does not read the body as the next request.
-        self.unread_body = "Content-Length" in self.headers or "Transfer-Encoding" in self.headers
-        if not srv.begin_request():
+        self.unread_body = "Transfer-Encoding" in self.headers or self.headers.get("Content-Length", "0") != "0"
+        if self.server.stopping:
+            self.close_connection = True
+            self._fail(ApiError(503, "closed", "サーバーは止まるところ"))
+            return
+        if not self.server.begin_request():
             self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
             return
         try:
             if not self._misdirected():
                 self._run(fn)
         finally:
-            srv.end_request(probe=is_probe(self.path))
+            self.server.end_request(probe=is_probe(self.path))
 
     def _user(self) -> str | None:
         """Return the authenticated user, or None without an authentication setting. Raise 401 on failure."""
@@ -540,6 +543,8 @@ class Handler(BaseHTTPRequestHandler):
         user = self._user()
         if isinstance(self.server.workspace, Replica):
             raise ApiError(405, "read_only", "このサーバーは記録先に追従する読み出し専用（書き込みは書き手のサーバーへ送る）")
+        if "Transfer-Encoding" in self.headers:  # with Content-Length too, a proxy could split the body differently
+            raise ApiError(400, "bad_request", "Transfer-Encoding には対応しない（Content-Length を使う）")
         length = self.headers.get("Content-Length")
         if length is None:
             raise ApiError(411, "length_required", "Content-Length が要る")
@@ -744,6 +749,7 @@ class Server(ThreadingHTTPServer):
         self._connections = threading.BoundedSemaphore(max_connections)  # each open connection holds a thread
         self.summaries = SummaryCache(max_cells)
         self._thread: threading.Thread | None = None
+        self.stopping = False
         # Requests in progress (probes too) and the monotonic time of the last use (probes not).
         self._active, self._last, self._use = 0, time.monotonic(), threading.Condition()
 
@@ -793,9 +799,9 @@ class Server(ThreadingHTTPServer):
             self.shutdown_request(request)
 
     def begin_request(self) -> bool:
-        """Take a request slot. Return False if no slot frees up in request_timeout seconds."""
+        """Take a request slot. Return False if no slot frees up in SLOT_WAIT seconds."""
         with self._use:
-            if not self._use.wait_for(lambda: self._active < self.max_threads, self.request_timeout):
+            if not self._use.wait_for(lambda: self._active < self.max_threads, SLOT_WAIT):
                 return False
             self._active += 1
             return True
@@ -807,6 +813,11 @@ class Server(ThreadingHTTPServer):
             if not probe:
                 self._last = time.monotonic()
             self._use.notify()
+
+    def shutdown(self) -> None:
+        """Stop serve_forever. Handler threads answer 503 to the next request on an open connection."""
+        self.stopping = True
+        super().shutdown()
 
     def touch(self) -> None:
         with self._use:
