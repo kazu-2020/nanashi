@@ -126,7 +126,9 @@ def run_once(t, args):
         err.seek(0)
         # ru_maxrss is in bytes on macOS and in KiB on Linux.
         rss_mb = usage.ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10)
-        return os.waitstatus_to_exitcode(status), wall, rss_mb, out.read(), err.read()
+        harness = {"wall_s": wall, "max_rss_mb": rss_mb, "user_s": usage.ru_utime, "sys_s": usage.ru_stime,
+                   "minor_faults_k": usage.ru_minflt / 1000}
+        return os.waitstatus_to_exitcode(status), harness, out.read(), err.read()
 
 
 def environment(args, sha, head):
@@ -161,15 +163,15 @@ def main():
     runs = []
     for i in range(2 * args.runs):
         side = ("base", "head")[i % 2]
-        rc, wall, rss, out, err = run_once(sides[side], args.bench)
+        rc, harness, out, err = run_once(sides[side], args.bench)
         metrics = parse_metrics(out)
         if rc == 0 and not metrics:
-            print(f"{side}: the last line of the output is not JSON, thus only wall_s and max_rss_mb",
-                  file=sys.stderr)
+            print(f"{side}: the last line of the output is not JSON, thus only the harness values "
+                  f"({', '.join(harness)})", file=sys.stderr)
         runs.append({"side": side, "dir": str(sides[side]), "run": i // 2, "rc": rc,
-                     "metrics": {**metrics, "wall_s": wall, "max_rss_mb": rss},  # the harness values win
+                     "metrics": {**metrics, **harness},  # the harness values win
                      **({"stderr_tail": err[-2000:]} if rc else {})})
-        print(f"{side} run {i // 2}: rc {rc}, {wall:.2f} s", file=sys.stderr, flush=True)
+        print(f"{side} run {i // 2}: rc {rc}, {harness['wall_s']:.2f} s", file=sys.stderr, flush=True)
     load_after = os.getloadavg()
     with open(head / "bench_ab_results.jsonl", "a") as f:
         f.writelines(json.dumps({"base": sha, **r}) + "\n" for r in runs)
