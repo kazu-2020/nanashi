@@ -48,12 +48,24 @@ The PostgreSQL role of the router needs the `insert` permission on `nanashi_mode
 With `--tessera <path to tessera/>`, the router starts the engines on its host.
 If a request comes for a model that has no live writer, the router starts `<tessera>/.venv/bin/python -m sparse_engine.server <engine-dir>/<model ID> --pg <DSN> --model-id <model ID> --port 0 --idle-exit <seconds>`.
 `--engine-dir` is the directory for the engine files (default `../.nanashi-data`).
+`--engine-dir` can also be `s3://<bucket>/<prefix>`. Then the engine path is `s3://<bucket>/<prefix>/<model ID>`.
 `--engine-idle` is the time without requests after which the engine stops itself (default 15m).
+`--engine-host` is the address of the engine (default `127.0.0.1`). The router sends it as `--host`.
+The engine tells this address to the routers, so do not use `0.0.0.0` or `::`.
+If `--engine-host` is not a loopback address, the router must have `--tokens` or `--user-header`.
+`--engine-max-bytes <N>` sends `--max-bytes <N>` to the engine.
+
+If the router has `--tokens` or `--user-header`, it starts the engine with `--user-header <name> --trusted-proxy <CIDR>`.
+The name is the `--user-header` of the router, or `X-Forwarded-User`. Then the engine records the user in the audit.
+The CIDRs come from `--engine-trusted-proxy`, which you can give more than one time.
+Give the addresses from which the routers connect to the engines.
+If you do not give it, the CIDR is `127.0.0.1/32`. This is permitted only for a loopback `--engine-host`.
 
 The router waits for the lease of the new engine, as it waits for any writer, until `--deadline`.
 An engine that stops with code 0 (idle stop or SIGTERM) starts again on the next request, without a wait.
 After a crash, the router waits 1 second before the next start, and doubles the wait up to 60 seconds.
-If an engine runs for 60 seconds without a lease, the router kills it. The count starts when the router first sees the engine without a lease. The kill counts as a crash.
+If an engine runs for `--engine-boot` (default 60s) without a lease, the router kills it.
+The engine loads the model and does a full recalc before it takes the lease. For a large model, make `--engine-boot` longer. The count starts when the router first sees the engine without a lease. The kill counts as a crash.
 On SIGTERM and SIGINT, the router sends SIGTERM to its engines after it stops, and kills them after 15 seconds.
 
 Without `--tessera`, the router only finds engines that something else started.

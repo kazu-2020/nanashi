@@ -26,10 +26,6 @@ const (
 	firstRetry = time.Second
 	maxRetry   = 60 * time.Second
 	healthyRun = time.Minute
-	// bootBudget is the time a process may run without a lease: 2 times the lease time of the engine (30 s).
-	// The cold start of the large plan is about 1 s (tessera/docs/performance.md), so a slow start does not
-	// become a crash loop.
-	bootBudget = 60 * time.Second
 )
 
 // state is the data about the engine of one model. It has no process handle, so plan and afterExit stay pure.
@@ -52,13 +48,13 @@ const (
 	failing
 )
 
-// plan is the decision for a model that has no live leader.
-func plan(st state, now time.Time) (verb, state) {
+// plan is the decision for a model that has no live leader. boot is Supervisor.Boot.
+func plan(st state, now time.Time, boot time.Duration) (verb, state) {
 	switch {
 	case st.running && st.noLeaseSince.IsZero():
 		st.noLeaseSince = now
 		return none, st
-	case st.running && now.Sub(st.noLeaseSince) < bootBudget:
+	case st.running && now.Sub(st.noLeaseSince) < boot:
 		return none, st
 	case st.running:
 		st.killed = true
@@ -100,6 +96,9 @@ func afterExit(st state, err error, now time.Time) state {
 type Supervisor struct {
 	Lease   Resolver                     // the lease is the only source of the leader address
 	Command func(model string) *exec.Cmd // the same model gives the same argv
+	// Boot is the time a process may run without a lease before the kill. The engine loads the model and
+	// does a full recalc before it takes the lease, so a large model needs more than 60 s.
+	Boot time.Duration
 
 	mu     sync.Mutex
 	closed bool // Close ran; start no process after it
@@ -128,7 +127,7 @@ func (s *Supervisor) Leader(ctx context.Context, model string) (string, error) {
 	if s.closed {
 		return "", nil
 	}
-	v, st := plan(s.models[model], time.Now())
+	v, st := plan(s.models[model], time.Now(), s.Boot)
 	if s.models == nil {
 		s.models, s.procs = map[string]state{}, map[string]*exec.Cmd{}
 	}
@@ -137,7 +136,7 @@ func (s *Supervisor) Leader(ctx context.Context, model string) (string, error) {
 	case spawn:
 		s.start(model)
 	case kill:
-		log.Printf("engine %s held no lease for %v; kill it", model, bootBudget)
+		log.Printf("engine %s held no lease for %v; kill it", model, s.Boot)
 		s.procs[model].Process.Kill()
 	case failing:
 		return "", engineFailing{st.lastErr}

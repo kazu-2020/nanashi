@@ -12,6 +12,7 @@ import (
 var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func TestPlan(t *testing.T) {
+	const boot = 60 * time.Second
 	sec := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Second) }
 	spawned := func(fails int, retryAt time.Time) state {
 		return state{running: true, started: t0, noLeaseSince: t0, fails: fails, retryAt: retryAt}
@@ -26,8 +27,8 @@ func TestPlan(t *testing.T) {
 		wantSt state
 	}{
 		{"new model", state{}, t0, spawn, spawned(0, time.Time{})},
-		{"booting", spawned(0, time.Time{}), t0.Add(bootBudget - time.Second), none, spawned(0, time.Time{})},
-		{"no lease after the budget", spawned(0, time.Time{}), t0.Add(bootBudget), kill, state{running: true, started: t0, noLeaseSince: t0, killed: true}},
+		{"booting", spawned(0, time.Time{}), t0.Add(boot - time.Second), none, spawned(0, time.Time{})},
+		{"no lease after the budget", spawned(0, time.Time{}), t0.Add(boot), kill, state{running: true, started: t0, noLeaseSince: t0, killed: true}},
 		{"lease was held, first leaderless observation", leased, sec(300), none, lapsed},
 		{"no lease for 59 s", lapsed, sec(359), none, lapsed},
 		{"no lease for 60 s", lapsed, sec(360), kill, state{running: true, started: t0, noLeaseSince: sec(300), killed: true}},
@@ -39,7 +40,7 @@ func TestPlan(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, st := plan(tt.st, tt.now)
+			got, st := plan(tt.st, tt.now, boot)
 			if got != tt.want {
 				t.Fatalf("plan = %v, want %v", got, tt.want)
 			}
@@ -96,6 +97,7 @@ func fakeSupervisor(script string) (*Supervisor, *atomic.Int32) {
 	var starts atomic.Int32
 	return &Supervisor{
 		Lease: &resolver{answers: []string{""}},
+		Boot:  time.Minute,
 		Command: func(string) *exec.Cmd {
 			starts.Add(1)
 			return exec.Command("sh", "-c", script)
