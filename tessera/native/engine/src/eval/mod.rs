@@ -89,7 +89,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
 
 /// 予算 b のもとで式を評価する（並列に評価するときは、式ごとに予算を分けて渡す）。
 pub fn eval_with(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
-    let mark = b.used();
+    let mark = b.mark();
     let out = node_value(node, cat, src, r, b)?;
     b.settle(mark, &out)?;
     Ok(out)
@@ -378,7 +378,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
 /// Evaluate a SUM formula (an aggregation with only SELECT above it, see plan::Method::OnePass). Gives the value,
 /// the count and the residual of each group from one pass over the source of the outermost aggregation.
 pub fn eval_sums(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<[Cube; 3]> {
-    let mark = b.used();
+    let mark = b.mark();
     let out = match node {
         Node::Select { child, dim, member, .. } => {
             let [v, c, l] = eval_sums(child, cat, src, &r.with(*dim, Sel::new(vec![*member], cat.dims[*dim].size)), b)?;
@@ -389,7 +389,7 @@ pub fn eval_sums(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budg
     let mut at = mark;
     for c in &out {
         b.settle(at, c)?;
-        at = b.used();
+        at = b.mark();
     }
     Ok(out)
 }

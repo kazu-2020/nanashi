@@ -14,14 +14,23 @@ pub struct Budget {
     used: Cell<usize>,
 }
 
+/// A count of the intermediate results that Budget::mark gives.
+#[derive(Clone, Copy)]
+pub(crate) struct Mark(usize);
+
 impl Budget {
     pub fn new(limit: usize, held: usize) -> Budget {
         Budget { limit, held, used: Cell::new(0) }
     }
 
-    /// The bytes of the intermediate results that the evaluation holds now.
-    pub fn used(&self) -> usize {
-        self.used.get()
+    /// The budget that gives `room` bytes to the intermediate results after the held bytes.
+    pub fn with_room(held: usize, room: usize) -> Budget {
+        Budget::new(held.saturating_add(room), held)
+    }
+
+    /// The count of the intermediate results now. Give it to settle when the node ends.
+    pub(crate) fn mark(&self) -> Mark {
+        Mark(self.used.get())
     }
 
     /// Err if `cells` new cells do not fit with the held bytes and the intermediate results.
@@ -33,10 +42,11 @@ impl Budget {
         Ok(())
     }
 
-    /// The evaluation of a node ended. Drop the child results counted after mark, and count the node result out.
-    pub(crate) fn settle(&self, mark: usize, out: &Cube) -> Result<()> {
+    /// The evaluation of a node ended. Reset the count to start (this drops the child results counted after it),
+    /// and count the node result out.
+    pub(crate) fn settle(&self, start: Mark, out: &Cube) -> Result<()> {
         let bytes = out.cells.capacity().saturating_mul(CELL_BYTES);
-        self.used.set(mark.saturating_add(bytes));
+        self.used.set(start.0.saturating_add(bytes));
         if self.held.saturating_add(self.used.get()) > self.limit {
             return Err(self.over(bytes, "途中結果"));
         }

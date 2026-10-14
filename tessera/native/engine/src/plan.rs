@@ -482,14 +482,22 @@ struct Done {
     value: Write,
     count: Option<Write>, // 差分集計する SUM の、各グループの件数（Whole の範囲は使わない）
     low: Option<Write>,   // the residual of each group of an incremental SUM (cells that are not 0)
-    old: Option<Src>,     // 書き戻す前の値（下流の差分集計の集計元なら）
+    old: Option<Old>,     // the value before the write (if it is the source of a downstream incremental aggregation)
+}
+
+/// The value of a region before the write.
+enum Old {
+    Shared(Arc<Store>), // the store that a whole-region recompute replaces; held counts it already
+    Slice(Src),         // a copy of the region
 }
 
 impl Done {
     fn bytes(&self) -> usize {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
-        // For the whole region, old is the Arc of the store, which held counts already
-        let old = if self.region.is_all() { 0 } else { held(&self.old) };
+        let old = match &self.old {
+            Some(Old::Slice(s)) => held([s]),
+            Some(Old::Shared(_)) | None => 0,
+        };
         writes.saturating_add(old)
     }
 }
@@ -557,11 +565,6 @@ fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
         }
     }
     out
-}
-
-/// Add held to each share because the Budget subtracts it again.
-fn share(max: usize, held: usize, n: usize) -> usize {
-    held.saturating_add(max.saturating_sub(held) / n)
 }
 
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
@@ -636,11 +639,11 @@ impl<'a> Run<'a> {
             // Group each wave again, because the earlier waves leave less room
             let wave = if parallel { waves(rest, max.saturating_sub(held)).remove(0) } else { vec![&rest[0]] };
             rest = &rest[wave.len()..];
-            let limit = share(max, held, wave.len());
+            let room = max.saturating_sub(held) / wave.len();
             let out: Vec<Result<Done>> = if wave.len() == 1 {
-                vec![run.compute(wave[0], limit, held)]
+                vec![run.compute(wave[0], room, held)]
             } else {
-                wave.par_iter().map(|t| run.compute(t, limit, held)).collect()
+                wave.par_iter().map(|t| run.compute(t, room, held)).collect()
             };
             unapplied += out.iter().flatten().map(Done::bytes).sum::<usize>();
             done.extend(out);
@@ -712,27 +715,27 @@ impl<'a> Run<'a> {
     }
 
     /// Calculate the task. It only reads the stored data, so the Metrics of one level can calculate in parallel.
-    fn compute(&self, t: &Task, limit: usize, held: usize) -> Result<Done> {
+    fn compute(&self, t: &Task, room: usize, held: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
-        // 集計元なら、書き戻す前の値を下流の差分集計のために取っておく。全体を計算し直すなら、
-        // 置き換える前の格納データをそのまま使う（複製しない）
+        // If it is a source, keep the value before the write for the downstream incremental aggregation.
+        // If the task calculates the whole region again, use the store that it replaces (no copy).
         let old = metric.source.then(|| {
             if t.region.is_all() {
-                Src::Store(self.stores[t.m].clone())
+                Old::Shared(self.stores[t.m].clone())
             } else {
-                self.slice(t.m, &t.region)
+                Old::Slice(self.slice(t.m, &t.region))
             }
         });
         let delta = match (&metric.delta, t.delta) {
-            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::new(limit, held))?,
+            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::with_room(held, room))?,
             _ => None,
         };
         let delta_used = delta.is_some();
         let (value, count, low) = match delta {
             Some(done) => done,
             None => {
-                let (r, b) = (t.region.restrict(self.cat), Budget::new(limit, held));
+                let (r, b) = (t.region.restrict(self.cat), Budget::with_room(held, room));
                 match metric.delta.as_ref().map(|d| &d.method) {
                     Some(Method::OnePass { .. }) => {
                         let [value, count, low] = self.sums(self.formula(t.m), None, &r, &b)?;
@@ -782,8 +785,10 @@ impl<'a> Run<'a> {
                 None => {}
             }
         }
-        if old.is_some() {
-            self.olds[m] = old;
+        match old {
+            Some(Old::Shared(a)) => self.olds[m] = Some(Src::Store(a)),
+            Some(Old::Slice(s)) => self.olds[m] = Some(s),
+            None => {}
         }
         self.log.push((m, delta, region));
         if let Some(sets) = sets {
@@ -979,23 +984,21 @@ mod tests {
 
     #[test]
     fn tasks_of_a_wave_split_the_room_after_the_held_data() {
-        let limit = share(1000, 400, 2);
-        let b = Budget::new(limit, 400);
-        assert_eq!(limit, 700);
+        let b = Budget::with_room(400, 300);
         assert!(b.need(300 / CELL_BYTES, "x").is_ok());
         assert!(b.need(300 / CELL_BYTES + 1, "x").is_err());
-        assert_eq!(share(100, 400, 2), 400);
     }
 
     #[test]
     fn a_slice_of_old_counts_but_the_shared_store_does_not() {
         let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
         let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
-        let old = Src::Store(Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap()));
-        let done = |region| Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old.clone()) };
-        assert_eq!(done(Reg::new(vec![])).bytes(), 0);
-        assert_eq!(done(Reg::new(vec![(0, vec![1])])).bytes(), held([&old]));
-        assert!(held([&old]) > 0);
+        let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
+        let slice = Src::Store(store.clone());
+        let done = |old| Done { m: 0, region: Reg::new(vec![]), delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old) };
+        assert_eq!(done(Old::Shared(store)).bytes(), 0);
+        assert_eq!(done(Old::Slice(slice.clone())).bytes(), held([&slice]));
+        assert!(held([&slice]) > 0);
     }
 
     #[test]
