@@ -71,16 +71,22 @@ impl Base {
 #[derive(Debug)]
 pub(crate) struct Postings {
     pub(crate) offsets: Vec<u32>, // the rows of member m are rows[offsets[m]..offsets[m + 1]]
-    pub(crate) rows: Vec<u32>,
+    pub(crate) rows: PackedKeys,  // `(m << 32) | row`, so the sequence is sorted and packs well
 }
 
 impl Postings {
-    pub(crate) fn of(&self, m: u32) -> &[u32] {
+    /// The positions in `rows` of the rows of member `m`.
+    pub(crate) fn span(&self, m: u32) -> Range<usize> {
         let m = m as usize;
         if m + 1 >= self.offsets.len() {
-            return &[];
+            return 0..0;
         }
-        &self.rows[self.offsets[m] as usize..self.offsets[m + 1] as usize]
+        self.offsets[m] as usize..self.offsets[m + 1] as usize
+    }
+
+    /// The base rows of member `m`, in ascending order.
+    pub(crate) fn of(&self, m: u32) -> impl Iterator<Item = u32> + '_ {
+        self.rows.range(self.span(m)).map(|k| k as u32)
     }
 }
 
@@ -163,7 +169,7 @@ impl Store {
             // 索引でその軸のメンバーの行だけを集める。差分の B 木にある変更は別に突き合わせる
             let mut cells = Vec::new();
             for &m in &sel.members {
-                for &row in post.of(m) {
+                for row in post.of(m) {
                     let k = self.base.keys.get(row as usize);
                     if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
                         cells.push((k, self.base.vals[row as usize]));
@@ -247,7 +253,7 @@ impl Store {
     /// この Store の分として数える。
     pub fn memory(&self) -> Mem {
         let b = &*self.base;
-        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| (p.offsets.capacity() + p.rows.capacity()) * 4).sum();
+        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| p.offsets.capacity() * 4 + p.rows.bytes()).sum();
         Mem {
             rows: b.keys.len(),
             base: b.keys.bytes() + b.vals.len() * 8,
@@ -305,13 +311,13 @@ impl Store {
                 offsets[i] += offsets[i - 1];
             }
             let mut fill = offsets.clone();
-            let mut rows = vec![0u32; self.base.keys.len()];
+            let mut rows = vec![0u64; self.base.keys.len()];
             for (row, k) in self.base.keys.iter().enumerate() {
                 let m = self.pack.get(k, pos) as usize;
-                rows[fill[m] as usize] = row as u32;
+                rows[fill[m] as usize] = (m as u64) << 32 | row as u64;
                 fill[m] += 1;
             }
-            Arc::new(Postings { offsets, rows })
+            Arc::new(Postings { offsets, rows: PackedKeys::new(&rows, self.cfg.par(rows.len())) })
         })
     }
 
@@ -329,7 +335,7 @@ impl Store {
                 continue; // メンバー数が大きすぎる軸には索引を作らない
             }
             let post = self.postings(pos);
-            let cand: usize = sel.members.iter().map(|&m| post.of(m).len()).sum();
+            let cand: usize = sel.members.iter().map(|&m| post.span(m).len()).sum();
             if best.is_none_or(|(c, _, _)| cand < c) {
                 best = Some((cand, sel, post));
             }
