@@ -301,7 +301,6 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
 /// Evaluate an aggregation node (ByAgg or Remove) and give one Cube for each of aggs (in place of the agg of the
 /// node), from one pass over the source. Min, Max and First only alone.
 fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget, aggs: &[Agg]) -> Result<Vec<Cube>> {
-    let cfg = &cat.cfg;
     match node {
         Node::ByAgg { child, src: s, dst, map, .. } => {
             // Aggregate each member of src into its member of dst
@@ -314,34 +313,12 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
             let rows = rows_of(child, cat, src, &sub, bud)?;
             let dims = replace_dim(&rows.pack().dims, *s, *dst);
             let out = Packing::new(&dims, cat)?;
-            if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
-                let xp = rows.pack();
-                let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
-                let rest = Proj::new(xp, &out);
-                let groups = fold_groups(cfg, &rows, |k| {
-                    let t = mp.fwd[xp.get(k, ps) as usize];
-                    (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
-                });
-                return Ok(finish_groups(groups, out, aggs));
-            }
-            let xp = rows.pack();
-            let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
-            let rest = Proj::new(xp, &out);
-            let target = |k: u64| {
+            let (ps, pd) = (rows.pack().pos(*s).unwrap(), out.pos(*dst).unwrap());
+            let rest = Proj::new(rows.pack(), &out);
+            Ok(aggregate_rows(rows, out, aggs, cat, r, move |xp, out, k| {
                 let t = mp.fwd[xp.get(k, ps) as usize];
-                (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
-            };
-            if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, target) {
-                return Ok(c);
-            }
-            // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
-            let pairs = collect_rows(cfg, rows.len(), |i| {
-                let (k, v) = rows.get(i);
-                let t = mp.fwd[xp.get(k, ps) as usize];
-                (t >= 0).then(|| (rest.apply(xp, &out, k) | out.put(pd, t as u32), v))
-            });
-            drop(rows);
-            Ok(group(cfg, pairs, out, aggs))
+                (t >= 0).then(|| rest.apply(xp, out, k) | out.put(pd, t as u32))
+            }))
         }
 
         Node::Remove { child, dim, agg } => {
