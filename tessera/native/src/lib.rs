@@ -1081,7 +1081,16 @@ thread_local! {
     static MY_SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
+fn heap_flush(v: isize) {
+    let now = HEAP_FLUSHED.fetch_add(v, Ordering::Relaxed) + v;
+    HEAP_PEAK.fetch_max(now, Ordering::Relaxed);
+}
+
 fn heap_add(n: isize) {
+    // A large change skips the slot, so the value in transit stays below about 2 * SLOT_FLUSH.
+    if n.unsigned_abs() > SLOT_FLUSH {
+        return heap_flush(n);
+    }
     let i = MY_SLOT.with(|c| {
         if c.get() == usize::MAX {
             c.set(NEXT_SLOT.fetch_add(1, Ordering::Relaxed) % SLOTS);
@@ -1091,9 +1100,8 @@ fn heap_add(n: isize) {
     let slot = &HEAP_SLOTS[i].0;
     let v = slot.fetch_add(n, Ordering::Relaxed) + n;
     if v.unsigned_abs() > SLOT_FLUSH {
-        slot.fetch_sub(v, Ordering::Relaxed);
-        let now = HEAP_FLUSHED.fetch_add(v, Ordering::Relaxed) + v;
-        HEAP_PEAK.fetch_max(now, Ordering::Relaxed);
+        // swap, not fetch_sub: after more than SLOTS threads, two threads can share a slot.
+        heap_flush(slot.swap(0, Ordering::Relaxed));
     }
 }
 
@@ -1136,7 +1144,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOC: Counting = Counting;
 
 /// The memory that Rust allocated after the process started, and the maximum after reset_heap_peak (bytes).
-/// The maximum can be wrong by about 64 KiB for each thread that allocated.
+/// The maximum can be wrong by about 128 KiB for each thread that allocated.
 #[pyfunction]
 fn heap() -> (usize, usize) {
     let now = heap_now();
