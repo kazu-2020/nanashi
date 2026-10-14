@@ -32,7 +32,7 @@ type Resolver interface {
 const (
 	maxBody        = 16 << 20
 	maxHead        = 64 << 10
-	attemptTimeout = 70 * time.Second // longer than the engine's own wait for a write (queue 30 s + commit 30 s)
+	attemptTimeout = 70 * time.Second // longer than the engine's own wait for a write (slot 5 s + queue 30 s + commit 30 s)
 	firstBackoff   = 50 * time.Millisecond
 	maxBackoff     = time.Second
 )
@@ -46,7 +46,7 @@ var upstream = &http.Client{
 	Transport: &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		MaxIdleConnsPerHost: 64,
-		IdleConnTimeout:     90 * time.Second,
+		IdleConnTimeout:     25 * time.Second, // below the engine idle limit (30 s): Go does not resend a POST on a closed pooled connection
 		DisableCompression:  true,
 	},
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

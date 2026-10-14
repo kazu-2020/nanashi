@@ -251,7 +251,7 @@ def main() -> None:
         s.add_argument("--rayon", help="RAYON_NUM_THREADS of the engines")
     sub.choices["clients"].add_argument("--clients", default="1,10,100,1000")
     sub.choices["clients"].add_argument("--only", help="cell, slice, or summary (comma list); the default mixes the 3")
-    sub.choices["clients"].add_argument("--keep-alive", action="store_true", help="HTTP/1.1, 1 connection per client (the engine closes it; use with --router)")
+    sub.choices["clients"].add_argument("--keep-alive", action="store_true", help="HTTP/1.1, 1 connection per client, kept open for the next request")
     sub.choices["clients"].add_argument("--router", type=int, metavar="PORT", help="send to the router on this port")
     sub.choices["clients"].add_argument("--model-id", help="the model ID in the path (with --router)")
     sub.choices["engines"].add_argument("--engines", default="10,50")
