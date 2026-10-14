@@ -387,7 +387,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
-        if self.unread_body:  # the body of the request is still on the connection, so close it after this response
+        # Tell the client when the connection closes after this response: an HTTP/1.0 request, a request with
+        # Connection: close, or a body that is still on the connection (it must not be read as the next request).
+        if self.close_connection or self.unread_body:
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)

@@ -618,8 +618,11 @@ class KeepAlive(unittest.TestCase):
         for _ in range(2):
             status, headers, body = exchange(s, req)
             self.assertEqual((status, headers.get("connection"), json.loads(body)["seq"]), (200, None, 0))
-        s.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        self.assertTrue(s.recv(100).startswith(b"HTTP/1.1 200"))
+        status, headers, _ = exchange(s, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        self.assertEqual((status, headers.get("connection"), s.recv(100)), (200, "close", b""))
+        s = self.connect(server)
+        status, headers, _ = exchange(s, b"GET /health HTTP/1.0\r\n\r\n")  # HTTP/1.0: 1 request per connection
+        self.assertEqual((status, headers.get("connection"), s.recv(100)), (200, "close", b""))
         start = time.monotonic()
         s2 = self.connect(server)
         for _ in range(100):  # with Nagle and the delayed ACK of the client, each answer takes 40 ms
