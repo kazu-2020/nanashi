@@ -34,7 +34,7 @@ jobs:
         ports: ["55432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
-      pgbouncer:  # PgBouncer in transaction pooling mode (the same as compose.yaml)
+      pgbouncer:
         image: edoburu/pgbouncer:v1.25.2-p0
         env:
           DATABASE_URL: postgres://postgres@postgres:5432  # No database name: a "*" entry forwards every database (the tests make new ones)
@@ -94,7 +94,9 @@ jobs:
         working-directory: tessera
         env:
           NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:56432/nanashi
-        run: SPARSE_ENGINE=rust python -m unittest tests.test_pg_journal tests.test_replica tests.test_standby
+        run: |
+          python -c "import os, psycopg; psycopg.connect(os.environ['NANASHI_PG_DSN'], connect_timeout=10).close()"
+          SPARSE_ENGINE=rust python -m unittest tests.test_pg_journal tests.test_replica tests.test_standby
       - name: 静的検査（Python）
         working-directory: tessera
         run: pyflakes sparse_engine tests examples bench*.py

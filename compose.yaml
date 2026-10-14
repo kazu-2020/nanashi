@@ -10,8 +10,7 @@ services:
       POSTGRES_HOST_AUTH_METHOD: trust
       POSTGRES_DB: nanashi
     ports: ["127.0.0.1:55432:5432"]
-  # PgBouncer in transaction pooling mode, in front of postgres. The tests can connect through it (port 56432).
-  # max_prepared_statements=0 makes sure that the clients do not use prepared statements.
+  # max_prepared_statements=0 turns off the PgBouncer support for prepared statements, so a test fails if the code uses them.
   pgbouncer:
     image: edoburu/pgbouncer:v1.25.2-p0
     container_name: nanashi-pgbouncer
