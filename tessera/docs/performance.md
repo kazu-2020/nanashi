@@ -272,6 +272,33 @@ The ranges of the full recalculation overlap, so the change is inside the noise 
 
 With 1 thread, the full recalculation went from 6,550 ms to 6,001 ms (1 run each). Before the change, the hash map path (`fold_groups`) was 22% of the 1-thread time. Thus 22% is the upper limit of the gain.
 
+### Aggregation into the array by runs of the source
+
+Before this change, each thread added its part of the rows into its own array of all targets. For `CatRev = Revenue[BY SUM: Product.Category]` on retail xlarge, the array has 1.8 million targets × 28 B = 50 MB a thread, and the 4 arrays are 200 MB. The rows are in Product order, and the products go through all 50 categories in turn. Thus each row touched a different cache line of the 50 MB array, and the evaluation took 7 times the time of `ProdRev = Revenue[REMOVE SUM: Store]` with the same rows (the instruction count was only 1.4 times).
+Now the engine reads the rows of each category together, from the runs of the rows of its products, and divides the categories over the threads ([Engine](engine.md)). A thread works in one block of 36,000 targets (1.2 MB) at a time, and the whole aggregation uses one 58 MB array, with no merge.
+We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.80 GHz, L2 1 MB a core, L3 33 MB) with `bench_ab.py` against `origin/main` (fa13c40). Each value is the median of 5 alternating runs with 4 threads (3 runs with 1 thread), with the minimum–maximum in parentheses. `Total` is bit-identical on both sides (132,119,849,539.62871) with 1 and 4 threads.
+
+| Measurement | Before | After |
+|---|---|---|
+| Full recalculation, 4 threads | 1,805 ms (1,683–2,215) | 1,258 ms (1,108–1,369) |
+| Full recalculation after the edits, 4 threads | 3,708 ms (2,992–4,156) | 3,022 ms (2,690–3,594) |
+| Full recalculation, 1 thread | 5,629 ms (5,558–6,920) | 4,277 ms (4,024–4,580) |
+| Full recalculation after the edits, 1 thread | 11,270 ms (10,960–11,270) | 9,919 ms (9,248–10,140) |
+| Maximum increase of the heap | 1,064 MB | 1,054 MB |
+| Maximum increase of the heap, after the edits | 1,064 MB | 980 MB |
+| Maximum RSS of the process, 4 threads | 2,311 MB | 2,257 MB |
+| User CPU of the whole benchmark process, 4 threads | 36.4 s | 34.3 s |
+| Incremental recalculation of 1 cell of Volume | 1.43 ms (1.42–1.68) | 1.52 ms (1.50–1.55) |
+
+The ranges of the full recalculation after the edits and of the incremental recalculation overlap. The evaluation of one Metric shows where the time went. Each value is the median of 5 alternating runs, and each run is the median of 5 evaluations after a full recalculation.
+
+| Formula | 4 threads, before | 4 threads, after | Heap peak, before | Heap peak, after |
+|---|---|---|---|---|
+| `Revenue[BY SUM: Product.Category]` (1.8 million targets) | 634 ms (576–706) | 193 ms (179–228) | 202 MB | 71 MB |
+| `Revenue[REMOVE SUM: Store]` (360 thousand targets) | 91 ms (84–137) | 99 ms (91–133) | 40 MB | 16 MB |
+
+With 1 thread, `Revenue[BY SUM: Product.Category]` went from 1,468 ms to 598 ms (1 run each, median of 3 evaluations).
+
 ## Save and journal formats
 
 This is a comparison before and after two changes. Snapshots and files for large changes changed from npz to Parquet. Large changes now move as change blocks.
