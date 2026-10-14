@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import multiprocessing
 import os
 import random
@@ -22,15 +23,13 @@ import subprocess
 import sys
 import time
 
-SECOND_HALF = 0.5  # the share of each run that is measured; the first part warms up
+MEASURED_SHARE = 0.5  # the first part of each run warms up
 
-
-# ---------------------------------------------------------------- calculations
 
 def percentiles(xs: list[float], ps=(50, 95, 99)) -> dict[str, float]:
     """Return the nearest-rank percentiles of xs in ms. An empty list gives NaN."""
     s = sorted(xs)
-    return {f"p{p}": (s[min(len(s) - 1, len(s) * p // 100)] * 1e3 if s else float("nan")) for p in ps}
+    return {f"p{p}": (s[max(0, math.ceil(len(s) * p / 100) - 1)] * 1e3 if s else float("nan")) for p in ps}
 
 
 def summarize(results: list[dict], seconds: float) -> dict:
@@ -43,11 +42,9 @@ def summarize(results: list[dict], seconds: float) -> dict:
     return {"rps": status.get("200", 0) / seconds, **percentiles(lat), "status": status}
 
 
-def request(path: str, host: str) -> bytes:
-    return f"GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n".encode()
+def request(path: str) -> bytes:
+    return f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode()
 
-
-# ---------------------------------------------------------------- actions
 
 def engine_main(size: str, port: int) -> None:
     """Child process: build the profit and loss plan, start the server, print the read paths and the write."""
@@ -72,32 +69,33 @@ def engine_main(size: str, port: int) -> None:
     server.serve_forever()
 
 
-async def _get(host: str, port: int, req: bytes, status: dict, lat: list, t0: float, keep: bool) -> None:
+async def _get(port: int, req: bytes, status: dict, lat: list, t0: float, keep: bool) -> None:
+    """Send 1 request. If keep, count its status, and its latency when it is 200."""
     try:
-        r, w = await asyncio.open_connection(host, port)
+        r, w = await asyncio.open_connection("127.0.0.1", port)
         w.write(req)
         data = await r.read()
         w.close()
         code = data[9:12].decode() or "empty"
     except OSError as e:
         code = type(e).__name__
-    status[code] = status.get(code, 0) + 1
-    if keep and code == "200":
-        lat.append(time.perf_counter() - t0)
+    if keep:
+        status[code] = status.get(code, 0) + 1
+        if code == "200":
+            lat.append(time.perf_counter() - t0)
 
 
 async def _closed(port: int, paths: list[str], clients: int, seconds: float) -> dict:
     status: dict[str, int] = {}
     lat: list[float] = []
-    reqs = [request(p, "127.0.0.1") for p in paths]
+    reqs = [request(p) for p in paths]
     start = time.perf_counter()
-    end, measure_from = start + seconds, start + seconds * (1 - SECOND_HALF)
+    end, measure_from = start + seconds, start + seconds * (1 - MEASURED_SHARE)
 
     async def client(i: int) -> None:
         rng = random.Random(i)
         while (t := time.perf_counter()) < end:
-            keep = t >= measure_from
-            await _get("127.0.0.1", port, rng.choice(reqs), status if keep else {}, lat, t, keep)
+            await _get(port, rng.choice(reqs), status, lat, t, t >= measure_from)
 
     await asyncio.gather(*(client(i) for i in range(clients)))
     return {"lat": lat, "status": status}
@@ -109,13 +107,11 @@ async def _open(ports: list[int], paths: dict[int, list[str]], rate: float, seco
     lat: list[float] = []
     rng = random.Random(seed)
     tasks, start = [], time.perf_counter()
-    measure_from, t = start + seconds * (1 - SECOND_HALF), start
+    measure_from, t = start + seconds * (1 - MEASURED_SHARE), start
     while (t := t + rng.expovariate(rate)) < start + seconds:
         await asyncio.sleep(max(0.0, t - time.perf_counter()))
         port = rng.choice(ports)
-        keep = t >= measure_from
-        tasks.append(asyncio.create_task(_get("127.0.0.1", port, request(rng.choice(paths[port]), "127.0.0.1"),
-                                              status if keep else {}, lat, t, keep)))
+        tasks.append(asyncio.create_task(_get(port, request(rng.choice(paths[port])), status, lat, t, t >= measure_from)))
     await asyncio.gather(*tasks)
     return {"lat": lat, "status": status}
 
@@ -132,13 +128,18 @@ def start_engines(n: int, size: str, base_port: int, rayon: str | None) -> list[
     env = dict(os.environ)
     if rayon:
         env["RAYON_NUM_THREADS"] = rayon
-    procs = []
-    for i in range(n):  # one at a time: a parallel build of 50 models needs 50 times the build memory
-        p = subprocess.Popen([sys.executable, __file__, "engine", size, str(base_port + i)],
-                             stdout=subprocess.PIPE, text=True, env=env)
-        procs.append((p, base_port + i, json.loads(p.stdout.readline())))
-    time.sleep(0.5)  # serve_forever starts after the print
-    return procs
+    procs: list[subprocess.Popen] = []
+    out = []
+    try:
+        for i in range(n):  # one at a time: a parallel build of 50 models needs 50 times the build memory
+            procs.append(subprocess.Popen([sys.executable, __file__, "engine", size, str(base_port + i)],
+                                          stdout=subprocess.PIPE, text=True, env=env))
+            out.append((procs[-1], base_port + i, json.loads(procs[-1].stdout.readline())))
+    except BaseException:
+        for p in procs:
+            p.kill()
+        raise
+    return out
 
 
 def rss_mb(pid: int) -> float:
@@ -174,7 +175,7 @@ def run_clients(args) -> None:
             shares = [n // procs + (i < n % procs) for i in range(procs)]
             with multiprocessing.Pool(procs) as pool:
                 res = pool.map(_closed_worker, [(port, info["paths"], s, args.seconds) for s in shares])
-            r = summarize(res, args.seconds * SECOND_HALF)
+            r = summarize(res, args.seconds * MEASURED_SHARE)
             print(json.dumps({"clients": n, **r, "rss_mb": rss_mb(proc.pid)}, ensure_ascii=False), flush=True)
     finally:
         proc.kill()
@@ -199,7 +200,7 @@ def run_engines(args) -> None:
                 others = ports[1:] if args.writer and n > 1 else ports
                 res = pool.map(_open_worker, [(others, paths, rate, args.seconds, i) for i in range(args.procs)])
                 writes = writes.get() if writes else 0
-            r = summarize(res, args.seconds * SECOND_HALF)
+            r = summarize(res, args.seconds * MEASURED_SHARE)
             print(json.dumps({"engines": n, "rss_mb_each": round(sum(rss) / n), "rss_gb_total": round(sum(rss) / 1024, 2),
                               "idle_cores": round(idle, 3), "rate": args.rate, "writes": writes, **r},
                              ensure_ascii=False), flush=True)

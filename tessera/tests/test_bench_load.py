@@ -1,3 +1,4 @@
+import math
 import unittest
 
 from bench_load import percentiles, summarize
@@ -10,10 +11,10 @@ class SummarizeTest(unittest.TestCase):
         r = summarize([a, b], 2.0)
         self.assertEqual(r["rps"], 2.0)
         self.assertEqual(r["status"], {"200": 4, "503": 1})
-        self.assertEqual((r["p50"], r["p99"]), (3.0, 4.0))
+        self.assertEqual((r["p50"], r["p99"]), (2.0, 4.0))
 
     def test_empty_latencies_give_nan(self):
-        self.assertNotEqual(percentiles([])["p50"], percentiles([])["p50"])
+        self.assertTrue(math.isnan(percentiles([])["p50"]))
 
 
 if __name__ == "__main__":

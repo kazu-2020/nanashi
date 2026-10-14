@@ -80,7 +80,7 @@ These are the limits:
 
 - The request body can be up to 16 MiB (`--max-body`).
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`).
-- The kernel keeps up to 1024 connections that the server did not accept yet. The default of `socketserver` is 5. With 5, about 64 clients that connect at the same time made some of them wait 1 s for a second SYN.
+- The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`). The default of `socketserver` is 5. With 5, about 64 clients that connect at the same time made some of them wait 1 s for a second SYN.
 - The server can process up to 64 requests at the same time (`--max-threads`). Above this, it returns 503.
 - If the read or write of a request stops for 30 seconds, the server closes the connection.
 

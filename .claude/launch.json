@@ -6,7 +6,7 @@
       "runtimeExecutable": "bash",
       "runtimeArgs": [
         "-c",
-        "set -e; export PATH=$HOME/.local/share/mise/shims:$PATH; DSN=postgresql://postgres@127.0.0.1:55432/nanashi; (cd tessera && .venv/bin/python -m sparse_engine.pg_journal migrate \"$DSN\"); trap 'kill 0' EXIT; mkdir -p .nanashi-data; (cd router && go run ./cmd/nanashi-router --pg \"$DSN\" --listen 127.0.0.1:8090 --tessera ../tessera --engine-dir ../.nanashi-data) & (cd api && go run ./cmd/nanashi-api --pg \"$DSN\" --router http://127.0.0.1:8090) & (cd web && node_modules/.bin/vp dev --host 127.0.0.1) & wait"
+        "export PATH=$HOME/.local/share/mise/shims:$PATH; exec ./dev.sh"
       ],
       "port": 5173,
       "url": "http://127.0.0.1:5173"

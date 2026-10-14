@@ -20,12 +20,11 @@ import statistics
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 GB = 2**30
 POLL = 0.1  # seconds between 2 reads of the RSS
 
-
-# ---------------------------------------------------------------- calculations
 
 def tree_rss(ps_output: str, root: int) -> int:
     """Return the total RSS in bytes of root and its descendants, from `ps -A -o pid=,ppid=,rss=`."""
@@ -85,8 +84,6 @@ def _ratio(a: float, b: float) -> str:
     return f"×{b / a:.2f}" if a else "-"
 
 
-# ---------------------------------------------------------------- actions
-
 def measure(scale: int, repeats: int) -> dict:
     """Build the model at scale, and measure each phase. Run this in the child process."""
     import nanashi_core
@@ -95,21 +92,20 @@ def measure(scale: int, repeats: int) -> dict:
 
     phases: dict[str, dict] = {}
 
-    def phase(name: str, fn, n: int = 1, prepare=lambda: None) -> None:
+    def phase(name: str, fn, n: int = 1, prepare=lambda: None):
         times, peaks = [], []
         for _ in range(n):
             prepare()
             nanashi_core.reset_heap_peak()
             t = time.perf_counter()
-            fn()
+            result = fn()
             times.append(time.perf_counter() - t)
             peaks.append(nanashi_core.heap()[1])
         phases[name] = {"seconds": statistics.median(times), "heap_peak": max(peaks), "heap_after": nanashi_core.heap()[0]}
+        return result
 
     employees, products, months = SIZES["large"]
-    box: dict = {}
-    phase("build", lambda: box.setdefault("m", build(RustEngine(), employees * scale, products * scale, months)))
-    m = box["m"]
+    m = phase("build", lambda: build(RustEngine(), employees * scale, products * scale, months))
     phase("full recalculation", m.recalc)
     cells = sum(m.engine.size(m.raw(n)) for n in m.metrics)  # before the edits, which add employees
     rng = random.Random(1)
@@ -122,7 +118,7 @@ def measure(scale: int, repeats: int) -> dict:
 def run_guarded(scale: int, repeats: int, limit: int) -> dict:
     """Run measure(scale) in a child process. Stop the child if its RSS tree is more than limit bytes."""
     child = subprocess.Popen([sys.executable, __file__, "child", str(scale), str(repeats)],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, text=True)  # stderr goes to the terminal, so a full pipe cannot stop the child
     peak, status = 0, None
     try:
         while child.poll() is None:
@@ -137,10 +133,9 @@ def run_guarded(scale: int, repeats: int, limit: int) -> dict:
     finally:
         if child.poll() is None:
             child.kill()
-    out, err = child.communicate()
+    out, _ = child.communicate()
     if status is None and child.returncode != 0:
         status = "error"
-        print(err[-2000:], file=sys.stderr)
     if status is not None:
         return {"scale": scale, "status": status, "rss_max": peak}
     r = json.loads(out.splitlines()[-1])
@@ -179,7 +174,7 @@ def main() -> None:
     if args.cmd == "child":
         print(json.dumps(measure(args.scale, args.repeats), ensure_ascii=False))
     elif args.cmd == "compare":
-        load = lambda path: json.load(open(path))["results"]
+        load = lambda path: json.loads(Path(path).read_text())["results"]
         print(compare(load(args.before), load(args.after)))
     else:
         results = []
