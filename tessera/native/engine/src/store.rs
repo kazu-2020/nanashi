@@ -256,13 +256,15 @@ impl Store {
         }
     }
 
-    /// Make the sorted cells the base and drop the delta. The keys stay in the buffer of `cells`,
-    /// so only the values get a new column (an unzip makes two columns while `cells` still exists).
+    /// Make the sorted cells the base and drop the delta. Only the values get a new column.
+    /// The standard library collects the keys into the buffer of `cells` (in-place iteration),
+    /// so the cells and two new columns do not exist at the same time, as they do with an unzip.
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let vals: Vec<f64> =
             if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
+        let keys: Vec<u64> = cells.into_iter().map(|c| c.0).collect();
         self.base = Arc::new(Base {
-            keys: keys_in_place(cells),
+            keys: keys.into_boxed_slice(),
             vals: vals.into_boxed_slice(),
             postings: fresh_postings(self.pack.dims.len()),
         });
@@ -726,24 +728,6 @@ impl Store {
 
 pub(crate) fn same_set(a: &[DimId], b: &[DimId]) -> bool {
     a.len() == b.len() && a.iter().all(|d| b.contains(d))
-}
-
-const _: () = assert!(size_of::<(u64, f64)>() == 2 * size_of::<u64>() && align_of::<(u64, f64)>() == align_of::<u64>());
-
-fn keys_in_place(cells: Vec<(u64, f64)>) -> Box<[u64]> {
-    let mut cells = std::mem::ManuallyDrop::new(cells);
-    let (n, cap, cell) = (cells.len(), cells.capacity(), cells.as_mut_ptr());
-    let key = cell as *mut u64;
-    // SAFETY: key i goes to bytes [8i, 8i + 8), which end at or before cell i starts (i >= 1),
-    // so each cell is read before it is overwritten. The buffer of cap cells has the size and
-    // alignment of 2 * cap u64 values, so Vec<u64> can own and free it.
-    unsafe {
-        for i in 0..n {
-            let k = (*cell.add(i)).0;
-            key.add(i).write(k);
-        }
-        Vec::from_raw_parts(key, n, 2 * cap).into_boxed_slice()
-    }
 }
 
 /// 並んだ 2 つのセル列で、値が違うか片側にしかないキー。
