@@ -198,6 +198,13 @@ class BadCells(unittest.TestCase):
                 m.add_input("Salary", ["Employee"], {("e1",): "a"}, id=m.metric("Salary").id)
             self.assertEqual(m.metric("Salary").dims, m.metric("Budget").dims)
             self.assertEqual(m.get("Total"), 120.0)
+            e1 = m.dimension("Employee").ids[0]
+            with self.assertRaisesRegex(ValueError, "^同じセルが 2 回ある$"):
+                m.add_input("Y", ["Employee"], {("e1",): 1.0, (e1,): 2.0})
+            with self.assertRaises(TypeError):
+                m.add_input("Y", ["Employee"], {1: 1.0})
+            self.assertNotIn("Y", [x.name for x in m.metrics.values()])
+            m.recalc()
 
 
 class MatchesFullRecalc(unittest.TestCase):

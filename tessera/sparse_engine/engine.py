@@ -118,7 +118,12 @@ class ReferenceEngine:
         return Cube(dims)
 
     def from_cells(self, dims, kind, cells, cat, partition=None):
-        return Cube(dims, dict(cells))
+        out = {}
+        for key, value in cells:
+            if key in out:  # Named gives the same cell twice if a key has the name and the id of one member
+                raise ValueError("同じセルが 2 回ある")
+            out[key] = value
+        return Cube(dims, out)
 
     def partition_of(self, storage):
         return None

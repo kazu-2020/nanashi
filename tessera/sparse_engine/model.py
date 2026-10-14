@@ -654,12 +654,12 @@ class Model:
         if storage is None:
             self.metrics[id] = new  # _check uses the dimensions of the registered Metric
             # A generator: a copy of a large cells dict can need more memory than the stored data
-            checked = ((key, self._check(id, key, value)) for key, value in
-                       ((tuple(key), value) for key, value in (cells or {}).items()))
+            pairs = ((tuple(key), value) for key, value in (cells or {}).items())
             try:
-                storage = self.engine.from_cells(dims, kind, ((k, v) for k, v in checked if v is not None),
-                                                 self, partition)
-            except ValueError:
+                storage = self.engine.from_cells(
+                    dims, kind, ((k, v) for k, value in pairs if (v := self._check(id, k, value)) is not None),
+                    self, partition)
+            except BaseException:  # also a bad key from Named, or no memory in the engine
                 if old is None:
                     del self.metrics[id]
                 else:
