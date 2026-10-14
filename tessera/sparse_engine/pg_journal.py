@@ -137,7 +137,7 @@ def schema_version(conn) -> int:
 def migrate(dsn: str) -> tuple[int, int]:
     """スキーマを最新の版にする（(前の版, 今の版) を返す）。複数のプロセスが同時に流しても 1 回だけ流す。
     書き込み中のプロセスがあれば、表のロックを待つ。"""
-    with psycopg.connect(dsn, autocommit=True) as conn, conn.transaction():
+    with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn, conn.transaction():
         conn.execute("select pg_advisory_xact_lock(hashtextextended('nanashi_schema', 0))")
         conn.execute("create table if not exists nanashi_schema (version integer not null)")
         before = schema_version(conn)
@@ -185,7 +185,9 @@ class PgJournal(Journal):
         self.lost = False
         self.lease_until: float | None = None  # リースの期限（time.monotonic の値。延長できた時点から数える）
         self.lease_error: BaseException | None = None  # 最後に延長できなかった理由（延長できたら None）
-        self.conn = psycopg.connect(dsn, autocommit=True)  # 複数の文は transaction() で囲む
+        # Put a group of statements in transaction(). prepare_threshold=None: PgBouncer in transaction
+        # pooling mode can send the next statement to a server connection without the prepared statement
+        self.conn = psycopg.connect(dsn, autocommit=True, prepare_threshold=None)
         version = schema_version(self.conn)
         if version != SCHEMA_VERSION:
             self.conn.close()
@@ -238,7 +240,7 @@ class PgJournal(Journal):
         """確定のたびに書き手が送る通知（NOTIFY nanashi_head）を、専用の接続で待つ。"""
         with self._listen_lock:
             if self._listen_conn is None:
-                self._listen_conn = psycopg.connect(self.dsn, autocommit=True)
+                self._listen_conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
                 self._listen_conn.execute("listen nanashi_head")
             for n in self._listen_conn.notifies(timeout=timeout):
                 if n.payload == self.model_id:
@@ -407,7 +409,7 @@ class PgJournal(Journal):
         記録ごとに「まだ反映していない」印を先に外してから書く（印を外せなければ、ほかが書いた）。"""
         with self._index_lock:
             if self._index_conn is None:
-                self._index_conn = psycopg.connect(self.dsn, autocommit=True)
+                self._index_conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
             conn = self._index_conn
             conn.execute("select pg_advisory_lock(hashtextextended(%s, 0))", ("nanashi_index:" + self.model_id,))
             try:
