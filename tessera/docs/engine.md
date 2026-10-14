@@ -45,7 +45,7 @@ The engine keeps the calculated values in key order. When it writes them back, i
 
 In a full evaluation, the engine fuses a formula that is a chain of element-wise operations. It evaluates the fused formula and does not make an intermediate result (Cube) for each operation (`eval/fuse.rs`).
 Fusion applies to these operations: the four arithmetic operations, comparisons, `AND` / `OR` / `NOT`, `IF`, `FILTER`, `ON`, `EXPAND`, `ISBLANK`, `IFBLANK`, dimension values (`Month`), `SELECT`, time shifts (`[SELECT: Month - 1]`), the BY mapping (`BY`), and manual overrides of formula Metrics.
-Before the scan, the engine compiles the expression tree into a chain of closures. Each operation and each source gets its own closure, and a constant operand goes into the closure of its operation.
+Before the scan, the engine compiles the expression tree into a chain of closures. Each operation and each source gets its own closure. A constant operand of `*`, `/` or a comparison goes into the closure of its operation.
 The engine scans each key that can be in the result. For each key, it calls the chain, calculates the value, and writes it directly to the result array.
 A source converts the key and looks up the value. `SELECT`, time shifts, and the BY mapping change the key that looks up the child.
 The value at each key has the same meaning as in the evaluation of one operation at a time. This includes blank cells, division by zero, three-valued logic, and the expansion to all members.
