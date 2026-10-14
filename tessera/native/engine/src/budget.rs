@@ -1,8 +1,5 @@
-//! The memory budget of one operation. The bytes that the operation holds alive (stored data, sources, writes
-//! that wait) plus its intermediate results must not be more than the limit.
-//!
-//! The operations that make all combinations (EXPAND, ISBLANK, IFBLANK) check the bytes before they make them.
-//! If the bytes are over the limit, they return Err before the allocation.
+//! The memory budget of one operation. The held bytes (the sources and the writes that wait) plus the intermediate
+//! results must not be more than the limit.
 
 use crate::*;
 use std::cell::Cell;
@@ -10,8 +7,7 @@ use std::cell::Cell;
 /// The bytes of one cell of an intermediate result (the key and the value).
 pub const CELL_BYTES: usize = 16;
 
-/// The budget of one evaluation. Each formula that the engine evaluates in parallel has its own Budget (the plan
-/// splits the limit).
+/// The budget of one operation. Each formula that the engine evaluates in parallel gets its own Budget.
 pub struct Budget {
     limit: usize,
     held: usize,
@@ -19,11 +15,7 @@ pub struct Budget {
 }
 
 impl Budget {
-    pub fn new(limit: usize) -> Budget {
-        Budget::with_held(limit, 0)
-    }
-
-    pub fn with_held(limit: usize, held: usize) -> Budget {
+    pub fn new(limit: usize, held: usize) -> Budget {
         Budget { limit, held, used: Cell::new(0) }
     }
 
@@ -32,7 +24,7 @@ impl Budget {
         self.used.get()
     }
 
-    /// Err if `cells` new cells do not fit next to the held bytes and the intermediates.
+    /// Err if `cells` new cells do not fit with the held bytes and the intermediate results.
     pub fn need(&self, cells: usize, what: &str) -> Result<()> {
         let bytes = cells.saturating_mul(CELL_BYTES);
         if self.held.saturating_add(self.used.get()).saturating_add(bytes) > self.limit {
@@ -66,15 +58,12 @@ impl Budget {
 pub fn held<'a>(src: impl IntoIterator<Item = &'a Src>) -> usize {
     let mut seen = FxHashSet::default();
     src.into_iter()
-        .filter(|s| {
-            seen.insert(match s {
-                Src::Store(a) => Arc::as_ptr(a) as usize,
-                Src::Cube(a) => Arc::as_ptr(a) as usize,
-            })
-        })
-        .map(|s| match s {
-            Src::Store(a) => a.memory().bytes(),
-            Src::Cube(a) => a.cells.capacity().saturating_mul(CELL_BYTES),
+        .filter_map(|s| {
+            let (ptr, bytes) = match s {
+                Src::Store(a) => (Arc::as_ptr(a) as usize, a.memory().bytes()),
+                Src::Cube(a) => (Arc::as_ptr(a) as usize, a.cells.capacity().saturating_mul(CELL_BYTES)),
+            };
+            seen.insert(ptr).then_some(bytes)
         })
         .sum()
 }

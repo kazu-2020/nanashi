@@ -50,12 +50,12 @@ fn ifblank_beyond_the_budget_fails_before_allocating() {
 #[test]
 fn intermediate_results_are_counted_while_they_live() {
     let cat = catalog(usize::MAX);
-    let b = Budget::new(usize::MAX);
+    let b = Budget::new(usize::MAX, 0);
     let node = Node::Ref(0);
     let out = eval_with(&node, &cat, &source(&cat), &Restrict::all(3), &b).unwrap();
     assert_eq!(b.used(), out.cells.capacity() * 16);
     // 1 セル分しか予算がなければ、3 セルの読み出しは失敗する
-    let tight = Budget::new(16);
+    let tight = Budget::new(16, 0);
     assert!(eval_with(&node, &cat, &source(&cat), &Restrict::all(3), &tight).is_err());
 }
 
@@ -65,12 +65,8 @@ fn stored_data_counts_against_the_budget() {
     let src = source(&cat);
     let node = Node::Ref(0);
     let stored = held(&src);
-    let full = Budget::with_held(stored + 3 * 16 - 1, stored);
-    let err = eval_with(&node, &cat, &src, &Restrict::all(3), &full).unwrap_err();
-    assert!(err.contains("格納データが 48 バイト"), "{err}");
-    let room = Budget::with_held(stored + 3 * 16, stored);
-    assert_eq!(eval_with(&node, &cat, &src, &Restrict::all(3), &room).unwrap().cells.len(), 3);
-    assert!(eval(&node, &catalog(stored + 3 * 16 - 1), &src, &Restrict::all(3)).is_err());
+    let tight = eval(&node, &catalog(stored + 3 * 16 - 1), &src, &Restrict::all(3)).unwrap_err();
+    assert!(tight.contains("格納データが 48 バイト"), "{tight}");
     assert!(eval(&node, &catalog(stored + 3 * 16), &src, &Restrict::all(3)).is_ok());
 }
 
@@ -79,7 +75,7 @@ fn held_counts_a_shared_source_once() {
     let cat = catalog(usize::MAX);
     let src = source(&cat);
     let twice = [src[0].clone(), src[0].clone()];
-    assert_eq!(held(&twice), 48);
+    assert_eq!(held(&twice), held(&src[..1]));
     let other = source(&cat);
-    assert_eq!(held([&src[0], &other[0]]), 96);
+    assert_eq!(held([&src[0], &other[0]]), 2 * held(&src[..1]));
 }

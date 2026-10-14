@@ -147,6 +147,7 @@ class MemoryBudget(unittest.TestCase):
         m.add_dimension("Customer", [f"c{i}" for i in range(10_000)])
         m.add_input("Sales", ["Customer"], {(f"c{i}",): float(i) for i in range(10_000)})
         m.add_formula("Double", ["Customer"], "Sales * 2")
+        # The result (10,000 cells x 16 bytes) fits in the budget alone, but not together with the stored data
         m.engine.core.configure(max_bytes=stored_bytes(m) + (64 << 10))
         with self.assertRaisesRegex(ValueError, "格納データが"):
             m.recalc()

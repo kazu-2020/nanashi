@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{chain, chain_scan, eval_sums, eval_with, remove_run, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{chain, chain_scan, eval_sums, eval_with, held, remove_run, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -489,7 +489,7 @@ impl Done {
     fn bytes(&self) -> usize {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
         // For the whole region, old is the Arc of the store, which held counts already
-        let old = if self.region.is_all() { 0 } else { crate::held(&self.old) };
+        let old = if self.region.is_all() { 0 } else { held(&self.old) };
         writes.saturating_add(old)
     }
 }
@@ -626,26 +626,23 @@ impl<'a> Run<'a> {
         let weight: usize = tasks.iter().map(|t| t.weight).sum();
         let run: &Self = self;
         let max = self.cat.cfg.max_bytes;
-        let held = self.held();
-        // The finished values wait for apply until the level ends
+        let held = if tasks.is_empty() { 0 } else { self.held() };
         let mut unapplied = 0;
         let mut done: Vec<Result<Done>> = Vec::with_capacity(tasks.len());
-        let groups = if tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min) {
-            // In parallel, the tasks of a wave share the room that the held data leaves. A task whose estimate
-            // is more than an equal share runs alone with all the room
-            waves(&tasks, max.saturating_sub(held))
-        } else {
-            tasks.iter().map(|t| vec![t]).collect()
-        };
-        for wave in groups {
+        let parallel = tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min);
+        let mut rest = &tasks[..];
+        while !rest.is_empty() {
             let held = held.saturating_add(unapplied);
+            // Group each wave again, because the earlier waves leave less room
+            let wave = if parallel { waves(rest, max.saturating_sub(held)).remove(0) } else { vec![&rest[0]] };
+            rest = &rest[wave.len()..];
             let limit = share(max, held, wave.len());
             let out: Vec<Result<Done>> = if wave.len() == 1 {
                 vec![run.compute(wave[0], limit, held)]
             } else {
                 wave.par_iter().map(|t| run.compute(t, limit, held)).collect()
             };
-            unapplied = out.iter().flatten().fold(unapplied, |p, d| p.saturating_add(d.bytes()));
+            unapplied += out.iter().flatten().map(Done::bytes).sum::<usize>();
             done.extend(out);
         }
         for d in done {
@@ -658,9 +655,12 @@ impl<'a> Run<'a> {
     }
 
     fn held(&self) -> usize {
+        if self.cat.cfg.max_bytes == usize::MAX {
+            return 0;
+        }
         let stores = self.stores.iter().chain(self.counts.iter().flatten()).chain(self.lows.iter().flatten());
         let src: Vec<Src> = stores.map(|s| Src::Store(s.clone())).chain(self.olds.iter().flatten().cloned()).collect();
-        crate::held(&src)
+        held(&src)
     }
 
     fn env(&self) -> Env<'_> {
@@ -725,14 +725,14 @@ impl<'a> Run<'a> {
             }
         });
         let delta = match (&metric.delta, t.delta) {
-            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::with_held(limit, held))?,
+            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::new(limit, held))?,
             _ => None,
         };
         let delta_used = delta.is_some();
         let (value, count, low) = match delta {
             Some(done) => done,
             None => {
-                let (r, b) = (t.region.restrict(self.cat), Budget::with_held(limit, held));
+                let (r, b) = (t.region.restrict(self.cat), Budget::new(limit, held));
                 match metric.delta.as_ref().map(|d| &d.method) {
                     Some(Method::OnePass { .. }) => {
                         let [value, count, low] = self.sums(self.formula(t.m), None, &r, &b)?;
@@ -916,6 +916,9 @@ impl<'a> Run<'a> {
                 self.stores[*n] = Arc::new(self.stores[*n].empty_like());
             }
         }
+        if active.is_empty() {
+            return Ok(());
+        }
         let held = self.held();
         // If only one Metric of the scan is active, the other Metrics do not change, thus the operands can read their stored data
         if let [(n, r)] = &active[..] {
@@ -924,6 +927,9 @@ impl<'a> Run<'a> {
                 return Ok(());
             }
         }
+        // The active stores grow in each period, so count their current bytes again before each evaluation
+        let grown = |stores: &[Arc<Store>]| active.iter().map(|(n, _)| stores[*n].memory().bytes()).sum::<usize>();
+        let others = held.saturating_sub(grown(self.stores));
         // 格納データにその場で 1 時点ずつ書き込む。次の時点の前月参照は、書き込んだばかりの時点を読む
         for t in 0..self.cat.dims[dim].size {
             for (n, r) in &active {
@@ -931,7 +937,8 @@ impl<'a> Run<'a> {
                     continue;
                 }
                 let sub = r.set(dim, vec![t]).restrict(self.cat);
-                let value = self.eval(self.formula(*n), None, &sub, &Budget::with_held(self.cat.cfg.max_bytes, held))?;
+                let held = others.saturating_add(grown(self.stores));
+                let value = self.eval(self.formula(*n), None, &sub, &Budget::new(self.cat.cfg.max_bytes, held))?;
                 Arc::make_mut(&mut self.stores[*n]).replace(&sub, &value)?;
             }
         }
@@ -958,7 +965,7 @@ impl<'a> Run<'a> {
         };
         let src: Vec<Src> = f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect();
         let rr = r.restrict(self.cat);
-        let b = Budget::with_held(self.cat.cfg.max_bytes, held);
+        let b = Budget::new(self.cat.cfg.max_bytes, held);
         // An error here also occurs in the per-period path, except a budget error. That path uses less memory
         let Ok(value) = chain_scan(&links, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
         Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
@@ -973,7 +980,7 @@ mod tests {
     #[test]
     fn tasks_of_a_wave_split_the_room_after_the_held_data() {
         let limit = share(1000, 400, 2);
-        let b = Budget::with_held(limit, 400);
+        let b = Budget::new(limit, 400);
         assert_eq!(limit, 700);
         assert!(b.need(300 / CELL_BYTES, "x").is_ok());
         assert!(b.need(300 / CELL_BYTES + 1, "x").is_err());
@@ -982,12 +989,35 @@ mod tests {
 
     #[test]
     fn a_slice_of_old_counts_but_the_shared_store_does_not() {
-        let dims = (0..1).map(|i| crate::DimInfo { size: 10, ordered: false, name: format!("d{i}") }).collect();
+        let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
         let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
         let old = Src::Store(Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap()));
         let done = |region| Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old.clone()) };
         assert_eq!(done(Reg::new(vec![])).bytes(), 0);
-        assert_eq!(done(Reg::new(vec![(0, vec![1])])).bytes(), crate::held([&old]));
-        assert!(crate::held([&old]) > 0);
+        assert_eq!(done(Reg::new(vec![(0, vec![1])])).bytes(), held([&old]));
+        assert!(held([&old]) > 0);
+    }
+
+    #[test]
+    fn each_wave_fits_in_the_room_that_the_earlier_waves_leave() {
+        // The rows of a stored result set the estimate of its task. Metric 1 runs alone. Metrics 2 and 3 fit
+        // together at the start of the level, but not after metric 1 keeps 16,000 bytes for apply
+        let dims = vec![crate::DimInfo { size: 1000, ordered: false, name: "d0".into() }];
+        let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg: crate::Config::default() };
+        let store = |n: u32| {
+            let keys: Vec<u32> = (0..n).collect();
+            Arc::new(Store::new(&[0], None, Kind::Num, &start).unwrap().with_rows(&[&keys], &vec![1.0; n as usize]).unwrap())
+        };
+        let mut stores = vec![store(1000), store(1000), store(250), store(250), store(1)];
+        let input = || Metric { formula: None, delta: None, source: false };
+        let copy = |i| Metric { formula: Some(Formula { node: Arc::new(Node::Ref(0)), refs: vec![i] }), delta: None, source: false };
+        let plan = Plan { metrics: vec![input(), copy(0), copy(0), copy(4), input()], levels: vec![vec![Step::One(1), Step::One(2), Step::One(3)]] };
+        let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
+        let held = held(&src);
+        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held + 40_000, ..crate::Config::default() } };
+        let all = || Reg::new(vec![]);
+        let changed = vec![(0, all()), (4, all())];
+        recalc(&cat, &plan, &mut stores, &mut vec![None; 5], &mut vec![None; 5], changed, &[], vec![], vec![], true).unwrap();
+        assert_eq!(stores[2].rows_hint(), 1000);
     }
 }
