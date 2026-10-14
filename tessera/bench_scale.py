@@ -93,7 +93,6 @@ def measure(scale: int, repeats: int) -> dict:
     from examples.fpa import EDITS, SIZES, build
     from sparse_engine.rust_engine import RustEngine
 
-    nanashi_core.track_heap(True)  # start before the build, so that frees of earlier allocations are not subtracted
     phases: dict[str, dict] = {}
 
     def phase(name: str, fn, n: int = 1, prepare=lambda: None) -> None:
