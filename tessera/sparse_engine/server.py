@@ -632,6 +632,7 @@ class Server(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 1024  # with the default of 5, the kernel drops SYNs when many clients connect, and they wait 1 s to send again
 
     def __init__(self, workspace: Workspace | Replica | None, host: str = "127.0.0.1", port: int = 8080, *,
                  write_timeout: float | None = 30.0, tokens: dict[str, str] | None = None,
