@@ -347,9 +347,13 @@ impl Store {
 
     /// 差分を本体にまとめ直す。
     pub(crate) fn compact(&mut self) {
-        let mut cells = Vec::with_capacity(self.base.keys.len() + self.delta.len());
-        self.merged(0, None, |k, v| cells.push((k, v)));
-        self.set_sorted(cells);
+        let n = self.base.keys.len() + self.delta.len();
+        let (mut keys, mut vals) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        self.merged(0, None, |k, v| {
+            keys.push(k);
+            vals.push(v);
+        });
+        self.set_columns(&keys, vals);
     }
 
     pub(crate) fn after_delta(&mut self) {
@@ -391,13 +395,12 @@ impl Store {
         Ok(())
     }
 
-    /// r の範囲の古いセル（old のキー）を消し、new（キー順）を置く。差分の木に入れると本体に
-    /// まとめ直すことになる量なら、差分の木を通さずに、新しい本体を直接作る（差分の木への
-    /// 挿入は 1 件ずつなので、大量に入れてからまとめ直すより速い）。
+    /// Remove the old cells in r (the keys in old) and put new (in key order). If the delta tree would then
+    /// need a compaction, make a new base directly. The delta tree inserts one cell at a time, so this is faster.
     pub(crate) fn write_back(&mut self, r: &Restrict, old: &[u64], new: Vec<(u64, f64)>) {
         let limit = self.cfg.compact_min.max(self.base.keys.len() / 8);
         if self.delta.len() + old.len() + new.len() > limit {
-            // Merge the kept cells and new straight into the key and value columns of the new base.
+            // Write directly into the new base columns. An intermediate cell array adds to the peak memory.
             // A new cell replaces a kept cell with the same key.
             let cs = checks(&self.pack, r);
             let n = (self.base.keys.len() + self.delta.len() + new.len()).saturating_sub(old.len());

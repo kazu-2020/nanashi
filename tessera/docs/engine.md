@@ -27,7 +27,7 @@ The Rust engine keeps the key of one cell as a 64-bit integer. The integer conta
 The storage has two layers. The base is an array in key order. The delta is a tree on top of the base, and it receives small changes.
 If the delta becomes larger than 1/8 of the base, the engine merges the delta into a new base.
 If one change writes more than 1/8 of the base, the engine makes a new base directly and does not use the delta tree.
-It merges the kept cells and the new cells directly into the key and value arrays of the new base, so the copy needs about 16 B for each cell.
+It merges the cells directly into the key array and the value array of the new base. The merge needs about 16 B for each cell.
 The engine does not change a base after it makes it, and versions share the base. The delta is a persistent tree (`OrdMap` of `imbl`), so a change does not break old versions.
 Thus, a writer can write while a reader keeps a published version. The engine does not copy all of the base or the delta.
 The values of the base are an immutable array with no extra capacity (`Box<[f64]>`). Its layout is the same as the buffer of an Arrow Float64 array.
@@ -35,7 +35,7 @@ The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed
 A scan decodes one block at a time into a buffer of 1,024 keys and then reads a plain array. A binary search decodes one key at a time. The cursor of the fused evaluation (`Cursor`) decodes the block of a row near its last row, and reads a far row one key at a time. The `base` value of `Model.memory()` is equal to the size of the packed keys and the value array.
 The high bits of the key contain the **partition dimension**. Thus, a binary search can read and write a range that a filter on the partition dimension selects.
 For a filter on a different dimension, the engine uses an inverted index. The engine makes the index when it is necessary.
-The index keeps a 4-byte row number for each cell of the base. It stays in memory until the engine makes a new base.
+The index keeps a 4-byte row number for each cell of the base. It stays in memory while a version uses that base.
 
 The engine selects the partition dimension for each Metric automatically.
 For each input, the engine propagates the affected range of a change to one cell. Then it selects the dimension that gives the smallest part of the cells that a change writes.
