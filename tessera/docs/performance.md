@@ -272,6 +272,21 @@ The ranges of the full recalculation overlap, so the change is inside the noise 
 
 With 1 thread, the full recalculation went from 6,550 ms to 6,001 ms (1 run each). Before the change, the hash map path (`fold_groups`) was 22% of the 1-thread time. Thus 22% is the upper limit of the gain.
 
+### Bucket buffers for a scattered array aggregation
+
+`CatRev = Revenue[BY SUM: Product.Category]` adds 17.56 million rows into 1.8 million combinations. Product → Category sends consecutive rows to different parts of the array, so each row missed the cache. Each of the 4 threads had its own 50 MB array, and the merge at the end took 82–100 ms on one thread. Thus CatRev was the last Metric of level 2 on 4 threads.
+Now, if the first 2^16 rows touch more than 4 MiB of the array, the engine puts the rows into buckets of 2^14 combinations and adds each bucket in the cache ([Engine](engine.md)). There is one array and no merge. `ProdRev` and `StoreRev` keep one array for each thread, because their access follows the row order. Bucket buffers for all aggregations made `ProdRev` slower (77 ms → 104–133 ms).
+We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.10 GHz) with `bench_ab.py` and retail xlarge, 7 alternating runs for each side. The results `Total` and the CatRev cells are bit-identical on both sides.
+
+| Measurement | Before | After |
+|---|---|---|
+| Full recalculation | 1,660 ms (1,548–2,027) | 1,070 ms (998–1,401) |
+| Full recalculation after the edits | 2,835 ms (2,619–3,839) | 2,512 ms (2,014–2,959) |
+| Maximum increase of the heap | 1,064 MB | 1,054 MB |
+| Maximum increase of the heap after the edits | 1,064 MB | 997 MB |
+
+The evaluation of `CatRev` alone on 4 threads (the minimum of 5 evaluations, 2 or 3 runs) went from 496–537 ms to 152–159 ms. In a later VM session, it went from 571–637 ms to 189–251 ms.
+
 ## Save and journal formats
 
 This is a comparison before and after two changes. Snapshots and files for large changes changed from npz to Parquet. Large changes now move as change blocks.

@@ -146,10 +146,11 @@ class FusionMatchesReference(unittest.TestCase):
             {"fuse": True, "compact_min": 0},
             {"fuse": True, "compact_min": 0, "par_min": 0, "chunk": 5},  # 並列の走査と、区間ごとの結果の詰め直し
             {"fuse": True, "compact_min": 0, "par_min": 0, "chunk": 3, "dense_always": True},  # 全組み合わせの配列への集計
+            {"fuse": True, "compact_min": 0, "par_min": 0, "chunk": 3, "dense_always": True, "scatter_bytes": 0},  # the same, through the bucket buffers
         ])
 
     def test_dense_sequential(self):
-        run(self, seed=67, rounds=30, configs=[{"compact_min": 0, "dense_always": True}])
+        run(self, seed=67, rounds=30, configs=[{"compact_min": 0, "dense_always": True}, {"compact_min": 0, "dense_always": True, "scatter_bytes": 0}])
 
 
 if __name__ == "__main__":
