@@ -82,9 +82,9 @@ pub(crate) fn kleene(op: Op, a: Option<f64>, b: Option<f64>) -> Option<f64> {
     }
 }
 
-/// 式を評価する。途中結果が予算（cat.cfg.max_bytes）を超えるなら Err。
+/// Evaluate a formula. Err if the sources plus the intermediate results are more than cat.cfg.max_bytes.
 pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cube> {
-    eval_with(node, cat, src, r, &Budget::new(cat.cfg.max_bytes))
+    eval_with(node, cat, src, r, &Budget::with_held(cat.cfg.max_bytes, held(src)))
 }
 
 /// 予算 b のもとで式を評価する（並列に評価するときは、式ごとに予算を分けて渡す）。

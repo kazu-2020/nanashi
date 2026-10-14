@@ -1,6 +1,6 @@
 //! メモリの予算。全組み合わせを作る演算は、作る前に予算を確かめる。
 
-use nanashi_engine::{eval, eval_with, Budget, Catalog, Config, DimInfo, Kind, Node, Restrict, Src, Store};
+use nanashi_engine::{eval, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Node, Restrict, Src, Store};
 use std::sync::Arc;
 
 fn catalog(max_bytes: usize) -> Catalog {
@@ -33,15 +33,18 @@ fn ifblank_beyond_the_budget_fails_before_allocating() {
     let node = Node::IfBlank(Box::new(Node::Expand(Box::new(Node::Ref(0)), vec![])), 0.0, false, vec![]);
     // 10^5 の軸 1 本なら収まる
     assert_eq!(eval(&node, &cat, &source(&cat), &Restrict::all(3)).unwrap().cells.len(), 100_000);
+    // The source of 3 rows also counts against the budget
+    let stored = held(&source(&cat));
+    assert_eq!(stored, 3 * 16);
     // 演算ごとに評価すると、全組み合わせのキーと結果の 2 つ分が要るので、1 つ分の予算では足りない
-    let small = catalog_with(Config { max_bytes: 100_000 * 16, fuse: false, ..Config::default() });
+    let small = catalog_with(Config { max_bytes: stored + 100_000 * 16, fuse: false, ..Config::default() });
     let err = eval(&node, &small, &source(&small), &Restrict::all(3)).unwrap_err();
     assert!(err.contains("IFBLANK"), "{err}");
     // 融合すれば結果の分しか持たないので、同じ予算で計算できる
-    let fused = catalog(100_000 * 16);
+    let fused = catalog(stored + 100_000 * 16);
     assert_eq!(eval(&node, &fused, &source(&fused), &Restrict::all(3)).unwrap().cells.len(), 100_000);
     // 結果も収まらなければ、確保する前に失敗する
-    let tiny = catalog(100_000 * 8);
+    let tiny = catalog(stored + 100_000 * 8);
     assert!(eval(&node, &tiny, &source(&tiny), &Restrict::all(3)).unwrap_err().contains("メモリの予算を超える"));
 }
 
@@ -55,4 +58,30 @@ fn intermediate_results_are_counted_while_they_live() {
     // 1 セル分しか予算がなければ、3 セルの読み出しは失敗する
     let tight = Budget::new(16);
     assert!(eval_with(&node, &cat, &source(&cat), &Restrict::all(3), &tight).is_err());
+}
+
+#[test]
+fn stored_data_counts_against_the_budget() {
+    let cat = catalog(usize::MAX);
+    let src = source(&cat);
+    let node = Node::Ref(0);
+    // The source holds 48 bytes, so 48 bytes of budget leave no room for the 3 cells that Ref reads
+    let full = Budget::with_held(48 + 3 * 16 - 1, held(&src));
+    let err = eval_with(&node, &cat, &src, &Restrict::all(3), &full).unwrap_err();
+    assert!(err.contains("格納データが 48 バイト"), "{err}");
+    let room = Budget::with_held(48 + 3 * 16, held(&src));
+    assert_eq!(eval_with(&node, &cat, &src, &Restrict::all(3), &room).unwrap().cells.len(), 3);
+    // eval counts the sources by itself
+    assert!(eval(&node, &catalog(48 + 3 * 16 - 1), &src, &Restrict::all(3)).is_err());
+    assert!(eval(&node, &catalog(48 + 3 * 16), &src, &Restrict::all(3)).is_ok());
+}
+
+#[test]
+fn held_counts_a_shared_source_once() {
+    let cat = catalog(usize::MAX);
+    let src = source(&cat);
+    let twice = [src[0].clone(), src[0].clone()];
+    assert_eq!(held(&twice), 48);
+    let other = source(&cat);
+    assert_eq!(held([&src[0], &other[0]]), 96);
 }
