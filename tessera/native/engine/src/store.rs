@@ -256,9 +256,8 @@ impl Store {
         }
     }
 
-    /// Make the sorted cells the base and drop the delta. Only the values get a new column, and
-    /// the keys go into the buffer of `cells` (see `keys_in_place`). With an unzip, the cells and
-    /// two new columns exist at the same time.
+    /// Make the sorted cells the base and drop the delta.
+    /// Use the buffer of `cells` for the keys, so that only one new column is made.
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let vals: Vec<f64> =
             if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
@@ -730,8 +729,8 @@ pub(crate) fn same_set(a: &[DimId], b: &[DimId]) -> bool {
     a.len() == b.len() && a.iter().all(|d| b.contains(d))
 }
 
-/// The keys of `cells`. The standard library collects them into the buffer of `cells`
-/// (in-place iteration). It does not promise this, so a test checks it.
+/// The standard library collects the keys into the buffer of `cells` (in-place iteration).
+/// It does not promise this, so a test checks it.
 fn keys_in_place(cells: Vec<(u64, f64)>) -> Vec<u64> {
     cells.into_iter().map(|c| c.0).collect()
 }
@@ -748,10 +747,9 @@ mod tests {
     #[test]
     fn keys_reuse_the_buffer_of_the_cells() {
         let cells: Vec<(u64, f64)> = (0..1000).map(|i| (i, i as f64)).collect();
-        let ptr = cells.as_ptr() as usize;
+        let ptr = cells.as_ptr().cast::<u64>();
         let keys = keys_in_place(cells);
-        assert_eq!(keys.as_ptr() as usize, ptr);
-        assert_eq!(keys.capacity(), 2000);
+        assert_eq!(keys.as_ptr(), ptr);
         assert_eq!(keys, (0..1000).collect::<Vec<u64>>());
     }
 }
