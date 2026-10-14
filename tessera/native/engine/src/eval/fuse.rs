@@ -699,23 +699,17 @@ fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &F) -> Vec<(u
             }
         }
         let mut at = lo.clone();
+        // The key at `at[j]` while `at[j] < hi[j]`. A packed key read is not free, so read it once.
+        let mut next: Vec<u64> = drivers.iter().zip(&at).zip(hi).map(|((d, &a), &h)| if a < h { d.key(a) } else { 0 }).collect();
         let mut w = 0;
-        loop {
-            // 被覆の次のキー（和を取る）
-            let mut key = u64::MAX;
-            let mut any = false;
+        // The loop takes the next key of the cover (the union of the drivers)
+        while let Some(key) = (0..drivers.len()).filter(|&j| at[j] < hi[j]).map(|j| next[j]).min() {
             for (j, d) in drivers.iter().enumerate() {
-                if at[j] < hi[j] {
-                    key = key.min(d.key(at[j]));
-                    any = true;
-                }
-            }
-            if !any {
-                break;
-            }
-            for (j, d) in drivers.iter().enumerate() {
-                if at[j] < hi[j] && d.key(at[j]) == key {
+                if at[j] < hi[j] && next[j] == key {
                     at[j] += 1;
+                    if at[j] < hi[j] {
+                        next[j] = d.key(at[j]);
+                    }
                 }
             }
             if let Some(v) = cur.eval(f, key) {

@@ -99,20 +99,21 @@ impl Store {
         self.pack.dims.first().copied()
     }
 
-    /// [lo, hi) のセルを、本体と差分を突き合わせながらキー順に渡す。
+    /// Gives the cells in [lo, hi) in key order, merged from the base and the delta.
     pub(crate) fn merged(&self, lo: u64, hi: Option<u64>, mut f: impl FnMut(u64, f64)) {
         let start = self.base.keys.partition_point(|k| k < lo);
         let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|k| k < h));
         let upper = hi.map_or(Bound::Unbounded, Bound::Excluded);
         let mut delta = self.delta.range((Bound::Included(lo), upper)).peekable();
+        let mut base = self.base.keys.range(start..end).peekable();
         let mut i = start;
         loop {
-            let b = (i < end).then(|| self.base.keys.get(i));
-            match (b, delta.peek().map(|(&k, &v)| (k, v))) {
+            match (base.peek().copied(), delta.peek().map(|(&k, &v)| (k, v))) {
                 (None, None) => break,
                 (Some(bk), Some((dk, dv))) if dk <= bk => {
                     delta.next();
                     if dk == bk {
+                        base.next();
                         i += 1;
                     }
                     if let Some(v) = dv {
@@ -121,6 +122,7 @@ impl Store {
                 }
                 (Some(bk), _) => {
                     f(bk, self.base.vals[i]);
+                    base.next();
                     i += 1;
                 }
                 (None, Some((dk, dv))) => {

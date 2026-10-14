@@ -6,80 +6,111 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use std::ops::Range;
 
 pub(crate) const BLOCK: usize = 1024;
+
+/// The metadata of one block. It is 16 bytes, so a random read touches one cache line of metadata.
+#[derive(Debug, Clone, Copy)]
+struct Block {
+    base: u64,  // the first key of the block
+    start: u32, // the first word of the block in `bytes` (a word is 8 bytes)
+    width: u8,  // bits per offset (0 to 64)
+}
+
+impl Block {
+    /// The key at position `j` in the block. `bytes` must hold 16 bytes from the position's byte.
+    #[inline(always)]
+    fn key(&self, bytes: &[u8], j: usize) -> u64 {
+        let width = self.width as usize;
+        let bit = j * width;
+        let o = self.start as usize * 8 + bit / 8;
+        let sh = (bit % 8) as u32;
+        // One unaligned 8-byte load holds the offset when the width is at most 56 bits. The branch
+        // is on the block's width, so the predictor learns it.
+        let off = if width <= 56 {
+            u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap()) >> sh
+        } else {
+            (u128::from_le_bytes(bytes[o..o + 16].try_into().unwrap()) >> sh) as u64
+        };
+        self.base + (off & MASKS[width])
+    }
+}
+
+/// `MASKS[w]` keeps the low `w` bits. A table load is cheaper than a shift that must handle w = 0 and 64.
+static MASKS: [u64; 65] = {
+    let mut m = [0u64; 65];
+    let mut w = 1;
+    while w <= 64 {
+        m[w] = u64::MAX >> (64 - w);
+        w += 1;
+    }
+    m
+};
 
 /// Immutable sorted keys with no duplicates, packed in blocks (see the module doc).
 #[derive(Debug)]
 pub(crate) struct PackedKeys {
     len: usize,
-    bases: Box<[u64]>,    // the first key of each block
-    widths: Box<[u8]>,    // bits per offset in each block (0 to 64)
-    starts: Box<[usize]>, // the first word of each block in `words`
-    words: Box<[u64]>,    // the packed offsets, plus one spare word so a read can always take 2 words
+    blocks: Box<[Block]>,
+    bytes: Box<[u8]>,  // the packed offsets in little-endian words, plus 16 spare bytes for the last read window
 }
 
 impl PackedKeys {
     /// Packs `keys`, which must be sorted and have no duplicates. `par` packs the blocks in parallel.
     pub(crate) fn new(keys: &[u64], par: bool) -> PackedKeys {
-        let pack = |chunk: &[u64]| {
-            let base = chunk[0];
-            let span = chunk[chunk.len() - 1] - base;
-            let width = 64 - span.leading_zeros() as u8;
-            let mut words = vec![0u64; (chunk.len() * width as usize).div_ceil(64)];
-            // Width 0 has no words: every key equals the base.
-            for (j, &k) in chunk.iter().enumerate().filter(|_| width > 0) {
-                let off = k - base;
-                let bit = j * width as usize;
-                let (w, sh) = (bit / 64, bit % 64);
-                words[w] |= off << sh;
-                if sh + width as usize > 64 {
-                    words[w + 1] |= off >> (64 - sh);
-                }
-            }
-            (base, width, words)
-        };
-        let blocks: Vec<(u64, u8, Vec<u64>)> =
-            if par { keys.par_chunks(BLOCK).map(pack).collect() } else { keys.chunks(BLOCK).map(pack).collect() };
-        let mut starts = Vec::with_capacity(blocks.len());
-        let mut words = Vec::with_capacity(blocks.iter().map(|b| b.2.len()).sum::<usize>() + 1);
-        for b in &blocks {
-            starts.push(words.len());
-            words.extend_from_slice(&b.2);
+        let width_of = |chunk: &[u64]| 64 - (chunk[chunk.len() - 1] - chunk[0]).leading_zeros() as usize;
+        let mut blocks = Vec::with_capacity(keys.len().div_ceil(BLOCK));
+        let mut start = 0usize;
+        for chunk in keys.chunks(BLOCK) {
+            let width = width_of(chunk);
+            blocks.push(Block { base: chunk[0], start: u32::try_from(start).expect("too many words"), width: width as u8 });
+            start += (chunk.len() * width).div_ceil(64);
         }
-        words.push(0);
-        PackedKeys {
-            len: keys.len(),
-            bases: blocks.iter().map(|b| b.0).collect(),
-            widths: blocks.iter().map(|b| b.1).collect(),
-            starts: starts.into_boxed_slice(),
-            words: words.into_boxed_slice(),
+        // A block of width 0 has no words and starts at the spare bytes, so a read window fits there too.
+        let mut bytes = vec![0u8; start * 8 + 16];
+        // The byte ranges of the blocks do not overlap, so each block fills its own slice.
+        let mut rest: &mut [u8] = &mut bytes;
+        let mut parts = Vec::with_capacity(blocks.len());
+        for w in blocks.windows(2) {
+            let (head, tail) = rest.split_at_mut((w[1].start - w[0].start) as usize * 8);
+            parts.push(head);
+            rest = tail;
         }
+        parts.push(rest);
+        let slices: Vec<(&[u64], &Block)> = keys.chunks(BLOCK).zip(&blocks).collect();
+        if par {
+            parts.into_par_iter().zip(slices).for_each(|(out, (chunk, blk))| pack_into(out, chunk, blk));
+        } else {
+            parts.into_iter().zip(slices).for_each(|(out, (chunk, blk))| pack_into(out, chunk, blk));
+        }
+        PackedKeys { len: keys.len(), blocks: blocks.into_boxed_slice(), bytes: bytes.into_boxed_slice() }
     }
 
     pub(crate) fn len(&self) -> usize {
         self.len
     }
 
-    /// The key at `i`. Panics if `i >= len()`.
+    /// The key at `i`. `i` must be less than `len()`. The slice bounds keep an index past the end safe.
     #[inline]
     pub(crate) fn get(&self, i: usize) -> u64 {
-        assert!(i < self.len, "キーの番号が行数を超えている");
-        let b = i / BLOCK;
-        let width = self.widths[b] as usize;
-        if width == 0 {
-            return self.bases[b];
-        }
-        let bit = (i % BLOCK) * width;
-        let w = self.starts[b] + bit / 64;
-        let pair = self.words[w] as u128 | (self.words[w + 1] as u128) << 64;
-        let off = (pair >> (bit % 64)) as u64 & (u64::MAX >> (64 - width));
-        self.bases[b] + off
+        debug_assert!(i < self.len, "key index past the number of rows");
+        self.blocks[i / BLOCK].key(&self.bytes, i % BLOCK)
+    }
+
+    /// The keys at the indexes in `r`, in order. It decodes block by block, so it is faster than `get`.
+    pub(crate) fn range(&self, r: Range<usize>) -> impl Iterator<Item = u64> + '_ {
+        debug_assert!(r.end <= self.len);
+        let (lo, hi) = (r.start, r.end);
+        (lo / BLOCK..hi.div_ceil(BLOCK)).flat_map(move |b| {
+            let blk = self.blocks[b];
+            (lo.max(b * BLOCK)..hi.min((b + 1) * BLOCK)).map(move |i| blk.key(&self.bytes, i % BLOCK))
+        })
     }
 
     /// The keys in order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
-        (0..self.len).map(move |i| self.get(i))
+        self.range(0..self.len)
     }
 
     pub(crate) fn par_iter(&self) -> impl IndexedParallelIterator<Item = u64> + '_ {
@@ -88,7 +119,7 @@ impl PackedKeys {
 
     /// The first index whose key does not satisfy `pred`. `pred` must be true for a prefix of the keys.
     pub(crate) fn partition_point(&self, mut pred: impl FnMut(u64) -> bool) -> usize {
-        let nb = self.bases.partition_point(|&b| pred(b));
+        let nb = self.blocks.partition_point(|b| pred(b.base));
         if nb == 0 {
             return 0;
         }
@@ -114,12 +145,31 @@ impl PackedKeys {
 
     #[cfg(test)]
     fn width(&self, block: usize) -> u8 {
-        self.widths[block]
+        self.blocks[block].width
     }
 
     /// The memory that the packed keys use (bytes).
     pub(crate) fn bytes(&self) -> usize {
-        (self.words.len() + self.bases.len() + self.starts.len()) * 8 + self.widths.len()
+        self.bytes.len() + self.blocks.len() * std::mem::size_of::<Block>()
+    }
+}
+
+/// Packs `chunk` into `out`, the bytes of the block `blk`.
+fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
+    let width = blk.width as usize;
+    let mut words = vec![0u64; out.len() / 8];
+    // Width 0 has no words: every key equals the base.
+    for (j, &k) in chunk.iter().enumerate().filter(|_| width > 0) {
+        let off = k - blk.base;
+        let bit = j * width;
+        let (w, sh) = (bit / 64, bit % 64);
+        words[w] |= off << sh;
+        if sh + width > 64 {
+            words[w + 1] |= off >> (64 - sh);
+        }
+    }
+    for (dst, w) in out.as_chunks_mut::<8>().0.iter_mut().zip(&words) {
+        *dst = w.to_le_bytes();
     }
 }
 
@@ -135,6 +185,14 @@ mod tests {
             assert_eq!(p.par_iter().collect::<Vec<_>>(), keys);
             for (i, &k) in keys.iter().enumerate() {
                 assert_eq!(p.get(i), k);
+            }
+            for lo in [0, 1, BLOCK - 1, BLOCK, BLOCK + 5, keys.len() / 2, keys.len()] {
+                for hi in [lo, lo + 1, lo + BLOCK + 3, keys.len()] {
+                    let (lo, hi) = (lo.min(keys.len()), hi.min(keys.len()));
+                    if lo <= hi {
+                        assert_eq!(p.range(lo..hi).collect::<Vec<_>>(), &keys[lo..hi], "range {lo}..{hi}");
+                    }
+                }
             }
             let probes = keys.iter().flat_map(|&k| [k.saturating_sub(1), k, k.saturating_add(1)]).chain([0, u64::MAX]);
             for q in probes {
