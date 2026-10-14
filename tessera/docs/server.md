@@ -84,6 +84,10 @@ These are the limits:
 - The server can process up to 64 requests at the same time (`--max-threads`). Above this, it returns 503.
 - If the read or write of a request stops for 30 seconds, the server closes the connection.
 
+The server keeps the results of summary reads for the published version, up to about `--max-cells` cells in total.
+When a summary read sees a newer published version (after a write, or after a standby catches up), the server removes those results.
+If many clients ask for the same summary at the same time, the server calculates it 1 time.
+
 Each write is 1 request and 1 transaction, and `client_op_id` is necessary.
 If a client sends a write again, the server does not commit it twice. This is also true after a restart.
 If `expect` has the sequence number of the version that the client read, and a later write changed the same cells, the server refuses the write with 409.
