@@ -145,7 +145,7 @@ It also forgets the `client_op_id` of journal entries older than the last 100 th
 - **Cell change** (`nanashi_cell_change`): 1 row for each changed input cell. It keeps the Metric ID (`text`) and the member IDs of the coordinates (`text[]`), and an index finds the history of 1 cell.
   The IDs are `text`, because the engine accepts any string as an ID (a UUID is the default). A number or boolean value is in `old_value` and `new_value`, and a member-type value (a member ID) is in `old_member` and `new_member`.
   A process (`index_pending`) adds large changes to this table after the commit.
-  If many processes call it at the same time, an advisory lock for each model and a mark on each journal entry prevent duplicate writes of the same entry.
+  If many processes call it at the same time, a mark on each journal entry prevents duplicate writes of the same entry. One transaction clears the mark and writes the cells of the entry.
 - **Snapshot**: The engine puts the files in `<model ID>/snapshots/<sequence number>-<random number>/` in the object storage.
   It puts `manifest.json` last, and then registers the snapshot in the table.
   The table keeps only the key relative to the location. Thus, if you copy the files to a different location (for example, from a directory to S3), you can open them without changes.

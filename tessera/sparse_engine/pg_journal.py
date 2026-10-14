@@ -402,20 +402,18 @@ class PgJournal(Journal):
         return read_cell_files(blob["files"], self.objects.get)
 
     def index_pending(self) -> int:
-        """確定の後に回した大量のセルの変更を、cell_change に書き込む（専用の接続で行うので、
-        書き込みを止めない）。書き込んだ記録の数を返す。
+        """Write the large cell changes that the commit left for later to cell_change. Use a separate
+        connection, so that writes do not stop. Return the number of journal entries that it wrote.
 
-        複数のプロセスが同時に呼んでも、同じ記録を二重に書かない。モデルごとの advisory lock で順に並べ、
-        記録ごとに「まだ反映していない」印を先に外してから書く（印を外せなければ、ほかが書いた）。"""
+        If many processes call it at the same time, it does not write the same entry 2 times. For each entry,
+        one transaction clears the "not indexed" mark and then writes the cells. A concurrent transaction
+        waits for the row lock, then finds the mark clear and skips the entry. If the first transaction
+        fails, the mark stays and the other one writes the entry. No session lock is necessary, thus this
+        works through PgBouncer in transaction pooling mode."""
         with self._index_lock:
             if self._index_conn is None:
                 self._index_conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
-            conn = self._index_conn
-            conn.execute("select pg_advisory_lock(hashtextextended(%s, 0))", ("nanashi_index:" + self.model_id,))
-            try:
-                return self._index_locked(conn)
-            finally:
-                conn.execute("select pg_advisory_unlock(hashtextextended(%s, 0))", ("nanashi_index:" + self.model_id,))
+            return self._index_locked(self._index_conn)
 
     def _index_locked(self, conn) -> int:
         pending = conn.execute("select seq, record->'cells_blob' from nanashi_operation"
