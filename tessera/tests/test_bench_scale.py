@@ -19,10 +19,12 @@ class CompareTest(unittest.TestCase):
                  {"scale": 2, "status": "over_limit", "rss_max": 9e9}]
         before.append({"scale": 4, "status": "over_limit", "rss_max": 9e9})
         after.append({"scale": 4, "status": "ok", "phases": {"recalc": phase(1, 1)}})
+        after.append({"scale": 8, "status": "ok", "phases": {"recalc": phase(1, 1)}})
         lines = compare(before, after).splitlines()
         self.assertEqual(lines[2:], ["| ×1 | recalc | 100 ms → 50 ms (×0.50) | 100 → 300 MB (×3.00) |",
                                      "| ×2 | - → over_limit | | |",
-                                     "| ×4 | over_limit → ok | | |"])
+                                     "| ×4 | over_limit → ok | | |",
+                                     "| ×8 | - → ok | | |"])
 
 
 if __name__ == "__main__":

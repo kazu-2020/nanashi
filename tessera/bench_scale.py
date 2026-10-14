@@ -51,7 +51,7 @@ def compare(before: list[dict], after: list[dict]) -> str:
     status = {r["scale"]: r["status"] for r in before}
     lines = ["| 規模 | 段階 | 時間 前 → 後 | ヒープの最大 前 → 後 |", "|---|---|---|---|"]
     for r in after:
-        if r["status"] != "ok" or status.get(r["scale"], "ok") != "ok":
+        if r["status"] != "ok" or status.get(r["scale"], "-") != "ok":
             lines.append(f"| ×{r['scale']} | {status.get(r['scale'], '-')} → {r['status']} | | |")
             continue
         for phase, v in r["phases"].items():
@@ -139,7 +139,10 @@ def run_guarded(scale: int, repeats: int, limit: int) -> dict:
     if status is not None:
         return {"scale": scale, "status": status, "rss_max": peak}
     r = json.loads(out.splitlines()[-1])
-    return {**r, "rss_max": max(peak, r.pop("rss_self_max"))}  # the poll can miss a short peak
+    peak = max(peak, r.pop("rss_self_max"))  # the poll can miss a short peak
+    if peak > limit:
+        return {"scale": scale, "status": "over_limit", "rss_max": peak}
+    return {**r, "rss_max": peak}
 
 
 def _max_rss() -> int:
