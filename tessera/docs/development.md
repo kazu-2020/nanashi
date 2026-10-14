@@ -116,6 +116,17 @@ To compare memory, compare the peak of the Rust heap. RSS varies from run to run
 
 We removed the measurement programs for key layouts ([member-numbering.md](member-numbering.md)) and for stored data on NVMe ([out-of-core.md](out-of-core.md)). They are in the git history.
 
+### Measure the profit and loss plan at large sizes
+
+`bench_snapshot.py` makes the saved model of `examples/fpa.py` at scale k (k times the employees and products of large) without Python dicts.
+Then `run` loads it and measures the full recalculation and the edits of `examples/fpa.py`.
+At scale 32 (157 million cells), `write` used 1.2 GB RSS and 39 seconds, and `build()` used about 11.5 GB RSS.
+
+```bash
+.venv/bin/python bench_snapshot.py write --scale 32 /tmp/fpa32
+.venv/bin/python bench_snapshot.py run /tmp/fpa32   # one JSON line, then a Markdown table
+```
+
 ### Compare two versions
 
 `bench_ab.py` runs one benchmark on a git ref (base) and on this checkout (head), with the uncommitted changes.
@@ -205,7 +216,7 @@ The role changes of the standby (promotion, demotion, writes that entered the qu
 | `native/engine/` | The Rust engine (`nanashi-engine`, no dependency on Python). `key.rs` packs keys. `store.rs` is the storage. `packed.rs` packs the sorted keys of a base in frame-of-reference blocks. `ast.rs` is the syntax tree of formulas. `eval/` is the evaluation (`fuse.rs` fuses element-wise operations, `join.rs` does joins, `agg.rs` does aggregation, `scan.rs` calculates a scan with a chain of `+`, `-`, `*`, `/` and `COALESCE` for all periods). `check.rs` does the type check and the BY rewrite. `graph.rs` makes the calculation plan. `plan.rs` does the incremental aggregation decision, the affected range and the recalculation schedule. `pq.rs` reads and writes Parquet. `config.rs` has the tuning values for speed. `tests/` has the property tests for the storage (they match the results with a BTreeMap) |
 | `native/src/lib.rs` | The thin layer for Python (`nanashi_core`, PyO3). It checks the numbers and lengths that it receives |
 | `examples/fpa.py` | The example of a profit and loss plan and a headcount plan |
-| `bench.py`, `bench_metrics.py`, `bench_versions.py`, `bench_journal.py`, `bench_reads.py`, `bench_http.py`, `bench_memory.py`, `bench_layout.py`, `bench_scale.py`, `bench_load.py`, `bench_ab.py` | Benchmarks. `bench_ab.py` compares two versions. `bench_load.py` measures the HTTP server under many clients, and many engines on 1 host |
+| `bench.py`, `bench_metrics.py`, `bench_versions.py`, `bench_journal.py`, `bench_reads.py`, `bench_http.py`, `bench_memory.py`, `bench_layout.py`, `bench_scale.py`, `bench_snapshot.py`, `bench_load.py`, `bench_ab.py` | Benchmarks. `bench_ab.py` compares two versions. `bench_load.py` measures the HTTP server under many clients, and many engines on 1 host |
 | `tests/test_expr_coverage.py` | It sends all kinds of expression nodes through all implementation locations (syntax, type inference, affected range, evaluation, dependencies, Rust) |
 
 The Python reference implementation and Rust both implement the meaning of formulas.
