@@ -58,7 +58,7 @@ pub(crate) struct Base {
 
 impl Base {
     pub(crate) fn empty(n_dims: usize) -> Arc<Base> {
-        Arc::new(Base { keys: PackedKeys::new(&[], false), vals: Box::new([]), postings: fresh_postings(n_dims) })
+        Arc::new(Base { keys: PackedKeys::new(&[], |&k: &u64| k, false), vals: Box::new([]), postings: fresh_postings(n_dims) })
     }
 
     /// The keys are decoded one block at a time (`PackedKeys::range`).
@@ -277,12 +277,10 @@ impl Store {
     /// Make the sorted cells the base and drop the delta.
     /// Use the buffer of `cells` for the keys, so that only one new column is made.
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
-        let vals: Vec<f64> =
-            if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
-        let keys = keys_in_place(cells);
+        let keys = PackedKeys::new(&cells, |c| c.0, self.cfg.par(cells.len()));
         self.base = Arc::new(Base {
-            keys: PackedKeys::new(&keys, self.cfg.par(keys.len())),
-            vals: vals.into_boxed_slice(),
+            keys,
+            vals: vals_in_place(cells).into_boxed_slice(),
             postings: fresh_postings(self.pack.dims.len()),
         });
         self.delta = OrdMap::new();
@@ -749,8 +747,9 @@ pub(crate) fn same_set(a: &[DimId], b: &[DimId]) -> bool {
 
 /// The standard library collects the keys into the buffer of `cells` (in-place iteration).
 /// It does not promise this, so a test checks it.
-fn keys_in_place(cells: Vec<(u64, f64)>) -> Vec<u64> {
-    cells.into_iter().map(|c| c.0).collect()
+/// The values of the cells. It reuses the buffer of the cells, so it does not allocate a second column.
+fn vals_in_place(cells: Vec<(u64, f64)>) -> Vec<f64> {
+    cells.into_iter().map(|c| c.1).collect()
 }
 
 /// 並んだ 2 つのセル列で、値が違うか片側にしかないキー。
@@ -763,11 +762,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keys_reuse_the_buffer_of_the_cells() {
+    fn vals_reuse_the_buffer_of_the_cells() {
         let cells: Vec<(u64, f64)> = (0..1000).map(|i| (i, i as f64)).collect();
-        let ptr = cells.as_ptr().cast::<u64>();
-        let keys = keys_in_place(cells);
-        assert_eq!(keys.as_ptr(), ptr);
-        assert_eq!(keys, (0..1000).collect::<Vec<u64>>());
+        let ptr = cells.as_ptr().cast::<f64>();
+        let vals = vals_in_place(cells);
+        assert_eq!(vals.as_ptr(), ptr);
+        assert_eq!(vals, (0..1000).map(|i| i as f64).collect::<Vec<f64>>());
     }
 }

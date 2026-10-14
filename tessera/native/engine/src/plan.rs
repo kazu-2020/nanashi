@@ -457,21 +457,20 @@ struct Task {
     weight: usize, // 計算し直す行数の見積もり（並列にするかの判断に使う）
 }
 
-/// 計算し終えて、書き戻しを待つ値。範囲が全体なら、新しい格納データの本体になるキー順のセルまで作っておく
-/// （置き換える前の格納データを読むだけで作れるので、同じ段の Metric と並列に作れる）。格納データの形
-/// （キーと値の 2 列）に移すのは書き戻すときで、移す間だけ値が 2 つ分になるのを、段の中で 1 つずつに抑える。
+/// The values that wait for the write-back. For the whole region, the task makes the new Store itself. It only reads
+/// the old stored data, so the Metrics of one level make their Stores in parallel. A Store with packed keys uses
+/// about half the memory of the cells, so the results of a level wait in the smaller form.
 enum Write {
-    Whole(Vec<(u64, f64)>, Option<Vec<Vec<u32>>>), // 新しい本体のセルと、値が変わったセルの範囲
-    Part(Cube),                          // 範囲の中の新しい値
+    Whole(Store, Option<Vec<Vec<u32>>>), // the new Store, and the region of the cells whose values changed
+    Part(Cube),                          // the new values in the region
 }
 
 impl Write {
     fn bytes(&self) -> usize {
         match self {
-            Write::Whole(cells, _) => cells.capacity(),
-            Write::Part(c) => c.cells.capacity(),
+            Write::Whole(store, _) => store.memory().bytes(),
+            Write::Part(c) => c.cells.capacity().saturating_mul(CELL_BYTES),
         }
-        .saturating_mul(CELL_BYTES)
     }
 }
 
@@ -767,9 +766,13 @@ impl<'a> Run<'a> {
                 self.stores[t.m].replaced_all(value)?
             };
             let whole = |side: &[Option<Arc<Store>>], c: Option<Cube>| {
-                c.map(|c| side[t.m].as_ref().expect("件数か残差の格納").sorted_cells(c).map(|cells| Write::Whole(cells, None))).transpose()
+                c.map(|c| {
+                    let store = side[t.m].as_ref().expect("件数か残差の格納");
+                    store.sorted_cells(c).map(|cells| Write::Whole(store.with_sorted(cells), None))
+                })
+                .transpose()
             };
-            (Write::Whole(cells, sets), whole(&*self.counts, count)?, whole(&*self.lows, low)?)
+            (Write::Whole(self.stores[t.m].with_sorted(cells), sets), whole(&*self.counts, count)?, whole(&*self.lows, low)?)
         } else {
             (Write::Part(value), count.map(Write::Part), low.map(Write::Part))
         };
@@ -786,15 +789,15 @@ impl<'a> Run<'a> {
         }
         let r = region.restrict(self.cat);
         let sets = match value {
-            Write::Whole(cells, sets) => {
-                self.stores[m] = Arc::new(self.stores[m].with_sorted(cells));
+            Write::Whole(store, sets) => {
+                self.stores[m] = Arc::new(store);
                 sets
             }
             Write::Part(value) => Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?,
         };
         for (side, w) in [(&mut *self.counts, count), (&mut *self.lows, low)] {
             match w {
-                Some(Write::Whole(cells, _)) => side[m] = Some(Arc::new(side[m].as_ref().expect("件数か残差の格納").with_sorted(cells))),
+                Some(Write::Whole(store, _)) => side[m] = Some(Arc::new(store)),
                 Some(Write::Part(c)) => Arc::make_mut(side[m].as_mut().expect("件数か残差の格納")).replace(&r, &c)?,
                 None => {}
             }
@@ -1012,7 +1015,7 @@ mod tests {
         let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
         let done = |region: Reg| {
             let old = old_of(&store, &region, &cat);
-            Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old) }
+            Done { m: 0, region, delta: false, value: Write::Part(Cube { pack: store.pack.clone(), kind: Kind::Num, cells: Vec::new() }), count: None, low: None, old: Some(old) }
         };
         assert_eq!(done(Reg::new(vec![])).bytes(), 0);
         let part = Reg::new(vec![(0, vec![1])]);

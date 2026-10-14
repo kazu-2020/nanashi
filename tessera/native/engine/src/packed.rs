@@ -56,13 +56,15 @@ pub(crate) struct PackedKeys {
 }
 
 impl PackedKeys {
-    /// Packs `keys`, which must be sorted and have no duplicates. `par` packs the blocks in parallel.
-    pub(crate) fn new(keys: &[u64], par: bool) -> PackedKeys {
-        let mut blocks = Vec::with_capacity(keys.len().div_ceil(BLOCK));
+    /// Packs the keys `key(row)` of `rows`, which must be sorted and have no duplicates. `par` packs the blocks in
+    /// parallel. The rows can be cells, so the caller does not copy the keys into a column first.
+    pub(crate) fn new<T: Sync>(rows: &[T], key: impl Fn(&T) -> u64 + Sync, par: bool) -> PackedKeys {
+        let mut blocks = Vec::with_capacity(rows.len().div_ceil(BLOCK));
         let mut start = 0usize;
-        for chunk in keys.chunks(BLOCK) {
-            let width = 64 - (chunk[chunk.len() - 1] - chunk[0]).leading_zeros() as usize;
-            blocks.push(Block { base: chunk[0], start: u32::try_from(start).expect("too many words"), width: width as u8 });
+        for chunk in rows.chunks(BLOCK) {
+            let (first, last) = (key(&chunk[0]), key(&chunk[chunk.len() - 1]));
+            let width = 64 - (last - first).leading_zeros() as usize;
+            blocks.push(Block { base: first, start: u32::try_from(start).expect("too many words"), width: width as u8 });
             start += (chunk.len() * width).div_ceil(64);
         }
         // A block of width 0 has no words and starts at the spare bytes, so a read window fits there too.
@@ -76,13 +78,13 @@ impl PackedKeys {
             rest = tail;
         }
         parts.push(rest);
-        let slices: Vec<(&[u64], &Block)> = keys.chunks(BLOCK).zip(&blocks).collect();
+        let slices: Vec<(&[T], &Block)> = rows.chunks(BLOCK).zip(&blocks).collect();
         if par {
-            parts.into_par_iter().zip(slices).for_each(|(out, (chunk, blk))| pack_into(out, chunk, blk));
+            parts.into_par_iter().zip(slices).for_each(|(out, (chunk, blk))| pack_into(out, chunk, &key, blk));
         } else {
-            parts.into_iter().zip(slices).for_each(|(out, (chunk, blk))| pack_into(out, chunk, blk));
+            parts.into_iter().zip(slices).for_each(|(out, (chunk, blk))| pack_into(out, chunk, &key, blk));
         }
-        PackedKeys { len: keys.len(), blocks: blocks.into_boxed_slice(), bytes: bytes.into_boxed_slice() }
+        PackedKeys { len: rows.len(), blocks: blocks.into_boxed_slice(), bytes: bytes.into_boxed_slice() }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -352,14 +354,14 @@ fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, mut out: &m
     }
 }
 
-fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
+fn pack_into<T>(out: &mut [u8], chunk: &[T], key: impl Fn(&T) -> u64, blk: &Block) {
     let width = blk.width as usize;
     if width == 0 {
         return; // every key equals the base
     }
     let mut words = vec![0u64; out.len() / 8];
-    for (j, &k) in chunk.iter().enumerate() {
-        let off = k - blk.base;
+    for (j, row) in chunk.iter().enumerate() {
+        let off = key(row) - blk.base;
         let bit = j * width;
         let (w, sh) = (bit / 64, bit % 64);
         words[w] |= off << sh;
@@ -378,7 +380,7 @@ mod tests {
 
     fn check(keys: &[u64]) {
         for par in [false, true] {
-            let p = PackedKeys::new(keys, par);
+            let p = PackedKeys::new(keys, |&k| k, par);
             assert_eq!(p.len(), keys.len());
             assert_eq!(p.iter().collect::<Vec<_>>(), keys);
             for (i, &k) in keys.iter().enumerate() {
@@ -438,7 +440,7 @@ mod tests {
     fn cursor_finds_the_same_rows_as_a_binary_search() {
         let mut seed = 0x9E37_79B9_7F4A_7C15;
         let keys = sorted_random(&mut seed, 20_000, 1 << 30, 24);
-        let p = PackedKeys::new(&keys, false);
+        let p = PackedKeys::new(&keys, |&k| k, false);
         let cells: Vec<(u64, f64)> = keys.iter().map(|&k| (k, 0.0)).collect();
         for src in [Sorted::Packed(&p), Sorted::Cells(&cells)] {
             let mut rd = Cursor::new(src);
@@ -498,7 +500,7 @@ mod tests {
                 keys.push(k);
             }
         }
-        let p = PackedKeys::new(&keys, true);
+        let p = PackedKeys::new(&keys, |&k| k, true);
         let mut hist = [0usize; 65];
         for b in 0..n.div_ceil(BLOCK) {
             hist[p.width(b) as usize] += 1;
@@ -555,6 +557,6 @@ mod tests {
                 a.wrapping_add(buf[m - 1])
             })
         });
-        time("packed new (par)", &|| PackedKeys::new(&keys, true).len() as u64);
+        time("packed new (par)", &|| PackedKeys::new(&keys, |&k| k, true).len() as u64);
     }
 }

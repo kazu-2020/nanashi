@@ -305,6 +305,24 @@ We measured on a cloud VM (4 cores, Intel Xeon 2.80 GHz) with `bench_ab.py` and 
 The heap after the recalculation is the stored data, so the stored data went from 16 B to about 10 B for each cell. The time ranges of the full recalculation and of the edits overlap, so these differences are inside the noise of this VM. The full recalculation after the edits is faster. We do not know the cause. A likely cause is the smaller base, but we did not measure it.
 A random read with `PackedKeys::get` (a binary search, `value_at`) is about 1.6 times slower than a `Vec` read in a micro-benchmark of 10 million reads (`bench_reads` in `packed.rs`, run with `--ignored`).
 
+### New stored data in the parallel step
+
+A full result waited for the write-back as sorted cells (16 B for each cell). The write-back then made the base, one Metric at a time. This change of form copied the values into a new column, so it needed 24 B for each cell for a short time.
+Now the parallel step of each Metric makes the base. `PackedKeys::new` reads the keys from the cells, and the values reuse the buffer of the cells. Thus the change of form needs only the packed keys in addition to the cells, and a result waits as stored data (about 10 B for each cell).
+We took a heap sample every 5 ms and a time stamp at the start and end of each Metric. In a version that only moved the change of form into the parallel step, the maximum was during the change of form of `BigSale` (17.56 million cells). The maximum did not change (963 MB), so we also removed the copy of the values.
+We measured on a cloud VM (4 cores, Intel Xeon 2.80 GHz) with `bench_ab.py` and retail xlarge, 5 alternating runs for each side. The cells of all 11 formula Metrics are bit-identical on both sides (SHA-256, retail large).
+
+| Measurement | Before | After |
+|---|---|---|
+| Maximum increase of the heap, full recalculation | 963 MB (963–963) | 920 MB (920–945) |
+| Maximum increase of the heap, full recalculation after the edits | 922 MB (918–924) | 921 MB (920–945) |
+| Minor page faults of the run | 946 thousand (932–950 thousand) | 780 thousand (771–785 thousand) |
+| Full recalculation | 1,805 ms (1,581–2,199) | 1,611 ms (1,429–1,763) |
+| Full recalculation after the edits | 3,042 ms (2,765–3,521) | 3,527 ms (2,517–3,869) |
+
+The time ranges overlap, so the time differences are inside the noise of this VM.
+The maximum is now at the start of `ActiveRev`. At that time, the evaluations of `BigSale` and `ActiveRev` each hold a buffer for all rows of `Revenue` (281 MB each).
+
 ## Save and journal formats
 
 This is a comparison before and after two changes. Snapshots and files for large changes changed from npz to Parquet. Large changes now move as change blocks.
