@@ -32,6 +32,8 @@ FORMULAS = [  # (名前, 軸, 式, 種類)
     ("SubLow", DIMS, "A - Price[EXPAND: Store, Month]", "number"),  # 全組み合わせに値がありうる（融合しない）
     ("MulAdd", DIMS, "A * (Price[EXPAND: Month] + Disc[EXPAND: Product])", "number"),  # 被覆の中で広げる
     ("Cmp", DIMS, "A > B", "boolean"),
+    ("ConstL", DIMS, "100 / A", "number"),                      # A constant on the left
+    ("CmpL", DIMS, "3 < A", "boolean"),
     ("AndOr", DIMS, "(A > 2) AND (B < 5) OR Flag", "boolean"),  # 三値論理
     ("NotF", DIMS, "NOT Flag", "boolean"),
     ("If1", DIMS, "IF(A > 3, A * 0.1, 0)", "number"),
