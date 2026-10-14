@@ -31,7 +31,7 @@ The engine does not change a base after it makes it, and versions share the base
 Thus, a writer can write while a reader keeps a published version. The engine does not copy all of the base or the delta.
 The values of the base are an immutable array with no extra capacity (`Box<[f64]>`). Its layout is the same as the buffer of an Arrow Float64 array.
 The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed.rs`). A block keeps its first key and the offset of each key from it, with the bit width of the largest offset (frame of reference). In the retail model the width is 14 to 19 bits, so the keys use about 2 B for each cell in place of 8 B ([Performance](performance.md)).
-A scan decodes one block at a time into a buffer of 1,024 keys and then reads a plain array. A binary search decodes one key at a time. The `base` value of `Model.memory()` is equal to the size of the packed keys and the value array.
+A scan decodes one block at a time into a buffer of 1,024 keys and then reads a plain array. A binary search decodes one key at a time. The cursor of the fused evaluation (`Cursor`) decodes the block of a row near its last row, and reads a far row one key at a time. The `base` value of `Model.memory()` is equal to the size of the packed keys and the value array.
 The high bits of the key contain the **partition dimension**. Thus, a binary search can read and write a range that a filter on the partition dimension selects.
 For a filter on a different dimension, the engine uses an inverted index. The engine makes the index when it is necessary.
 

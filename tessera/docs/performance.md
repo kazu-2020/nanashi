@@ -280,14 +280,14 @@ We measured on a cloud VM (4 cores, Intel Xeon 2.80 GHz) with `bench_ab.py` and 
 
 | Measurement | Before | After |
 |---|---|---|
-| Rust heap after the full recalculation | 1,162 MB | 738 MB |
-| Maximum increase of the heap, full recalculation | 1,064 MB (1,064–1,089) | 963 MB |
+| Rust heap after the full recalculation | 1,162 MB (all 5 runs equal) | 738 MB (all 5 runs equal) |
+| Maximum increase of the heap, full recalculation | 1,064 MB (1,064–1,089) | 963 MB (all 5 runs equal) |
 | Maximum RSS | 2,329 MB (2,303–2,340) | 1,750 MB (1,720–1,803) |
 | Full recalculation | 2,772 ms (2,546–2,888) | 2,938 ms (2,546–2,975) |
 | Full recalculation after the edits | 5,199 ms (4,913–6,220) | 3,641 ms (3,498–3,845) |
 | Edit of 1 Volume cell | 2.79 ms (2.13–4.13) | 1.77 ms (1.67–4.89) |
 
-The heap after the recalculation is the stored data, so the stored data went from 16 B to about 10 B for each cell. The time ranges of the full recalculation and of the edits overlap, so these differences are inside the noise of this VM. The full recalculation after the edits is faster, because the merge of the base and the delta reads the keys block by block.
+The heap after the recalculation is the stored data, so the stored data went from 16 B to about 10 B for each cell. The time ranges of the full recalculation and of the edits overlap, so these differences are inside the noise of this VM. The full recalculation after the edits is faster. We do not know the cause. A likely cause is the smaller base, but we did not measure it.
 A random read with `PackedKeys::get` (a binary search, `value_at`) is about 1.6 times slower than a `Vec` read in a micro-benchmark of 10 million reads (`bench_reads` in `packed.rs`, run with `--ignored`).
 
 ## Save and journal formats
