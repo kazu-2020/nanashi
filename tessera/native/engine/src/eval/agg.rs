@@ -359,6 +359,14 @@ struct Dense<'a, K> {
 /// Slots in one bucket of the partitioned fill. 2^14 was the fastest of 2^14, 2^15 and 2^16.
 const BUCKET: usize = 1 << 14;
 
+/// The buffers of one part in one round of the partitioned fill.
+#[derive(Clone, Default)]
+struct Round {
+    idx: Vec<u32>,            // the slot of each row (u32::MAX if the row has no group)
+    start: Vec<usize>,        // the start of each bucket in pairs
+    pairs: Vec<(u32, f64)>,   // the (slot, value) pairs in bucket order
+}
+
 /// True if the sampled slot indices touch more bytes of the array than scatter_bytes, in 4 KiB pages. Then
 /// each row misses the cache, and the partitioned fill is faster.
 fn scattered(sample: impl Iterator<Item = usize>, tuple_bytes: usize, scatter_bytes: usize) -> bool {
@@ -394,21 +402,37 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         let tuple_bytes = std::mem::size_of::<(T, u32)>();
         let sample = (0..n.min(1 << 16)).filter_map(|i| slot(i).map(|(s, _)| s));
         let partitioned = slots * tuple_bytes > cfg.scatter_bytes && scattered(sample, tuple_bytes, cfg.scatter_bytes);
-        // The partitioned fill has one array and round buffers of about the same size
-        let arrays = if partitioned { 2 } else { parts };
+        // The partitioned fill has one array, and the buffers of a round have about the memory of 1.25 arrays
+        let arrays = if partitioned { 3 } else { parts };
         if !cfg.dense_always && slots.saturating_mul(arrays).saturating_mul(tuple_bytes) > n.saturating_mul(row_bytes) {
             return None;
         }
         let g: Vec<(T, u32)> = if partitioned {
             let mut g = vec![(init, 0u32); slots];
             let buckets = slots.div_ceil(BUCKET);
-            // A pair is 16 B, so the buffers of a round use about the memory of the array
+            // A round has one 16 B pair and one 4 B slot index for each row, in buffers of a fixed size
             let round = (slots * tuple_bytes / 16).max(cfg.chunk).max(1);
-            let mut bufs: Vec<Vec<Vec<(u32, f64)>>> = vec![vec![Vec::new(); buckets]; parts];
-            let scatter = |lo: usize, hi: usize, b: &mut [Vec<(u32, f64)>]| {
-                b.iter_mut().for_each(Vec::clear);
-                for (s, v) in (lo..hi).filter_map(slot) {
-                    b[s / BUCKET].push((s as u32, v));
+            let mut bufs = vec![Round::default(); parts];
+            let scatter = |lo: usize, hi: usize, Round { idx, start, pairs }: &mut Round| {
+                idx.clear();
+                idx.extend((lo..hi).map(|i| slot(i).map_or(u32::MAX, |(s, _)| s as u32)));
+                start.clear();
+                start.resize(buckets + 1, 0);
+                for &s in idx.iter().filter(|&&s| s != u32::MAX) {
+                    start[s as usize / BUCKET + 1] += 1;
+                }
+                for b in 0..buckets {
+                    start[b + 1] += start[b];
+                }
+                pairs.clear();
+                pairs.resize(start[buckets], (0, 0.0));
+                let mut at = start.clone();
+                for (i, &s) in (lo..hi).zip(idx.iter()) {
+                    if s != u32::MAX {
+                        let b = s as usize / BUCKET;
+                        pairs[at[b]] = (s, rows.get(i).1);
+                        at[b] += 1;
+                    }
                 }
             };
             for lo in (0..n).step_by(round) {
@@ -420,10 +444,12 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                     scatter(lo, hi, &mut bufs[0]);
                 }
                 let gather = |(bi, chunk): (usize, &mut [(T, u32)])| {
-                    for &(s, v) in bufs.iter().flat_map(|b| &b[bi]) {
-                        let e = &mut chunk[s as usize - bi * BUCKET];
-                        add(&mut e.0, v);
-                        e.1 += 1;
+                    for Round { start, pairs, .. } in &bufs {
+                        for &(s, v) in &pairs[start[bi]..start[bi + 1]] {
+                            let e = &mut chunk[s as usize - bi * BUCKET];
+                            add(&mut e.0, v);
+                            e.1 += 1;
+                        }
                     }
                 };
                 if parts > 1 {
