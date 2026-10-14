@@ -285,7 +285,7 @@ We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.10 GHz) with `bench_ab.p
 | Maximum increase of the heap | 1,064 MB | 1,054 MB |
 | Maximum increase of the heap after the edits | 1,064 MB | 997 MB |
 
-The evaluation of `CatRev` alone on 4 threads (the minimum of 5 evaluations, 2 or 3 runs) went from 496–537 ms to 152–159 ms. In a later VM session, it went from 571–637 ms to 189–251 ms.
+The evaluation of `CatRev` alone on 4 threads (the minimum of 5 evaluations, 2 or 3 runs) went from 496–537 ms to 152–159 ms. In a later VM session, it went from 571–637 ms to 231–242 ms.
 
 ## Save and journal formats
 

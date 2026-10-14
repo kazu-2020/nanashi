@@ -411,7 +411,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             let mut g = vec![(init, 0u32); slots];
             let buckets = slots.div_ceil(BUCKET);
             // A round has one 16 B pair and one 4 B slot index for each row, in buffers of a fixed size
-            let round = (slots * tuple_bytes / 16).max(cfg.chunk).max(1);
+            let round = (slots * tuple_bytes / 16).max(1);
             let mut bufs = vec![Round::default(); parts];
             let scatter = |lo: usize, hi: usize, Round { idx, start, pairs }: &mut Round| {
                 idx.clear();
