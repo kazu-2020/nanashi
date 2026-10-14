@@ -13,5 +13,7 @@ router/nanashi-router
 .nanashi-data/
 # The mise hook links web/node_modules/typescript here for typescript-language-server.
 /node_modules/
+# archify writes one timestamped directory for each diagram run.
+.archify/
 # bench_ab.py makes the git worktrees of the base side here.
 .bench/

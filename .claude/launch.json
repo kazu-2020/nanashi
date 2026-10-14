@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "nanashi",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "export PATH=$HOME/.local/share/mise/shims:$PATH; exec ./dev.sh"
+      ],
+      "port": 5173,
+      "url": "http://127.0.0.1:5173"
+    }
+  ]
+}
