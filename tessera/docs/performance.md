@@ -196,12 +196,28 @@ We measured a full recalculation after the edits of `bench.py`, when Volume, Pri
 The heap decrease is the same in each run. The time ranges overlap, so the time difference is inside the noise of this VM.
 Most of the time after the edit is the write-back and the aggregations, not `Volume * Price`. The maximum heap is now lower than for the first full recalculation (1,194 MB).
 
+### Write-back without a second copy of the keys
+
+At the write-back of a full result, the engine changed the sorted cells into the 2 columns of the base with an unzip.
+For a short time, the cells and both new columns existed together (32 bytes for each cell).
+Now only the values get a new column. The keys go into the buffer of the cells (24 bytes for each cell).
+We measured the retail model (xlarge of `bench.py`, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
+
+| Measurement | Before | After |
+|---|---|---|
+| Maximum increase of the heap, full recalculation | 1,194 MB | 1,070 MB (1,063–1,101) |
+| Maximum increase of the heap, full recalculation after the edits | 1,120 MB | 1,070 MB (1,063–1,094) |
+| Full recalculation | 2,183 ms (1,972–2,418) | 1,997 ms (1,804–2,579) |
+
+The time ranges overlap, so the time difference is inside the noise of this VM.
+The maximum is now at a different point of the recalculation. A trial version without any copy of the cells also gave 1,063 MB.
+
 RSS is larger than the Rust heap because the standard macOS allocator keeps large released blocks for reuse (MALLOC_LARGE (empty) in `vmmap`).
 In the version from before the engine aggregated while it read, RSS increased with each recalculation (1,919 MB the first time, 2,559 MB the fourth time).
 When we started the process with the environment variable `MallocLargeCache=0`, RSS stopped at 791–812 MB. The recalculation time did not change.
 RSS varies much from run to run. Thus, to compare memory usage, compare the Rust heap.
 To read the Rust heap, use `nanashi_core.heap()`. The count is always on, so subtract a value that you read before the model exists. To read the stored data of each Metric, use `m.memory()`.
-Each thread counts in its own slot. The earlier shared counter made parallel recalculation a few percent slower. With the slots, `bench.py --size xlarge` showed no difference in recalculation time between the count on and off (5 runs for each side, the run-to-run variation was about 20%).
+Each thread counts in its own slot. The earlier shared counter made parallel recalculation a few percent slower. With the slots, `bench.py --size xlarge` showed no difference in recalculation time between the count on and off. "Off" is the old implementation with the count stopped (`track_heap(False)`), before the count was always on. We did 5 runs for each side, and the run-to-run variation was about 20%.
 
 A comparison of journals (`bench_journal.py`, profit and loss plan, PostgreSQL in local Docker):
 
@@ -219,6 +235,42 @@ The file journal uses `F_FULLFSYNC` on macOS to write through to the cache of th
 PostgreSQL in Docker Desktop writes inside a virtual machine, and each write takes 52 microseconds (`pg_test_fsync`).
 This speed shows that the data does not get to the physical device. Thus, in this environment, a PostgreSQL commit is not safe from a power failure.
 In a production environment (with writes to the disk and network round trips), we expect commit times to increase by a few ms. You must measure again.
+
+### Before and after the closure chain
+
+The engine now compiles a fused formula into a chain of closures before the scan ([Engine](engine.md)). Before, the scan went through the expression tree at each key.
+We measured the evaluation of each fused formula alone (retail xlarge, after a full recalculation, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
+
+| Formula | 4 threads, before | 4 threads, after | 1 thread, before | 1 thread, after |
+|---|---|---|---|---|
+| `Volume * Price` | 216 ms (209–243) | 177 ms (170–187) | 861 ms (756–995) | 693 ms (631–878) |
+| `IF(Revenue > 1000, Revenue * 0.1, 0)` | 283 ms (271–304) | 203 ms (186–206) | 1,234 ms (1,045–2,135) | 830 ms (703–1,003) |
+| `Revenue[FILTER: Active]` | 310 ms (295–325) | 262 ms (244–267) | 988 ms (826–1,523) | 789 ms (698–841) |
+
+The full recalculation on 1 thread went from 8,051 ms (7,758–8,281) to 7,453 ms (6,963–8,139). On 4 threads, it did not change (2,472 ms and 2,501 ms). The ranges overlap in both cases.
+The results of all 11 formula Metrics are bit-identical before and after (SHA-256 of the keys and values). The heap does not change.
+Each operator (`*`, `/`, comparisons) has its own closure, so the operator is a constant in the compiled code. One shared closure that reads the operator at each key made `IF(Revenue > 1000, Revenue * 0.1, 0)` 18% slower on 4 threads (134 ms and 158 ms, the ranges do not overlap).
+
+### Aggregation into an array before the hash map
+
+Before this change, the engine tried the hash map path first and the array path second. In the retail model, `StoreRev = Revenue[REMOVE SUM: Product]` has 36,000 targets, which is few for 17.56 million rows, so it used the hash map. The array for 36,000 targets is 1 MB a thread. Now the engine tries the array first ([Engine](engine.md)). An incremental recalculation on a narrowed range keeps the old order, because the array ignores the range.
+We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.80 GHz) with `bench_ab.py` and retail xlarge. Each value is the median of 5 alternating runs, with the minimum–maximum in parentheses. The result `Total` is bit-identical on both sides, because both paths use the exact sum.
+
+| Measurement | Before | After |
+|---|---|---|
+| Full recalculation | 1,790 ms (1,718–2,359) | 1,709 ms (1,541–2,427) |
+| Full recalculation after the edits | 3,083 ms (2,780–3,443) | 2,968 ms (2,838–3,221) |
+| Maximum increase of the heap | 1,194 MB | 1,194 MB |
+
+The ranges of the full recalculation overlap, so the change is inside the noise of this VM. The evaluation of one Metric shows the change. Each value is the median of 5 evaluations after a full recalculation. We did 2 runs for each side with 4 threads and 1 run with 1 thread.
+
+| Formula | Path before → after | 4 threads, before | 4 threads, after | 1 thread, before | 1 thread, after |
+|---|---|---|---|---|---|
+| `Revenue[REMOVE SUM: Product]` (36 thousand targets) | hash map → array | 255–278 ms | 87–110 ms | 597 ms | 320 ms |
+| `Revenue[REMOVE SUM: Store]` (360 thousand targets) | array (1 thread: hash map → array) | 99–114 ms | 85–102 ms | 578 ms | 270 ms |
+| `Revenue[BY SUM: Product.Category]` (1.8 million targets) | array | 578–580 ms | 564–566 ms | 1,473 ms | 1,537 ms |
+
+With 1 thread, the full recalculation went from 6,550 ms to 6,001 ms (1 run each). Before the change, the hash map path (`fold_groups`) was 22% of the 1-thread time. Thus 22% is the upper limit of the gain.
 
 ## Save and journal formats
 

@@ -495,6 +495,16 @@ fn old_of(store: &Arc<Store>, r: &Reg, cat: &Catalog) -> Old {
     if r.is_all() { Old::Held(store.clone()) } else { Old::Slice(Arc::new(store.slice(&r.restrict(cat)))) }
 }
 
+impl Old {
+    /// The bytes of the copy. Held is the store itself, which held counts already.
+    fn copied(&self) -> usize {
+        match self {
+            Old::Held(_) => 0,
+            Old::Slice(s) => s.memory().bytes(),
+        }
+    }
+}
+
 impl From<Old> for Src {
     fn from(old: Old) -> Src {
         match old {
@@ -506,11 +516,7 @@ impl From<Old> for Src {
 impl Done {
     fn bytes(&self) -> usize {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
-        let old = match &self.old {
-            Some(Old::Slice(s)) => s.memory().bytes(),
-            Some(Old::Held(_)) | None => 0,
-        };
-        writes.saturating_add(old)
+        writes.saturating_add(self.old.as_ref().map_or(0, Old::copied))
     }
 }
 
@@ -577,6 +583,12 @@ fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
         }
     }
     out
+}
+
+/// The limit of each task in a wave: held plus an equal part of the room. A task adds its copies to held, not to the
+/// limit. Never more than max, so held data over max is an error.
+fn share(max: usize, held: usize, n: usize) -> usize {
+    held.saturating_add(max.saturating_sub(held) / n).min(max)
 }
 
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
@@ -652,11 +664,11 @@ impl<'a> Run<'a> {
             // Group each wave again, because the earlier waves leave less room
             let wave = if parallel { waves(rest, max.saturating_sub(held)).remove(0) } else { vec![&rest[0]] };
             rest = &rest[wave.len()..];
-            let room = max.saturating_sub(held) / wave.len();
+            let limit = share(max, held, wave.len());
             let out: Vec<Result<Done>> = if wave.len() == 1 {
-                vec![run.compute(wave[0], room, held)]
+                vec![run.compute(wave[0], limit, held)]
             } else {
-                wave.par_iter().map(|t| run.compute(t, room, held)).collect()
+                wave.par_iter().map(|t| run.compute(t, limit, held)).collect()
             };
             unapplied += out.iter().flatten().map(Done::bytes).sum::<usize>();
             done.extend(out);
@@ -724,19 +736,20 @@ impl<'a> Run<'a> {
     }
 
     /// Calculate the task. It only reads the stored data, so the Metrics of one level can calculate in parallel.
-    fn compute(&self, t: &Task, room: usize, held: usize) -> Result<Done> {
+    fn compute(&self, t: &Task, limit: usize, held: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
         let old = metric.source.then(|| old_of(&self.stores[t.m], &t.region, self.cat));
+        let held = held.saturating_add(old.as_ref().map_or(0, Old::copied));
         let delta = match (&metric.delta, t.delta) {
-            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::with_room(held, room))?,
+            (Some(d), true) => self.compute_delta(t.m, d, &t.region, limit, held)?,
             _ => None,
         };
         let delta_used = delta.is_some();
         let (value, count, low) = match delta {
             Some(done) => done,
             None => {
-                let (r, b) = (t.region.restrict(self.cat), Budget::with_room(held, room));
+                let (r, b) = (t.region.restrict(self.cat), Budget::new(limit, held));
                 match metric.delta.as_ref().map(|d| &d.method) {
                     Some(Method::OnePass { .. }) => {
                         let [value, count, low] = self.sums(self.formula(t.m), None, &r, &b)?;
@@ -830,7 +843,7 @@ impl<'a> Run<'a> {
     /// one ExactSum for each group. Thus the result has the same bits as a full evaluation. If a residual is not
     /// one f64 (NaN), returns None, and the caller calculates the region again.
     #[allow(clippy::type_complexity)]
-    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, b: &Budget) -> Result<Option<(Cube, Option<Cube>, Option<Cube>)>> {
+    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, limit: usize, held: usize) -> Result<Option<(Cube, Option<Cube>, Option<Cube>)>> {
         let cat = self.cat;
         let all = Restrict::all(cat.dims.len());
         let range = self.delta_range(d).expect("変更範囲").restrict(cat);
@@ -851,6 +864,8 @@ impl<'a> Run<'a> {
             work.push(Src::Store(Arc::new(new)));
             work.push(Src::Store(old));
         }
+        // The slices in work stay until the end, so the budget counts them
+        let b = &Budget::new(limit, held.saturating_add(crate::held(&work)));
         let r = region.restrict(cat);
         let store = &self.stores[m];
         let cube = |c: Cube| Src::Cube(Arc::new(c));
@@ -982,9 +997,12 @@ mod tests {
 
     #[test]
     fn tasks_of_a_wave_split_the_room_after_the_held_data() {
-        let b = Budget::with_room(400, 300);
+        let limit = share(1000, 400, 2);
+        let b = Budget::new(limit, 400);
+        assert_eq!(limit, 700);
         assert!(b.need(300 / CELL_BYTES, "x").is_ok());
         assert!(b.need(300 / CELL_BYTES + 1, "x").is_err());
+        assert_eq!(share(100, 400, 2), 100);
     }
 
     #[test]
@@ -1024,5 +1042,23 @@ mod tests {
         let changed = vec![(0, all()), (4, all())];
         recalc(&cat, &plan, &mut stores, &mut vec![None; 5], &mut vec![None; 5], changed, &[], vec![], vec![], true).unwrap();
         assert_eq!(stores[2].rows_hint(), 1000);
+    }
+
+    #[test]
+    fn stored_data_over_the_budget_is_an_error_also_for_an_empty_result() {
+        let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
+        let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg: crate::Config::default() };
+        let store = |n: u32| {
+            let keys: Vec<u32> = (0..n).collect();
+            Arc::new(Store::new(&[0], None, Kind::Num, &start).unwrap().with_rows(&[&keys], &vec![1.0; n as usize]).unwrap())
+        };
+        let mut stores = vec![store(0), store(0), store(10)];
+        let input = || Metric { formula: None, delta: None, source: false };
+        let copy = Metric { formula: Some(Formula { node: Arc::new(Node::Ref(0)), refs: vec![0] }), delta: None, source: false };
+        let plan = Plan { metrics: vec![input(), copy, input()], levels: vec![vec![Step::One(1)]] };
+        let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held(&src) - 1, ..crate::Config::default() } };
+        let changed = vec![(0, Reg::new(vec![]))];
+        assert!(recalc(&cat, &plan, &mut stores, &mut vec![None; 3], &mut vec![None; 3], changed, &[], vec![], vec![], true).is_err());
     }
 }

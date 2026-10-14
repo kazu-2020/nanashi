@@ -21,11 +21,6 @@ impl Budget {
         Budget { limit, held, used: Cell::new(0) }
     }
 
-    /// The budget that gives `room` bytes to the intermediate results after the held bytes.
-    pub fn with_room(held: usize, room: usize) -> Budget {
-        Budget::new(held.saturating_add(room), held)
-    }
-
     pub(crate) fn mark(&self) -> Mark {
         Mark(self.used.get())
     }
