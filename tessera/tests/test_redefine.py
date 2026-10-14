@@ -307,7 +307,7 @@ def redefine(rng: random.Random, models: list[Model], counter: list[int]) -> Non
                 m.remove_metric(target)
 
 
-def run_random(test, seed: int, rounds: int, engines) -> list[Model]:
+def run_random(test, seed: int, rounds: int, engines) -> None:
     rng = random.Random(seed)
     models = [computed(e()) for e in engines]
     counter, members = [0], [0]
@@ -330,7 +330,6 @@ def run_random(test, seed: int, rounds: int, engines) -> list[Model]:
             for name in a:
                 with test.subTest(round=round_, metric=name):
                     test.assertTrue(same(a[name], b[name]), f"{name}\n{la}: {a[name]}\n{lb}: {b[name]}")
-    return models
 
 
 class MatchesFullRecalc(unittest.TestCase):

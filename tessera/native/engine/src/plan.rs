@@ -486,8 +486,21 @@ struct Done {
 }
 
 enum Old {
-    Shared(Arc<Store>), // the store that the write replaces; held counts it already
+    Held(Arc<Store>),
     Slice(Arc<Store>),
+}
+
+/// The value before the write. For the whole region, keep the store itself (do not copy it).
+fn old_of(store: &Arc<Store>, r: &Reg, cat: &Catalog) -> Old {
+    if r.is_all() { Old::Held(store.clone()) } else { Old::Slice(Arc::new(store.slice(&r.restrict(cat)))) }
+}
+
+impl From<Old> for Src {
+    fn from(old: Old) -> Src {
+        match old {
+            Old::Held(s) | Old::Slice(s) => Src::Store(s),
+        }
+    }
 }
 
 impl Done {
@@ -495,7 +508,7 @@ impl Done {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
         let old = match &self.old {
             Some(Old::Slice(s)) => s.memory().bytes(),
-            Some(Old::Shared(_)) | None => 0,
+            Some(Old::Held(_)) | None => 0,
         };
         writes.saturating_add(old)
     }
@@ -613,8 +626,9 @@ pub fn recalc(
 }
 
 impl<'a> Run<'a> {
-    /// 依存の段を 1 つ計算し直す。同じ段の Metric は互いを読まないので、範囲を決めてから並列に計算し、
-    /// 順に書き戻す。scan は時点ごとに自分の格納データへ書き込むので、そのあとで順に計算する。
+    /// Calculate one level of the dependencies again. The Metrics of one level do not read each other.
+    /// Thus decide the regions, calculate them in parallel, and then write them back in sequence.
+    /// A scan writes to its own stored data at each time point, so it calculates after them in sequence.
     fn level(&mut self, level: &[Step]) -> Result<()> {
         let mut tasks = Vec::new();
         let mut scans = Vec::new();
@@ -691,10 +705,6 @@ impl<'a> Run<'a> {
         eval_sums(&f.node, self.cat, &self.srcs(f, work), r, b)
     }
 
-    fn slice(&self, m: usize, r: &Reg) -> Arc<Store> {
-        Arc::new(self.stores[m].slice(&r.restrict(self.cat)))
-    }
-
     /// 段の 1 つの Metric について、計算し直す範囲と方法を決める。計算し直さなくてよければ None。
     fn prepare(&self, m: usize) -> Option<Task> {
         let plan: &'a Plan = self.plan;
@@ -717,13 +727,7 @@ impl<'a> Run<'a> {
     fn compute(&self, t: &Task, room: usize, held: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
-        let old = metric.source.then(|| {
-            if t.region.is_all() {
-                Old::Shared(self.stores[t.m].clone())
-            } else {
-                Old::Slice(self.slice(t.m, &t.region))
-            }
-        });
+        let old = metric.source.then(|| old_of(&self.stores[t.m], &t.region, self.cat));
         let delta = match (&metric.delta, t.delta) {
             (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::with_room(held, room))?,
             _ => None,
@@ -759,7 +763,7 @@ impl<'a> Run<'a> {
         Ok(Done { m: t.m, region: t.region.clone(), delta: delta_used, value, count, low, old })
     }
 
-    /// 計算した値を書き戻し、値が実際に変わったセルの範囲を下流への影響範囲にする。
+    /// Write back the calculated values. The region of the cells whose values changed goes downstream.
     fn apply(&mut self, done: Done) -> Result<()> {
         let Done { m, region, delta, value, count, low, old } = done;
         match self.cat.cfg.fail_at {
@@ -782,8 +786,8 @@ impl<'a> Run<'a> {
                 None => {}
             }
         }
-        if let Some(Old::Shared(s) | Old::Slice(s)) = old {
-            self.olds[m] = Some(Src::Store(s));
+        if let Some(old) = old {
+            self.olds[m] = Some(old.into());
         }
         self.log.push((m, delta, region));
         if let Some(sets) = sets {
@@ -908,8 +912,7 @@ impl<'a> Run<'a> {
         let active: Vec<(usize, Reg)> = names.iter().filter_map(|&n| self.regions[n].clone().map(|r| (n, r))).collect();
         for (n, r) in &active {
             if self.plan.metrics[*n].source {
-                let old = if r.is_all() { Src::Store(self.stores[*n].clone()) } else { Src::Store(self.slice(*n, r)) };
-                self.olds[*n] = Some(old);
+                self.olds[*n] = Some(old_of(&self.stores[*n], r, self.cat).into());
             }
             if r.is_all() {
                 // 全時点を書き直すので、空から書き込む（既存のセルを時点ごとに消して書き直すより速い）
@@ -985,15 +988,19 @@ mod tests {
     }
 
     #[test]
-    fn a_slice_of_old_counts_but_the_shared_store_does_not() {
+    fn the_old_value_of_a_partial_region_counts_but_of_the_whole_region_does_not() {
         let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
         let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
         let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
-        let done = |old| Done { m: 0, region: Reg::new(vec![]), delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old) };
-        let bytes = store.memory().bytes();
+        let done = |region: Reg| {
+            let old = old_of(&store, &region, &cat);
+            Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old) }
+        };
+        assert_eq!(done(Reg::new(vec![])).bytes(), 0);
+        let part = Reg::new(vec![(0, vec![1])]);
+        let bytes = store.slice(&part.restrict(&cat)).memory().bytes();
         assert!(bytes > 0);
-        assert_eq!(done(Old::Shared(store.clone())).bytes(), 0);
-        assert_eq!(done(Old::Slice(store)).bytes(), bytes);
+        assert_eq!(done(part).bytes(), bytes);
     }
 
     #[test]
