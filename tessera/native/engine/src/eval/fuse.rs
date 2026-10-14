@@ -73,14 +73,51 @@ impl Col<'_> {
         }
     }
 
-    /// key 以上の最初の行を、前回の位置 from の近くから探す（前後どちらへも指数探索）。
-    /// 続けて引くキーが近ければ、二分探索より速い。
+}
+
+/// A cursor over the keys of a column. For a `Col::Store` it decodes one packed block at a time into
+/// `buf`, so reads of nearby indexes cost a plain array read. `pos` is the row of the last read.
+struct Reader<'a> {
+    col: Col<'a>,
+    pos: usize,
+    block: usize, // the decoded block in `buf`, or usize::MAX
+    buf: Box<[u64; BLOCK]>,
+}
+
+impl<'a> Reader<'a> {
+    fn new(col: Col<'a>) -> Reader<'a> {
+        Reader { col, pos: 0, block: usize::MAX, buf: Box::new([0; BLOCK]) }
+    }
+
     #[inline]
-    fn seek(&self, from: usize, key: u64) -> usize {
+    fn n(&self) -> usize {
+        self.col.n()
+    }
+
+    #[inline]
+    fn key(&mut self, i: usize) -> u64 {
+        match self.col {
+            Col::Store(s) => {
+                let b = i / BLOCK;
+                if b != self.block {
+                    let m = (s.base.keys.len() - b * BLOCK).min(BLOCK);
+                    s.base.keys.decode(b, 0..m, &mut self.buf[..m]);
+                    self.block = b;
+                }
+                self.buf[i % BLOCK]
+            }
+            Col::Cells(c) => c[i].0,
+        }
+    }
+
+    /// The first row at or after `key`, searched near the previous row `from` (an exponential
+    /// search in both directions). If the next keys are close, this is faster than a binary search.
+    #[inline]
+    fn seek(&mut self, from: usize, key: u64) -> usize {
         if from == 0 || from > self.n() || self.key(from - 1) < key {
             return self.gallop(from.min(self.n()), key);
         }
-        // key(from - 1) >= key: 後ろへ戻る
+        // key(from - 1) >= key: go backwards
         let mut step = 1;
         let mut hi = from - 1; // key(hi) >= key
         let mut lo = hi.saturating_sub(1);
@@ -105,9 +142,10 @@ impl Col<'_> {
         l
     }
 
-    /// from 以降で key 以上の最初の行（指数探索。キー順に進むカーソル用）。
+    /// The first row at or after `from` whose key is at least `key` (an exponential search, for a
+    /// cursor that moves in key order).
     #[inline]
-    fn gallop(&self, from: usize, key: u64) -> usize {
+    fn gallop(&mut self, from: usize, key: u64) -> usize {
         let n = self.n();
         if from >= n || self.key(from) >= key {
             return from;
@@ -131,7 +169,6 @@ impl Col<'_> {
         }
         l
     }
-
 }
 
 /// 読み出し元（src の番号ごとに 1 つ）。
@@ -238,8 +275,9 @@ impl<'a> Access<'a> {
         if width <= DENSE_BITS && (1usize << width) <= leaf.col.n().saturating_mul(64).max(1 << 12) {
             let size = 1usize << width;
             let (mut vals, mut has) = (vec![0.0; size], vec![false; size]);
+            let mut rd = Reader::new(leaf.col);
             for i in 0..leaf.col.n() {
-                let k = leaf.col.key(i) as usize;
+                let k = rd.key(i) as usize;
                 vals[k] = leaf.col.val(i);
                 has[k] = true;
             }
@@ -492,20 +530,29 @@ impl<'a> Fuse<'a> {
     }
 }
 
-/// 走査の状態（1 つの仕事の単位ごと）。
+/// The state of one scan (one per unit of work).
 struct Cursor<'s, 'a> {
     access: &'s [Access<'a>],
-    pos: Vec<usize>, // Aligned と Search の読み出し元ごとの、前回の行
+    readers: Vec<Reader<'a>>, // one per access; a Dense access gets an empty placeholder
 }
 
-impl Cursor<'_, '_> {
+impl<'s, 'a> Cursor<'s, 'a> {
+    fn new(access: &'s [Access<'a>]) -> Cursor<'s, 'a> {
+        let reader = |a: &Access<'a>| match a {
+            Access::Aligned(col) | Access::Search { col, .. } => Reader::new(*col),
+            Access::Dense { .. } => Reader::new(Col::Cells(&[])),
+        };
+        Cursor { access, readers: access.iter().map(reader).collect() }
+    }
+
     #[inline]
     fn get(&mut self, l: usize, key: u64) -> Option<f64> {
         match &self.access[l] {
             Access::Aligned(col) => {
-                let p = col.gallop(self.pos[l], key);
-                self.pos[l] = p;
-                (p < col.n() && col.key(p) == key).then(|| col.val(p))
+                let rd = &mut self.readers[l];
+                let p = rd.gallop(rd.pos, key);
+                rd.pos = p;
+                (p < col.n() && rd.key(p) == key).then(|| col.val(p))
             }
             Access::Dense { ctx, proj, pack, vals, has } => {
                 let k = proj.apply(ctx, pack, key) as usize;
@@ -513,9 +560,10 @@ impl Cursor<'_, '_> {
             }
             Access::Search { ctx, proj, pack, col } => {
                 let k = proj.apply(ctx, pack, key);
-                let p = col.seek(self.pos[l], k);
-                self.pos[l] = p;
-                (p < col.n() && col.key(p) == k).then(|| col.val(p))
+                let rd = &mut self.readers[l];
+                let p = rd.seek(rd.pos, k);
+                rd.pos = p;
+                (p < col.n() && rd.key(p) == k).then(|| col.val(p))
             }
         }
     }
@@ -689,22 +737,23 @@ fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &F) -> Vec<(u
         rest = tail;
     }
     let work = |((lo, hi), slice): (&Span, &mut [(u64, f64)])| -> usize {
-        let mut cur = Cursor { access, pos: vec![0; access.len()] };
-        // Aligned の読み出し元は、区間の先頭のキーから読み始める
+        let mut cur = Cursor::new(access);
+        // An Aligned source starts at the first key of the span
         let first = lo.iter().zip(hi).zip(drivers).filter(|((a, b), _)| a < b).map(|((a, _), d)| d.key(*a)).min();
         let Some(first) = first else { return 0 };
         for (l, a) in access.iter().enumerate() {
             if let Access::Aligned(col) = a {
-                cur.pos[l] = col.lower_bound(first);
+                cur.readers[l].pos = col.lower_bound(first);
             }
         }
         let mut at = lo.clone();
+        let mut rds: Vec<Reader> = drivers.iter().map(|&d| Reader::new(d)).collect();
         // The key at `at[j]` while `at[j] < hi[j]`. A packed key read is not free, so read it once.
-        let mut next: Vec<u64> = drivers.iter().zip(&at).zip(hi).map(|((d, &a), &h)| if a < h { d.key(a) } else { 0 }).collect();
+        let mut next: Vec<u64> = rds.iter_mut().zip(&at).zip(hi).map(|((d, &a), &h)| if a < h { d.key(a) } else { 0 }).collect();
         let mut w = 0;
         // The loop takes the next key of the cover (the union of the drivers)
         while let Some(key) = (0..drivers.len()).filter(|&j| at[j] < hi[j]).map(|j| next[j]).min() {
-            for (j, d) in drivers.iter().enumerate() {
+            for (j, d) in rds.iter_mut().enumerate() {
                 if at[j] < hi[j] && next[j] == key {
                     at[j] += 1;
                     if at[j] < hi[j] {
@@ -739,7 +788,7 @@ struct Space<'s, 'a> {
     fill: &'s [(usize, Vec<u32>)],
 }
 
-impl Space<'_, '_> {
+impl<'a> Space<'_, 'a> {
     fn combos(&self) -> usize {
         self.fill.iter().map(|(_, ms)| ms.len()).product()
     }
@@ -748,11 +797,17 @@ impl Space<'_, '_> {
         self.base.as_ref().map_or(1, |(c, _, _)| c.n()) * self.combos()
     }
 
+    /// A reader of the base column (empty without a base).
+    fn reader(&self) -> Reader<'a> {
+        Reader::new(self.base.as_ref().map_or(Col::Cells(&[]), |(c, _, _)| *c))
+    }
+
+    /// The key at `i`. `rd` is `self.reader()`.
     #[inline]
-    fn key(&self, i: usize, combos: usize) -> u64 {
+    fn key(&self, i: usize, combos: usize, rd: &mut Reader) -> u64 {
         let (row, mut c) = (i / combos, i % combos);
         let mut key = match &self.base {
-            Some((col, proj, pack)) => proj.apply(pack, self.out, col.key(row)),
+            Some((_, proj, pack)) => proj.apply(pack, self.out, rd.key(row)),
             None => 0,
         };
         for (pos, ms) in self.fill.iter().rev() {
@@ -774,8 +829,8 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget
     let chunk = cfg.chunk.max(1);
     let parts: Vec<(usize, usize)> = (0..n).step_by(chunk).map(|lo| (lo, (lo + chunk).min(n))).collect();
     let count = |&(lo, hi): &(usize, usize)| {
-        let mut cur = Cursor { access, pos: vec![0; access.len()] };
-        (lo..hi).filter(|&i| cur.eval(f, space.key(i, combos)).is_some()).count()
+        let (mut cur, mut rd) = (Cursor::new(access), space.reader());
+        (lo..hi).filter(|&i| cur.eval(f, space.key(i, combos, &mut rd)).is_some()).count()
     };
     let sizes: Vec<usize> = if cfg.par(n) { parts.par_iter().map(count).collect() } else { parts.iter().map(count).collect() };
     bud.need(sizes.iter().sum::<usize>() + copied, "式の結果")?;
@@ -788,10 +843,10 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget
         rest = tail;
     }
     let write = |(&(lo, hi), slice): (&(usize, usize), &mut [(u64, f64)])| {
-        let mut cur = Cursor { access, pos: vec![0; access.len()] };
+        let (mut cur, mut rd) = (Cursor::new(access), space.reader());
         let mut w = 0;
         for i in lo..hi {
-            let key = space.key(i, combos);
+            let key = space.key(i, combos, &mut rd);
             if let Some(v) = cur.eval(f, key) {
                 slice[w] = (key, v);
                 w += 1;

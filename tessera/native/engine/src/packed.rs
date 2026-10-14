@@ -98,23 +98,44 @@ impl PackedKeys {
         self.blocks[i / BLOCK].key(&self.bytes, i % BLOCK)
     }
 
+    /// Decodes the keys at positions `js` of block `b` into `out`. `out.len()` must equal `js.len()`.
+    /// The loop has no per-key branch or table load, so it is much faster than `get` per key.
+    pub(crate) fn decode(&self, b: usize, js: Range<usize>, out: &mut [u64]) {
+        let blk = self.blocks[b];
+        let width = blk.width as usize;
+        debug_assert!(js.end <= BLOCK && js.len() == out.len());
+        if width == 0 {
+            out.fill(blk.base);
+            return;
+        }
+        let bytes = &self.bytes[blk.start as usize * 8..];
+        macro_rules! dispatch {
+            ($($w:literal)*) => {
+                match width {
+                    $($w => unpack::<$w>(blk.base, bytes, js, out),)*
+                    _ => {
+                        for (o, j) in out.iter_mut().zip(js) {
+                            let bit = j * width;
+                            let w = u128::from_le_bytes(bytes[bit / 8..bit / 8 + 16].try_into().unwrap());
+                            *o = blk.base + ((w >> (bit % 8)) as u64 & MASKS[width]);
+                        }
+                    }
+                }
+            };
+        }
+        dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32
+            33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56);
+    }
+
     /// The keys at the indexes in `r`, in order. It decodes block by block, so it is faster than `get`.
-    pub(crate) fn range(&self, r: Range<usize>) -> impl Iterator<Item = u64> + '_ {
+    pub(crate) fn range(&self, r: Range<usize>) -> Keys<'_> {
         debug_assert!(r.end <= self.len);
-        let (lo, hi) = (r.start, r.end);
-        (lo / BLOCK..hi.div_ceil(BLOCK)).flat_map(move |b| {
-            let blk = self.blocks[b];
-            (lo.max(b * BLOCK)..hi.min((b + 1) * BLOCK)).map(move |i| blk.key(&self.bytes, i % BLOCK))
-        })
+        Keys { keys: self, i: r.start, end: r.end, decode_at: r.start, buf: [0; BLOCK] }
     }
 
     /// The keys in order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.range(0..self.len)
-    }
-
-    pub(crate) fn par_iter(&self) -> impl IndexedParallelIterator<Item = u64> + '_ {
-        (0..self.len).into_par_iter().map(move |i| self.get(i))
     }
 
     /// The first index whose key does not satisfy `pred`. `pred` must be true for a prefix of the keys.
@@ -154,6 +175,71 @@ impl PackedKeys {
     }
 }
 
+/// The iterator of `range`. It decodes one block at a time into `buf`.
+pub(crate) struct Keys<'a> {
+    keys: &'a PackedKeys,
+    i: usize,
+    end: usize,
+    decode_at: usize, // the first index that is not yet in `buf`
+    buf: [u64; BLOCK],
+}
+
+impl Iterator for Keys<'_> {
+    type Item = u64;
+
+    #[inline]
+    fn next(&mut self) -> Option<u64> {
+        if self.i >= self.end {
+            return None;
+        }
+        let j = self.i % BLOCK;
+        if self.i == self.decode_at {
+            // Decode the rest of the block, but not past `end`.
+            let hi = (self.end - (self.i - j)).min(BLOCK);
+            self.keys.decode(self.i / BLOCK, j..hi, &mut self.buf[j..hi]);
+            self.decode_at = self.i - j + hi;
+        }
+        self.i += 1;
+        Some(self.buf[j])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.end - self.i;
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for Keys<'_> {}
+
+/// Decodes `out[i] = base + offset(js.start + i)` for a width `W` of 1 to 56 bits. The width is a
+/// constant, so the compiler unrolls each group of 8 keys (`W` bytes) with fixed shifts.
+fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, out: &mut [u64]) {
+    let mask = MASKS[W];
+    let one = |j: usize| {
+        let bit = j * W;
+        base + ((u64::from_le_bytes(bytes[bit / 8..bit / 8 + 8].try_into().unwrap()) >> (bit % 8)) & mask)
+    };
+    let (mut j, end) = (js.start, js.end);
+    let mut out = out;
+    while j % 8 != 0 && j < end {
+        out[0] = one(j);
+        out = &mut out[1..];
+        j += 1;
+    }
+    while j + 8 <= end {
+        let g = &bytes[j / 8 * W..j / 8 * W + W + 8];
+        for (l, o) in out[..8].iter_mut().enumerate() {
+            let bit = l * W;
+            *o = base + ((u64::from_le_bytes(g[bit / 8..bit / 8 + 8].try_into().unwrap()) >> (bit % 8)) & mask);
+        }
+        out = &mut out[8..];
+        j += 8;
+    }
+    for (o, j) in out.iter_mut().zip(j..end) {
+        *o = one(j);
+    }
+}
+
 /// Packs `chunk` into `out`, the bytes of the block `blk`.
 fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
     let width = blk.width as usize;
@@ -182,7 +268,6 @@ mod tests {
             let p = PackedKeys::new(keys, par);
             assert_eq!(p.len(), keys.len());
             assert_eq!(p.iter().collect::<Vec<_>>(), keys);
-            assert_eq!(p.par_iter().collect::<Vec<_>>(), keys);
             for (i, &k) in keys.iter().enumerate() {
                 assert_eq!(p.get(i), k);
             }
@@ -284,8 +369,14 @@ mod tests {
         time("packed sequential get", &|| (0..n).map(|i| p.get(i)).fold(0, u64::wrapping_add));
         time("vec iter", &|| keys.iter().fold(0, |a, &k| a.wrapping_add(k)));
         time("packed iter", &|| p.iter().fold(0, u64::wrapping_add));
-        time("vec par_iter", &|| keys.par_iter().map(|&k| k).reduce(|| 0, u64::wrapping_add));
-        time("packed par_iter", &|| p.par_iter().reduce(|| 0, u64::wrapping_add));
+        time("packed block decode", &|| {
+            let mut buf = [0u64; BLOCK];
+            (0..n.div_ceil(BLOCK)).fold(0, |a, b| {
+                let m = BLOCK.min(n - b * BLOCK);
+                p.decode(b, 0..m, &mut buf[..m]);
+                a.wrapping_add(buf[m - 1])
+            })
+        });
         time("packed new (par)", &|| PackedKeys::new(&keys, true).len() as u64);
     }
 }

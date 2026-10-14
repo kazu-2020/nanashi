@@ -105,32 +105,35 @@ impl Store {
         let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|k| k < h));
         let upper = hi.map_or(Bound::Unbounded, Bound::Excluded);
         let mut delta = self.delta.range((Bound::Included(lo), upper)).peekable();
-        let mut base = self.base.keys.range(start..end).peekable();
+        // The base keys are decoded one block at a time into `buf`, so the merge loop reads a plain array.
+        let mut buf = [0u64; BLOCK];
         let mut i = start;
-        loop {
-            match (base.peek().copied(), delta.peek().map(|(&k, &v)| (k, v))) {
-                (None, None) => break,
-                (Some(bk), Some((dk, dv))) if dk <= bk => {
-                    delta.next();
-                    if dk == bk {
-                        base.next();
+        while i < end {
+            let j = i % BLOCK;
+            let block_end = (i - j + BLOCK).min(end);
+            self.base.keys.decode(i / BLOCK, j..j + (block_end - i), &mut buf[j..j + (block_end - i)]);
+            while i < block_end {
+                let bk = buf[i % BLOCK];
+                match delta.peek() {
+                    Some(&(&dk, &dv)) if dk <= bk => {
+                        delta.next();
+                        if dk == bk {
+                            i += 1;
+                        }
+                        if let Some(v) = dv {
+                            f(dk, v);
+                        }
+                    }
+                    _ => {
+                        f(bk, self.base.vals[i]);
                         i += 1;
                     }
-                    if let Some(v) = dv {
-                        f(dk, v);
-                    }
                 }
-                (Some(bk), _) => {
-                    f(bk, self.base.vals[i]);
-                    base.next();
-                    i += 1;
-                }
-                (None, Some((dk, dv))) => {
-                    delta.next();
-                    if let Some(v) = dv {
-                        f(dk, v);
-                    }
-                }
+            }
+        }
+        for (&dk, &dv) in delta {
+            if let Some(v) = dv {
+                f(dk, v);
             }
         }
     }
@@ -197,11 +200,20 @@ impl Store {
 
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
-            let cells = if self.cfg.par(self.base.keys.len()) {
-                self.base.keys.par_iter().zip(self.base.vals.par_iter().copied()).collect()
-            } else {
-                self.base.keys.iter().zip(self.base.vals.iter().copied()).collect()
+            // Each block is decoded once into a local buffer, in parallel on a large base.
+            let mut cells = vec![(0u64, 0f64); self.base.keys.len()];
+            let fill = |(b, out): (usize, &mut [(u64, f64)])| {
+                let mut buf = [0u64; BLOCK];
+                self.base.keys.decode(b, 0..out.len(), &mut buf[..out.len()]);
+                for ((c, &k), &v) in out.iter_mut().zip(&buf).zip(&self.base.vals[b * BLOCK..]) {
+                    *c = (k, v);
+                }
             };
+            if self.cfg.par(cells.len()) {
+                cells.par_chunks_mut(BLOCK).enumerate().for_each(fill);
+            } else {
+                cells.chunks_mut(BLOCK).enumerate().for_each(fill);
+            }
             return Cube { pack: self.pack.clone(), kind: self.kind, cells };
         }
         let mut cells = Vec::new();
