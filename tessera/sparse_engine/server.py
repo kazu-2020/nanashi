@@ -757,7 +757,7 @@ def main(argv=None) -> None:
     ap.add_argument("--max-body", type=int, default=16 << 20, help="本文の上限（バイト）")
     ap.add_argument("--max-cells", type=int, default=100_000, help="slice、rows、summary で返すセルの上限")
     ap.add_argument("--max-threads", type=int, default=64, help="同時に処理する要求の上限（超えたら 503）")
-    ap.add_argument("--max-bytes", type=int, help="Rust のエンジンで、1 つの式の評価が持つ途中結果の上限（バイト）")
+    ap.add_argument("--max-bytes", type=int, help="Rust のエンジンで、1 つの処理が持つ格納データと途中結果の合計の上限（バイト）")
     ap.add_argument("--follow", action="store_true",
                     help="書き込まず、記録先に追従する読み出し専用のサーバーにする（読み手を増やすとき）")
     ap.add_argument("--advertise", metavar="URL",

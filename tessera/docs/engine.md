@@ -87,6 +87,6 @@ The formula of that Metric must be a chain of `+`, `-`, `*`, `/` and `COALESCE` 
 It evaluates each operand one time for all periods in the range. Then it calculates the chain for each key along the time dimension and writes all periods back one time.
 Each cell gets the same operations in the same order as in the evaluation for each period. Thus, the result is the same bit for bit.
 The engine does not use this path if an operand has an aggregation, because an aggregation of all periods can add the values in a different order.
-If the operands of all periods do not fit in the memory budget (`max_bytes`), the engine evaluates one period at a time.
+If the operands of all periods do not fit in the memory budget (`max_bytes`, stored data and intermediate results), the engine evaluates one period at a time.
 In the reference implementation, Python (`Model.recalc`) does the same schedule.
 Tests match the two results. This makes sure that the Rust schedule gives the same result as the Python schedule.
