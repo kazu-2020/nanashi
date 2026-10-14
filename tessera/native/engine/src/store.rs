@@ -38,6 +38,12 @@ pub struct Mem {
     pub index: usize,      // 分割軸以外の軸の索引（バイト）
 }
 
+impl Mem {
+    pub fn bytes(&self) -> usize {
+        self.base + self.delta + self.index
+    }
+}
+
 /// The base of a Store. Nothing changes it after it is made.
 ///
 /// The keys are packed in frame-of-reference blocks (`PackedKeys`). The values are an immutable column

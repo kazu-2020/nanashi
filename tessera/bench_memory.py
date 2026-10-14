@@ -1,13 +1,14 @@
-"""メモリの内訳を測る。損益計画をスナップショットから開き、全体を計算し直す間の最大と、計算し直した後に
-持ち続けるメモリを、格納データ（本体、差分、索引、差分集計の件数）とそれ以外に分ける。
+"""Measure the parts of the memory. Open the profit and loss plan from a snapshot and recalculate all of it.
+Show the maximum during the recalculation and the memory that stays after it. Divide each value into the stored
+data (the main values, the deltas, the indexes, and the counts of the delta aggregation) and the other memory.
 
-    python bench_memory.py                   # 損益計画（大）の 1 倍、2 倍、4 倍
+    python bench_memory.py                   # the profit and loss plan (large) at 1x, 2x and 4x
     python bench_memory.py --scales 1
 
-測るのは次の 3 つで、それぞれ別のプロセスで開き直して測る。
-- Rust のヒープ（nanashi_core.track_heap と heap）: Rust の側で確保している量。格納データと計算の途中結果
-- プロセスの RSS: Python のオブジェクトと、アロケータが解放後も抱えている分を含む
-- 式ごとの途中結果: Metric を 1 つずつ評価したときのヒープの最大と、結果の大きさの比
+The script measures these 3 values. It opens the model again in a new process for each value.
+- The Rust heap (nanashi_core.heap): the memory that Rust allocates. This is the stored data and the intermediate results of the calculation.
+- The process RSS: this includes the Python objects and the memory that the allocator keeps after a release.
+- The intermediate results of each formula: evaluate each Metric one at a time, and compare the maximum heap with the size of the result.
 """
 from __future__ import annotations
 
@@ -48,15 +49,16 @@ def child(path: str, per_formula: bool) -> dict:
     from sparse_engine import Named, to_formula
     from sparse_engine.rust_engine import RustEngine
 
-    nanashi_core.track_heap(True)  # モデルを作る前に数え始める
+    start = nanashi_core.heap()[0]
     out: dict = {"rss_start": rss()}
     m = Named.load(path, RustEngine())
-    out["heap_loaded"], out["rss_loaded"] = nanashi_core.heap()[0], rss()
+    out["heap_loaded"], out["rss_loaded"] = nanashi_core.heap()[0] - start, rss()
     nanashi_core.reset_heap_peak()
     t = time.perf_counter()
     m.refresh()
     out["recalc_ms"] = 1e3 * (time.perf_counter() - t)
-    out["heap_now"], out["heap_peak"] = nanashi_core.heap()
+    now, peak = nanashi_core.heap()
+    out["heap_now"], out["heap_peak"] = now - start, peak - start
     out["rss_now"], out["rss_max"] = rss(), max_rss()
 
     mem = m.memory()
