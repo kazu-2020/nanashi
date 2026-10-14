@@ -221,10 +221,9 @@ pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Cat
     Ok(aggregate_rows(rows, out, aggs, cat, r, move |xp, out, k| Some(proj.apply(xp, out, k))))
 }
 
-/// Aggregate rows into the groups (packed as out) that key gives for (row packing, out, row key). r is the range
-/// of the result. The paths are the array of all group combinations, the hash map, and the sort, in this order.
-/// The array is 2 to 3 times faster than the hash map for the same rows (docs/performance.md). The array ignores
-/// r, so if r narrows the groups, or with stream_always, try the hash map before the array.
+/// key gives the group key (packed as out) from (row packing, out, row key). r is the range of the result.
+/// The array path is 2 to 3 times faster than the hash map (docs/performance.md), but it ignores r. Thus if r
+/// narrows the groups, or with stream_always, the hash map goes first.
 pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catalog, r: &Restrict, key: impl Fn(&Packing, &Packing, u64) -> Option<u64> + Sync) -> Vec<Cube> {
     let cfg = &cat.cfg;
     let xp = rows.pack();

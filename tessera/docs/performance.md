@@ -223,7 +223,7 @@ In a production environment (with writes to the disk and network round trips), w
 ### Aggregation into an array before the hash map
 
 Before this change, the engine tried the hash map path first and the array path second. In the retail model, `StoreRev = Revenue[REMOVE SUM: Product]` has 36,000 targets, which is few for 17.56 million rows, so it used the hash map. The array for 36,000 targets is 1 MB a thread. Now the engine tries the array first ([Engine](engine.md)). An incremental recalculation on a narrowed range keeps the old order, because the array ignores the range.
-We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.80 GHz) with `bench_ab.py`, retail xlarge, median of 5 alternating runs, minimum–maximum in parentheses. The result `Total` is bit-identical on both sides, because both paths use the exact sum.
+We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.80 GHz) with `bench_ab.py` and retail xlarge. Each value is the median of 5 alternating runs, with the minimum–maximum in parentheses. The result `Total` is bit-identical on both sides, because both paths use the exact sum.
 
 | Measurement | Before | After |
 |---|---|---|
@@ -231,7 +231,7 @@ We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.80 GHz) with `bench_ab.p
 | Full recalculation after the edits | 3,083 ms (2,780–3,443) | 2,968 ms (2,838–3,221) |
 | Maximum increase of the heap | 1,194 MB | 1,194 MB |
 
-The ranges of the full recalculation overlap, so the change is inside the noise of this VM. The evaluation of one Metric shows the change (median of 5 evaluations after a full recalculation, 2 runs for each side with 4 threads, 1 run with 1 thread):
+The ranges of the full recalculation overlap, so the change is inside the noise of this VM. The evaluation of one Metric shows the change. Each value is the median of 5 evaluations after a full recalculation. We did 2 runs for each side with 4 threads and 1 run with 1 thread.
 
 | Formula | Path before → after | 4 threads, before | 4 threads, after | 1 thread, before | 1 thread, after |
 |---|---|---|---|---|---|
@@ -239,7 +239,7 @@ The ranges of the full recalculation overlap, so the change is inside the noise 
 | `Revenue[REMOVE SUM: Store]` (360 thousand targets) | array (1 thread: hash map → array) | 99–114 ms | 85–102 ms | 578 ms | 270 ms |
 | `Revenue[BY SUM: Product.Category]` (1.8 million targets) | array | 578–580 ms | 564–566 ms | 1,473 ms | 1,537 ms |
 
-With 1 thread, the full recalculation went from 6,550 ms to 6,001 ms (1 run each). The hash map path was 22% of the 1-thread time before the change (callgrind, `fold_groups` 33% of the instructions), so this is the upper limit of the gain.
+With 1 thread, the full recalculation went from 6,550 ms to 6,001 ms (1 run each). Before the change, the hash map path (`fold_groups`) was 22% of the 1-thread time. Thus 22% is the upper limit of the gain.
 
 ## Save and journal formats
 
