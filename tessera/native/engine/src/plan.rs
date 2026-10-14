@@ -559,9 +559,9 @@ fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
     out
 }
 
-/// Add held to each share because the Budget subtracts it again.
+/// Add held to each share because the Budget subtracts it again. Never more than max, so held data over max is an error.
 fn share(max: usize, held: usize, n: usize) -> usize {
-    held.saturating_add(max.saturating_sub(held) / n)
+    held.saturating_add(max.saturating_sub(held) / n).min(max)
 }
 
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
@@ -724,8 +724,10 @@ impl<'a> Run<'a> {
                 self.slice(t.m, &t.region)
             }
         });
+        // A slice of old is a new copy, so count it (the same rule as Done::bytes)
+        let held = if t.region.is_all() { held } else { held.saturating_add(crate::held(&old)) };
         let delta = match (&metric.delta, t.delta) {
-            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::new(limit, held))?,
+            (Some(d), true) => self.compute_delta(t.m, d, &t.region, limit, held)?,
             _ => None,
         };
         let delta_used = delta.is_some();
@@ -826,7 +828,7 @@ impl<'a> Run<'a> {
     /// one ExactSum for each group. Thus the result has the same bits as a full evaluation. If a residual is not
     /// one f64 (NaN), returns None, and the caller calculates the region again.
     #[allow(clippy::type_complexity)]
-    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, b: &Budget) -> Result<Option<(Cube, Option<Cube>, Option<Cube>)>> {
+    fn compute_delta(&self, m: usize, d: &Delta, region: &Reg, limit: usize, held: usize) -> Result<Option<(Cube, Option<Cube>, Option<Cube>)>> {
         let cat = self.cat;
         let all = Restrict::all(cat.dims.len());
         let range = self.delta_range(d).expect("変更範囲").restrict(cat);
@@ -847,6 +849,8 @@ impl<'a> Run<'a> {
             work.push(Src::Store(Arc::new(new)));
             work.push(Src::Store(old));
         }
+        // The slices in work stay until the end, so the budget counts them
+        let b = &Budget::new(limit, held.saturating_add(crate::held(&work)));
         let r = region.restrict(cat);
         let store = &self.stores[m];
         let cube = |c: Cube| Src::Cube(Arc::new(c));
@@ -984,7 +988,7 @@ mod tests {
         assert_eq!(limit, 700);
         assert!(b.need(300 / CELL_BYTES, "x").is_ok());
         assert!(b.need(300 / CELL_BYTES + 1, "x").is_err());
-        assert_eq!(share(100, 400, 2), 400);
+        assert_eq!(share(100, 400, 2), 100);
     }
 
     #[test]
@@ -1019,5 +1023,23 @@ mod tests {
         let changed = vec![(0, all()), (4, all())];
         recalc(&cat, &plan, &mut stores, &mut vec![None; 5], &mut vec![None; 5], changed, &[], vec![], vec![], true).unwrap();
         assert_eq!(stores[2].rows_hint(), 1000);
+    }
+
+    #[test]
+    fn stored_data_over_the_budget_is_an_error_also_for_an_empty_result() {
+        let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
+        let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg: crate::Config::default() };
+        let store = |n: u32| {
+            let keys: Vec<u32> = (0..n).collect();
+            Arc::new(Store::new(&[0], None, Kind::Num, &start).unwrap().with_rows(&[&keys], &vec![1.0; n as usize]).unwrap())
+        };
+        let mut stores = vec![store(0), store(0), store(10)];
+        let input = || Metric { formula: None, delta: None, source: false };
+        let copy = Metric { formula: Some(Formula { node: Arc::new(Node::Ref(0)), refs: vec![0] }), delta: None, source: false };
+        let plan = Plan { metrics: vec![input(), copy, input()], levels: vec![vec![Step::One(1)]] };
+        let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held(&src) - 1, ..crate::Config::default() } };
+        let changed = vec![(0, Reg::new(vec![]))];
+        assert!(recalc(&cat, &plan, &mut stores, &mut vec![None; 3], &mut vec![None; 3], changed, &[], vec![], vec![], true).is_err());
     }
 }
