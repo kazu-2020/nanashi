@@ -545,7 +545,7 @@ mod tests {
         let cond = Node::Bin(Op::Gt, Box::new(Node::Ref(0)), Box::new(Node::Const(5.0, Kind::Num)), vec![]);
         let branch = Node::If(Box::new(cond), Box::new(Node::Ref(0)), Some(Box::new(Node::Ref(0))), vec![]);
         let node = Node::Remove { child: Box::new(branch), dim: 1, agg: Agg::Sum };
-        let got = eval_with(&node, &cat, &src, &Restrict::all(2), &Budget::new(1 << 30)).unwrap();
+        let got = eval_with(&node, &cat, &src, &Restrict::all(2), &Budget::new(1 << 30, 0)).unwrap();
         let out = Packing::new(&[0], &cat).unwrap();
         assert_eq!(got.cells, [(out.put(0, 0), 1.0), (out.put(0, 1), 2.0), (out.put(0, 2), 3.0), (out.put(0, 3), 30.0)]);
     }
