@@ -113,8 +113,8 @@ The default is `http://<host>:<port>`. If the server listens on `0.0.0.0`, `--ad
 `--lease-ttl` sets the lease time (30 seconds by default).
 
 On SIGTERM and SIGINT, the server completes the received requests, commits the writes in the queue, releases the lease, and then stops. (Containers on ECS and similar services stop with SIGTERM.)
-The standby receives the notification, gets the right immediately, and becomes the writer.
-If the server crashes (SIGKILL), the failover occurs after the lease expires, within the interval at which the standby tries to get the right (1 second).
+The standby sees the release at its next poll (0.2 seconds), gets the right, and becomes the writer.
+If the server crashes (SIGKILL), the failover occurs at the next poll after the lease expires.
 
 With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress, the count does not start. If the value is 0 (the default), the server does not stop for this reason.
 

@@ -174,7 +174,12 @@ A standby uses it to tell the client the writer when it refuses a write. The rou
 If the lease is free (no owner, or expired), `journal.take()` gets it without a wait and returns `True`.
 If a different process has the lease and it has not expired, `journal.take()` returns `False`.
 Unlike `acquire`, it does not check the local sequence number. Thus the process that got the lease must catch up to the journal before it writes (promotion of a standby, [Concurrent reads and writes](concurrency.md)).
-`release` sends the same notification as a commit (`NOTIFY nanashi_head`). Thus the standby can try to get the lease without a wait for the interval.
+`journal.wait` reads `head_seq` and the lease state in `nanashi_model` at each `poll_interval` (default 0.2 seconds).
+It returns when `head_seq` changes, or when the lease is released or expires. Thus the standby can try to get the lease without a wait for the interval.
+
+`PgJournal` does not use session state (`LISTEN`/`NOTIFY`, session advisory locks, prepared statements). Thus it works through PgBouncer in transaction pooling mode.
+The router uses pgx, and pgx uses prepared statements by default. If the router connects through PgBouncer, add `default_query_exec_mode=exec` to the router DSN.
+PgBouncer 1.21 or later with `max_prepared_statements` more than 0 also works.
 
 For a change of more than 10 thousand cells, the engine writes the values before and after to 1 Parquet file for each Metric.
 It puts these files in the object storage (`<model ID>/cells/`) and then commits.
