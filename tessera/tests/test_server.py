@@ -18,7 +18,8 @@ from unittest import mock
 
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.named import Named
-from sparse_engine.server import Server, idle_for, main
+from sparse_engine.model import Model
+from sparse_engine.server import Server, SummaryCache, idle_for, main
 from sparse_engine.workspace import Workspace
 
 from .journals import JournalCase, PgStore
@@ -153,6 +154,16 @@ class Api:
         self.assertEqual(self.c.get(path(ws, "Stock", "rows", params="offset=x"))[0], 400)
         self.assertEqual(self.c.get(path(ws, "Stock", "cell", Product="nope", Month="Jan"))[0], 400)  # not a member UUID
         self.assertEqual(self.c.get(path(ws, "Stock", "cell", Color="p1", Month="Jan"))[0], 400)
+
+    def test_summary_after_a_write_shows_the_new_version(self):
+        total = lambda: self.cells("Stock", "summary", Product="p1")
+        with mock.patch.object(Model, "summarize", autospec=True, side_effect=Model.summarize) as summarize:
+            self.assertEqual(total(), [[400.0]])
+            self.assertEqual(total(), [[400.0]])
+        self.assertEqual(summarize.call_count, 1)
+        body = {"client_op_id": "sum-1", "ops": [write(self.ws, "Stock", 1.0, Product="p1", Month="Jan")]}
+        self.assertEqual(self.c.post("/writes", body)[0], 200)
+        self.assertEqual(total(), [[301.0]])
 
     def test_member_values_are_uuids(self):
         v = Named(self.ws.version)
@@ -773,6 +784,50 @@ class IdleExit(unittest.TestCase):
             time.sleep(0.5)
         self.assertIsNotNone(proc.poll(), "the probes kept the server alive")
         self.assertEqual(proc.returncode, 0)
+
+
+class Version:
+    def __init__(self, seq: int):
+        self.seq = seq
+
+
+class SummaryCacheTest(unittest.TestCase):
+    def test_calculates_once_for_each_version_and_request(self):
+        cache, calls = SummaryCache(max_size=100), []
+        v1, v2, again = Version(1), Version(2), Version(2)  # again: the seq went back, and came to 2 again
+        get = lambda v, key: cache.get(v, (key,), lambda: calls.append((v.seq, key)) or {"cells": [f"{key}@{v.seq}"]})
+        out = [get(v1, "a"), get(v1, "a"), get(v1, "b"), get(v2, "a"), get(v1, "a"), get(v2, "a"), get(again, "a")]
+        self.assertEqual([o["cells"][0] for o in out], ["a@1", "a@1", "b@1", "a@2", "a@1", "a@2", "a@2"])
+        self.assertEqual(calls, [(1, "a"), (1, "b"), (2, "a"), (1, "a"), (2, "a")])
+
+    def test_drops_the_oldest_results_above_max_size(self):
+        cache, calls, v = SummaryCache(max_size=7), [], Version(1)
+        get = lambda key, n: cache.get(v, (key,), lambda: calls.append(key) or {"cells": [0] * n})  # size n + 1
+        get("a", 2), get("b", 2), get("a", 2), get("c", 2), get("b", 2), get("big", 7), get("big", 7)
+        self.assertEqual(calls, ["a", "b", "c", "b", "big", "big"])  # c pushed out b (a was used later); big never fits
+
+    def test_clients_that_ask_at_the_same_time_share_one_calculation(self):
+        cache, v, release, calls = SummaryCache(max_size=10), Version(1), threading.Event(), []
+
+        def compute():
+            calls.append(1)
+            release.wait(5)
+            return {"cells": []}
+
+        threads = [threading.Thread(target=lambda: cache.get(v, ("k",), compute)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.2)  # let all 4 threads reach the cache before the calculation ends
+        release.set()
+        for t in threads:
+            t.join(5)
+        self.assertEqual(calls, [1])
+
+    def test_a_failed_calculation_is_not_kept(self):
+        cache, v = SummaryCache(max_size=10), Version(1)
+        with self.assertRaises(ValueError):
+            cache.get(v, ("k",), lambda: (_ for _ in ()).throw(ValueError("x")))
+        self.assertEqual(cache.get(v, ("k",), lambda: {"cells": [1]}), {"cells": [1]})
 
 
 class ModelHeader(unittest.TestCase):

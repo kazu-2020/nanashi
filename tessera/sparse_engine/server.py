@@ -77,7 +77,10 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections.abc import Iterable
+import weakref
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -491,8 +494,13 @@ class Handler(BaseHTTPRequestHandler):
                         groups *= len(v.dimension(d).members) if c is None else 1 if isinstance(c, str) else len(c)
                 if groups > limit:
                     raise ApiError(413, "too_large", f"集計の結果が最大 {groups:,} 件になり、上限 {limit:,} を超える")
-                cube = v.summarize(m.id, coords, keep=keep, agg=query.get("agg", ["sum"])[0])
-                return 200, {"seq": v.seq, **_cube_out(cube)}
+                agg = query.get("agg", ["sum"])[0]
+                key = (m.id, agg, len(keep), *keep)
+                for d, x in sorted(coords.items()):
+                    xs = x if isinstance(x, list) else [x]
+                    key += (d, len(xs), *xs)
+                out = self.server.summaries.get(v, key, lambda: _cube_out(v.summarize(m.id, coords, keep=keep, agg=agg)))
+                return 200, {"seq": v.seq, **out}
         raise ApiError(404, "not_found", f"{url.path} はない")
 
     # ------------------------------------------------ 書き込み
@@ -625,6 +633,72 @@ def stats_text(ws) -> str:
     return "\n".join(out) + "\n"
 
 
+class SummaryCache:
+    """The results of summary reads of the published version, up to max_size in total.
+
+    Nothing changes a published version, so a result stays correct while that version is published.
+    A read of a different, newer version removes all entries. A read of an older version does not use the cache.
+    If many clients ask for the same summary at the same time, only 1 of them calculates it.
+    The size of an entry is its number of cells plus the length of its key.
+    """
+
+    def __init__(self, max_size: int):
+        self.max_size = max_size
+        self._lock = threading.Lock()
+        self._version: weakref.ref | None = None  # weak, so that the cache does not keep an old version alive
+        self._seq = -1
+        self._done: OrderedDict[tuple, tuple[dict, int]] = OrderedDict()  # key -> (result, size), oldest first
+        self._size = 0
+        self._running: dict[tuple, Future] = {}
+
+    def get(self, version, key: tuple, compute: Callable[[], dict]) -> dict:
+        with self._lock:
+            if version.seq < self._seq:
+                future = None
+            else:
+                if self._version is None or self._version() is not version:
+                    self._version, self._seq, self._size = weakref.ref(version), version.seq, 0
+                    self._done.clear()
+                    self._running = {}
+                if (hit := self._done.get(key)) is not None:
+                    self._done.move_to_end(key)
+                    return hit[0]
+                future = self._running.get(key)
+                if future is not None:
+                    owner = False
+                else:
+                    future = self._running[key] = Future()
+                    owner = True
+        if future is None:
+            return compute()
+        if not owner:
+            return future.result()
+        entry = None
+        try:
+            result = compute()
+            entry = (result, len(result["cells"]) + len(key))
+            future.set_result(result)
+            return result
+        except BaseException as e:
+            future.set_exception(e)
+            raise
+        finally:
+            self._finish(version, key, future, entry)
+
+    def _finish(self, version, key: tuple, future: Future, entry: tuple[dict, int] | None) -> None:
+        """Keep the result and remove the running entry together, so that no client starts a second calculation."""
+        with self._lock:
+            if self._running.get(key) is future:
+                del self._running[key]
+            if entry is None or self._version is None or self._version() is not version or entry[1] > self.max_size:
+                return
+            self._done[key] = entry
+            self._size += entry[1]
+            while self._size > self.max_size:
+                _, (_, old) = self._done.popitem(last=False)
+                self._size -= old
+
+
 class Server(ThreadingHTTPServer):
     """An HTTP server that publishes a Workspace. Run serve_forever in a different thread, or use start().
     To open the workspace after the server binds its address, give None and set it before serve_forever.
@@ -653,6 +727,7 @@ class Server(ThreadingHTTPServer):
         self.max_body, self.max_cells, self.request_timeout = max_body, max_cells, request_timeout
         self.model_id = model_id  # with a PgJournal: refuse requests that X-Nanashi-Model sends for another model
         self._slots = threading.BoundedSemaphore(max_threads)
+        self.summaries = SummaryCache(max_cells)
         self._thread: threading.Thread | None = None
         # Connections in progress (probes too) and the monotonic time of the last use (probes not).
         self._active, self._last, self._use = 0, time.monotonic(), threading.Lock()
