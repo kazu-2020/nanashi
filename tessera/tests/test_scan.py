@@ -5,6 +5,8 @@ import unittest
 from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
 
+from .test_failures import stored_bytes
+
 try:
     from sparse_engine.rust_engine import RustEngine
 except ImportError:  # nanashi_core is not built
@@ -57,12 +59,15 @@ class MatchesReference(unittest.TestCase):
         products = [f"p{i:03d}" for i in range(200)]
         values = {(p, mo): float(i % 7) / 3 for i, (p, mo) in enumerate((p, mo) for p in products for mo in MONTHS)}
         results = []
-        for engine in (ReferenceEngine(), RustEngine(max_bytes=32 << 10)):
+        for engine in (ReferenceEngine(), RustEngine()):
             m = Named(Model(engine=engine))
             m.add_dimension("Product", products)
             m.add_dimension("Month", MONTHS, ordered=True)
             m.add_input("A", ["Product", "Month"], values)
             m.add_formula("Stock", ["Product", "Month"], "PREVIOUS(Month) * 0.9 + A + A")
+            if engine.name == "rust":
+                # The stored data also counts against max_bytes, so the intermediates get 32 KiB on top of it
+                engine.core.configure(max_bytes=stored_bytes(m) + (32 << 10))
             results.append(m.value("Stock").cells)
         self.assertEqual(results[1], results[0])
 

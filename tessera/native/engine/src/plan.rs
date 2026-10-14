@@ -465,6 +465,16 @@ enum Write {
     Part(Cube),                          // 範囲の中の新しい値
 }
 
+impl Write {
+    fn bytes(&self) -> usize {
+        match self {
+            Write::Whole(cells, _) => cells.capacity(),
+            Write::Part(c) => c.cells.capacity(),
+        }
+        .saturating_mul(CELL_BYTES)
+    }
+}
+
 struct Done {
     m: usize,
     region: Reg,
@@ -473,6 +483,13 @@ struct Done {
     count: Option<Write>, // 差分集計する SUM の、各グループの件数（Whole の範囲は使わない）
     low: Option<Write>,   // the residual of each group of an incremental SUM (cells that are not 0)
     old: Option<Src>,     // 書き戻す前の値（下流の差分集計の集計元なら）
+}
+
+impl Done {
+    /// The bytes of the values that wait for apply.
+    fn bytes(&self) -> usize {
+        [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum()
+    }
 }
 
 /// 値が変わった範囲がセル全体のこの割合以上なら、全体が変わったものとして下流へ伝える
@@ -540,6 +557,12 @@ fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
     out
 }
 
+/// The limit of each of n tasks that run together: the held bytes plus an equal part of the room that they leave.
+/// The Budget adds held again to the intermediates, so each task gets (max - held) / n for them.
+fn share(max: usize, held: usize, n: usize) -> usize {
+    held.saturating_add(max.saturating_sub(held) / n)
+}
+
 /// 差分再計算。changed は入力の変更範囲、olds は差分集計の集計元になる入力の変更前の値、
 /// forced は定義を変えたので必ず計算し直す計算 Metric の範囲。stores と counts（Metric の番号順）は
 /// その場で書き換える。lows (the residual stores, in Metric number order) also change in place.
@@ -602,22 +625,28 @@ impl<'a> Run<'a> {
         let weight: usize = tasks.iter().map(|t| t.weight).sum();
         let run: &Self = self;
         let max = self.cat.cfg.max_bytes;
-        let done: Vec<Result<Done>> = if tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min) {
-            // 並列に計算する仕事は、メモリの予算を等分して持つ。見積もりが等分した額に収まる仕事だけを
-            // 一度に並べ、収まらない仕事は予算をすべて持って 1 つずつ計算する
-            let mut done = Vec::with_capacity(tasks.len());
-            for wave in waves(&tasks, max) {
-                if wave.len() == 1 {
-                    done.push(run.compute(wave[0], max));
-                } else {
-                    let share = max / wave.len();
-                    done.extend(wave.par_iter().map(|t| run.compute(t, share)).collect::<Vec<_>>());
-                }
-            }
-            done
+        let held = self.held();
+        // The finished values wait for apply until the level ends, so each later task has less room
+        let mut pending = 0;
+        let mut done: Vec<Result<Done>> = Vec::with_capacity(tasks.len());
+        let groups = if tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min) {
+            // In parallel, the tasks of a wave share the room that the held data leaves. A task whose estimate
+            // is more than an equal share runs alone with all the room
+            waves(&tasks, max.saturating_sub(held))
         } else {
-            tasks.iter().map(|t| run.compute(t, max)).collect()
+            tasks.iter().map(|t| vec![t]).collect()
         };
+        for wave in groups {
+            let held = held.saturating_add(pending);
+            let limit = share(max, held, wave.len());
+            let out: Vec<Result<Done>> = if wave.len() == 1 {
+                vec![run.compute(wave[0], limit, held)]
+            } else {
+                wave.par_iter().map(|t| run.compute(t, limit, held)).collect()
+            };
+            pending = out.iter().flatten().fold(pending, |p, d| p.saturating_add(d.bytes()));
+            done.extend(out);
+        }
         for d in done {
             self.apply(d?)?;
         }
@@ -625,6 +654,13 @@ impl<'a> Run<'a> {
             self.scan_step(dim, names)?;
         }
         Ok(())
+    }
+
+    /// The bytes of the stored data that the run holds: the stores, the counts, the residuals and the old values.
+    fn held(&self) -> usize {
+        let stores = self.stores.iter().chain(self.counts.iter().flatten()).chain(self.lows.iter().flatten());
+        let src: Vec<Src> = stores.map(|s| Src::Store(s.clone())).chain(self.olds.iter().flatten().cloned()).collect();
+        crate::held(&src)
     }
 
     fn env(&self) -> Env<'_> {
@@ -675,8 +711,9 @@ impl<'a> Run<'a> {
         Some(Task { m, region, delta, weight })
     }
 
-    /// 計算する（格納データは読むだけなので、同じ段の Metric を並列に計算できる）。limit はメモリの予算。
-    fn compute(&self, t: &Task, limit: usize) -> Result<Done> {
+    /// Calculate the task. It only reads the stored data, so the Metrics of one level can calculate in parallel.
+    /// limit is the memory budget, and held is the part of it that the run holds already.
+    fn compute(&self, t: &Task, limit: usize, held: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
         // 集計元なら、書き戻す前の値を下流の差分集計のために取っておく。全体を計算し直すなら、
@@ -689,14 +726,14 @@ impl<'a> Run<'a> {
             }
         });
         let delta = match (&metric.delta, t.delta) {
-            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::new(limit))?,
+            (Some(d), true) => self.compute_delta(t.m, d, &t.region, &Budget::with_held(limit, held))?,
             _ => None,
         };
         let delta_used = delta.is_some();
         let (value, count, low) = match delta {
             Some(done) => done,
             None => {
-                let (r, b) = (t.region.restrict(self.cat), Budget::new(limit));
+                let (r, b) = (t.region.restrict(self.cat), Budget::with_held(limit, held));
                 match metric.delta.as_ref().map(|d| &d.method) {
                     Some(Method::OnePass { .. }) => {
                         let [value, count, low] = self.sums(self.formula(t.m), None, &r, &b)?;
@@ -880,9 +917,10 @@ impl<'a> Run<'a> {
                 self.stores[*n] = Arc::new(self.stores[*n].empty_like());
             }
         }
+        let held = self.held();
         // If only one Metric of the scan is active, the other Metrics do not change, thus the operands can read their stored data
         if let [(n, r)] = &active[..] {
-            if self.chain_scan(dim, *n, r)? {
+            if self.chain_scan(dim, *n, r, held)? {
                 self.log.push((*n, false, r.clone()));
                 return Ok(());
             }
@@ -894,7 +932,7 @@ impl<'a> Run<'a> {
                     continue;
                 }
                 let sub = r.set(dim, vec![t]).restrict(self.cat);
-                let value = self.eval(self.formula(*n), None, &sub, &Budget::new(self.cat.cfg.max_bytes))?;
+                let value = self.eval(self.formula(*n), None, &sub, &Budget::with_held(self.cat.cfg.max_bytes, held))?;
                 Arc::make_mut(&mut self.stores[*n]).replace(&sub, &value)?;
             }
         }
@@ -907,7 +945,7 @@ impl<'a> Run<'a> {
     /// Calculate all periods of the range r for the scan Metric n in one pass, and write them back.
     /// The formula must be a chain of +, -, *, / and COALESCE around PREVIOUS.
     /// Return false if the pass cannot calculate the Metric. Then the per-period path calculates it.
-    fn chain_scan(&mut self, dim: DimId, n: usize, r: &Reg) -> Result<bool> {
+    fn chain_scan(&mut self, dim: DimId, n: usize, r: &Reg, held: usize) -> Result<bool> {
         let f = self.formula(n);
         let Some(links) = chain(&f.node, dim, &|i| f.refs[i] == n) else { return Ok(false) };
         let ts: Vec<u32> = (0..self.cat.dims[dim].size).filter(|&t| r.has(dim, t)).collect();
@@ -921,10 +959,27 @@ impl<'a> Run<'a> {
         };
         let src: Vec<Src> = f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect();
         let rr = r.restrict(self.cat);
-        let b = Budget::new(self.cat.cfg.max_bytes);
+        let b = Budget::with_held(self.cat.cfg.max_bytes, held);
         // An error here also occurs in the per-period path, except a budget error. That path uses less memory
         let Ok(value) = chain_scan(&links, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
         Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tasks_of_a_wave_split_the_room_after_the_held_data() {
+        let limit = share(1000, 400, 2);
+        let b = Budget::with_held(limit, 400);
+        assert_eq!(limit, 700);
+        // Each task has 300 bytes (18 cells) for intermediates, not 500 and not 100
+        assert!(b.need(300 / CELL_BYTES, "x").is_ok());
+        assert!(b.need(300 / CELL_BYTES + 1, "x").is_err());
+        // Held data that is more than max leaves no room
+        assert_eq!(share(100, 400, 2), 400);
     }
 }
