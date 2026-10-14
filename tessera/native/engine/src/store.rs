@@ -357,10 +357,10 @@ impl Store {
         out
     }
 
-    /// 差分を本体にまとめ直す。
+    /// Merge the delta into a new base.
     pub(crate) fn compact(&mut self) {
         let n = self.base.keys.len() + self.delta.len();
-        let (mut keys, mut vals) = (PackedKeys::builder(n), Vec::with_capacity(n));
+        let (mut keys, mut vals) = (PackedKeys::builder(n, self.base.keys.bytes()), Vec::with_capacity(n));
         self.merged(0, None, |k, v| {
             keys.push(k);
             vals.push(v);
@@ -416,7 +416,7 @@ impl Store {
             // array adds to the peak memory. A new cell replaces a kept cell with the same key.
             let cs = checks(&self.pack, r);
             let n = (self.base.keys.len() + self.delta.len() + new.len()).saturating_sub(old.len());
-            let (mut keys, mut vals) = (PackedKeys::builder(n), Vec::with_capacity(n));
+            let (mut keys, mut vals) = (PackedKeys::builder(n, self.base.keys.bytes()), Vec::with_capacity(n));
             let mut push = |(k, v): (u64, f64)| {
                 keys.push(k);
                 vals.push(v);
