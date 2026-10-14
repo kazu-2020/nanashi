@@ -693,6 +693,13 @@ class KeepAlive(unittest.TestCase):
         self.assertEqual((status, headers.get("connection"), json.loads(body)["error"]), (400, "close", "bad_request"))
         self.assertEqual(s.recv(100), b"")
 
+    def test_a_get_with_transfer_encoding_or_two_lengths_is_refused(self):
+        server = self.serve()
+        for extra in (b"Transfer-Encoding: chunked\r\n", b"Content-Length: 0\r\nContent-Length: 9\r\n"):
+            s = self.connect(server)
+            status, headers, _ = exchange(s, b"GET /health HTTP/1.1\r\nHost: x\r\n" + extra + b"\r\n")
+            self.assertEqual((status, headers.get("connection")), (400, "close"))
+
     def test_a_get_with_an_empty_body_keeps_the_connection(self):
         s = self.connect(self.serve())
         for _ in range(2):

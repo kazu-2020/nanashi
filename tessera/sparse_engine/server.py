@@ -437,6 +437,11 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._fail(ApiError(503, "closed", "サーバーは止まるところ"))
             return
+        # Refuse a body that a proxy could frame in a different way, before any route or authentication check.
+        if "Transfer-Encoding" in self.headers or len(set(self.headers.get_all("Content-Length", []))) > 1:
+            self.close_connection = True
+            self._fail(ApiError(400, "bad_request", "Transfer-Encoding と、値の違う Content-Length には対応しない"))
+            return
         if not self.server.begin_request():
             self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
             return
@@ -543,8 +548,6 @@ class Handler(BaseHTTPRequestHandler):
         user = self._user()
         if isinstance(self.server.workspace, Replica):
             raise ApiError(405, "read_only", "このサーバーは記録先に追従する読み出し専用（書き込みは書き手のサーバーへ送る）")
-        if "Transfer-Encoding" in self.headers:  # with Content-Length too, a proxy could split the body differently
-            raise ApiError(400, "bad_request", "Transfer-Encoding には対応しない（Content-Length を使う）")
         length = self.headers.get("Content-Length")
         if length is None:
             raise ApiError(411, "length_required", "Content-Length が要る")
