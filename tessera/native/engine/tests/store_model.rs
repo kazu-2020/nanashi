@@ -88,7 +88,8 @@ fn replace(rng: &mut Rng, cat: &Catalog, s: &mut Store, m: &mut Model, diff: boo
     let mut new = BTreeMap::new();
     for _ in 0..rng.below(30) {
         let k = key(rng);
-        if inside(&r, &k) {
+        // A few cells outside r: they replace the cells with the same key, as inside r
+        if inside(&r, &k) || rng.chance(0.1) {
             new.insert(k, rng.below(100) as f64);
         }
     }

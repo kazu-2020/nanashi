@@ -279,9 +279,13 @@ impl Store {
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let vals: Vec<f64> =
             if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
-        let keys = keys_in_place(cells);
+        self.set_columns(&keys_in_place(cells), vals);
+    }
+
+    /// Make the sorted columns the base and drop the delta.
+    fn set_columns(&mut self, keys: &[u64], vals: Vec<f64>) {
         self.base = Arc::new(Base {
-            keys: PackedKeys::new(&keys, self.cfg.par(keys.len())),
+            keys: PackedKeys::new(keys, self.cfg.par(keys.len())),
             vals: vals.into_boxed_slice(),
             postings: fresh_postings(self.pack.dims.len()),
         });
@@ -393,14 +397,26 @@ impl Store {
     pub(crate) fn write_back(&mut self, r: &Restrict, old: &[u64], new: Vec<(u64, f64)>) {
         let limit = self.cfg.compact_min.max(self.base.keys.len() / 8);
         if self.delta.len() + old.len() + new.len() > limit {
+            // Merge the kept cells and new straight into the key and value columns of the new base.
+            // A new cell replaces a kept cell with the same key.
             let cs = checks(&self.pack, r);
-            let mut kept = Vec::with_capacity(self.base.keys.len() + self.delta.len());
+            let n = (self.base.keys.len() + self.delta.len() + new.len()).saturating_sub(old.len());
+            let (mut keys, mut vals) = (Vec::with_capacity(n), Vec::with_capacity(n));
+            let mut push = |(k, v): (u64, f64)| {
+                keys.push(k);
+                vals.push(v);
+            };
+            let mut new = new.into_iter().peekable();
             self.merged(0, None, |k, v| {
-                if !pass(&self.pack, k, &cs) {
-                    kept.push((k, v))
+                while let Some(c) = new.next_if(|c| c.0 < k) {
+                    push(c);
+                }
+                if !pass(&self.pack, k, &cs) && new.peek().is_none_or(|c| c.0 != k) {
+                    push((k, v));
                 }
             });
-            self.set_sorted(merge_sorted(&kept[..], &new[..], true, |a, b| b.or(a)));
+            new.for_each(push);
+            self.set_columns(&keys, vals);
             return;
         }
         for &k in old {
