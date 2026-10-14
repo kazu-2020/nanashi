@@ -58,7 +58,7 @@ pub(crate) struct Base {
 
 impl Base {
     pub(crate) fn empty(n_dims: usize) -> Arc<Base> {
-        Arc::new(Base { keys: PackedKeys::new(&[], |&k: &u64| k, false), vals: Box::new([]), postings: fresh_postings(n_dims) })
+        Arc::new(Base { keys: PackedKeys::new::<u64>(&[], |&k| k, false), vals: Box::new([]), postings: fresh_postings(n_dims) })
     }
 
     /// The keys are decoded one block at a time (`PackedKeys::range`).
@@ -275,7 +275,7 @@ impl Store {
     }
 
     /// Make the sorted cells the base and drop the delta.
-    /// Use the buffer of `cells` for the keys, so that only one new column is made.
+    /// Use the buffer of `cells` for the values, so that the packed keys are the only new allocation.
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let keys = PackedKeys::new(&cells, |c| c.0, self.cfg.par(cells.len()));
         self.base = Arc::new(Base {
@@ -745,9 +745,9 @@ pub(crate) fn same_set(a: &[DimId], b: &[DimId]) -> bool {
     a.len() == b.len() && a.iter().all(|d| b.contains(d))
 }
 
-/// The standard library collects the keys into the buffer of `cells` (in-place iteration).
+/// The standard library collects the values into the buffer of `cells` (in-place iteration).
 /// It does not promise this, so a test checks it.
-/// The values of the cells. It reuses the buffer of the cells, so it does not allocate a second column.
+/// shortcut: `into_boxed_slice` then shrinks the buffer to half. glibc does this in place; if an allocator copies, keep a Vec.
 fn vals_in_place(cells: Vec<(u64, f64)>) -> Vec<f64> {
     cells.into_iter().map(|c| c.1).collect()
 }

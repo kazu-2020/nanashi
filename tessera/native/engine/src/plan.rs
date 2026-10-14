@@ -459,7 +459,7 @@ struct Task {
 
 /// The values that wait for the write-back. For the whole region, the task makes the new Store itself. It only reads
 /// the old stored data, so the Metrics of one level make their Stores in parallel. A Store with packed keys uses
-/// about half the memory of the cells, so the results of a level wait in the smaller form.
+/// less memory than the cells, so the results of a level wait in the smaller form.
 enum Write {
     Whole(Store, Option<Vec<Vec<u32>>>), // the new Store, and the region of the cells whose values changed
     Part(Cube),                          // the new values in the region
@@ -1013,9 +1013,10 @@ mod tests {
         let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
         let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
         let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
+        let empty = || Write::Part(Cube { pack: store.pack.clone(), kind: Kind::Num, cells: Vec::new() });
         let done = |region: Reg| {
             let old = old_of(&store, &region, &cat);
-            Done { m: 0, region, delta: false, value: Write::Part(Cube { pack: store.pack.clone(), kind: Kind::Num, cells: Vec::new() }), count: None, low: None, old: Some(old) }
+            Done { m: 0, region, delta: false, value: empty(), count: None, low: None, old: Some(old) }
         };
         assert_eq!(done(Reg::new(vec![])).bytes(), 0);
         let part = Reg::new(vec![(0, vec![1])]);
