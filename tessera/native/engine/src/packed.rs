@@ -89,8 +89,10 @@ impl PackedKeys {
         self.len
     }
 
-    /// A builder for about `capacity` keys that pack into about `bytes` bytes.
-    pub(crate) fn builder(capacity: usize, bytes: usize) -> Builder {
+    /// A builder for about `capacity` keys. It reserves the bytes at the density of `like`,
+    /// or 8 B for each key if `like` is empty, so the byte buffer does not grow by doubling.
+    pub(crate) fn builder(capacity: usize, like: &PackedKeys) -> Builder {
+        let bytes = if like.len == 0 { capacity * 8 } else { (like.bytes.len() * capacity).div_ceil(like.len).min(capacity * 8) };
         Builder {
             len: 0,
             blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
@@ -498,7 +500,7 @@ mod tests {
         cases.push(random);
         for keys in cases {
             let want = PackedKeys::new(&keys, false);
-            let mut b = PackedKeys::builder(keys.len(), 0);
+            let mut b = PackedKeys::builder(keys.len(), &want);
             keys.iter().for_each(|&k| b.push(k));
             let got = b.finish();
             assert_eq!(got.len, want.len, "n={}", keys.len());
