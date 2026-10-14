@@ -12,13 +12,13 @@ import (
 var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func TestPlan(t *testing.T) {
-	const boot = 60 * time.Second
+	const boot = 10 * time.Minute // a large model; a lapsed lease still gets bootBudget
 	sec := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Second) }
 	spawned := func(fails int, retryAt time.Time) state {
 		return state{running: true, started: t0, noLeaseSince: t0, fails: fails, retryAt: retryAt}
 	}
-	leased := state{running: true, started: t0} // Leader saw a lease and cleared noLeaseSince
-	lapsed := state{running: true, started: t0, noLeaseSince: sec(300)}
+	leased := state{running: true, started: t0, leased: true} // Leader saw a lease and cleared noLeaseSince
+	lapsed := state{running: true, started: t0, noLeaseSince: sec(300), leased: true}
 	tests := []struct {
 		name   string
 		st     state
@@ -31,7 +31,7 @@ func TestPlan(t *testing.T) {
 		{"no lease after the budget", spawned(0, time.Time{}), t0.Add(boot), kill, state{running: true, started: t0, noLeaseSince: t0, killed: true}},
 		{"lease was held, first leaderless observation", leased, sec(300), none, lapsed},
 		{"no lease for 59 s", lapsed, sec(359), none, lapsed},
-		{"no lease for 60 s", lapsed, sec(360), kill, state{running: true, started: t0, noLeaseSince: sec(300), killed: true}},
+		{"no lease for 60 s", lapsed, sec(360), kill, state{running: true, started: t0, noLeaseSince: sec(300), leased: true, killed: true}},
 		{"crashed, waiting", state{fails: 1, retryAt: sec(1)}, t0, none, state{fails: 1, retryAt: sec(1)}},
 		{"crashed, retry time", state{fails: 1, retryAt: sec(1)}, sec(1), spawn, state{running: true, started: sec(1), noLeaseSince: sec(1), fails: 1, retryAt: sec(1)}},
 		{"crash loop, waiting", state{fails: quietFails, retryAt: sec(4)}, sec(3), failing, state{fails: quietFails, retryAt: sec(4)}},
@@ -97,7 +97,6 @@ func fakeSupervisor(script string) (*Supervisor, *atomic.Int32) {
 	var starts atomic.Int32
 	return &Supervisor{
 		Lease: &resolver{answers: []string{""}},
-		Boot:  time.Minute,
 		Command: func(string) *exec.Cmd {
 			starts.Add(1)
 			return exec.Command("sh", "-c", script)

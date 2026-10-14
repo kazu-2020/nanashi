@@ -48,15 +48,18 @@ func main() {
 	engineDir := flag.String("engine-dir", "../.nanashi-data", "エンジンのデータを置く場所（--tessera と一緒に使う）")
 	engineIdle := flag.Duration("engine-idle", 15*time.Minute, "要求がこの時間ないエンジンは自分で止まる（--tessera と一緒に使う）")
 	engineHost := flag.String("engine-host", "127.0.0.1",
-		"エンジンが待ち受ける番地（--tessera と一緒に使う）。ルーターはこの番地でエンジンにつなぐ。0.0.0.0 は使えない")
+		"エンジンが待ち受ける番地（--tessera と一緒に使う）。ルーターはこの番地でエンジンにつなぐ。0.0.0.0 と IPv6 の番地は使えない")
 	var engineTrusted []string
 	flag.Func("engine-trusted-proxy",
 		"ルーターがエンジンにつなぐときの送信元（例: 10.0.1.0/24）。認証があるとき、エンジンはこの番地からの利用者の見出しを信頼する。"+
-			"複数なら繰り返す。--engine-host が 127.0.0.1 なら既定は 127.0.0.1/32",
+			"複数なら繰り返す（--tessera と一緒に使う）。--engine-host が 127.0.0.1 なら 127.0.0.1/32 で、指定できない",
 		func(v string) error {
 			x, err := router.ParsePrefix(v)
 			if err != nil {
 				return err
+			}
+			if x.Bits() == 0 {
+				return errors.New("すべての番地は信頼できない。ルーターのホストの番地（/32）を指定する")
 			}
 			engineTrusted = append(engineTrusted, x.String())
 			return nil
@@ -161,31 +164,29 @@ func main() {
 	}
 }
 
-// engineConfig is the data for the argv of the engines that the router starts.
 type engineConfig struct {
-	dir        string // an absolute local directory, or s3://bucket/prefix
-	dsn        string
-	idle       time.Duration
-	host       string
-	userHeader string   // empty: the router has no auth, so the engine gets no auth options
-	trusted    []string // CIDRs of the routers, sent with userHeader
-	maxBytes   int64    // 0: not sent
+	dir            string
+	dsn            string
+	idle           time.Duration
+	host           string
+	userHeader     string
+	trustedProxies []string
+	maxBytes       int64
 }
 
-// newEngineConfig checks the engine options. hasAuth tells if the router has --tokens or --user-header.
 func newEngineConfig(dir, dsn string, idle time.Duration, host string, maxBytes int64, trusted []string,
 	hasAuth bool, userHeader string) (engineConfig, error) {
-	if ip := net.ParseIP(host); host == "" || ip != nil && ip.IsUnspecified() {
+	// The engine advertises http://host:port without brackets, so only IPv4 addresses and host names work.
+	if ip, err := netip.ParseAddr(host); host == "" || err == nil && (!ip.Is4() || ip.IsUnspecified()) {
 		return engineConfig{}, fmt.Errorf("--engine-host %q は使えない。エンジンは自分の番地として知らせるので、"+
-			"ルーターがつなぐ番地（例: 10.0.1.5）を指定する", host)
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil { // the engine advertises http://host:port without brackets
-		return engineConfig{}, fmt.Errorf("--engine-host %q: IPv6 の番地は使えない。IPv4 の番地かホスト名を指定する", host)
+			"ルーターがつなぐ IPv4 の番地（例: 10.0.1.5）かホスト名を指定する", host)
 	}
 	if maxBytes < 0 {
 		return engineConfig{}, errors.New("--engine-max-bytes は 0 以上")
 	}
-	if !strings.HasPrefix(dir, "s3://") {
+	if strings.HasPrefix(dir, "s3://") {
+		dir = strings.TrimRight(dir, "/")
+	} else {
 		abs, err := filepath.Abs(dir)
 		if err != nil {
 			return engineConfig{}, err
@@ -193,40 +194,34 @@ func newEngineConfig(dir, dsn string, idle time.Duration, host string, maxBytes 
 		dir = abs
 	}
 	cfg := engineConfig{dir: dir, dsn: dsn, idle: idle, host: host, maxBytes: maxBytes}
-	if !hasAuth {
-		if !loopback(host) {
-			return engineConfig{}, errors.New("--engine-host を 127.0.0.1 以外にするには、ルーターを --tokens か --user-header で認証する")
-		}
+	if loopback(host) {
 		if len(trusted) > 0 {
-			return engineConfig{}, errors.New("--engine-trusted-proxy は --tokens か --user-header と一緒に使う")
-		}
-		return cfg, nil
-	}
-	if len(trusted) == 0 {
-		if !loopback(host) {
-			return engineConfig{}, errors.New("--engine-host を 127.0.0.1 以外にするには、ルーターがエンジンにつなぐ送信元を --engine-trusted-proxy で指定する")
+			return engineConfig{}, errors.New("--engine-trusted-proxy は --engine-host が 127.0.0.1 以外のときに使う" +
+				"（127.0.0.1 のエンジンには同じホストのルーターだけがつなぐ）")
 		}
 		trusted = []string{"127.0.0.1/32"}
+	} else if !hasAuth {
+		return engineConfig{}, errors.New("--engine-host を 127.0.0.1 以外にするには、ルーターを --tokens か --user-header で認証する")
+	} else if len(trusted) == 0 {
+		return engineConfig{}, errors.New("--engine-host を 127.0.0.1 以外にするには、ルーターがエンジンにつなぐ送信元を --engine-trusted-proxy で指定する")
 	}
-	// The same header name as Router.upstreamHeader.
-	cfg.userHeader, cfg.trusted = cmp.Or(userHeader, "X-Forwarded-User"), trusted
+	if hasAuth {
+		cfg.userHeader = cmp.Or(userHeader, router.DefaultUserHeader)
+		cfg.trustedProxies = trusted
+	}
 	return cfg, nil
 }
 
-// engineArgs is the argv after the python executable for the engine of model.
 func engineArgs(cfg engineConfig, model string) []string {
 	path := filepath.Join(cfg.dir, model)
 	if strings.HasPrefix(cfg.dir, "s3://") { // filepath.Join would make s3://b into s3:/b
-		path = strings.TrimSuffix(cfg.dir, "/") + "/" + model
+		path = cfg.dir + "/" + model
 	}
 	args := []string{"-m", "sparse_engine.server", path, "--pg", cfg.dsn, "--model-id", model, "--port", "0",
-		"--idle-exit", strconv.FormatFloat(cfg.idle.Seconds(), 'g', -1, 64)}
-	if cfg.host != "127.0.0.1" { // the engine default
-		args = append(args, "--host", cfg.host)
-	}
+		"--idle-exit", strconv.FormatFloat(cfg.idle.Seconds(), 'g', -1, 64), "--host", cfg.host}
 	if cfg.userHeader != "" {
 		args = append(args, "--user-header", cfg.userHeader)
-		for _, c := range cfg.trusted {
+		for _, c := range cfg.trustedProxies {
 			args = append(args, "--trusted-proxy", c)
 		}
 	}
