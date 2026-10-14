@@ -1,8 +1,8 @@
-//! Sorted u64 keys in FastLanes-style frame-of-reference blocks.
+//! Sorted u64 keys in frame-of-reference blocks.
 //!
 //! The keys are split into blocks of `BLOCK` keys. A block keeps its first key as the base and the
-//! offsets `key - base` bit-packed with the width of the largest offset. On the benchmark data the
-//! width is 14 to 19 bits, so the keys use about a quarter of the memory of `Box<[u64]>`.
+//! offsets `key - base` bit-packed one after the other with the width of the largest offset. In the
+//! retail model the width is 14 to 19 bits, so the keys use about a quarter of the memory of `Box<[u64]>`.
 
 #[allow(unused_imports)]
 use crate::*;
@@ -91,7 +91,8 @@ impl PackedKeys {
         self.len
     }
 
-    /// The key at `i`. `i` must be less than `len()`. The slice bounds keep an index past the end safe.
+    /// The key at `i`. `i` must be less than `len()`. For an index past the end, the result is a wrong
+    /// key or a panic on the slice bounds.
     #[inline]
     pub(crate) fn get(&self, i: usize) -> u64 {
         debug_assert!(i < self.len, "key index past the number of rows");
@@ -109,15 +110,15 @@ impl PackedKeys {
             return;
         }
         let bytes = &self.bytes[blk.start as usize * 8..];
+        // One `unpack` for each width decodes 2 times faster than one loop with a variable width
+        // (`bench_reads`: 0.010 s against 0.021 s for 18.9M keys).
         macro_rules! dispatch {
             ($($w:literal)*) => {
                 match width {
                     $($w => unpack::<$w>(blk.base, bytes, js, out),)*
                     _ => {
                         for (o, j) in out.iter_mut().zip(js) {
-                            let bit = j * width;
-                            let w = u128::from_le_bytes(bytes[bit / 8..bit / 8 + 16].try_into().unwrap());
-                            *o = blk.base + ((w >> (bit % 8)) as u64 & MASKS[width]);
+                            *o = blk.key(&self.bytes, j);
                         }
                     }
                 }
@@ -211,6 +212,124 @@ impl Iterator for Keys<'_> {
 
 impl ExactSizeIterator for Keys<'_> {}
 
+/// The keys that a `Cursor` reads: packed keys, or cells in key order.
+#[derive(Clone, Copy)]
+pub(crate) enum Sorted<'a> {
+    Packed(&'a PackedKeys),
+    Cells(&'a [(u64, f64)]),
+}
+
+/// A cursor over sorted keys. `pos` is the row of the last read. Over packed keys it caches one decoded
+/// block: a read within `BLOCK` rows of `pos` decodes the block of the row, a read farther away (a probe of a
+/// search that jumps far) uses `get` for that row only.
+pub(crate) struct Cursor<'a> {
+    src: Sorted<'a>,
+    pub(crate) pos: usize,
+    block: usize,  // the decoded block in `buf`, or usize::MAX
+    buf: Vec<u64>, // empty until the first decode
+}
+
+impl<'a> Cursor<'a> {
+    pub(crate) fn new(src: Sorted<'a>) -> Cursor<'a> {
+        Cursor { src, pos: 0, block: usize::MAX, buf: Vec::new() }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self.src {
+            Sorted::Packed(p) => p.len(),
+            Sorted::Cells(c) => c.len(),
+        }
+    }
+
+    /// The key at row `i`, and `pos` becomes `i`.
+    #[inline]
+    pub(crate) fn key(&mut self, i: usize) -> u64 {
+        let k = match self.src {
+            Sorted::Cells(c) => c[i].0,
+            Sorted::Packed(_) if i / BLOCK == self.block => self.buf[i % BLOCK],
+            Sorted::Packed(p) if i.abs_diff(self.pos) > BLOCK => p.get(i),
+            Sorted::Packed(p) => {
+                let b = i / BLOCK;
+                if self.buf.is_empty() {
+                    self.buf = vec![0; BLOCK];
+                }
+                let m = (p.len() - b * BLOCK).min(BLOCK);
+                p.decode(b, 0..m, &mut self.buf[..m]);
+                self.block = b;
+                self.buf[i % BLOCK]
+            }
+        };
+        self.pos = i;
+        k
+    }
+
+    /// The first row at or after `key`, searched near `pos` (an exponential search in both directions).
+    /// If the next keys are close, this is faster than a binary search. `pos` becomes the row.
+    #[inline]
+    pub(crate) fn seek(&mut self, key: u64) -> usize {
+        let from = self.pos;
+        let i = if from == 0 || from > self.len() || self.key(from - 1) < key {
+            self.gallop_from(from.min(self.len()), key)
+        } else {
+            // key(from - 1) >= key: go backwards
+            let mut step = 1;
+            let mut hi = from - 1; // key(hi) >= key
+            let mut lo = hi.saturating_sub(1);
+            while lo > 0 && self.key(lo) >= key {
+                hi = lo;
+                step *= 2;
+                lo = lo.saturating_sub(step);
+            }
+            if self.key(lo) >= key {
+                lo // lo == 0
+            } else {
+                self.bisect(lo + 1, hi, key) // key(lo) < key <= key(hi)
+            }
+        };
+        self.pos = i;
+        i
+    }
+
+    /// The first row at or after `pos` whose key is at least `key` (an exponential search, for a
+    /// cursor that moves in key order). `pos` becomes the row.
+    #[inline]
+    pub(crate) fn gallop(&mut self, key: u64) -> usize {
+        let i = self.gallop_from(self.pos, key);
+        self.pos = i;
+        i
+    }
+
+    fn gallop_from(&mut self, from: usize, key: u64) -> usize {
+        let n = self.len();
+        if from >= n || self.key(from) >= key {
+            return from;
+        }
+        let mut step = 1;
+        let mut lo = from; // key(lo) < key
+        let mut hi = from + 1;
+        while hi < n && self.key(hi) < key {
+            lo = hi;
+            step *= 2;
+            hi = (hi + step).min(n);
+        }
+        self.bisect(lo + 1, hi, key)
+    }
+
+    /// The first row in `l..=h` whose key is at least `key`. `key(l - 1) < key`, and `h` is the end or `key(h) >= key`.
+    fn bisect(&mut self, mut l: usize, mut h: usize, key: u64) -> usize {
+        while l < h {
+            let mid = (l + h) / 2;
+            if self.key(mid) < key {
+                l = mid + 1;
+            } else {
+                h = mid;
+            }
+        }
+        l
+    }
+}
+
 /// Decodes `out[i] = base + offset(js.start + i)` for a width `W` of 1 to 56 bits. The width is a
 /// constant, so the compiler unrolls each group of 8 keys (`W` bytes) with fixed shifts.
 fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, out: &mut [u64]) {
@@ -243,9 +362,11 @@ fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, out: &mut [
 /// Packs `chunk` into `out`, the bytes of the block `blk`.
 fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
     let width = blk.width as usize;
+    if width == 0 {
+        return; // every key equals the base
+    }
     let mut words = vec![0u64; out.len() / 8];
-    // Width 0 has no words: every key equals the base.
-    for (j, &k) in chunk.iter().enumerate().filter(|_| width > 0) {
+    for (j, &k) in chunk.iter().enumerate() {
         let off = k - blk.base;
         let bit = j * width;
         let (w, sh) = (bit / 64, bit % 64);
@@ -321,6 +442,45 @@ mod tests {
         check(&mixed);
     }
 
+    #[test]
+    fn cursor_finds_the_same_rows_as_a_binary_search() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15;
+        let keys = sorted_random(&mut seed, 20_000, 1 << 30, 24);
+        let p = PackedKeys::new(&keys, false);
+        let cells: Vec<(u64, f64)> = keys.iter().map(|&k| (k, 0.0)).collect();
+        for src in [Sorted::Packed(&p), Sorted::Cells(&cells)] {
+            let mut rd = Cursor::new(src);
+            assert_eq!((0..keys.len()).map(|i| rd.key(i)).collect::<Vec<_>>(), keys, "a sequential read");
+            // Near and far probes: steps of 1, a jump of 3 blocks, a jump to the other end, a step back.
+            let mut q = keys[0];
+            for step in [1u64, 1, 1 << 12, 1 << 16, 1 << 23, 1, 1 << 23, 3, 7] {
+                q = q.wrapping_add(step << 6);
+                let want = keys.partition_point(|&k| k < q);
+                assert_eq!(rd.seek(q), want, "seek {q}");
+                assert_eq!(rd.pos, want);
+            }
+            // Far seeks to exact keys: the probes of the search use `get`.
+            for i in [0, 7000, 13, 19_999, 5000, 5001, 12_345] {
+                assert_eq!(rd.seek(keys[i]), i, "seek to key {i}");
+                assert_eq!(rd.seek(keys[i] + 1), i + 1, "seek past key {i}");
+            }
+            let mut back = Cursor::new(src);
+            back.pos = keys.len();
+            assert_eq!(back.seek(keys[5]), 5, "a seek backwards from the end");
+            assert_eq!(back.seek(0), 0);
+            assert_eq!(back.seek(u64::MAX), keys.len());
+            let mut fwd = Cursor::new(src);
+            for (i, &k) in keys.iter().enumerate().step_by(997) {
+                assert_eq!(fwd.gallop(k), i);
+                assert_eq!(fwd.gallop(k + 1), i + 1);
+            }
+            assert_eq!(fwd.gallop(u64::MAX), keys.len());
+        }
+        let mut empty = Cursor::new(Sorted::Cells(&[]));
+        assert_eq!(empty.seek(5), 0);
+        assert_eq!(empty.gallop(5), 0);
+    }
+
     /// Micro-benchmark of the reads against a plain `Vec<u64>` on about 18M keys with 15 to 18
     /// bit offsets. Run: `cargo test --release -p nanashi-engine bench_reads -- --ignored --nocapture`.
     #[test]
@@ -369,6 +529,32 @@ mod tests {
         time("packed sequential get", &|| (0..n).map(|i| p.get(i)).fold(0, u64::wrapping_add));
         time("vec iter", &|| keys.iter().fold(0, |a, &k| a.wrapping_add(k)));
         time("packed iter", &|| p.iter().fold(0, u64::wrapping_add));
+        time("packed iter zip vals", &|| p.iter().zip(&keys).fold(0, |a, (k, &v)| a.wrapping_add(k ^ v)));
+        time("packed callback zip vals", &|| {
+            let mut buf = [0u64; BLOCK];
+            let mut a = 0u64;
+            for b in 0..n.div_ceil(BLOCK) {
+                let m = BLOCK.min(n - b * BLOCK);
+                p.decode(b, 0..m, &mut buf[..m]);
+                for (&k, &v) in buf[..m].iter().zip(&keys[b * BLOCK..]) {
+                    a = a.wrapping_add(k ^ v);
+                }
+            }
+            a
+        });
+        time("packed generic decode", &|| {
+            let mut buf = [0u64; BLOCK];
+            (0..n.div_ceil(BLOCK)).fold(0, |a, b| {
+                let m = BLOCK.min(n - b * BLOCK);
+                let (blk, bytes) = (p.blocks[b], &p.bytes[p.blocks[b].start as usize * 8..]);
+                let width = blk.width as usize;
+                for (o, j) in buf[..m].iter_mut().zip(0..m) {
+                    let bit = j * width;
+                    *o = blk.base + ((u64::from_le_bytes(bytes[bit / 8..bit / 8 + 8].try_into().unwrap()) >> (bit % 8)) & MASKS[width]);
+                }
+                a.wrapping_add(buf[m - 1])
+            })
+        });
         time("packed block decode", &|| {
             let mut buf = [0u64; BLOCK];
             (0..n.div_ceil(BLOCK)).fold(0, |a, b| {
