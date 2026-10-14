@@ -230,7 +230,6 @@ class Memory(unittest.TestCase):
         import gc
 
         import nanashi_core
-        # Collect the cyclic garbage of earlier tests (it can hold Rust stored data) now, so that it is not freed during the measurement
         gc.collect()
         before = nanashi_core.heap()[0]
         m = Named(Model(engine=RustEngine()))
@@ -255,7 +254,7 @@ class Memory(unittest.TestCase):
         self.assertEqual(nanashi_core.heap()[1], nanashi_core.heap()[0])
         del m
         gc.collect()
-        self.assertLess(nanashi_core.heap()[0], before + 24_000 * 16)  # frees are counted
+        self.assertLess(nanashi_core.heap()[0], before + 24_000 * 16)
 
     def test_reference_reports_rows_only(self):
         m = Named(Model(engine=ReferenceEngine()))

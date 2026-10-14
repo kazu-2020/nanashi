@@ -1063,11 +1063,6 @@ fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
 
 // ------------------------------------------------------------------ ヒープの計測
 
-/// An allocator that counts the memory that Rust allocates. System does the allocation. It does not count Python objects.
-/// The count is always on. Each thread adds to its own slot, so that threads do not write to one shared cache line
-/// (a shared atomic counter made the parallel recalculation a few % slower).
-/// If a slot holds more than SLOT_FLUSH bytes, the thread moves the slot value into HEAP_NOW and updates HEAP_PEAK.
-/// Thus HEAP_PEAK can be low by the values that stay in the slots (at most SLOT_FLUSH for each slot).
 struct Counting;
 
 const SLOTS: usize = 64;
@@ -1077,12 +1072,12 @@ const SLOT_FLUSH: usize = 64 << 10;
 struct Slot(AtomicIsize);
 
 static HEAP_SLOTS: [Slot; SLOTS] = [const { Slot(AtomicIsize::new(0)) }; SLOTS];
-static HEAP_NOW: AtomicIsize = AtomicIsize::new(0); // allocations minus frees, without the values in the slots
+static HEAP_FLUSHED: AtomicIsize = AtomicIsize::new(0);
 static HEAP_PEAK: AtomicIsize = AtomicIsize::new(0);
 static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    // No destructor: the allocator must not use a thread local with a destructor. A slot keeps its value after the thread stops.
+    // No destructor: the allocator must not use a thread local with a destructor.
     static MY_SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
@@ -1097,13 +1092,13 @@ fn heap_add(n: isize) {
     let v = slot.fetch_add(n, Ordering::Relaxed) + n;
     if v.unsigned_abs() > SLOT_FLUSH {
         slot.fetch_sub(v, Ordering::Relaxed);
-        let now = HEAP_NOW.fetch_add(v, Ordering::Relaxed) + v;
+        let now = HEAP_FLUSHED.fetch_add(v, Ordering::Relaxed) + v;
         HEAP_PEAK.fetch_max(now, Ordering::Relaxed);
     }
 }
 
 fn heap_now() -> isize {
-    HEAP_NOW.load(Ordering::Relaxed) + HEAP_SLOTS.iter().map(|s| s.0.load(Ordering::Relaxed)).sum::<isize>()
+    HEAP_FLUSHED.load(Ordering::Relaxed) + HEAP_SLOTS.iter().map(|s| s.0.load(Ordering::Relaxed)).sum::<isize>()
 }
 
 unsafe impl GlobalAlloc for Counting {
@@ -1141,6 +1136,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOC: Counting = Counting;
 
 /// The memory that Rust allocated after the process started, and the maximum after reset_heap_peak (bytes).
+/// The maximum can be wrong by about 64 KiB for each thread that allocated.
 #[pyfunction]
 fn heap() -> (usize, usize) {
     let now = heap_now();

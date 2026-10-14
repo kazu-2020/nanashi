@@ -48,7 +48,7 @@ def child(path: str, per_formula: bool) -> dict:
     from sparse_engine import Named, to_formula
     from sparse_engine.rust_engine import RustEngine
 
-    start = nanashi_core.heap()[0]  # Read the heap before the model exists. The values below are increases from it.
+    start = nanashi_core.heap()[0]
     out: dict = {"rss_start": rss()}
     m = Named.load(path, RustEngine())
     out["heap_loaded"], out["rss_loaded"] = nanashi_core.heap()[0] - start, rss()

@@ -158,7 +158,7 @@ def run(engine_name: str, size: str, repeats: int) -> dict:
     heap = None
     if engine_name == "rust":
         import nanashi_core
-        start = nanashi_core.heap()[0]  # The heap count is always on. Read it before the model exists.
+        start = nanashi_core.heap()[0]
     t0 = time.perf_counter()
     m = build(engine_name, size)
     load = time.perf_counter() - t0
