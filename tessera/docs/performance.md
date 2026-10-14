@@ -201,7 +201,7 @@ In the version from before the engine aggregated while it read, RSS increased wi
 When we started the process with the environment variable `MallocLargeCache=0`, RSS stopped at 791–812 MB. The recalculation time did not change.
 RSS varies much from run to run. Thus, to compare memory usage, compare the Rust heap.
 To read the Rust heap, use `nanashi_core.heap()`. The count is always on, so subtract a value that you read before the model exists. To read the stored data of each Metric, use `m.memory()`.
-Each thread counts in its own slot. The earlier shared counter made parallel recalculation a few percent slower. With the slots, `bench.py --size xlarge` showed no difference in recalculation time between the count on and off (5 runs for each side, the run-to-run variation was about 20%).
+Each thread counts in its own slot. The earlier shared counter made parallel recalculation a few percent slower. With the slots, `bench.py --size xlarge` showed no difference in recalculation time between the count on and off. "Off" is the old implementation with the count stopped (`track_heap(False)`), before the count was always on. We did 5 runs for each side, and the run-to-run variation was about 20%.
 
 A comparison of journals (`bench_journal.py`, profit and loss plan, PostgreSQL in local Docker):
 
