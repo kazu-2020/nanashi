@@ -287,13 +287,14 @@ impl Store {
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let vals: Vec<f64> =
             if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
-        self.set_columns(&keys_in_place(cells), vals);
+        let keys = keys_in_place(cells);
+        self.set_columns(PackedKeys::new(&keys, self.cfg.par(keys.len())), vals);
     }
 
-    /// Make the sorted columns the base and drop the delta.
-    fn set_columns(&mut self, keys: &[u64], vals: Vec<f64>) {
+    /// Make the packed sorted keys and the values the base and drop the delta.
+    fn set_columns(&mut self, keys: PackedKeys, vals: Vec<f64>) {
         self.base = Arc::new(Base {
-            keys: PackedKeys::new(keys, self.cfg.par(keys.len())),
+            keys,
             vals: vals.into_boxed_slice(),
             postings: fresh_postings(self.pack.dims.len()),
         });
@@ -356,15 +357,15 @@ impl Store {
         out
     }
 
-    /// 差分を本体にまとめ直す。
+    /// Merge the delta into a new base.
     pub(crate) fn compact(&mut self) {
         let n = self.base.keys.len() + self.delta.len();
-        let (mut keys, mut vals) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let (mut keys, mut vals) = (PackedKeys::builder(n, &self.base.keys), Vec::with_capacity(n));
         self.merged(0, None, |k, v| {
             keys.push(k);
             vals.push(v);
         });
-        self.set_columns(&keys, vals);
+        self.set_columns(keys.finish(), vals);
     }
 
     pub(crate) fn after_delta(&mut self) {
@@ -411,11 +412,11 @@ impl Store {
     pub(crate) fn write_back(&mut self, r: &Restrict, old: &[u64], new: Vec<(u64, f64)>) {
         let limit = self.cfg.compact_min.max(self.base.keys.len() / 8);
         if self.delta.len() + old.len() + new.len() > limit {
-            // Write directly into the new base columns. An intermediate cell array adds to the peak memory.
-            // A new cell replaces a kept cell with the same key.
+            // Write directly into the new packed base columns. An intermediate cell array or a plain key
+            // array adds to the peak memory. A new cell replaces a kept cell with the same key.
             let cs = checks(&self.pack, r);
             let n = (self.base.keys.len() + self.delta.len() + new.len()).saturating_sub(old.len());
-            let (mut keys, mut vals) = (Vec::with_capacity(n), Vec::with_capacity(n));
+            let (mut keys, mut vals) = (PackedKeys::builder(n, &self.base.keys), Vec::with_capacity(n));
             let mut push = |(k, v): (u64, f64)| {
                 keys.push(k);
                 vals.push(v);
@@ -430,7 +431,7 @@ impl Store {
                 }
             });
             new.for_each(push);
-            self.set_columns(&keys, vals);
+            self.set_columns(keys.finish(), vals);
             return;
         }
         for &k in old {

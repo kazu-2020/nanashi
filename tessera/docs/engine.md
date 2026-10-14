@@ -27,7 +27,7 @@ The Rust engine keeps the key of one cell as a 64-bit integer. The integer conta
 The storage has two layers. The base is an array in key order. The delta is a tree on top of the base, and it receives small changes.
 If the delta becomes larger than 1/8 of the base, the engine merges the delta into a new base.
 If one change writes more than 1/8 of the base, the engine makes a new base directly and does not use the delta tree.
-It merges the cells directly into the key array and the value array of the new base. The merge needs about 16 B for each cell.
+It merges the cells directly into the value array and the packed keys of the new base. The packed keys get one block of 1,024 keys at a time, so the merge needs about 10 to 12 B for each cell.
 The engine does not change a base after it makes it, and versions share the base. The delta is a persistent tree (`OrdMap` of `imbl`), so a change does not break old versions.
 Thus, a writer can write while a reader keeps a published version. The engine does not copy all of the base or the delta.
 The values of the base are an immutable array with no extra capacity (`Box<[f64]>`). Its layout is the same as the buffer of an Arrow Float64 array.

@@ -61,9 +61,9 @@ impl PackedKeys {
         let mut blocks = Vec::with_capacity(keys.len().div_ceil(BLOCK));
         let mut start = 0usize;
         for chunk in keys.chunks(BLOCK) {
-            let width = 64 - (chunk[chunk.len() - 1] - chunk[0]).leading_zeros() as usize;
-            blocks.push(Block { base: chunk[0], start: u32::try_from(start).expect("too many words"), width: width as u8 });
-            start += (chunk.len() * width).div_ceil(64);
+            let (blk, words) = block_of(chunk, start);
+            blocks.push(blk);
+            start += words;
         }
         // A block of width 0 has no words and starts at the spare bytes, so a read window fits there too.
         let mut bytes = vec![0u8; start * 8 + 16];
@@ -87,6 +87,18 @@ impl PackedKeys {
 
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// A builder for about `capacity` keys. It reserves the bytes at the density of `like`,
+    /// or 8 B for each key if `like` is empty, so the byte buffer does not grow by doubling.
+    pub(crate) fn builder(capacity: usize, like: &PackedKeys) -> Builder {
+        let bytes = if like.len == 0 { capacity * 8 } else { (like.bytes.len() * capacity).div_ceil(like.len).min(capacity * 8) };
+        Builder {
+            len: 0,
+            blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
+            bytes: Vec::with_capacity(bytes + 16),
+            buf: Vec::with_capacity(BLOCK),
+        }
     }
 
     /// The key at `i`. `i` must be less than `len()`.
@@ -168,6 +180,52 @@ impl PackedKeys {
     /// Includes the block headers and the 16 spare bytes.
     pub(crate) fn bytes(&self) -> usize {
         self.bytes.len() + self.blocks.len() * std::mem::size_of::<Block>()
+    }
+}
+
+/// The header of the block of `chunk` that starts at word `start`, and its number of words.
+fn block_of(chunk: &[u64], start: usize) -> (Block, usize) {
+    let width = 64 - (chunk[chunk.len() - 1] - chunk[0]).leading_zeros() as usize;
+    (Block { base: chunk[0], start: u32::try_from(start).expect("too many words"), width: width as u8 }, (chunk.len() * width).div_ceil(64))
+}
+
+/// Packs keys pushed one at a time, in sorted order and with no duplicates. It keeps only one block of
+/// keys unpacked, so a merge into a new base does not hold a `Vec<u64>` of all keys. `finish` gives
+/// the same bytes as `PackedKeys::new`.
+pub(crate) struct Builder {
+    len: usize,
+    blocks: Vec<Block>,
+    bytes: Vec<u8>,
+    buf: Vec<u64>, // the keys of the block that is not yet packed
+}
+
+impl Builder {
+    #[inline]
+    pub(crate) fn push(&mut self, key: u64) {
+        self.buf.push(key);
+        if self.buf.len() == BLOCK {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        let chunk = &self.buf;
+        let start = self.bytes.len() / 8;
+        let (blk, words) = block_of(chunk, start);
+        self.bytes.resize((start + words) * 8, 0);
+        pack_into(&mut self.bytes[start * 8..], chunk, &blk);
+        self.blocks.push(blk);
+        self.len += chunk.len();
+        self.buf.clear();
+    }
+
+    pub(crate) fn finish(mut self) -> PackedKeys {
+        if !self.buf.is_empty() {
+            self.flush();
+        }
+        self.bytes.reserve_exact(16);
+        self.bytes.resize(self.bytes.len() + 16, 0);
+        PackedKeys { len: self.len, blocks: self.blocks.into_boxed_slice(), bytes: self.bytes.into_boxed_slice() }
     }
 }
 
@@ -432,6 +490,27 @@ mod tests {
         mixed.extend(sorted_random(&mut seed, 1024, 1 << 20, 50));
         mixed.push(1 << 62);
         check(&mixed);
+    }
+
+    #[test]
+    fn builder_gives_the_same_bytes_as_new() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15;
+        let random = sorted_random(&mut seed, 5000, 1 << 40, 45);
+        let mut cases: Vec<Vec<u64>> = [0, 1, BLOCK - 1, BLOCK, BLOCK + 1].iter().map(|&n| (0..n as u64 * 3).step_by(3).collect()).collect();
+        cases.push(random);
+        for keys in cases {
+            let want = PackedKeys::new(&keys, false);
+            let mut b = PackedKeys::builder(keys.len(), &want);
+            keys.iter().for_each(|&k| b.push(k));
+            let got = b.finish();
+            assert_eq!(got.len, want.len, "n={}", keys.len());
+            assert_eq!(got.bytes, want.bytes, "n={}", keys.len());
+            assert_eq!(got.blocks.len(), want.blocks.len());
+            for (g, w) in got.blocks.iter().zip(&want.blocks) {
+                assert_eq!((g.base, g.start, g.width), (w.base, w.start, w.width));
+            }
+            assert_eq!(got.iter().collect::<Vec<_>>(), keys);
+        }
     }
 
     #[test]
