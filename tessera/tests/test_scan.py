@@ -66,7 +66,6 @@ class MatchesReference(unittest.TestCase):
             m.add_input("A", ["Product", "Month"], values)
             m.add_formula("Stock", ["Product", "Month"], "PREVIOUS(Month) * 0.9 + A + A")
             if engine.name == "rust":
-                # The stored data also counts against max_bytes, so the intermediates get 32 KiB on top of it
                 engine.core.configure(max_bytes=stored_bytes(m) + (32 << 10))
             results.append(m.value("Stock").cells)
         self.assertEqual(results[1], results[0])

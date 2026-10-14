@@ -486,9 +486,11 @@ struct Done {
 }
 
 impl Done {
-    /// The bytes of the values that wait for apply.
     fn bytes(&self) -> usize {
-        [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum()
+        let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
+        // For the whole region, old is the Arc of the store, which held counts already
+        let old = if self.region.is_all() { 0 } else { crate::held(&self.old) };
+        writes.saturating_add(old)
     }
 }
 
@@ -557,8 +559,7 @@ fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
     out
 }
 
-/// The limit of each of n tasks that run together: the held bytes plus an equal part of the room that they leave.
-/// The Budget adds held again to the intermediates, so each task gets (max - held) / n for them.
+/// Add held to each share because the Budget subtracts it again.
 fn share(max: usize, held: usize, n: usize) -> usize {
     held.saturating_add(max.saturating_sub(held) / n)
 }
@@ -626,8 +627,8 @@ impl<'a> Run<'a> {
         let run: &Self = self;
         let max = self.cat.cfg.max_bytes;
         let held = self.held();
-        // The finished values wait for apply until the level ends, so each later task has less room
-        let mut pending = 0;
+        // The finished values wait for apply until the level ends
+        let mut unapplied = 0;
         let mut done: Vec<Result<Done>> = Vec::with_capacity(tasks.len());
         let groups = if tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min) {
             // In parallel, the tasks of a wave share the room that the held data leaves. A task whose estimate
@@ -637,14 +638,14 @@ impl<'a> Run<'a> {
             tasks.iter().map(|t| vec![t]).collect()
         };
         for wave in groups {
-            let held = held.saturating_add(pending);
+            let held = held.saturating_add(unapplied);
             let limit = share(max, held, wave.len());
             let out: Vec<Result<Done>> = if wave.len() == 1 {
                 vec![run.compute(wave[0], limit, held)]
             } else {
                 wave.par_iter().map(|t| run.compute(t, limit, held)).collect()
             };
-            pending = out.iter().flatten().fold(pending, |p, d| p.saturating_add(d.bytes()));
+            unapplied = out.iter().flatten().fold(unapplied, |p, d| p.saturating_add(d.bytes()));
             done.extend(out);
         }
         for d in done {
@@ -656,7 +657,6 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    /// The bytes of the stored data that the run holds: the stores, the counts, the residuals and the old values.
     fn held(&self) -> usize {
         let stores = self.stores.iter().chain(self.counts.iter().flatten()).chain(self.lows.iter().flatten());
         let src: Vec<Src> = stores.map(|s| Src::Store(s.clone())).chain(self.olds.iter().flatten().cloned()).collect();
@@ -712,7 +712,6 @@ impl<'a> Run<'a> {
     }
 
     /// Calculate the task. It only reads the stored data, so the Metrics of one level can calculate in parallel.
-    /// limit is the memory budget, and held is the part of it that the run holds already.
     fn compute(&self, t: &Task, limit: usize, held: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
@@ -976,10 +975,19 @@ mod tests {
         let limit = share(1000, 400, 2);
         let b = Budget::with_held(limit, 400);
         assert_eq!(limit, 700);
-        // Each task has 300 bytes (18 cells) for intermediates, not 500 and not 100
         assert!(b.need(300 / CELL_BYTES, "x").is_ok());
         assert!(b.need(300 / CELL_BYTES + 1, "x").is_err());
-        // Held data that is more than max leaves no room
         assert_eq!(share(100, 400, 2), 400);
+    }
+
+    #[test]
+    fn a_slice_of_old_counts_but_the_shared_store_does_not() {
+        let dims = (0..1).map(|i| crate::DimInfo { size: 10, ordered: false, name: format!("d{i}") }).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
+        let old = Src::Store(Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap()));
+        let done = |region| Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old.clone()) };
+        assert_eq!(done(Reg::new(vec![])).bytes(), 0);
+        assert_eq!(done(Reg::new(vec![(0, vec![1])])).bytes(), crate::held([&old]));
+        assert!(crate::held([&old]) > 0);
     }
 }

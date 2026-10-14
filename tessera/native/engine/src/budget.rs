@@ -1,10 +1,8 @@
 //! The memory budget of one operation. The bytes that the operation holds alive (stored data, sources, writes
 //! that wait) plus its intermediate results must not be more than the limit.
 //!
-//! The engine counts an intermediate result when the evaluation of its node ends. The parent result replaces
-//! the child results, because the parent evaluation drops them. The operations that make all combinations
-//! (EXPAND, ISBLANK, IFBLANK) check the bytes before they make them. If the bytes are over the limit, they
-//! return Err before the allocation.
+//! The operations that make all combinations (EXPAND, ISBLANK, IFBLANK) check the bytes before they make them.
+//! If the bytes are over the limit, they return Err before the allocation.
 
 use crate::*;
 use std::cell::Cell;
@@ -16,7 +14,7 @@ pub const CELL_BYTES: usize = 16;
 /// splits the limit).
 pub struct Budget {
     limit: usize,
-    held: usize, // bytes that the operation holds alive outside the intermediates; they do not change during it
+    held: usize,
     used: Cell<usize>,
 }
 
@@ -34,7 +32,7 @@ impl Budget {
         self.used.get()
     }
 
-    /// Err if cells more cells do not fit next to the held bytes and the intermediates.
+    /// Err if `cells` new cells do not fit next to the held bytes and the intermediates.
     pub fn need(&self, cells: usize, what: &str) -> Result<()> {
         let bytes = cells.saturating_mul(CELL_BYTES);
         if self.held.saturating_add(self.used.get()).saturating_add(bytes) > self.limit {

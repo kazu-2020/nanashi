@@ -33,7 +33,6 @@ fn ifblank_beyond_the_budget_fails_before_allocating() {
     let node = Node::IfBlank(Box::new(Node::Expand(Box::new(Node::Ref(0)), vec![])), 0.0, false, vec![]);
     // 10^5 の軸 1 本なら収まる
     assert_eq!(eval(&node, &cat, &source(&cat), &Restrict::all(3)).unwrap().cells.len(), 100_000);
-    // The source of 3 rows also counts against the budget
     let stored = held(&source(&cat));
     assert_eq!(stored, 3 * 16);
     // 演算ごとに評価すると、全組み合わせのキーと結果の 2 つ分が要るので、1 つ分の予算では足りない
@@ -65,15 +64,14 @@ fn stored_data_counts_against_the_budget() {
     let cat = catalog(usize::MAX);
     let src = source(&cat);
     let node = Node::Ref(0);
-    // The source holds 48 bytes, so 48 bytes of budget leave no room for the 3 cells that Ref reads
-    let full = Budget::with_held(48 + 3 * 16 - 1, held(&src));
+    let stored = held(&src);
+    let full = Budget::with_held(stored + 3 * 16 - 1, stored);
     let err = eval_with(&node, &cat, &src, &Restrict::all(3), &full).unwrap_err();
     assert!(err.contains("格納データが 48 バイト"), "{err}");
-    let room = Budget::with_held(48 + 3 * 16, held(&src));
+    let room = Budget::with_held(stored + 3 * 16, stored);
     assert_eq!(eval_with(&node, &cat, &src, &Restrict::all(3), &room).unwrap().cells.len(), 3);
-    // eval counts the sources by itself
-    assert!(eval(&node, &catalog(48 + 3 * 16 - 1), &src, &Restrict::all(3)).is_err());
-    assert!(eval(&node, &catalog(48 + 3 * 16), &src, &Restrict::all(3)).is_ok());
+    assert!(eval(&node, &catalog(stored + 3 * 16 - 1), &src, &Restrict::all(3)).is_err());
+    assert!(eval(&node, &catalog(stored + 3 * 16), &src, &Restrict::all(3)).is_ok());
 }
 
 #[test]

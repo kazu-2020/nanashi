@@ -37,7 +37,6 @@ pub struct Mem {
 }
 
 impl Mem {
-    /// The bytes of the base, the delta and the index.
     pub fn bytes(&self) -> usize {
         self.base + self.delta + self.index
     }
