@@ -1013,16 +1013,16 @@ mod tests {
         let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
         let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
         let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
-        let empty = || Write::Part(Cube { pack: store.pack.clone(), kind: Kind::Num, cells: Vec::new() });
         let done = |region: Reg| {
             let old = old_of(&store, &region, &cat);
-            Done { m: 0, region, delta: false, value: empty(), count: None, low: None, old: Some(old) }
+            Done { m: 0, region, delta: false, value: Write::Whole(store.empty_like(), None), count: None, low: None, old: Some(old) }
         };
-        assert_eq!(done(Reg::new(vec![])).bytes(), 0);
+        let empty = store.empty_like().memory().bytes();
+        assert_eq!(done(Reg::new(vec![])).bytes(), empty);
         let part = Reg::new(vec![(0, vec![1])]);
         let bytes = store.slice(&part.restrict(&cat)).memory().bytes();
         assert!(bytes > 0);
-        assert_eq!(done(part).bytes(), bytes);
+        assert_eq!(done(part).bytes(), empty + bytes);
     }
 
     #[test]
