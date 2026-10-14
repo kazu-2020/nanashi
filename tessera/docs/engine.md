@@ -45,7 +45,8 @@ The engine keeps the calculated values in key order. When it writes them back, i
 
 In a full evaluation, the engine fuses a formula that is a chain of element-wise operations. It evaluates the fused formula and does not make an intermediate result (Cube) for each operation (`eval/fuse.rs`).
 Fusion applies to these operations: the four arithmetic operations, comparisons, `AND` / `OR` / `NOT`, `IF`, `FILTER`, `ON`, `EXPAND`, `ISBLANK`, `IFBLANK`, dimension values (`Month`), `SELECT`, time shifts (`[SELECT: Month - 1]`), the BY mapping (`BY`), and manual overrides of formula Metrics.
-The engine scans each key that can be in the result. For each key, it goes through the expression tree, calculates the value, and writes it directly to the result array.
+Before the scan, the engine compiles the expression tree into a chain of closures. Each operation and each source gets its own closure. A constant operand of `*`, `/` or a comparison goes into the closure of its operation.
+The engine scans each key that can be in the result. For each key, it calls the chain, calculates the value, and writes it directly to the result array.
 A source converts the key and looks up the value. `SELECT`, time shifts, and the BY mapping change the key that looks up the child.
 The value at each key has the same meaning as in the evaluation of one operation at a time. This includes blank cells, division by zero, three-valued logic, and the expansion to all members.
 
@@ -57,11 +58,13 @@ The expression tree sets the keys that the engine scans:
 If a source is stored data with a delta (the usual state of an input after edits), the engine first merges the base and the delta into one array in key order. This copy counts against the memory budget. Then the fused scan reads the copy.
 The engine continues to evaluate one operation at a time for these: an incremental recalculation on a limited range, and an aggregation. For an aggregation, the engine fuses the expression inside the aggregation and makes it one time.
 
-For an aggregation (`REMOVE`, `BY`) with few aggregation targets, the engine does not copy the aggregation source. "Few" means 1/(16 × number of threads) of the source rows or less. The engine reads the source and adds each value to the intermediate value of its target.
+For an aggregation (`REMOVE`, `BY`) on the array path or the hash map path, the engine does not copy the aggregation source. It reads the source and adds each value to the intermediate value of its target.
 If the aggregation source is stored data, the engine reads the base directly by row number.
-The type check rewrites a `BY` aggregation with a Metric into a join with `On` and `AsAxis` and an aggregation. In a full evaluation, the engine puts the mapping table (for example, employee and month → department) into an array of all combinations. It looks up the targets in this array and does not make the join result.
-If there are many aggregation targets but all their combinations are few, the engine adds the values into an array of all combinations. For a SUM, "few" means that the arrays for all threads (28 B for each combination and thread) are not larger than the (target, value) pairs (16 B a row). For `MIN`, `MAX` and `COUNT`, the limit is half of the pairs (12 B for each combination and thread).
+The type check rewrites a `BY` aggregation with a Metric into a join with `On` and `AsAxis` and an aggregation. In a full evaluation, the engine puts the mapping table (for example, employee and month → department) into an array of all combinations. It looks up the targets in this array and does not make the join result. This path uses only the hash map, and only if the targets are few.
+The engine tries 3 paths in this order: an array of all target combinations, a hash map, and a sort. The array path is 2 to 3 times faster than the hash map for the same rows ([Performance](performance.md)). If an incremental recalculation narrows the range of the targets, the engine tries the hash map first, because the array ignores the range.
+If all combinations of the aggregation targets are few, the engine adds the values into an array of all combinations. For a SUM, "few" means that the arrays for all threads (28 B for each combination and thread) are not larger than the (target, value) pairs (16 B a row). For `MIN`, `MAX` and `COUNT`, the limit is half of the pairs (12 B for each combination and thread).
 The engine divides the rows into one part for each thread, and each part has its own array. At the end, the engine adds the arrays in order.
+If the arrays are too large but the targets are few, the engine adds each value to its target in a hash map. "Few" means 1/(16 × number of threads) of the source rows or less. Each thread has its own hash map, and the engine merges them at the end.
 In other cases, the engine converts the rows to (target, value) pairs, sorts them, and then aggregates them. The engine makes the pairs directly in one array and does not copy the aggregation source to a Cube.
 
 `SUM` and `AVG` add the values into an exact sum (Shewchuk partials, the same algorithm as Python `math.fsum`) and round one time at the end. Thus the result does not change with the order of the rows, the aggregation path, or the number of threads. The reference implementation uses `math.fsum` and gives the same bits.

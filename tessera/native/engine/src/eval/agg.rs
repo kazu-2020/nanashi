@@ -177,10 +177,10 @@ pub(crate) fn combos_in(dims: &[DimId], cat: &Catalog, r: &Restrict) -> f64 {
     dims.iter().fold(1.0, |n, &d| n * r.get(d).map_or(cat.dims[d].size as usize, |s| s.members.len()) as f64)
 }
 
-/// If the number of groups is this or less, read the source and add each value to its group, with no copy.
-/// Each thread keeps an intermediate value (about 64 B) for each group, and the threads merge them at the end.
-/// Thus the limit is 1/(16 x thread count) of the source rows. With more groups, the merge time and memory
-/// come near the cost to copy the source to (group, value) pairs and sort them. First is not used here,
+/// If the number of groups is this or less, read the source and add each value to its group in a hash map, with
+/// no copy. Each thread keeps an intermediate value (about 64 B) for each group, and the threads merge them at
+/// the end. Thus the limit is 1/(16 x thread count) of the source rows. With more groups, the merge time and
+/// memory come near the cost to copy the source to (group, value) pairs and sort them. First is not used here,
 /// because the order of the rows has a meaning for it.
 pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -> bool {
     if aggs.contains(&Agg::First) {
@@ -244,23 +244,44 @@ pub(crate) fn remove_run(dim: DimId, agg: Agg, child: &Node) -> (Vec<DimId>, &No
 /// Aggregate rows without the dimensions removed (REMOVE). r is the range of the result (to estimate the number
 /// of groups).
 pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Catalog, r: &Restrict) -> Result<Vec<Cube>> {
-    let cfg = &cat.cfg;
     let dims: Vec<DimId> = rows.pack().dims.iter().copied().filter(|d| !removed.contains(d)).collect();
     let out = Packing::new(&dims, cat)?;
-    if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
-        let proj = Proj::new(rows.pack(), &out);
-        let groups = fold_groups(cfg, &rows, |k| Some(proj.apply(rows.pack(), &out, k)));
-        return Ok(finish_groups(groups, out, aggs));
-    }
+    let proj = Proj::new(rows.pack(), &out);
+    Ok(aggregate_rows(rows, out, aggs, cat, r, move |xp, out, k| Some(proj.apply(xp, out, k))))
+}
+
+/// key gives the group key (packed as out) from (row packing, out, row key). r is the range of the result.
+/// The array path is 2 to 3 times faster than the hash map (docs/performance.md), but it ignores r. Thus if r
+/// narrows the groups, or with stream_always, the hash map goes first.
+pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catalog, r: &Restrict, key: impl Fn(&Packing, &Packing, u64) -> Option<u64> + Sync) -> Vec<Cube> {
+    let cfg = &cat.cfg;
     let xp = rows.pack();
-    let proj = Proj::new(xp, &out);
-    if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, |k| Some(proj.apply(xp, &out, k))) {
-        return Ok(c);
+    let k = |x| key(xp, &out, x);
+    let groups = combos_in(&out.dims, cat, r);
+    let dense_first = dense_first(cat, &out.dims, r);
+    if dense_first {
+        if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, k) {
+            return c;
+        }
+    }
+    if few_groups(cfg, aggs, groups, rows.len()) {
+        return finish_groups(fold_groups(cfg, &rows, k), out, aggs);
+    }
+    if !dense_first {
+        if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, k) {
+            return c;
+        }
     }
     // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
-    let pairs = rows.collect(cfg, |k, v| Some((proj.apply(xp, &out, k), v)));
+    let pairs = rows.collect(cfg, |x, v| k(x).map(|o| (o, v)));
     drop(rows);
-    Ok(group(cfg, pairs, out, aggs))
+    group(cfg, pairs, out, aggs)
+}
+
+/// True if aggregate_rows tries the array before the hash map: r does not narrow the groups and stream_always
+/// is off.
+fn dense_first(cat: &Catalog, dims: &[DimId], r: &Restrict) -> bool {
+    !cat.cfg.stream_always && combos_in(dims, cat, r) == combos_in(dims, cat, &Restrict::all(0))
 }
 
 /// 対応表（メンバー型の Metric、例: 社員・月 -> 部署）を、その軸の全組み合わせの配列にしたもの。
@@ -422,5 +443,22 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             push_group(&mut cells, self.aggs, k, |a| finish(&vals[s], cnt[s], a));
         }
         Some(cubes(out.clone(), cells))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_first_only_for_the_full_range_without_stream_always() {
+        let dims = (0..2).map(|i| DimInfo { size: 12, ordered: false, name: format!("d{i}") }).collect();
+        let mut cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        let all = Restrict::all(2);
+        assert!(dense_first(&cat, &[0], &all));
+        assert!(dense_first(&cat, &[0], &all.with(1, Sel::new(vec![3], 12))), "a range on a removed dimension");
+        assert!(!dense_first(&cat, &[0], &all.with(0, Sel::new(vec![3], 12))), "a narrowed group dimension");
+        cat.cfg.stream_always = true;
+        assert!(!dense_first(&cat, &[0], &all));
     }
 }
