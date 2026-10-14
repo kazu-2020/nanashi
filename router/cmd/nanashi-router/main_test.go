@@ -59,6 +59,7 @@ func TestNewEngineConfigRefuses(t *testing.T) {
 	}{
 		{"all IPv4 addresses", "0.0.0.0", nil, true, "--engine-host"},
 		{"all IPv6 addresses", "::", nil, true, "--engine-host"},
+		{"an IPv6 address", "fd00::1", []string{"fd00::/8"}, true, "IPv6"},
 		{"no auth on another host", "10.0.1.5", nil, false, "--tokens か --user-header で認証する"},
 		{"auth on another host without proxies", "10.0.1.5", nil, true, "--engine-trusted-proxy で指定する"},
 		{"proxies without auth", "127.0.0.1", []string{"127.0.0.1/32"}, false, "--engine-trusted-proxy は"},

@@ -179,6 +179,9 @@ func newEngineConfig(dir, dsn string, idle time.Duration, host string, maxBytes 
 		return engineConfig{}, fmt.Errorf("--engine-host %q は使えない。エンジンは自分の番地として知らせるので、"+
 			"ルーターがつなぐ番地（例: 10.0.1.5）を指定する", host)
 	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil { // the engine advertises http://host:port without brackets
+		return engineConfig{}, fmt.Errorf("--engine-host %q: IPv6 の番地は使えない。IPv4 の番地かホスト名を指定する", host)
+	}
 	if maxBytes < 0 {
 		return engineConfig{}, errors.New("--engine-max-bytes は 0 以上")
 	}
