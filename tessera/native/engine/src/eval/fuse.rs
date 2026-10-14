@@ -878,29 +878,3 @@ pub(crate) fn compact(cells: &mut Vec<(u64, f64)>, sizes: &[usize], written: &[u
     }
 }
 
-/// i = 0..n の各行を f で写し、None を捨てた列（件数が多ければ並列に）。結果は 1 つの配列へ直接書き、
-/// 写す前に全体を集めて写し直すことはしない（途中で持つのは、n 件分の結果の配列だけ）。
-pub(crate) fn collect_rows(cfg: &Config, n: usize, f: impl Fn(usize) -> Option<(u64, f64)> + Sync) -> Vec<(u64, f64)> {
-    if !cfg.par(n) {
-        return (0..n).filter_map(f).collect();
-    }
-    let chunk = cfg.chunk.max(1);
-    let mut cells = vec![(0u64, 0f64); n];
-    let sizes: Vec<usize> = (0..n).step_by(chunk).map(|lo| chunk.min(n - lo)).collect();
-    let written: Vec<usize> = cells
-        .par_chunks_mut(chunk)
-        .enumerate()
-        .map(|(c, slice)| {
-            let mut w = 0;
-            for i in c * chunk..c * chunk + slice.len() {
-                if let Some(x) = f(i) {
-                    slice[w] = x;
-                    w += 1;
-                }
-            }
-            w
-        })
-        .collect();
-    compact(&mut cells, &sizes, &written);
-    cells
-}

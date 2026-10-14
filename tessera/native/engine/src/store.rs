@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use std::ops::Range;
 
 /// Metric の格納。分割軸（index）を先頭（最上位ビット）に詰めた整数キーで持つ。
 ///
@@ -226,10 +227,26 @@ impl Store {
         self.delta.is_empty().then(|| self.base.keys.len())
     }
 
-    /// 本体の i 行目（base_rows が Some のときだけ使う）。
+    /// Row `i` of the base (only when `base_rows` is Some).
     #[inline]
     pub fn base_cell(&self, i: usize) -> (u64, f64) {
         (self.base.keys.get(i), self.base.vals[i])
+    }
+
+    /// Gives the base rows in `r` in order. It decodes the keys one block at a time, so it is much
+    /// faster than `base_cell` for each row.
+    pub(crate) fn base_range(&self, r: Range<usize>, mut f: impl FnMut(u64, f64)) {
+        let mut buf = [0u64; BLOCK];
+        let mut i = r.start;
+        while i < r.end {
+            let j = i % BLOCK;
+            let hi = (i - j + BLOCK).min(r.end);
+            self.base.keys.decode(i / BLOCK, j..j + hi - i, &mut buf[..hi - i]);
+            for (&k, &v) in buf[..hi - i].iter().zip(&self.base.vals[i..hi]) {
+                f(k, v);
+            }
+            i = hi;
+        }
     }
 
     /// 全セルを、本体と差分を突き合わせながらキー順に渡す。

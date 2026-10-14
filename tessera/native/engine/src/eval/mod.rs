@@ -335,8 +335,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                 return Ok(c);
             }
             // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
-            let pairs = collect_rows(cfg, rows.len(), |i| {
-                let (k, v) = rows.get(i);
+            let pairs = rows.collect(cfg, |k, v| {
                 let t = mp.fwd[xp.get(k, ps) as usize];
                 (t >= 0).then(|| (rest.apply(xp, &out, k) | out.put(pd, t as u32), v))
             });
