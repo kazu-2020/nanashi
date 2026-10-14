@@ -61,16 +61,16 @@ impl Base {
         Arc::new(Base { keys: PackedKeys::new(&[], false), vals: Box::new([]), postings: fresh_postings(n_dims) })
     }
 
-    /// The rows in `r` in order. The keys are decoded one block at a time (`PackedKeys::range`).
+    /// The keys are decoded one block at a time (`PackedKeys::range`).
     pub(crate) fn range(&self, r: Range<usize>) -> impl Iterator<Item = (u64, f64)> + '_ {
         self.keys.range(r.clone()).zip(self.vals[r].iter().copied())
     }
 }
 
-/// 分割軸以外の軸の索引。本体の行番号を、その軸のメンバーごとにまとめたもの（転置索引）。
+/// The index of a dimension other than the partition dimension: the base rows of each member (an inverted index).
 #[derive(Debug)]
 pub(crate) struct Postings {
-    pub(crate) offsets: Vec<u32>, // メンバー m の行は rows[offsets[m]..offsets[m + 1]]
+    pub(crate) offsets: Vec<u32>, // the rows of member m are rows[offsets[m]..offsets[m + 1]]
     pub(crate) rows: Vec<u32>,
 }
 

@@ -115,7 +115,7 @@ impl Rows {
         }
     }
 
-    /// Gives the rows in `r` in order. For a Store it reads the keys block by block (see `Store::base_range`).
+    /// For a Store it reads the keys block by block (see `Store::base_range`).
     pub(crate) fn for_each_in(&self, r: Range<usize>, mut f: impl FnMut(u64, f64)) {
         match self {
             Rows::Store(s) => s.base_range(r).for_each(|(k, v)| f(k, v)),
@@ -190,7 +190,7 @@ pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -
     cfg.stream_always || groups * (rayon::current_num_threads() * 16) as f64 <= rows as f64
 }
 
-/// rows を読みながら、key が返す集計先ごとに値を足し込む（件数が多ければ並列に）。
+/// Reads `rows` and adds each value to the group that `key` gives. Many rows are read in parallel.
 pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option<u64> + Sync) -> FxHashMap<u64, Acc> {
     use crate::packed::BLOCK; // one unit of work is one block of packed keys
     let n = rows.len();

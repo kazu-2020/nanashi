@@ -19,15 +19,14 @@ struct Block {
 }
 
 impl Block {
-    /// The key at position `j` in the block. `bytes` must hold 16 bytes from the position's byte.
+    /// `bytes` must hold 16 bytes from the byte of position `j`.
     #[inline(always)]
     fn key(&self, bytes: &[u8], j: usize) -> u64 {
         let width = self.width as usize;
         let bit = j * width;
         let o = self.start as usize * 8 + bit / 8;
         let sh = (bit % 8) as u32;
-        // One unaligned 8-byte load holds the offset when the width is at most 56 bits. The branch
-        // is on the block's width, so the predictor learns it.
+        // One unaligned 8-byte load holds the offset when the width is at most 56 bits.
         let off = if width <= 56 {
             u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap()) >> sh
         } else {
@@ -59,11 +58,10 @@ pub(crate) struct PackedKeys {
 impl PackedKeys {
     /// Packs `keys`, which must be sorted and have no duplicates. `par` packs the blocks in parallel.
     pub(crate) fn new(keys: &[u64], par: bool) -> PackedKeys {
-        let width_of = |chunk: &[u64]| 64 - (chunk[chunk.len() - 1] - chunk[0]).leading_zeros() as usize;
         let mut blocks = Vec::with_capacity(keys.len().div_ceil(BLOCK));
         let mut start = 0usize;
         for chunk in keys.chunks(BLOCK) {
-            let width = width_of(chunk);
+            let width = 64 - (chunk[chunk.len() - 1] - chunk[0]).leading_zeros() as usize;
             blocks.push(Block { base: chunk[0], start: u32::try_from(start).expect("too many words"), width: width as u8 });
             start += (chunk.len() * width).div_ceil(64);
         }
@@ -91,8 +89,7 @@ impl PackedKeys {
         self.len
     }
 
-    /// The key at `i`. `i` must be less than `len()`. For an index past the end, the result is a wrong
-    /// key or a panic on the slice bounds.
+    /// The key at `i`. `i` must be less than `len()`.
     #[inline]
     pub(crate) fn get(&self, i: usize) -> u64 {
         debug_assert!(i < self.len, "key index past the number of rows");
@@ -134,7 +131,6 @@ impl PackedKeys {
         Keys { keys: self, i: r.start, end: r.end, decode_at: r.start, buf: [0; BLOCK] }
     }
 
-    /// The keys in order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.range(0..self.len)
     }
@@ -159,7 +155,6 @@ impl PackedKeys {
         lo
     }
 
-    /// The index of `key`, or None if it is not present.
     pub(crate) fn find(&self, key: u64) -> Option<usize> {
         let i = self.partition_point(|k| k < key);
         (i < self.len && self.get(i) == key).then_some(i)
@@ -170,7 +165,7 @@ impl PackedKeys {
         self.blocks[block].width
     }
 
-    /// The memory that the packed keys use (bytes).
+    /// Includes the block headers and the 16 spare bytes.
     pub(crate) fn bytes(&self) -> usize {
         self.bytes.len() + self.blocks.len() * std::mem::size_of::<Block>()
     }
@@ -212,7 +207,6 @@ impl Iterator for Keys<'_> {
 
 impl ExactSizeIterator for Keys<'_> {}
 
-/// The keys that a `Cursor` reads: packed keys, or cells in key order.
 #[derive(Clone, Copy)]
 pub(crate) enum Sorted<'a> {
     Packed(&'a PackedKeys),
@@ -332,14 +326,13 @@ impl<'a> Cursor<'a> {
 
 /// Decodes `out[i] = base + offset(js.start + i)` for a width `W` of 1 to 56 bits. The width is a
 /// constant, so the compiler unrolls each group of 8 keys (`W` bytes) with fixed shifts.
-fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, out: &mut [u64]) {
+fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, mut out: &mut [u64]) {
     let mask = MASKS[W];
     let one = |j: usize| {
         let bit = j * W;
         base + ((u64::from_le_bytes(bytes[bit / 8..bit / 8 + 8].try_into().unwrap()) >> (bit % 8)) & mask)
     };
     let (mut j, end) = (js.start, js.end);
-    let mut out = out;
     while j % 8 != 0 && j < end {
         out[0] = one(j);
         out = &mut out[1..];
@@ -359,7 +352,6 @@ fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, out: &mut [
     }
 }
 
-/// Packs `chunk` into `out`, the bytes of the block `blk`.
 fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
     let width = blk.width as usize;
     if width == 0 {
@@ -530,7 +522,7 @@ mod tests {
         time("vec iter", &|| keys.iter().fold(0, |a, &k| a.wrapping_add(k)));
         time("packed iter", &|| p.iter().fold(0, u64::wrapping_add));
         time("packed iter zip vals", &|| p.iter().zip(&keys).fold(0, |a, (k, &v)| a.wrapping_add(k ^ v)));
-        time("packed callback zip vals", &|| {
+        time("packed block decode zip vals", &|| {
             let mut buf = [0u64; BLOCK];
             let mut a = 0u64;
             for b in 0..n.div_ceil(BLOCK) {

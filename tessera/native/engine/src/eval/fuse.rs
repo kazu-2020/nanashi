@@ -72,7 +72,7 @@ impl<'a> Col<'a> {
         }
     }
 
-    /// A cursor over the keys. For a `Col::Store` it decodes one packed block at a time.
+    /// For a `Col::Store` it decodes one packed block at a time.
     fn cursor(&self) -> Cursor<'a> {
         Cursor::new(match self {
             Col::Store(s) => Sorted::Packed(&s.base.keys),
@@ -444,13 +444,14 @@ impl<'a> Fuse<'a> {
 /// and `Search` access; a `Dense` access gets an empty placeholder).
 type Ev<'s> = Box<dyn Fn(&mut [Cursor], u64) -> Option<f64> + Sync + 's>;
 
-/// The readers of one scan (one per unit of work).
 fn readers<'a>(access: &[Access<'a>]) -> Vec<Cursor<'a>> {
-    let reader = |a: &Access<'a>| match a {
-        Access::Aligned(col) | Access::Search { col, .. } => col.cursor(),
-        Access::Dense { .. } => Cursor::new(Sorted::Cells(&[])),
-    };
-    access.iter().map(reader).collect()
+    access
+        .iter()
+        .map(|a| match a {
+            Access::Aligned(col) | Access::Search { col, .. } => col.cursor(),
+            Access::Dense { .. } => Cursor::new(Sorted::Cells(&[])),
+        })
+        .collect()
 }
 
 fn compile<'s>(f: &'s F, acc: &'s [Access]) -> Ev<'s> {
@@ -722,7 +723,6 @@ fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev) -> Vec<(
         // The key at `at[j]` while `at[j] < hi[j]`. A packed key read is not free, so read it once.
         let mut next: Vec<u64> = rds.iter_mut().zip(&at).zip(hi).map(|((d, &a), &h)| if a < h { d.key(a) } else { 0 }).collect();
         let mut w = 0;
-        // The loop takes the next key of the drivers (their union)
         while let Some(key) = (0..drivers.len()).filter(|&j| at[j] < hi[j]).map(|j| next[j]).min() {
             for (j, d) in rds.iter_mut().enumerate() {
                 if at[j] < hi[j] && next[j] == key {
@@ -768,7 +768,6 @@ impl<'a> Space<'_, 'a> {
         self.base.as_ref().map_or(1, |(c, _, _)| c.n()) * self.combos()
     }
 
-    /// A cursor over the base column (empty without a base).
     fn cursor(&self) -> Cursor<'a> {
         self.base.as_ref().map_or(Col::Cells(&[]), |(c, _, _)| *c).cursor()
     }
