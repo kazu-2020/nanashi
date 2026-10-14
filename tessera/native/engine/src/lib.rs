@@ -30,7 +30,7 @@ pub use cube::*;
 pub use diag::*;
 pub use eval::*;
 pub use key::*;
-pub(crate) use packed::*;
+pub(crate) use packed::{Cursor, PackedKeys, Sorted};
 pub use restrict::*;
 pub use store::*;
 

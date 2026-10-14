@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use crate::packed::BLOCK;
 use std::ops::Range;
 
 /// Metric の格納。分割軸（index）を先頭（最上位ビット）に詰めた整数キーで持つ。
@@ -52,6 +53,11 @@ pub(crate) struct Base {
 impl Base {
     pub(crate) fn empty(n_dims: usize) -> Arc<Base> {
         Arc::new(Base { keys: PackedKeys::new(&[], false), vals: Box::new([]), postings: fresh_postings(n_dims) })
+    }
+
+    /// The rows in `r` in order. The keys are decoded one block at a time (`PackedKeys::range`).
+    pub(crate) fn range(&self, r: Range<usize>) -> impl Iterator<Item = (u64, f64)> + '_ {
+        self.keys.range(r.clone()).zip(self.vals[r].iter().copied())
     }
 }
 
@@ -106,29 +112,21 @@ impl Store {
         let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|k| k < h));
         let upper = hi.map_or(Bound::Unbounded, Bound::Excluded);
         let mut delta = self.delta.range((Bound::Included(lo), upper)).peekable();
-        // The base keys are decoded one block at a time into `buf`, so the merge loop reads a plain array.
-        let mut buf = [0u64; BLOCK];
-        let mut i = start;
-        while i < end {
-            let j = i % BLOCK;
-            let block_end = (i - j + BLOCK).min(end);
-            self.base.keys.decode(i / BLOCK, j..j + (block_end - i), &mut buf[j..j + (block_end - i)]);
-            while i < block_end {
-                let bk = buf[i % BLOCK];
-                match delta.peek() {
-                    Some(&(&dk, &dv)) if dk <= bk => {
-                        delta.next();
-                        if dk == bk {
-                            i += 1;
-                        }
-                        if let Some(v) = dv {
-                            f(dk, v);
-                        }
+        let mut base = self.base.range(start..end).peekable();
+        while let Some(&(bk, bv)) = base.peek() {
+            match delta.peek() {
+                Some(&(&dk, &dv)) if dk <= bk => {
+                    delta.next();
+                    if dk == bk {
+                        base.next();
                     }
-                    _ => {
-                        f(bk, self.base.vals[i]);
-                        i += 1;
+                    if let Some(v) = dv {
+                        f(dk, v);
                     }
+                }
+                _ => {
+                    f(bk, bv);
+                    base.next();
                 }
             }
         }
@@ -201,13 +199,12 @@ impl Store {
 
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
-            // Each block is decoded once into a local buffer, in parallel on a large base.
+            // Each block is decoded once, in parallel on a large base.
             let mut cells = vec![(0u64, 0f64); self.base.keys.len()];
             let fill = |(b, out): (usize, &mut [(u64, f64)])| {
-                let mut buf = [0u64; BLOCK];
-                self.base.keys.decode(b, 0..out.len(), &mut buf[..out.len()]);
-                for ((c, &k), &v) in out.iter_mut().zip(&buf).zip(&self.base.vals[b * BLOCK..]) {
-                    *c = (k, v);
+                let rows = self.base.range(b * BLOCK..b * BLOCK + out.len());
+                for (c, row) in out.iter_mut().zip(rows) {
+                    *c = row;
                 }
             };
             if self.cfg.par(cells.len()) {
@@ -227,25 +224,11 @@ impl Store {
         self.delta.is_empty().then(|| self.base.keys.len())
     }
 
-    /// The base rows in order. It decodes the keys one block at a time.
-    pub(crate) fn base_iter(&self) -> impl Iterator<Item = (u64, f64)> + '_ {
-        self.base.keys.iter().zip(self.base.vals.iter().copied())
-    }
-
-    /// Gives the base rows in `r` in order. It decodes the keys one block at a time, so it is much
-    /// faster than `PackedKeys::get` for each row.
-    pub(crate) fn base_range(&self, r: Range<usize>, mut f: impl FnMut(u64, f64)) {
-        let mut buf = [0u64; BLOCK];
-        let mut i = r.start;
-        while i < r.end {
-            let j = i % BLOCK;
-            let hi = (i - j + BLOCK).min(r.end);
-            self.base.keys.decode(i / BLOCK, j..j + hi - i, &mut buf[..hi - i]);
-            for (&k, &v) in buf[..hi - i].iter().zip(&self.base.vals[i..hi]) {
-                f(k, v);
-            }
-            i = hi;
-        }
+    /// The rows `r` of stored data without a delta, in order (the base rows are the cells). It decodes the
+    /// keys one block at a time, so it is much faster than `PackedKeys::get` for each row.
+    pub(crate) fn base_range(&self, r: Range<usize>) -> impl Iterator<Item = (u64, f64)> + '_ {
+        assert!(self.base_rows().is_some(), "差分のある格納データは番号で読めない");
+        self.base.range(r)
     }
 
     /// 全セルを、本体と差分を突き合わせながらキー順に渡す。

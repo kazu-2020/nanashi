@@ -34,11 +34,9 @@ impl Cells for Store {
         self.base_rows().expect("差分のある格納データは番号で読めない")
     }
 
-    /// Reads the keys one packed block at a time (see `PackedKeys::iter`).
     #[inline]
     fn iter(&self) -> impl Iterator<Item = (u64, f64)> + '_ {
-        self.n();
-        self.base_iter()
+        self.base_range(0..self.n())
     }
 }
 

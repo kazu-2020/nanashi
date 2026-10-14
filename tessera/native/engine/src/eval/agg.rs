@@ -118,16 +118,21 @@ impl Rows {
     /// Gives the rows in `r` in order. For a Store it reads the keys block by block (see `Store::base_range`).
     pub(crate) fn for_each_in(&self, r: Range<usize>, mut f: impl FnMut(u64, f64)) {
         match self {
-            Rows::Store(s) => s.base_range(r, f),
+            Rows::Store(s) => s.base_range(r).for_each(|(k, v)| f(k, v)),
             Rows::Shared(c) => c.cells[r].iter().for_each(|&(k, v)| f(k, v)),
             Rows::Owned(c) => c.cells[r].iter().for_each(|&(k, v)| f(k, v)),
         }
     }
 
-    /// Maps each row with `f` and drops the None results (in parallel on many rows). The result is
-    /// written directly into one array, so only that array is held while it is made.
+    /// Maps each row with `f` and drops the None results. On many rows the parts run in parallel and
+    /// write directly into one array, so only that array is held while it is made.
     pub(crate) fn collect(&self, cfg: &Config, f: impl Fn(u64, f64) -> Option<(u64, f64)> + Sync) -> Vec<(u64, f64)> {
         let (n, chunk) = (self.len(), cfg.chunk.max(1));
+        if !cfg.par(n) {
+            let mut cells = Vec::new();
+            self.for_each_in(0..n, |k, v| cells.extend(f(k, v)));
+            return cells;
+        }
         let mut cells = vec![(0u64, 0f64); n];
         let fill = |(c, part): (usize, &mut [(u64, f64)])| {
             let mut w = 0;
@@ -140,11 +145,7 @@ impl Rows {
             w
         };
         let sizes: Vec<usize> = (0..n).step_by(chunk).map(|lo| chunk.min(n - lo)).collect();
-        let written: Vec<usize> = if cfg.par(n) {
-            cells.par_chunks_mut(chunk).enumerate().map(fill).collect()
-        } else {
-            cells.chunks_mut(chunk).enumerate().map(fill).collect()
-        };
+        let written: Vec<usize> = cells.par_chunks_mut(chunk).enumerate().map(fill).collect();
         compact(&mut cells, &sizes, &written);
         cells
     }
@@ -191,7 +192,7 @@ pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -
 
 /// rows を読みながら、key が返す集計先ごとに値を足し込む（件数が多ければ並列に）。
 pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option<u64> + Sync) -> FxHashMap<u64, Acc> {
-    // The rows are read one block at a time
+    use crate::packed::BLOCK; // one unit of work is one block of packed keys
     let n = rows.len();
     let add = |mut g: FxHashMap<u64, Acc>, b: usize| {
         rows.for_each_in(b * BLOCK..((b + 1) * BLOCK).min(n), |k, v| {
