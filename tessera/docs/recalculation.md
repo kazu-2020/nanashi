@@ -35,6 +35,7 @@ In the Rust engine, the engine also propagates the range as full for a large Met
 
 When you change a formula or an input definition, the engine also calculates again only the changed Metric and its affected range.
 If you give an existing name to `add_formula` or `add_input`, the new Metric replaces the old Metric.
+If `add_input` refuses a cell (for example, the same cell two times), it raises ValueError and keeps the old definition.
 
 - **Add a formula**: The engine calculates only that Metric. There are no downstream Metrics, because no formula refers to it yet.
 - **Replace a formula**: The engine calculates the full Metric again. It propagates only the cells with changed values to the downstream Metrics.

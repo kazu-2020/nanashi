@@ -86,7 +86,7 @@ class Transaction:
 # ---------------------------------------------------------------- 意図
 
 def jsonable(x: Any) -> Any:
-    """操作の引数を JSON にできる形にする（大きな入力データは件数だけにする）。"""
+    """Make the arguments of an operation into a form for JSON. A large input becomes only its number of cells."""
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
     if isinstance(x, Expr):
@@ -98,7 +98,7 @@ def jsonable(x: Any) -> Any:
             not isinstance(k, str) for k in x) else {k: jsonable(v) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
         return [jsonable(v) for v in x]
-    return f"<{type(x).__name__}>"  # エンジンの格納データなど（結果の側に値が残る）
+    return f"<{type(x).__name__}>"  # for example the stored data of the engine (the result keeps the values)
 
 
 # ---------------------------------------------------------------- 結果（前後の差）

@@ -653,13 +653,13 @@ class Model:
                      override=None if old is None else old.override)  # rename and remove still follow the link
         if storage is None:
             self.metrics[id] = new  # _check uses the dimensions of the registered Metric
-            # A generator: a copy of a large cells dict can need more memory than the stored data
-            pairs = ((tuple(key), value) for key, value in (cells or {}).items())
+            # Generators: a copy of the cells can need more memory than the stored data
             try:
+                pairs = ((tuple(key), value) for key, value in (cells or {}).items())
                 storage = self.engine.from_cells(
                     dims, kind, ((k, v) for k, value in pairs if (v := self._check(id, k, value)) is not None),
                     self, partition)
-            except BaseException:  # also a bad key from Named, or no memory in the engine
+            except BaseException:
                 if old is None:
                     del self.metrics[id]
                 else:

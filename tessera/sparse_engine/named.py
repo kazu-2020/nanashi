@@ -318,8 +318,8 @@ class NamedLog:
 
 
 class _ById(Mapping):
-    """The cells {(member name, ...): value} of an input Metric m as {(member id, ...): value}. The ids are made
-    when the Model reads the cells, because a copy of a large input can need more memory than the engine."""
+    """The cells {(member name, ...): value} of an input Metric m as {(member id, ...): value}. Named makes the
+    ids when the Model reads the cells, because a copy of a large input can need more memory than the stored data."""
 
     def __init__(self, named: Named, m: Metric, cells: Mapping[Key, Any]):
         self._named, self._metric, self._cells = named, m, cells
@@ -328,10 +328,10 @@ class _ById(Mapping):
         return len(self._cells)
 
     def __iter__(self):
-        return (key for key, _ in self.items())
+        return (self._named._key(self._metric.dims, tuple(k)) for k in self._cells)
 
     def __getitem__(self, key: Key) -> Any:
-        return self._named._value_in(self._metric, self._cells[self._named._names(self._metric.dims)(key)])
+        return dict(self.items())[key]  # shortcut: O(n) for each lookup, nothing calls it now; index it if one does
 
     def items(self):
         named, m = self._named, self._metric

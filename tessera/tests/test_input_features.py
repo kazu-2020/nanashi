@@ -203,6 +203,8 @@ class BadCells(unittest.TestCase):
                 m.add_input("Y", ["Employee"], {("e1",): 1.0, (e1,): 2.0})
             with self.assertRaises(TypeError):
                 m.add_input("Y", ["Employee"], {1: 1.0})
+            with self.assertRaises(AttributeError):
+                m.add_input("Y", ["Employee"], [(("e1",), 1.0)])
             self.assertNotIn("Y", [x.name for x in m.metrics.values()])
             m.recalc()
 
