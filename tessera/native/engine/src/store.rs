@@ -694,6 +694,9 @@ impl Store {
             })
             .collect();
         cells.par_sort_unstable_by_key(|c| c.0);
+        if cells.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Err("同じセルが 2 回ある".into());
+        }
         self.set_sorted(cells);
         Ok(self)
     }

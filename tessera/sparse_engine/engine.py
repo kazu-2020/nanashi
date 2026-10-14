@@ -26,8 +26,9 @@ class Store(Protocol):
 
     def empty(self, dims: tuple[str, ...], kind: Kind, partition: str | None = None,
               cat: Catalog | None = None) -> Any: ...
-    def from_cells(self, dims: tuple[str, ...], kind: Kind, cells: Mapping[Key, Any], cat: Catalog,
-                   partition: str | None = None) -> Any: ...
+    def from_cells(self, dims: tuple[str, ...], kind: Kind, cells: Iterable[tuple[Key, Any]], cat: Catalog,
+                   partition: str | None = None) -> Any:
+        """Make the storage from (key, value) pairs. If two pairs have the same key, raise ValueError."""
     def to_parquet(self, storage: Any, dims: tuple[str, ...], kind: Kind, cat: Catalog,
                    meta: Mapping[str, str]) -> bytes:
         """入力 Metric の値を Parquet のバイト列にする（保存）。列は parquet_columns と値の列 v
@@ -117,7 +118,12 @@ class ReferenceEngine:
         return Cube(dims)
 
     def from_cells(self, dims, kind, cells, cat, partition=None):
-        return Cube(dims, dict(cells))
+        out = {}
+        for key, value in cells:
+            if key in out:
+                raise ValueError("同じセルが 2 回ある")
+            out[key] = value
+        return Cube(dims, out)
 
     def partition_of(self, storage):
         return None

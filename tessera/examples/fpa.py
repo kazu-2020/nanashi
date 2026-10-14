@@ -91,6 +91,7 @@ def build(engine=None, employees: int = 60, products: int = 30, months: int = 24
                 units[(p, "実績", t)] = float(base + rng.randint(-20, 20))
     m.add_input("Units", ["Product", "Version", "Month"], units)
     m.add_input("Price", ["Product", "Version"], price)
+    del units, price  # the engine has its own copy, so free them before the employee inputs
 
     salary, dept, hire, leave = {}, {}, {}, {}
     for i, e in enumerate(emps):

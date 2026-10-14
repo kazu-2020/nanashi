@@ -386,7 +386,7 @@ class _Run:
             values[k] = exact_sum(vs[k])
             if low != 0:
                 lows[k] = low
-        return eng.from_cells(m.dims, "number", values, cat), eng.from_cells(m.dims, "number", lows, cat)
+        return eng.from_cells(m.dims, "number", values.items(), cat), eng.from_cells(m.dims, "number", lows.items(), cat)
 
     def _widened(self, changed: Restrict | None) -> Restrict | None:
         """値が変わったセルの範囲から、全メンバーにわたる軸を外す（その軸は「全体」として扱う）。

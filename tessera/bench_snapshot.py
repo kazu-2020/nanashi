@@ -4,7 +4,7 @@
     python bench_snapshot.py run /tmp/fpa32                 # load it, then time the recalculations
 
 Scale k multiplies the employees and the products of SIZES["large"] (examples/fpa.py) by k.
-build() keeps a Python tuple key for each input cell, so it used about 11.5 GB RSS at scale 32.
+build() keeps a Python tuple key for each input cell (see docs/development.md for its RSS).
 This script keeps the member numbers in array.array columns and writes the Parquet files of storage.py directly.
 """
 from __future__ import annotations

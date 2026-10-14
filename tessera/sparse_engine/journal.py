@@ -86,19 +86,19 @@ class Transaction:
 # ---------------------------------------------------------------- 意図
 
 def jsonable(x: Any) -> Any:
-    """操作の引数を JSON にできる形にする（大きな入力データは件数だけにする）。"""
+    """Make the arguments of an operation into a form for JSON. A large input becomes only its number of cells."""
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
     if isinstance(x, Expr):
         return to_formula(x)
-    if isinstance(x, dict):
+    if isinstance(x, Mapping):
         if len(x) > 1000:
             return {"cells": len(x)}
         return [[jsonable(k), jsonable(v)] for k, v in x.items()] if any(
             not isinstance(k, str) for k in x) else {k: jsonable(v) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
         return [jsonable(v) for v in x]
-    return f"<{type(x).__name__}>"  # エンジンの格納データなど（結果の側に値が残る）
+    return f"<{type(x).__name__}>"  # for example the stored data of the engine (the result keeps the values)
 
 
 # ---------------------------------------------------------------- 結果（前後の差）
@@ -413,7 +413,7 @@ def _define(model, specs: list[dict]) -> None:
             model._values.pop(m.id, None)  # the values of a formula Metric are calculated again after the replay
         elif (old is None or old.formula is not None or m.id not in model._values
               or (old.dims, old.kind) != (m.dims, m.kind)):
-            model._values[m.id] = model.engine.from_cells(m.dims, m.kind, {}, model, m.partition)
+            model._values[m.id] = model.engine.from_cells(m.dims, m.kind, (), model, m.partition)
         m.override = model._metric_ids.get(m.override_name)  # the link stays also while not overridable
 
 
