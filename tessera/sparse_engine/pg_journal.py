@@ -28,10 +28,15 @@ cell_change への書き込み（と索引の更新）は確定の後で行う�
 リースが切れて別のプロセスが書き込みを始めていれば、古いプロセスの確定は拒否される（締め出し）。
 読み込んだあとに別のプロセスが書き込んでいた場合も、手元のモデルが古いので拒否する（Stale）。
 
-リースは書き込みのない間も別のスレッドで延長する（heartbeat）。別のプロセスが期限内のリースを
-持っていれば、acquire は期限が切れるまで待ってから取る（落ちたプロセスのリースを待つ）。
-take は待たずに取れるかだけを試す（待機系が使う）。リースには持ち主が公開している番地（endpoint）も
-書き、leader で引ける。手放すとき（release）は確定と同じ通知を送るので、待機系はすぐ取りに行ける。
+A different thread extends the lease while there are no writes (heartbeat). If a different process has
+a lease that has not expired, acquire waits until it expires and then gets it (the lease of a stopped process).
+take only tries to get the lease without a wait (a standby uses it). The lease also contains the address
+that the owner publishes (endpoint). leader returns it. wait reads nanashi_model at each poll_interval.
+It returns when head_seq changes, or when the lease is released or expires. Thus a standby can try to
+get the lease immediately.
+
+The module does not use session state (LISTEN/NOTIFY, session advisory locks, prepared statements).
+Thus it works through PgBouncer in transaction pooling mode.
 """
 from __future__ import annotations
 
@@ -156,14 +161,15 @@ ANALYZE_ROWS = 100_000
 class PgJournal(Journal):
     def __init__(self, dsn: str, model_id: str, objects, *, lease_ttl: float = 30.0,
                  holder: str | None = None, bulk_cells: int = 10_000, heartbeat: bool = True,
-                 acquire_wait: float | None = None, endpoint: str | None = None):
+                 acquire_wait: float | None = None, endpoint: str | None = None, poll_interval: float = 0.2):
         """objects はスナップショットと大量の変更のファイルの置き場所（s3://<バケット>/<接頭辞> か
         ディレクトリ。objects.py）。その下の <model_id>/ に置く。
         lease_ttl はリースの期限（秒）。heartbeat なら、リースを持っている間は期限の 1/3 ごとに延長する。
         acquire_wait は、別のプロセスのリースが切れるのを待つ長さ（既定は lease_ttl）。
         holder はリースの持ち主の名前（既定はホスト名、プロセス番号、乱数）。
         endpoint はこのプロセスが公開している番地（HTTP サーバーの URL）。リースと一緒に書き、
-        待機系やルーターが書き手を見つけるのに使う。"""
+        待機系やルーターが書き手を見つけるのに使う。
+        poll_interval is the time in seconds between 2 reads of nanashi_model in wait."""
         self.dsn = dsn
         self.model_id = model_id
         self.endpoint = endpoint
@@ -174,8 +180,8 @@ class PgJournal(Journal):
         self._lock = threading.RLock()
         self._index_conn = None
         self._index_lock = threading.Lock()
-        self._listen_conn = None  # 確定の通知を待つ接続（wait で初めて使うときにつなぐ）
-        self._listen_lock = threading.Lock()
+        self.poll_interval = poll_interval
+        self._lease_live: bool | None = None  # The lease state at the last poll of wait (None: not polled yet)
         self.lease_ttl = lease_ttl
         self.acquire_wait = lease_ttl if acquire_wait is None else acquire_wait
         self.holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -210,21 +216,18 @@ class PgJournal(Journal):
             self.release()
         finally:
             self.conn.close()
-            for c in (self._index_conn, self._listen_conn):
-                if c is not None:
-                    c.close()
+            if self._index_conn is not None:
+                self._index_conn.close()
 
     def release(self) -> None:
-        """持っているリースを手放す。持っていなければ何もしない。待機系（wait で待っている）に知らせるので、
-        次の書き手は間隔を待たずに取りに行ける。"""
+        """Release the lease if this process has it. A standby in wait sees the change at its next poll,
+        thus it can try to get the lease before the interval ends."""
         with self._lock:
             if self.epoch is None or self.conn.closed:
                 return
-            with self.conn.transaction():
-                self.conn.execute("update nanashi_model set lease_expires = now()"
-                                  " where model_id = %s and writer_epoch = %s and lease_holder = %s",
-                                  (self.model_id, self.epoch, self.holder))
-                self.conn.execute("select pg_notify('nanashi_head', %s)", (self.model_id,))
+            self.conn.execute("update nanashi_model set lease_expires = now()"
+                              " where model_id = %s and writer_epoch = %s and lease_holder = %s",
+                              (self.model_id, self.epoch, self.holder))
             self.epoch = None
 
     def open(self, engine=None):
@@ -237,14 +240,23 @@ class PgJournal(Journal):
         return self.head
 
     def wait(self, timeout: float) -> None:
-        """確定のたびに書き手が送る通知（NOTIFY nanashi_head）を、専用の接続で待つ。"""
-        with self._listen_lock:
-            if self._listen_conn is None:
-                self._listen_conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
-                self._listen_conn.execute("listen nanashi_head")
-            for n in self._listen_conn.notifies(timeout=timeout):
-                if n.payload == self.model_id:
-                    return
+        """Read nanashi_model every poll_interval seconds. Return when head_seq is not self.head (more
+        entries), when the lease became live or not live (a release or an expiry), or after timeout.
+        It does not use LISTEN, because PgBouncer in transaction pooling mode does not keep a session."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                head, live = self.conn.execute(
+                    "select head_seq, coalesce(lease_expires > now(), false) from nanashi_model where model_id = %s",
+                    (self.model_id,)).fetchone()
+            # Keep the state between calls, so that a change between 2 calls also wakes the caller
+            seen, self._lease_live = self._lease_live, live
+            if head != self.head or (seen is not None and seen != live):
+                return
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(self.poll_interval, left))
 
     def _db_head(self) -> int:
         with self._lock:
@@ -385,8 +397,6 @@ class PgJournal(Journal):
                     for rec, seq, blob in zip(records, seqs, blobs):
                         if blob is None:
                             _copy_cells(copy, self.model_id, seq, rec["changes"].get("cells", []))
-                # 追従する読み手（Replica）に知らせる。確定したときに届く
-                self.conn.execute("select pg_notify('nanashi_head', %s)", (self.model_id,))
             self.head = seqs[-1]
             return seqs
 
