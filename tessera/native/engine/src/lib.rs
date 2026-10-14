@@ -15,6 +15,7 @@ mod diag;
 mod eval;
 pub mod graph;
 mod key;
+mod packed;
 pub mod plan;
 pub mod pq;
 mod restrict;
@@ -29,6 +30,7 @@ pub use cube::*;
 pub use diag::*;
 pub use eval::*;
 pub use key::*;
+pub(crate) use packed::*;
 pub use restrict::*;
 pub use store::*;
 

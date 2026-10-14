@@ -38,20 +38,19 @@ pub struct Mem {
 
 /// The base of a Store. Nothing changes it after it is made.
 ///
-/// The keys and values are immutable columns with no gaps (`Box<[T]>`, with no extra capacity).
-/// The packed u64 keys and f64 values have the same layout as the data of Arrow UInt64 / Float64 arrays.
-/// They contain no pointers. Thus a memory-mapped file or shared memory can keep the same layout
-/// (step 2 of "Plan" in docs/out-of-core.md). The index (postings) stays in memory.
+/// The keys are packed in frame-of-reference blocks (`PackedKeys`). The values are an immutable column
+/// with no gaps (`Box<[f64]>`), with the same layout as the data of an Arrow Float64 array.
+/// The index (postings) stays in memory.
 #[derive(Debug)]
 pub(crate) struct Base {
-    pub(crate) keys: Box<[u64]>, // 昇順・重複なし
+    pub(crate) keys: PackedKeys, // ascending, no duplicates
     pub(crate) vals: Box<[f64]>,
     pub(crate) postings: Vec<OnceLock<Arc<Postings>>>, // 分割軸以外の軸の索引（詰め方の位置ごと。必要になったら作る）
 }
 
 impl Base {
     pub(crate) fn empty(n_dims: usize) -> Arc<Base> {
-        Arc::new(Base { keys: Box::new([]), vals: Box::new([]), postings: fresh_postings(n_dims) })
+        Arc::new(Base { keys: PackedKeys::new(&[], false), vals: Box::new([]), postings: fresh_postings(n_dims) })
     }
 }
 
@@ -102,13 +101,13 @@ impl Store {
 
     /// [lo, hi) のセルを、本体と差分を突き合わせながらキー順に渡す。
     pub(crate) fn merged(&self, lo: u64, hi: Option<u64>, mut f: impl FnMut(u64, f64)) {
-        let start = self.base.keys.partition_point(|&k| k < lo);
-        let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|&k| k < h));
+        let start = self.base.keys.partition_point(|k| k < lo);
+        let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|k| k < h));
         let upper = hi.map_or(Bound::Unbounded, Bound::Excluded);
         let mut delta = self.delta.range((Bound::Included(lo), upper)).peekable();
         let mut i = start;
         loop {
-            let b = (i < end).then(|| self.base.keys[i]);
+            let b = (i < end).then(|| self.base.keys.get(i));
             match (b, delta.peek().map(|(&k, &v)| (k, v))) {
                 (None, None) => break,
                 (Some(bk), Some((dk, dv))) if dk <= bk => {
@@ -155,7 +154,7 @@ impl Store {
             let mut cells = Vec::new();
             for &m in &sel.members {
                 for &row in post.of(m) {
-                    let k = self.base.keys[row as usize];
+                    let k = self.base.keys.get(row as usize);
                     if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
                         cells.push((k, self.base.vals[row as usize]));
                     }
@@ -197,9 +196,9 @@ impl Store {
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
             let cells = if self.cfg.par(self.base.keys.len()) {
-                self.base.keys.par_iter().copied().zip(self.base.vals.par_iter().copied()).collect()
+                self.base.keys.par_iter().zip(self.base.vals.par_iter().copied()).collect()
             } else {
-                self.base.keys.iter().copied().zip(self.base.vals.iter().copied()).collect()
+                self.base.keys.iter().zip(self.base.vals.iter().copied()).collect()
             };
             return Cube { pack: self.pack.clone(), kind: self.kind, cells };
         }
@@ -216,7 +215,7 @@ impl Store {
     /// 本体の i 行目（base_rows が Some のときだけ使う）。
     #[inline]
     pub fn base_cell(&self, i: usize) -> (u64, f64) {
-        (self.base.keys[i], self.base.vals[i])
+        (self.base.keys.get(i), self.base.vals[i])
     }
 
     /// 全セルを、本体と差分を突き合わせながらキー順に渡す。
@@ -232,7 +231,7 @@ impl Store {
         let index = b.postings.iter().filter_map(|p| p.get()).map(|p| (p.offsets.capacity() + p.rows.capacity()) * 4).sum();
         Mem {
             rows: b.keys.len(),
-            base: (b.keys.len() + b.vals.len()) * 8,
+            base: b.keys.bytes() + b.vals.len() * 8,
             delta_rows: self.delta.len(),
             delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
             index,
@@ -261,7 +260,7 @@ impl Store {
         let (keys, vals): (Vec<u64>, Vec<f64>) =
             if self.cfg.par(cells.len()) { cells.into_par_iter().unzip() } else { cells.into_iter().unzip() };
         self.base = Arc::new(Base {
-            keys: keys.into_boxed_slice(),
+            keys: PackedKeys::new(&keys, self.cfg.par(keys.len())),
             vals: vals.into_boxed_slice(),
             postings: fresh_postings(self.pack.dims.len()),
         });
@@ -274,7 +273,7 @@ impl Store {
         base.postings[pos].get_or_init(|| {
             let size = (self.pack.masks[pos] + 1) as usize;
             let mut offsets = vec![0u32; size + 1];
-            for &k in &self.base.keys {
+            for k in self.base.keys.iter() {
                 offsets[self.pack.get(k, pos) as usize + 1] += 1;
             }
             for i in 1..offsets.len() {
@@ -282,7 +281,7 @@ impl Store {
             }
             let mut fill = offsets.clone();
             let mut rows = vec![0u32; self.base.keys.len()];
-            for (row, &k) in self.base.keys.iter().enumerate() {
+            for (row, k) in self.base.keys.iter().enumerate() {
                 let m = self.pack.get(k, pos) as usize;
                 rows[fill[m] as usize] = row as u32;
                 fill[m] += 1;
@@ -509,7 +508,7 @@ impl Store {
     pub(crate) fn value_at(&self, k: u64) -> Option<f64> {
         match self.delta.get(&k) {
             Some(v) => *v,
-            None => self.base.keys.binary_search(&k).ok().map(|i| self.base.vals[i]),
+            None => self.base.keys.find(k).map(|i| self.base.vals[i]),
         }
     }
 

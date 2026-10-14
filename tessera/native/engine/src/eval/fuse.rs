@@ -52,7 +52,7 @@ impl Col<'_> {
     #[inline]
     fn key(&self, i: usize) -> u64 {
         match self {
-            Col::Store(s) => s.base.keys[i],
+            Col::Store(s) => s.base.keys.get(i),
             Col::Cells(c) => c[i].0,
         }
     }
@@ -68,7 +68,7 @@ impl Col<'_> {
     /// key 以上の最初の行。
     fn lower_bound(&self, key: u64) -> usize {
         match self {
-            Col::Store(s) => s.base.keys.partition_point(|&k| k < key),
+            Col::Store(s) => s.base.keys.partition_point(|k| k < key),
             Col::Cells(c) => c.partition_point(|x| x.0 < key),
         }
     }
