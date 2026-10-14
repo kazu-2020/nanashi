@@ -70,17 +70,25 @@ impl Base {
 /// The index of a dimension other than the partition dimension: the base rows of each member (an inverted index).
 #[derive(Debug)]
 pub(crate) struct Postings {
-    pub(crate) offsets: Vec<u32>, // the rows of member m are rows[offsets[m]..offsets[m + 1]]
-    pub(crate) rows: Vec<u32>,
+    pub(crate) offsets: Vec<u32>, // the entries of member m are entries[offsets[m]..offsets[m + 1]]
+    pub(crate) entries: PackedKeys, // `m * n + row` for each base row, sorted
+    pub(crate) n: u64,              // the number of base rows
 }
 
 impl Postings {
-    pub(crate) fn of(&self, m: u32) -> &[u32] {
+    /// The positions in `entries` of member `m`.
+    pub(crate) fn span(&self, m: u32) -> Range<usize> {
         let m = m as usize;
         if m + 1 >= self.offsets.len() {
-            return &[];
+            return 0..0;
         }
-        &self.rows[self.offsets[m] as usize..self.offsets[m + 1] as usize]
+        self.offsets[m] as usize..self.offsets[m + 1] as usize
+    }
+
+    /// The base rows of member `m`, in ascending order.
+    pub(crate) fn of(&self, m: u32) -> impl Iterator<Item = u32> + '_ {
+        let first = m as u64 * self.n;
+        self.entries.range(self.span(m)).map(move |k| (k - first) as u32)
     }
 }
 
@@ -160,10 +168,10 @@ impl Store {
             }
         }
         if let Some((sel, post)) = self.best_postings(r) {
-            // 索引でその軸のメンバーの行だけを集める。差分の B 木にある変更は別に突き合わせる
+            // Collect only the rows of the selected members with the index. Match the changes in the delta tree separately
             let mut cells = Vec::new();
             for &m in &sel.members {
-                for &row in post.of(m) {
+                for row in post.of(m) {
                     let k = self.base.keys.get(row as usize);
                     if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
                         cells.push((k, self.base.vals[row as usize]));
@@ -247,7 +255,7 @@ impl Store {
     /// この Store の分として数える。
     pub fn memory(&self) -> Mem {
         let b = &*self.base;
-        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| (p.offsets.capacity() + p.rows.capacity()) * 4).sum();
+        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| p.offsets.capacity() * 4 + p.entries.bytes()).sum();
         Mem {
             rows: b.keys.len(),
             base: b.keys.bytes() + b.vals.len() * 8,
@@ -279,16 +287,21 @@ impl Store {
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
         let vals: Vec<f64> =
             if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
-        let keys = keys_in_place(cells);
+        self.set_columns(&keys_in_place(cells), vals);
+    }
+
+    /// Make the sorted columns the base and drop the delta.
+    fn set_columns(&mut self, keys: &[u64], vals: Vec<f64>) {
         self.base = Arc::new(Base {
-            keys: PackedKeys::new(&keys, self.cfg.par(keys.len())),
+            keys: PackedKeys::new(keys, self.cfg.par(keys.len())),
             vals: vals.into_boxed_slice(),
             postings: fresh_postings(self.pack.dims.len()),
         });
         self.delta = OrdMap::new();
     }
 
-    /// 詰め方の位置 pos の軸の索引。初めて使うときに計数ソートで作る（本体の行数に比例）。
+    /// The index of the dimension at packing position pos. The first use makes it with a counting sort (linear in the base rows).
+    /// The build is sequential: a rayon wait inside `get_or_init` can run a task that waits on the same cell.
     pub(crate) fn postings(&self, pos: usize) -> &Postings {
         let base = &*self.base;
         base.postings[pos].get_or_init(|| {
@@ -301,17 +314,19 @@ impl Store {
                 offsets[i] += offsets[i - 1];
             }
             let mut fill = offsets.clone();
-            let mut rows = vec![0u32; self.base.keys.len()];
+            let n = self.base.keys.len() as u64;
+            let mut entries = vec![0u64; self.base.keys.len()];
             for (row, k) in self.base.keys.iter().enumerate() {
                 let m = self.pack.get(k, pos) as usize;
-                rows[fill[m] as usize] = row as u32;
+                entries[fill[m] as usize] = m as u64 * n + row as u64;
                 fill[m] += 1;
             }
-            Arc::new(Postings { offsets, rows })
+            Arc::new(Postings { offsets, entries: PackedKeys::new(&entries, false), n })
         })
     }
 
-    /// 分割軸以外の軸で絞られていて、索引を使うと対象が十分減るなら、その軸の位置と索引を返す。
+    /// If r filters a dimension other than the partition dimension and its index makes the rows much fewer,
+    /// return the selection and the index of that dimension.
     pub(crate) fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, &'a Postings)> {
         let min_rows = self.cfg.postings_min_rows;
         let n = self.base.keys.len();
@@ -322,10 +337,10 @@ impl Store {
         for (pos, &d) in self.pack.dims.iter().enumerate().skip(1) {
             let Some(sel) = r.get(d) else { continue };
             if self.pack.masks[pos] >= (1 << 22) {
-                continue; // メンバー数が大きすぎる軸には索引を作らない
+                continue; // no index for a dimension with too many members
             }
             let post = self.postings(pos);
-            let cand: usize = sel.members.iter().map(|&m| post.of(m).len()).sum();
+            let cand: usize = sel.members.iter().map(|&m| post.span(m).len()).sum();
             if best.is_none_or(|(c, _, _)| cand < c) {
                 best = Some((cand, sel, post));
             }
@@ -343,9 +358,13 @@ impl Store {
 
     /// 差分を本体にまとめ直す。
     pub(crate) fn compact(&mut self) {
-        let mut cells = Vec::with_capacity(self.base.keys.len() + self.delta.len());
-        self.merged(0, None, |k, v| cells.push((k, v)));
-        self.set_sorted(cells);
+        let n = self.base.keys.len() + self.delta.len();
+        let (mut keys, mut vals) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        self.merged(0, None, |k, v| {
+            keys.push(k);
+            vals.push(v);
+        });
+        self.set_columns(&keys, vals);
     }
 
     pub(crate) fn after_delta(&mut self) {
@@ -387,20 +406,31 @@ impl Store {
         Ok(())
     }
 
-    /// r の範囲の古いセル（old のキー）を消し、new（キー順）を置く。差分の木に入れると本体に
-    /// まとめ直すことになる量なら、差分の木を通さずに、新しい本体を直接作る（差分の木への
-    /// 挿入は 1 件ずつなので、大量に入れてからまとめ直すより速い）。
+    /// Remove the old cells in r (the keys in old) and put new (in key order). If the delta tree would then
+    /// need a compaction, make a new base directly. The delta tree inserts one cell at a time, so this is faster.
     pub(crate) fn write_back(&mut self, r: &Restrict, old: &[u64], new: Vec<(u64, f64)>) {
         let limit = self.cfg.compact_min.max(self.base.keys.len() / 8);
         if self.delta.len() + old.len() + new.len() > limit {
+            // Write directly into the new base columns. An intermediate cell array adds to the peak memory.
+            // A new cell replaces a kept cell with the same key.
             let cs = checks(&self.pack, r);
-            let mut kept = Vec::with_capacity(self.base.keys.len() + self.delta.len());
+            let n = (self.base.keys.len() + self.delta.len() + new.len()).saturating_sub(old.len());
+            let (mut keys, mut vals) = (Vec::with_capacity(n), Vec::with_capacity(n));
+            let mut push = |(k, v): (u64, f64)| {
+                keys.push(k);
+                vals.push(v);
+            };
+            let mut new = new.into_iter().peekable();
             self.merged(0, None, |k, v| {
-                if !pass(&self.pack, k, &cs) {
-                    kept.push((k, v))
+                while let Some(c) = new.next_if(|c| c.0 < k) {
+                    push(c);
+                }
+                if !pass(&self.pack, k, &cs) && new.peek().is_none_or(|c| c.0 != k) {
+                    push((k, v));
                 }
             });
-            self.set_sorted(merge_sorted(&kept[..], &new[..], true, |a, b| b.or(a)));
+            new.for_each(push);
+            self.set_columns(&keys, vals);
             return;
         }
         for &k in old {
