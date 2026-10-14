@@ -1,11 +1,15 @@
 import tempfile
 import unittest
 
-from bench_snapshot import write
+try:
+    from bench_snapshot import write
+except ImportError:  # nanashi_core is not built
+    write = None
 from examples.fpa import SIZES, build
 from sparse_engine import Named
 
 
+@unittest.skipIf(write is None, "nanashi_core が必要")
 class SnapshotTest(unittest.TestCase):
     def test_same_model_as_build(self):
         employees, products, months = SIZES["small"]

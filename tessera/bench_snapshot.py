@@ -4,7 +4,7 @@
     python bench_snapshot.py run /tmp/fpa32                 # load it, then time the recalculations
 
 Scale k multiplies the employees and the products of SIZES["large"] (examples/fpa.py) by k.
-build() keeps a Python tuple key for each input cell, so it uses about 73 B for each cell.
+build() keeps a Python tuple key for each input cell, so it used about 11.5 GB RSS at scale 32.
 This script keeps the member numbers in array.array columns and writes the Parquet files of storage.py directly.
 It uses the random stream in the same order as build(), so the snapshot holds the same model.
 """
@@ -149,7 +149,7 @@ def run(path) -> dict:
         phases[name] = {"seconds": statistics.median(times), "heap_peak": max(peaks), "heap_after": nanashi_core.heap()[0]}
         return out
 
-    m = Named(phase("読み込み", lambda: Model.load(path, RustEngine())))
+    m = phase("読み込み", lambda: Named.load(path, RustEngine()))
     phase("全体の再計算", m.recalc)
     cells = sum(m.engine.size(m.raw(n)) for n in m.metrics)  # before the edits, which add employees
     rng = random.Random(1)
