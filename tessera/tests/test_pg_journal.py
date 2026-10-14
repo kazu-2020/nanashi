@@ -284,29 +284,31 @@ class PgJournalTests(unittest.TestCase):
         self.journal(heartbeat=False).start(m.model)
         a, b = self.journal(heartbeat=False), self.journal(heartbeat=False)
         a.acquire()
-        b.wait(0.0)  # Record that the lease is live
-        threading.Timer(0.2, a.release).start()
-        t = time.perf_counter()
-        b.wait(5.0)  # The next poll sees the released lease, so it returns before the timeout
-        self.assertLess(time.perf_counter() - t, 2.0)
-        self.assertIsNone(b.leader())
-
-    def test_expired_lease_wakes_a_waiting_follower(self):
-        m = build_with(ReferenceEngine())
-        dead = self.journal(lease_ttl=0.6, heartbeat=False)  # A stopped process (it does not extend the lease)
-        dead.start(m.model)
-        m.set_cell("Price", 12, Product="A")
-        b = self.journal(heartbeat=False)
         b.wait(0.0)
+        threading.Timer(0.2, a.release).start()
         t = time.perf_counter()
         b.wait(5.0)
         self.assertLess(time.perf_counter() - t, 2.0)
         self.assertIsNone(b.leader())
 
+    def test_expired_lease_wakes_a_waiting_follower(self):
+        m = build_with(ReferenceEngine())
+        dead = self.journal(lease_ttl=1.5, heartbeat=False)  # A stopped process (it does not extend the lease)
+        dead.start(m.model)
+        b = self.journal(heartbeat=False)  # Before dead takes the lease, so that slow setup cannot hide the expiry
+        m.set_cell("Price", 12, Product="A")
+        b.refresh()
+        b.wait(0.0)
+        t = time.perf_counter()
+        b.wait(5.0)
+        self.assertLess(time.perf_counter() - t, 3.0)  # The lease expires 1.5 s after set_cell
+        self.assertIsNone(b.leader())
+
     def test_commit_wakes_a_waiting_follower(self):
         m = build_with(ReferenceEngine())
         self.journal(heartbeat=False).start(m.model)
-        m.set_cell("Price", 12, Product="A")  # The writer has the lease before b starts to wait
+        # Take the lease now, so that only the commit (not a lease change) can wake b
+        m.set_cell("Price", 12, Product="A")
         b = self.journal(heartbeat=False)
         head = b.head
         threading.Timer(0.2, m.set_cell, ("Price", 13), {"Product": "A"}).start()

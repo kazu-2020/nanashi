@@ -652,7 +652,7 @@ class Replica:
         replica = Replica(PgJournal(dsn, "plan", "s3://nanashi/plans", heartbeat=False), RustEngine())
         replica.version.get(price, {product: a})  # ids (docs/ids.md)
 
-    別のスレッドで記録先を見張り（PgJournal は確定の通知、FileJournal はファイルの長さ）、ほかのプロセスが
+    別のスレッドで記録先を見張り（PgJournal reads nanashi_model at each poll_interval、FileJournal はファイルの長さ）、ほかのプロセスが
     確定した記録を、公開中の版の複製に入力の変更として書き込んで影響範囲だけを計算し直し、新しい版として
     公開する。読み出しはいつでも公開中の版を見る。書き込めない（書くのは Workspace を持つ 1 つのプロセス）。
     """
