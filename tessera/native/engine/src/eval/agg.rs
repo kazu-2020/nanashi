@@ -347,18 +347,17 @@ pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &St
 /// 集計先の全組み合わせの数がこれ以下なら、全組み合わせの配列へ足し込む経路を考える。
 const DENSE_MAX: usize = 1 << 26;
 
-/// Add the rows into an array of all the group combinations (all members of each dimension of out). The work
-/// divides the rows into one part for each thread. Each part has its own array, and the parts merge in order
-/// at the end. If the arrays are larger than the (group, value) pairs (16 B a row) of the sort path, returns
-/// None. For MIN, MAX or COUNT alone, the limit is half of the pairs. key gives the group key (packed as out) of
-/// a row key. Gives one Cube for each of aggs (Min, Max and First only alone), in key order.
+/// Add the rows into an array of all the group combinations (all members of each dimension of out). If the
+/// arrays are larger than the (group, value) pairs (16 B a row) of the sort path, returns None. For MIN, MAX or
+/// COUNT alone, the limit is half of the pairs. key gives the group key (packed as out) of a row key. Gives one
+/// Cube for each of aggs (Min, Max and First only alone), in key order.
 pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, aggs: &[Agg], key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Vec<Cube>> {
     let d = Dense { cfg, rows, out, cat, aggs, key };
     match aggs {
         [Agg::First] => None,
-        [Agg::Min] => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _, _| *x, [12, 8]),
-        [Agg::Max] => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _, _| *x, [12, 8]),
-        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64, [12, 8]),
+        [Agg::Min] => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _, _| *x, 8),
+        [Agg::Max] => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _, _| *x, 8),
+        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64, 8),
         _ => d.fold(
             ExactSum::default(),
             |s, v| s.add(v),
@@ -370,7 +369,7 @@ pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catal
                 Agg::Count => n as f64,
                 Agg::Min | Agg::Max | Agg::First => unreachable!("only alone"),
             },
-            [std::mem::size_of::<ExactSum>() + 4, 16],
+            16,
         ),
     }
 }
@@ -384,56 +383,143 @@ struct Dense<'a, K> {
     key: K,
 }
 
+/// Slots in one bucket of the partitioned fill. 2^14 was the fastest of 2^14, 2^15 and 2^16.
+const BUCKET: usize = 1 << 14;
+
+/// The buffers of one part in one round of the partitioned fill.
+#[derive(Clone, Default)]
+struct Round {
+    idx: Vec<u32>,            // the slot of each row (u32::MAX if the row has no group)
+    start: Vec<usize>,        // the start of each bucket in pairs
+    pairs: Vec<(u32, f64)>,   // the (slot, value) pairs in bucket order
+}
+
+/// True if the sampled slot indices touch more bytes of the array than scatter_bytes, in 4 KiB pages. Then
+/// each row misses the cache, and the partitioned fill is faster.
+fn scattered(sample: impl Iterator<Item = usize>, tuple_bytes: usize, scatter_bytes: usize) -> bool {
+    let pages: FxHashSet<usize> = sample.map(|s| s * tuple_bytes / 4096).collect();
+    pages.len() * 4096 > scatter_bytes
+}
+
 impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
-    /// Each slot holds a T and a count (u32). limit is [bytes a slot, bytes a row]: if the arrays are larger
-    /// than the rows, returns None.
+    /// Each slot holds a T and a count (u32). If the arrays are larger than row_bytes for each row, returns None.
+    ///
+    /// A local access gives one array to each thread, and the arrays merge in order at the end. A scattered
+    /// access (see `scattered`) fills one array in rounds. In each round, each thread puts its rows into buckets
+    /// of BUCKET slots. Then each bucket adds its rows into its part of the array, which stays in the cache.
     fn fold<T: Clone + Send + Sync>(
         &self,
         init: T,
         add: impl Fn(&mut T, f64) + Sync,
         merge: impl Fn(&mut T, &T),
         finish: impl Fn(&T, u32, Agg) -> f64,
-        [slot_bytes, row_bytes]: [usize; 2],
+        row_bytes: usize,
     ) -> Option<Vec<Cube>> {
         let (cfg, rows, out) = (self.cfg, self.rows, self.out);
         let n = rows.len();
         let sizes: Vec<usize> = out.dims.iter().map(|&d| self.cat.dims[d].size.max(1) as usize).collect();
         let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
         let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
-        if !cfg.dense_always && slots.saturating_mul(parts).saturating_mul(slot_bytes) > n.saturating_mul(row_bytes) {
-            return None;
-        }
         // group key -> array index (the first dimension is the highest digit, so the index order is the key order)
         let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
-        let fill = |lo: usize, hi: usize| {
-            let (mut vals, mut cnt) = (vec![init.clone(); slots], vec![0u32; slots]);
-            rows.for_each_in(lo..hi, |k, v| {
-                if let Some(o) = (self.key)(k) {
-                    let s = index(o);
-                    add(&mut vals[s], v);
-                    cnt[s] += 1;
+        let slot = |k: u64| (self.key)(k).map(index);
+        let tuple_bytes = std::mem::size_of::<(T, u32)>();
+        let partitioned = slots * tuple_bytes > cfg.scatter_bytes && {
+            let mut sample = Vec::new();
+            rows.for_each_in(0..n.min(1 << 16), |k, _| sample.extend(slot(k)));
+            scattered(sample.into_iter(), tuple_bytes, cfg.scatter_bytes)
+        };
+        // The partitioned fill has one array, and the buffers of a round have about the memory of 1.25 arrays
+        let arrays = if partitioned { 3 } else { parts };
+        if !cfg.dense_always && slots.saturating_mul(arrays).saturating_mul(tuple_bytes) > n.saturating_mul(row_bytes) {
+            return None;
+        }
+        let g: Vec<(T, u32)> = if partitioned {
+            let mut g = vec![(init, 0u32); slots];
+            let buckets = slots.div_ceil(BUCKET);
+            // A round has one 16 B pair and one 4 B slot index for each row, in buffers of a fixed size
+            let round = (slots * tuple_bytes / 16).max(1);
+            let mut bufs = vec![Round::default(); parts];
+            let scatter = |lo: usize, hi: usize, Round { idx, start, pairs }: &mut Round| {
+                idx.clear();
+                rows.for_each_in(lo..hi, |k, _| idx.push(slot(k).map_or(u32::MAX, |s| s as u32)));
+                start.clear();
+                start.resize(buckets + 1, 0);
+                for &s in idx.iter().filter(|&&s| s != u32::MAX) {
+                    start[s as usize / BUCKET + 1] += 1;
                 }
-            });
-            (vals, cnt)
-        };
-        let step = n.div_ceil(parts).max(1);
-        let mut acc: Vec<(Vec<T>, Vec<u32>)> = if parts > 1 {
-            (0..parts).into_par_iter().map(|p| fill((p * step).min(n), ((p + 1) * step).min(n))).collect()
-        } else {
-            vec![fill(0, n)]
-        };
-        let (mut vals, mut cnt) = acc.remove(0);
-        for (v2, c2) in acc {
-            for s in 0..slots {
-                if c2[s] > 0 {
-                    merge(&mut vals[s], &v2[s]);
-                    cnt[s] += c2[s];
+                for b in 0..buckets {
+                    start[b + 1] += start[b];
+                }
+                pairs.clear();
+                pairs.resize(start[buckets], (0, 0.0));
+                let mut at = start.clone();
+                let mut i = 0;
+                rows.for_each_in(lo..hi, |_, v| {
+                    let s = idx[i];
+                    i += 1;
+                    if s != u32::MAX {
+                        let b = s as usize / BUCKET;
+                        pairs[at[b]] = (s, v);
+                        at[b] += 1;
+                    }
+                });
+            };
+            for lo in (0..n).step_by(round) {
+                let hi = (lo + round).min(n);
+                let step = (hi - lo).div_ceil(parts);
+                if parts > 1 {
+                    bufs.par_iter_mut().enumerate().for_each(|(p, b)| scatter((lo + p * step).min(hi), (lo + (p + 1) * step).min(hi), b));
+                } else {
+                    scatter(lo, hi, &mut bufs[0]);
+                }
+                let gather = |(bi, chunk): (usize, &mut [(T, u32)])| {
+                    for Round { start, pairs, .. } in &bufs {
+                        for &(s, v) in &pairs[start[bi]..start[bi + 1]] {
+                            let e = &mut chunk[s as usize - bi * BUCKET];
+                            add(&mut e.0, v);
+                            e.1 += 1;
+                        }
+                    }
+                };
+                if parts > 1 {
+                    g.par_chunks_mut(BUCKET).enumerate().for_each(gather);
+                } else {
+                    g.chunks_mut(BUCKET).enumerate().for_each(gather);
                 }
             }
-        }
+            g
+        } else {
+            let fill = |lo: usize, hi: usize| {
+                let mut g = vec![(init.clone(), 0u32); slots];
+                rows.for_each_in(lo..hi, |k, v| {
+                    if let Some(s) = slot(k) {
+                        add(&mut g[s].0, v);
+                        g[s].1 += 1;
+                    }
+                });
+                g
+            };
+            let step = n.div_ceil(parts).max(1);
+            let mut acc: Vec<Vec<(T, u32)>> = if parts > 1 {
+                (0..parts).into_par_iter().map(|p| fill((p * step).min(n), ((p + 1) * step).min(n))).collect()
+            } else {
+                vec![fill(0, n)]
+            };
+            let mut g = acc.remove(0);
+            for g2 in acc {
+                for (e, e2) in g.iter_mut().zip(&g2) {
+                    if e2.1 > 0 {
+                        merge(&mut e.0, &e2.0);
+                        e.1 += e2.1;
+                    }
+                }
+            }
+            g
+        };
         let mut cells = vec![Vec::new(); self.aggs.len()];
-        for s in 0..slots {
-            if cnt[s] == 0 {
+        for (s, (x, cnt)) in g.iter().enumerate() {
+            if *cnt == 0 {
                 continue;
             }
             let (mut rest, mut k) = (s, 0u64);
@@ -441,7 +527,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 k |= out.put(j, (rest % sizes[j]) as u32);
                 rest /= sizes[j];
             }
-            push_group(&mut cells, self.aggs, k, |a| finish(&vals[s], cnt[s], a));
+            push_group(&mut cells, self.aggs, k, |a| finish(x, *cnt, a));
         }
         Some(cubes(out.clone(), cells))
     }
@@ -461,5 +547,49 @@ mod tests {
         assert!(!dense_first(&cat, &[0], &all.with(0, Sel::new(vec![3], 12))), "a narrowed group dimension");
         cat.cfg.stream_always = true;
         assert!(!dense_first(&cat, &[0], &all));
+    }
+
+    #[test]
+    fn scattered_counts_distinct_pages() {
+        // 32 B a slot: 128 slots fill one 4 KiB page
+        assert!(!scattered([].into_iter(), 32, 0), "no rows, no pages");
+        assert!(!scattered([0, 127, 5].into_iter(), 32, 4096), "1 page is not more than 4096 B");
+        assert!(scattered([0, 128].into_iter(), 32, 4096), "2 pages are 8192 B");
+        assert!(!scattered([0, 128].into_iter(), 32, 8192));
+        assert!(scattered([0, 1, 2, 300].into_iter(), 32, 4096), "pages 0 and 2");
+        assert!(scattered([0, 1, 2, 300].into_iter(), 32, 0), "scatter_bytes=0 partitions always");
+    }
+
+    /// The partitioned fill, the fill with one array for each thread, and the sort path give the same bits.
+    #[test]
+    fn dense_paths_give_the_same_bits() {
+        let dims = [100u32, 100, 5].iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
+        let mut cat = Catalog { dims, maps: Vec::new(), cfg: Config { dense_always: true, ..Config::default() } };
+        let out = Packing::new(&[0, 1, 2], &cat).unwrap();
+        // An LCG gives scattered slot indices with duplicates. The ±1e16 values make the sum depend on the order of the adds
+        let mut x = 12345u64;
+        let cells: Vec<(u64, f64)> = (0..200_000)
+            .map(|i| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let s = (x >> 33) as usize % 50_000;
+                let k = out.put(0, (s / 500) as u32) | out.put(1, (s / 5 % 100) as u32) | out.put(2, (s % 5) as u32);
+                let v = if i % 97 == 0 { 1e16 } else if i % 89 == 0 { -1e16 } else { (i % 1000) as f64 * 0.1 };
+                (k, v)
+            })
+            .collect();
+        let key = |k: u64| (!k.is_multiple_of(7)).then_some(k);
+        let rows = Rows::Owned(Cube { pack: out.clone(), kind: Kind::Num, cells: cells.clone() });
+        let bits = |c: Vec<Cube>| -> Vec<Vec<(u64, u64)>> { c.iter().map(|c| c.cells.iter().map(|&(k, v)| (k, v.to_bits())).collect()).collect() };
+        for aggs in [vec![Agg::Sum, Agg::Low, Agg::Count, Agg::Avg], vec![Agg::Min], vec![Agg::Max], vec![Agg::Count]] {
+            let pairs = cells.iter().filter_map(|&(k, v)| key(k).map(|o| (o, v))).collect();
+            let want = bits(group(&cat.cfg, pairs, out.clone(), &aggs));
+            assert!(want[0].len() > 40_000, "most slots are used");
+            for (par_min, scatter_bytes) in [(0, 0), (0, usize::MAX), (usize::MAX, 0), (usize::MAX, usize::MAX)] {
+                cat.cfg.par_min = par_min;
+                cat.cfg.scatter_bytes = scatter_bytes;
+                let got = bits(dense_groups(&cat.cfg, &rows, &out, &cat, &aggs, key).unwrap());
+                assert_eq!(got, want, "{aggs:?} par_min={par_min} scatter_bytes={scatter_bytes}");
+            }
+        }
     }
 }

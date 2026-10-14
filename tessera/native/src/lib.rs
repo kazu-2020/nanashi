@@ -415,6 +415,7 @@ impl Core {
                 "stream_always" => cfg.stream_always = v.extract()?,
                 "fuse" => cfg.fuse = v.extract()?,
                 "dense_always" => cfg.dense_always = v.extract()?,
+                "scatter_bytes" => cfg.scatter_bytes = v.extract()?,
                 "chunk" => cfg.chunk = v.extract()?,
                 "widen_min_rows" => cfg.widen_min_rows = v.extract()?,
                 "max_bytes" => cfg.max_bytes = v.extract::<Option<usize>>()?.unwrap_or(usize::MAX),
