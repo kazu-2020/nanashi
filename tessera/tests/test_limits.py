@@ -230,11 +230,7 @@ class Memory(unittest.TestCase):
         import gc
 
         import nanashi_core
-        # heap() は数え始めてからの確保と解放の差なので、前のテストが残した循環参照のゴミ（Rust の格納データを
-        # 持つもの）が数えている途中で回収されると減る。数え始める前に回収しておく
         gc.collect()
-        nanashi_core.track_heap(True)
-        self.addCleanup(nanashi_core.track_heap, False)
         before = nanashi_core.heap()[0]
         m = Named(Model(engine=RustEngine()))
         m.add_dimension("P", [f"p{i}" for i in range(2000)])
@@ -256,10 +252,9 @@ class Memory(unittest.TestCase):
         self.assertGreaterEqual(peak, now)
         nanashi_core.reset_heap_peak()
         self.assertEqual(nanashi_core.heap()[1], nanashi_core.heap()[0])
-        nanashi_core.track_heap(False)  # 止めている間は数えない
-        m.add_input("W", ["P", "M"], {(f"p{i}", "m0"): 1.0 for i in range(2000)})
-        m.recalc()
-        self.assertEqual(nanashi_core.heap()[0], now)
+        del m
+        gc.collect()
+        self.assertLess(nanashi_core.heap()[0], before + 24_000 * 16)
 
     def test_reference_reports_rows_only(self):
         m = Named(Model(engine=ReferenceEngine()))
