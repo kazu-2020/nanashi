@@ -716,6 +716,23 @@ class KeepAlive(unittest.TestCase):
         self.assertEqual((status, headers.get("connection"), json.loads(body)["error"]), (503, "close", "closed"))
         self.assertEqual(s.recv(100), b"")
 
+    def test_a_request_that_waits_for_a_slot_gets_503_at_shutdown(self):
+        server = self.serve(max_threads=1)
+        release = hold(self.ws)
+        self.addCleanup(release)
+        op = write(self.ws, "Stock", 1, Product="p0", Month="Jan")
+        threading.Thread(target=lambda: Client(server.url).post("/writes", {"client_op_id": "k", "ops": [op]})).start()
+        while server.idle():  # the write holds the only slot
+            time.sleep(0.01)
+        s = self.connect(server)
+        s.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+        time.sleep(0.2)  # the request waits for the slot
+        start = time.monotonic()
+        server.shutdown()
+        status, headers, body = exchange(s, b"")
+        self.assertEqual((status, headers.get("connection"), json.loads(body)["error"]), (503, "close", "closed"))
+        self.assertLess(time.monotonic() - start, 2.0)  # SLOT_WAIT is 5 s
+
 
 class ProxyHeader(JournalCase, unittest.TestCase):
     """The user header counts only on a connection from a trusted proxy (--trusted-proxy)."""

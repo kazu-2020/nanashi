@@ -443,7 +443,11 @@ class Handler(BaseHTTPRequestHandler):
             self._fail(ApiError(400, "bad_request", "Transfer-Encoding と、値の違う Content-Length には対応しない"))
             return
         if not self.server.begin_request():
-            self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
+            if self.server.stopping:
+                self.close_connection = True
+                self._fail(ApiError(503, "closed", "サーバーは止まるところ"))
+            else:
+                self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
             return
         try:
             if not self._misdirected():
@@ -802,9 +806,10 @@ class Server(ThreadingHTTPServer):
             self.shutdown_request(request)
 
     def begin_request(self) -> bool:
-        """Take a request slot. Return False if no slot frees up in SLOT_WAIT seconds."""
+        """Take a request slot. Return False if no slot frees up in SLOT_WAIT seconds, or if the server stops."""
         with self._use:
-            if not self._use.wait_for(lambda: self._active < self.max_threads, SLOT_WAIT):
+            if not self._use.wait_for(lambda: self.stopping or self._active < self.max_threads, SLOT_WAIT) \
+                    or self.stopping:
                 return False
             self._active += 1
             return True
@@ -819,7 +824,9 @@ class Server(ThreadingHTTPServer):
 
     def shutdown(self) -> None:
         """Stop serve_forever. Handler threads answer 503 to the next request on an open connection."""
-        self.stopping = True
+        with self._use:
+            self.stopping = True
+            self._use.notify_all()  # a request that waits for a slot gets 503 closed
         super().shutdown()
 
     def touch(self) -> None:
