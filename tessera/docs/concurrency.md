@@ -56,7 +56,7 @@ Named(replica.version).get("Revenue", Product="A", Month="Jan")
 ```
 
 A different thread monitors the journal.
-For `PgJournal`, it monitors the `NOTIFY nanashi_head` that the writer sends at each commit.
+For `PgJournal`, it reads `head_seq` and the lease state in `nanashi_model` at each `poll_interval` (default 0.2 seconds).
 For `FileJournal`, it monitors the file length.
 It writes the entries that other processes committed to a copy of the published version as input changes.
 Then it calculates again only the affected range and publishes the result as a new version.
@@ -82,7 +82,7 @@ except NotLeader as e:
 
 - When the process opens the model, it tries to get the writer right in the journal with `take`. If it gets the right, it catches up to the journal and becomes the writer. If not, it becomes a standby.
 - A standby follows the journal with a monitor thread (`nanashi-standby`), as `Replica` does, and accepts reads. It rejects writes immediately with `NotLeader` (`leader` has the address of the writer).
-- At each interval (`interval=`, default 1 second), the standby tries to get the writer right. If the writer releases the right with `close` (SIGTERM), the standby gets the right immediately when it receives the notification. If the writer stops and its lease expires, the standby gets the right at the next interval. Then it catches up to the journal again and becomes the writer. While a process has the right, no other process can commit. Thus, the version after the catch-up is the latest version.
+- At each interval (`interval=`, default 1 second), the standby tries to get the writer right. If the writer releases the right with `close` (SIGTERM), the standby gets the right at its next poll. If the writer stops and its lease expires, the standby also gets the right at its next poll. Then it catches up to the journal again and becomes the writer. While a process has the right, no other process can commit. Thus, the version after the catch-up is the latest version.
 - The writer becomes a standby again if a commit is fenced (`Fenced`), or if the monitor finds that the writer does not have the right (it could not extend the lease). The writes in that batch, and the writes that entered the queue immediately before, get `NotLeader`. The writer does not open the model again, and the monitor does the catch-up.
 - At each promotion, the process publishes the version again. Thus, a write with `expect` set to the sequence number of an earlier version gets `Conflict` (the same as when you open the model again).
 - If many standbys try to get the free right at the same time, only one gets it (one conditional update in the journal).

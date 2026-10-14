@@ -10,6 +10,18 @@ services:
       POSTGRES_HOST_AUTH_METHOD: trust
       POSTGRES_DB: nanashi
     ports: ["127.0.0.1:55432:5432"]
+  # max_prepared_statements=0 turns off the PgBouncer support for prepared statements, so a test fails if the code uses them.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    container_name: nanashi-pgbouncer
+    depends_on: [postgres]
+    environment:
+      DATABASE_URL: postgres://postgres@postgres:5432  # No database name: a "*" entry forwards every database (the tests make new ones)
+      AUTH_TYPE: trust
+      POOL_MODE: transaction
+      MAX_PREPARED_STATEMENTS: "0"
+      MAX_CLIENT_CONN: "2000"
+    ports: ["127.0.0.1:56432:5432"]
   s3:
     image: rustfs/rustfs:1.0.0
     container_name: nanashi-s3

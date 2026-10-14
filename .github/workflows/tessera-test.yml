@@ -34,6 +34,15 @@ jobs:
         ports: ["55432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      pgbouncer:
+        image: edoburu/pgbouncer:v1.25.2-p0
+        env:
+          DATABASE_URL: postgres://postgres@postgres:5432  # No database name: a "*" entry forwards every database (the tests make new ones)
+          AUTH_TYPE: trust
+          POOL_MODE: transaction
+          MAX_PREPARED_STATEMENTS: "0"
+          MAX_CLIENT_CONN: "2000"
+        ports: ["56432:5432"]
       s3:  # S3 互換のオブジェクトストレージ（compose.yaml と同じ）
         image: rustfs/rustfs:1.0.0
         env:
@@ -81,6 +90,13 @@ jobs:
       - name: Rust のエンジンでテストする
         working-directory: tessera
         run: SPARSE_ENGINE=rust python -m tests.parallel
+      - name: Test the PostgreSQL journal through PgBouncer
+        working-directory: tessera
+        env:
+          NANASHI_PG_DSN: postgresql://postgres@127.0.0.1:56432/nanashi
+        run: |
+          python -c "import os, psycopg; psycopg.connect(os.environ['NANASHI_PG_DSN'], connect_timeout=10).close()"
+          SPARSE_ENGINE=rust python -m unittest tests.test_pg_journal tests.test_replica tests.test_standby
       - name: 静的検査（Python）
         working-directory: tessera
         run: pyflakes sparse_engine tests examples bench*.py
