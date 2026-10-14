@@ -85,7 +85,7 @@ These are the limits:
 - If the read or write of a request stops for 30 seconds, the server closes the connection.
 
 The server keeps the results of summary reads for the published version, up to about `--max-cells` cells in total.
-When a summary read sees a newer published version (after a write, or after a standby catches up), the server removes them.
+When a summary read sees a newer published version (after a write, or after a standby catches up), the server removes those results.
 If many clients ask for the same summary at the same time, the server calculates it 1 time.
 
 Each write is 1 request and 1 transaction, and `client_op_id` is necessary.

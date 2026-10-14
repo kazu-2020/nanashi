@@ -794,16 +794,20 @@ class Version:
 class SummaryCacheTest(unittest.TestCase):
     def test_calculates_once_for_each_version_and_request(self):
         cache, calls = SummaryCache(max_size=100), []
-        v1, v2, again = Version(1), Version(2), Version(2)  # again: the seq went back, and came to 2 again
+        v1, v2, again = Version(1), Version(2), Version(2)  # again: a reload published a new version at the same seq
         get = lambda v, key: cache.get(v, (key,), lambda: calls.append((v.seq, key)) or {"cells": [f"{key}@{v.seq}"]})
         out = [get(v1, "a"), get(v1, "a"), get(v1, "b"), get(v2, "a"), get(v1, "a"), get(v2, "a"), get(again, "a")]
         self.assertEqual([o["cells"][0] for o in out], ["a@1", "a@1", "b@1", "a@2", "a@1", "a@2", "a@2"])
         self.assertEqual(calls, [(1, "a"), (1, "b"), (2, "a"), (1, "a"), (2, "a")])
+        del v2  # when no request holds the cached version, any version can take its place
+        get(again, "a"), get(again, "a"), get(Version(0), "a")
+        self.assertEqual(calls[5:], [(2, "a"), (0, "a")])
 
     def test_drops_the_oldest_results_above_max_size(self):
         cache, calls, v = SummaryCache(max_size=7), [], Version(1)
         get = lambda key, n: cache.get(v, (key,), lambda: calls.append(key) or {"cells": [0] * n})  # size n + 1
-        get("a", 2), get("b", 2), get("a", 2), get("c", 2), get("b", 2), get("big", 7), get("big", 7)
+        for key, n in [("a", 2), ("b", 2), ("a", 2), ("c", 2), ("b", 2), ("big", 7), ("big", 7)]:
+            get(key, n)
         self.assertEqual(calls, ["a", "b", "c", "b", "big", "big"])  # c pushed out b (a was used later); big never fits
 
     def test_clients_that_ask_at_the_same_time_share_one_calculation(self):
@@ -814,7 +818,8 @@ class SummaryCacheTest(unittest.TestCase):
             release.wait(5)
             return {"cells": []}
 
-        threads = [threading.Thread(target=lambda: cache.get(v, ("k",), compute)) for _ in range(4)]
+        out = []
+        threads = [threading.Thread(target=lambda: out.append(cache.get(v, ("k",), compute))) for _ in range(4)]
         for t in threads:
             t.start()
         time.sleep(0.2)  # let all 4 threads reach the cache before the calculation ends
@@ -822,11 +827,12 @@ class SummaryCacheTest(unittest.TestCase):
         for t in threads:
             t.join(5)
         self.assertEqual(calls, [1])
+        self.assertEqual(out, [{"cells": []}] * 4)
 
     def test_a_failed_calculation_is_not_kept(self):
         cache, v = SummaryCache(max_size=10), Version(1)
-        with self.assertRaises(ValueError):
-            cache.get(v, ("k",), lambda: (_ for _ in ()).throw(ValueError("x")))
+        with self.assertRaises(ZeroDivisionError):
+            cache.get(v, ("k",), lambda: 1 / 0)
         self.assertEqual(cache.get(v, ("k",), lambda: {"cells": [1]}), {"cells": [1]})
 
 
