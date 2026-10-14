@@ -10,16 +10,15 @@ engines: N engine processes start on this host. It records the RSS of each engin
 request comes, and the read latency at a total rate split over all engines. With --writer, engine 0 also
 receives writes, so that its recalculation runs at the same time (the noisy neighbor).
 The engines have no journal. The load generator runs on the same host and uses some of the CPU.
-With --router, the clients send to the router on that port under /models/<--model-id>. The router finds the
-engine in nanashi_model, so first add the row by hand: insert into nanashi_model (model_id, lease_expires,
-lease_endpoint) values ('<uuid>', now() + interval '1 day', 'http://127.0.0.1:18000').
-With --keep-alive, each client keeps 1 connection (HTTP/1.1) while the server keeps it open.
+With --router, the clients send to the router on that port under /models/<--model-id>.
+The router finds the engine in nanashi_model. Before you use --router, add the row:
+    insert into nanashi_model (model_id, lease_expires, lease_endpoint)
+    values ('<uuid>', now() + interval '1 day', 'http://127.0.0.1:18000');  -- 18000 is --port
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import itertools
 import json
 import math
 import multiprocessing
@@ -56,8 +55,8 @@ def request(path: str, keep_alive: bool = False) -> bytes:
 def parse_head(head: bytes) -> tuple[str, int | None, bool]:
     """Return the status code, the Content-Length, and whether the server keeps the connection open.
     shortcut: no chunked bodies; the engine and the router always send Content-Length."""
-    n = re.search(rb"\r\ncontent-length: *(\d+)", head, re.I)
-    length = int(n.group(1)) if n else None
+    m = re.search(rb"\r\ncontent-length: *(\d+)", head, re.I)
+    length = int(m.group(1)) if m else None
     keep = length is not None and head.startswith(b"HTTP/1.1") and b"connection: close" not in head.lower()
     return head[9:12].decode(), length, keep
 
@@ -85,20 +84,20 @@ def engine_main(size: str, port: int) -> None:
     server.serve_forever()
 
 
-async def _get(port: int, req: bytes, status: dict, lat: list, t0: float, keep: bool, conn=None):
-    """Send 1 request on conn, or on a new connection. If keep, count its status, and its latency when it is 200.
-    Return the connection for the next request, or None if the server closed it."""
+async def _get(port: int, req: bytes, status: dict, lat: list, t0: float, measured: bool, conn=None):
+    """Send 1 request. If measured, count its status, and its latency when it is 200.
+    Return the open connection for the next request, or None."""
     w = None
     try:
         r, w = conn or await asyncio.open_connection("127.0.0.1", port)
         w.write(req)
         code, length, keep_open = parse_head(await r.readuntil(b"\r\n\r\n"))
         await (r.readexactly(length) if length is not None else r.read())
-    except (OSError, asyncio.IncompleteReadError) as e:
+    except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError) as e:
         code, keep_open = type(e).__name__, False
     if not keep_open and w is not None:
         w.close()
-    if keep:
+    if measured:
         status[code] = status.get(code, 0) + 1
         if code == "200":
             lat.append(time.perf_counter() - t0)
@@ -116,6 +115,8 @@ async def _closed(port: int, paths: list[str], clients: int, seconds: float, kee
         rng, conn = random.Random(i), None
         while (t := time.perf_counter()) < end:
             conn = await _get(port, rng.choice(reqs), status, lat, t, t >= measure_from, conn)
+        if conn:
+            conn[1].close()
 
     await asyncio.gather(*(client(i) for i in range(clients)))
     return {"lat": lat, "status": status}
@@ -192,14 +193,16 @@ def run_clients(args) -> None:
     if args.router:
         port, info["paths"] = args.router, [f"/models/{args.model_id}{p}" for p in info["paths"]]
     try:
-        for kind, n in itertools.product(args.only.split(",") if args.only else ["mix"], map(int, args.clients.split(","))):
-            paths = [p for p in info["paths"] if kind == "mix" or f"/{kind}?" in p]
-            procs = min(args.procs, n)
-            shares = [n // procs + (i < n % procs) for i in range(procs)]
-            with multiprocessing.Pool(procs) as pool:
-                res = pool.map(_closed_worker, [(port, paths, s, args.seconds, args.keep_alive) for s in shares])
-            r = summarize(res, args.seconds * MEASURED_SHARE)
-            print(json.dumps({"kind": kind, "clients": n, **r, "rss_mb": rss_mb(proc.pid)}, ensure_ascii=False), flush=True)
+        for kind in args.only.split(",") if args.only else ["mix"]:
+            for n in map(int, args.clients.split(",")):
+                paths = [p for p in info["paths"] if kind == "mix" or f"/{kind}?" in p]
+                procs = min(args.procs, n)
+                shares = [n // procs + (i < n % procs) for i in range(procs)]
+                with multiprocessing.Pool(procs) as pool:
+                    res = pool.map(_closed_worker, [(port, paths, s, args.seconds, args.keep_alive) for s in shares])
+                r = summarize(res, args.seconds * MEASURED_SHARE)
+                print(json.dumps({"kind": kind, "clients": n, **r, "rss_mb": rss_mb(proc.pid)}, ensure_ascii=False),
+                      flush=True)
     finally:
         proc.kill()
 
@@ -248,7 +251,7 @@ def main() -> None:
         s.add_argument("--rayon", help="RAYON_NUM_THREADS of the engines")
     sub.choices["clients"].add_argument("--clients", default="1,10,100,1000")
     sub.choices["clients"].add_argument("--only", help="cell, slice, or summary (comma list); the default mixes the 3")
-    sub.choices["clients"].add_argument("--keep-alive", action="store_true", help="HTTP/1.1, 1 connection per client")
+    sub.choices["clients"].add_argument("--keep-alive", action="store_true", help="HTTP/1.1, 1 connection per client (the engine closes it; use with --router)")
     sub.choices["clients"].add_argument("--router", type=int, metavar="PORT", help="send to the router on this port")
     sub.choices["clients"].add_argument("--model-id", help="the model ID in the path (with --router)")
     sub.choices["engines"].add_argument("--engines", default="10,50")
@@ -256,8 +259,10 @@ def main() -> None:
     sub.choices["engines"].add_argument("--idle", type=float, default=5, help="seconds with no request")
     sub.choices["engines"].add_argument("--writer", action="store_true")
     args = ap.parse_args()
-    if getattr(args, "router", None) and not args.model_id:
+    if args.cmd == "clients" and args.router and not args.model_id:
         ap.error("--router には --model-id が要る")
+    if args.cmd == "clients" and args.only and set(args.only.split(",")) - {"cell", "slice", "summary"}:
+        ap.error(f"--only は cell、slice、summary のいずれか（{args.only}）")
     if args.cmd == "engine":
         engine_main(args.size, args.port)
     elif args.cmd == "clients":
