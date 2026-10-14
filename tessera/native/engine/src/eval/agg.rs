@@ -420,11 +420,11 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         let sizes: Vec<usize> = out.dims.iter().map(|&d| self.cat.dims[d].size.max(1) as usize).collect();
         let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
         let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
-        let arrays = if self.digit.is_some() { slots } else { slots.saturating_mul(parts) };
+        let runs = self.runs();
+        let arrays = if runs.is_some() { slots } else { slots.saturating_mul(parts) };
         if !cfg.dense_always && arrays.saturating_mul(slot_bytes) > n.saturating_mul(row_bytes) {
             return None;
         }
-        let runs = self.runs();
         // group key -> array index (the first dimension is the highest digit, so the index order is the key order)
         let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
         // base is the slot index of vals[0]
