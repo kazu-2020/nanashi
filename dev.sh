@@ -17,6 +17,6 @@ done
 trap 'kill 0' EXIT
 mkdir -p .nanashi-data
 (cd router && go run ./cmd/nanashi-router --pg "$DSN" --listen 127.0.0.1:8090 --tessera ../tessera --engine-dir ../.nanashi-data) &
-(cd api && go run ./cmd/nanashi-api --pg "$DSN" --router http://127.0.0.1:8090) &
+(cd api && go run ./cmd/nanashi-api --pg "$DSN") &
 (cd web && pnpm dev --host 127.0.0.1) &
 wait

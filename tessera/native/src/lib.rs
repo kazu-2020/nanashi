@@ -13,7 +13,8 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyIterator, PyList, PyString, PyTuple
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 fn err(msg: String) -> PyErr {
@@ -306,6 +307,7 @@ impl Core {
                 "max" => Agg::Max,
                 "count" => Agg::Count,
                 "first" => Agg::First,
+                "low" => Agg::Low,
                 _ => return Err(err(format!("未知の集計関数 {s}"))),
             })
         };
@@ -395,10 +397,11 @@ impl Core {
         Ok(core)
     }
 
-    /// 調整値を変える。max_bytes（1 つの式の評価が同時に持つ途中結果のバイト数の上限。None は上限なし）は
-    /// メモリの予算で、超えれば計算を始める前か途中で ValueError にする。評価と再計算の段取りにはすぐ効き、格納データの持ち方（差分をまとめ直す件数、
-    /// 索引を作る行数、並列にする件数）は、このあと作る格納データから効く。fail_at はテスト用で、
-    /// (Metric の番号, panic させるか) か None。
+    /// Change the tuning values. max_bytes is the memory budget of one operation: the stored data that it holds plus
+    /// its intermediate results (bytes, None for no limit). If an operation is over it, the engine gives a ValueError
+    /// before or during the calculation. Evaluation and the recalculation schedule use a new value at once. The
+    /// values for the stored data (compaction, index and parallel thresholds) apply to the stored data made after the
+    /// change. fail_at is for tests: (Metric number, panic or not), or None.
     #[pyo3(signature = (**config))]
     fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let Some(config) = config else { return Ok(()) };
@@ -412,6 +415,7 @@ impl Core {
                 "stream_always" => cfg.stream_always = v.extract()?,
                 "fuse" => cfg.fuse = v.extract()?,
                 "dense_always" => cfg.dense_always = v.extract()?,
+                "scatter_bytes" => cfg.scatter_bytes = v.extract()?,
                 "chunk" => cfg.chunk = v.extract()?,
                 "widen_min_rows" => cfg.widen_min_rows = v.extract()?,
                 "max_bytes" => cfg.max_bytes = v.extract::<Option<usize>>()?.unwrap_or(usize::MAX),
@@ -871,29 +875,21 @@ impl Core {
         plan::delta_pattern(&expr.node)
     }
 
-    /// 差分集計する SUM の、各グループの件数を求める式（一番内側の集計を COUNT にしたもの）。読み出し元は同じ。
-    fn count_formula(&self, expr: &Expr) -> Expr {
-        Expr { node: Arc::new(plan::inner_count(&expr.node)), refs: expr.refs }
-    }
-
-    /// 差分再計算の計算計画を作る。
+    /// Make the plan of the incremental recalculation.
     ///
-    /// metrics は Metric ごとの (式, 差分集計するか, 集計元か)。式は (Expr, 読み出す Metric の番号) で、
-    /// 差分集計する Metric は、件数の式と差分の式をここで作る。levels は依存の段ごとの
-    /// (scan の軸または None, Metric の番号) の並び。
+    /// metrics is (formula, incremental aggregation or not, source or not) for each Metric. A formula is (Expr, the
+    /// numbers of the Metrics that it reads). For incremental aggregation, this makes the work formulas
+    /// (plan::derive_delta). levels is a list of (scan dimension or None, Metric numbers) for each level.
     fn make_plan(&self, metrics: Vec<Bound<'_, PyTuple>>, levels: Vec<Vec<(Option<DimId>, Vec<usize>)>>) -> PyResult<PlanHandle> {
         let mut out = Vec::with_capacity(metrics.len());
         for t in &metrics {
             let f = formula(&t.get_item(0)?)?;
             let wants_delta: bool = t.get_item(1)?.extract()?;
-            let (delta, count) = match (&f, wants_delta) {
-                (Some(f), true) => match plan::derive_delta(f) {
-                    Some((d, c)) => (Some(d), c),
-                    None => return Err(err("差分集計の対象でない式に差分集計を指定した".into())),
-                },
-                _ => (None, None),
+            let delta = match (&f, wants_delta) {
+                (Some(f), true) => Some(plan::derive_delta(f).ok_or_else(|| err("差分集計の対象でない式に差分集計を指定した".into()))?),
+                _ => None,
             };
-            out.push(Metric { formula: f, count, delta, source: t.get_item(2)?.extract()? });
+            out.push(Metric { formula: f, delta, source: t.get_item(2)?.extract()? });
         }
         let n = out.len();
         check_refs(out.iter().map(|m| &m.formula), n)?;
@@ -969,18 +965,22 @@ impl Core {
         Ok(env.affected(&expr.node, &refs).map(|r| r.into_parts()))
     }
 
-    /// 差分再計算を 1 回の呼び出しで行う（GIL を外して）。stores と counts は Metric の番号順の
-    /// 格納データで、その場で書き換える。changed は入力の変更範囲、added は軸ごとの追加したメンバー、
-    /// olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
-    /// 再計算した (Metric, 差分集計か, 範囲) を返す。full なら全体の再計算で、段を必ず並列に計算する。
+    /// Do an incremental recalculation in one call, without the GIL. stores is the stored data in Metric number
+    /// order. counts and lows are the counts and the residuals (exact sum minus value, only the cells that are not
+    /// 0) of incremental aggregation, in the same order. All three change in place. changed is the changed range
+    /// of the inputs, and added is the added members of each dimension. olds is the old values of the inputs
+    /// that are a source of incremental aggregation. forced is the range of each formula Metric to calculate
+    /// again. Returns each recalculated (Metric, incremental aggregation or not, range). If full is true, it is a
+    /// full recalculation, and the levels always run in parallel.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (plan, stores, counts, changed, added, olds, forced, full = false))]
+    #[pyo3(signature = (plan, stores, counts, lows, changed, added, olds, forced, full = false))]
     fn recalc_changes(
         &self,
         py: Python<'_>,
         plan: &PlanHandle,
         stores: Vec<Bound<'_, StoreHandle>>,
         counts: Vec<Option<Bound<'_, StoreHandle>>>,
+        lows: Vec<Option<Bound<'_, StoreHandle>>>,
         changed: Vec<(usize, Region)>,
         added: Vec<(DimId, Vec<u32>)>,
         olds: Vec<(usize, Bound<'_, PyAny>)>,
@@ -995,13 +995,18 @@ impl Core {
         let changed: Vec<(usize, Reg)> = changed.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
         let forced: Vec<(usize, Reg)> = forced.into_iter().map(|(m, r)| self.reg(&plan.plan, m, r)).collect::<PyResult<_>>()?;
         self.added(&added)?;
-        if stores.len() != n || counts.len() != n {
-            return Err(err(format!("格納データの数 {} が計算計画の Metric の数 {n} と合わない", stores.len())));
+        if stores.len() != n || counts.len() != n || lows.len() != n {
+            return Err(err(format!(
+                "格納データの数 {}、件数の数 {}、残差の数 {} が計算計画の Metric の数 {n} と合わない",
+                stores.len(),
+                counts.len(),
+                lows.len()
+            )));
         }
-        // 格納データをハンドルから取り出して渡し、終わったら戻す（参照を増やすと書き込み時に複製されるため）。
-        // 失敗しても panic しても必ず戻す（途中まで書いた計算 Metric が残るので、呼び出し側は次に全体を
-        // 計算し直す）。入力の格納データは書き換えないので取り出さずに渡す。終わるまでハンドルを借りたままに
-        // して、ほかのスレッドが途中で触れないようにする
+        // Take the stored data out of the handles and put it back at the end (one more reference makes a copy at
+        // a write). Always put it back, also after an error or a panic. Formula Metrics can then be half written,
+        // so the caller does a full recalculation next. The inputs do not change, so they stay in the handles.
+        // Keep the handles borrowed until the end, so other threads cannot touch them
         let empty = Arc::new(Store::new(&[], None, Kind::Num, &self.cat).map_err(err)?);
         let mut guard = Returned { stores: Vec::new(), counts: Vec::new(), own: Vec::new(), own_counts: Vec::new() };
         for (h, m) in stores.iter().zip(&plan.plan.metrics) {
@@ -1009,16 +1014,17 @@ impl Core {
             guard.own.push(if m.formula.is_some() { std::mem::replace(&mut h.store, empty.clone()) } else { h.store.clone() });
             guard.stores.push(h);
         }
-        for h in &counts {
+        // The counts and then the lows, in one list: own_counts[..n] are the counts, own_counts[n..] the lows
+        for h in counts.iter().chain(&lows) {
             let mut h = h.as_ref().map(|h| h.try_borrow_mut().map_err(busy)).transpose()?;
             guard.own_counts.push(h.as_mut().map(|h| std::mem::replace(&mut h.store, empty.clone())));
             guard.counts.push(h);
         }
         let (cat, plan) = (self.cat.clone(), plan.plan.clone());
-        let (own, own_counts) = (&mut guard.own, &mut guard.own_counts);
+        let (own, (own_counts, own_lows)) = (&mut guard.own, guard.own_counts.split_at_mut(n));
         let result = py.detach(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                plan::recalc(&cat, &plan, own, own_counts, changed, &added, olds, forced, full)
+                plan::recalc(&cat, &plan, own, own_counts, own_lows, changed, &added, olds, forced, full)
             }))
         });
         drop(guard);
@@ -1059,23 +1065,50 @@ fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
 
 // ------------------------------------------------------------------ ヒープの計測
 
-/// Rust の側で確保しているメモリを数えるアロケータ。中身の確保は System に任せる。
-/// 数えるのは track_heap(true) の後だけで、止めている間は確保のたびにフラグを 1 回読むだけにする
-/// （原子的な加減算を毎回すると、並列の再計算で数 % 遅くなったため）。Python のオブジェクトは数えない。
 struct Counting;
 
-static HEAP_TRACK: AtomicBool = AtomicBool::new(false);
-static HEAP_NOW: AtomicIsize = AtomicIsize::new(0); // 数え始めてからの確保と解放の差
+const SLOTS: usize = 64;
+const SLOT_FLUSH: usize = 64 << 10;
+
+#[repr(align(128))] // 128, not 64: the adjacent-line prefetch moves cache lines in pairs
+struct Slot(AtomicIsize);
+
+static HEAP_SLOTS: [Slot; SLOTS] = [const { Slot(AtomicIsize::new(0)) }; SLOTS];
+static HEAP_FLUSHED: AtomicIsize = AtomicIsize::new(0);
 static HEAP_PEAK: AtomicIsize = AtomicIsize::new(0);
+static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    // No destructor: the allocator must not use a thread local with a destructor.
+    static MY_SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+fn heap_flush(v: isize) {
+    let now = HEAP_FLUSHED.fetch_add(v, Ordering::Relaxed) + v;
+    HEAP_PEAK.fetch_max(now, Ordering::Relaxed);
+}
 
 fn heap_add(n: isize) {
-    if !HEAP_TRACK.load(Ordering::Relaxed) {
-        return;
+    // A large change skips the slot, so the value in transit stays below about 2 * SLOT_FLUSH.
+    if n.unsigned_abs() > SLOT_FLUSH {
+        return heap_flush(n);
     }
-    let now = HEAP_NOW.fetch_add(n, Ordering::Relaxed) + n;
-    if n > 0 && now > HEAP_PEAK.load(Ordering::Relaxed) {
-        HEAP_PEAK.fetch_max(now, Ordering::Relaxed);
+    let i = MY_SLOT.with(|c| {
+        if c.get() == usize::MAX {
+            c.set(NEXT_SLOT.fetch_add(1, Ordering::Relaxed) % SLOTS);
+        }
+        c.get()
+    });
+    let slot = &HEAP_SLOTS[i].0;
+    let v = slot.fetch_add(n, Ordering::Relaxed) + n;
+    if v.unsigned_abs() > SLOT_FLUSH {
+        // swap, not fetch_sub: after more than SLOTS threads, two threads can share a slot.
+        heap_flush(slot.swap(0, Ordering::Relaxed));
     }
+}
+
+fn heap_now() -> isize {
+    HEAP_FLUSHED.load(Ordering::Relaxed) + HEAP_SLOTS.iter().map(|s| s.0.load(Ordering::Relaxed)).sum::<isize>()
 }
 
 unsafe impl GlobalAlloc for Counting {
@@ -1112,27 +1145,18 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
-/// ヒープを数えるかを切り替える。数え始めるときは今の量と最大を 0 にする。
-/// 数える前に確保したメモリの解放は差し引かれるので、モデルを作る前に数え始める。
-#[pyfunction]
-fn track_heap(on: bool) {
-    if on {
-        HEAP_NOW.store(0, Ordering::Relaxed);
-        HEAP_PEAK.store(0, Ordering::Relaxed);
-    }
-    HEAP_TRACK.store(on, Ordering::Relaxed);
-}
-
-/// 数え始めてから Rust の側で確保しているメモリと、reset_heap_peak の後の最大（バイト）。
+/// The memory that Rust allocated after the process started, and the maximum after reset_heap_peak (bytes).
+/// The maximum can be wrong by about 128 KiB for each thread that allocated.
 #[pyfunction]
 fn heap() -> (usize, usize) {
-    (HEAP_NOW.load(Ordering::Relaxed).max(0) as usize, HEAP_PEAK.load(Ordering::Relaxed).max(0) as usize)
+    let now = heap_now();
+    (now.max(0) as usize, HEAP_PEAK.load(Ordering::Relaxed).max(now).max(0) as usize)
 }
 
-/// ヒープの最大を今の量に戻す（ある処理の間の最大を測るときに、その前に呼ぶ）。
+/// Set the maximum of the heap to the current value. To measure the maximum during an operation, call this before it.
 #[pyfunction]
 fn reset_heap_peak() {
-    HEAP_PEAK.store(HEAP_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
+    HEAP_PEAK.store(heap_now(), Ordering::Relaxed);
 }
 
 /// 2 つの格納データの差（宣言した軸の順のメンバー番号の列と、変更前後の値）。Python のオブジェクトにはしない。
@@ -1489,7 +1513,6 @@ fn parquet_metadata(py: Python<'_>, data: PyBackedBytes) -> PyResult<Vec<(String
 
 #[pymodule(gil_used = false)] // free-threaded の Python でも GIL を有効に戻さない（格納データは Arc と永続的な木で共有する）
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(track_heap, m)?)?;
     m.add_function(wrap_pyfunction!(heap, m)?)?;
     m.add_function(wrap_pyfunction!(reset_heap_peak, m)?)?;
     m.add_function(wrap_pyfunction!(write_parquet, m)?)?;

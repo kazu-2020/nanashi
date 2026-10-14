@@ -63,9 +63,6 @@ class Store(Protocol):
     def evaluate(self, expr: Expr, cat: Catalog, restrict: Restrict) -> Any: ...
     def evaluate_many(self, items: list[tuple[Expr, Restrict]], cat: Catalog) -> list[Any]:
         """互いに独立な式をまとめて評価する。並列に実行できるエンジンはそうしてよい。"""
-    def evaluate_with_count(self, expr: Expr, count_expr: Expr, cat: Catalog,
-                            restrict: Restrict) -> tuple[Any, Any]:
-        """差分集計する SUM の値と各グループの件数。1 回の集計で求められるエンジンはそうしてよい。"""
     def filter(self, storage: Any, restrict: Restrict | None, cat: Catalog) -> Any:
         """restrict の範囲に絞った格納データ（実体化したもの）を返す。"""
     def view(self, storage: Any, restrict: Restrict | None, cat: Catalog) -> Any:
@@ -87,6 +84,8 @@ class Store(Protocol):
         """restrict の範囲を keep の軸だけ残して agg で集計した Cube。"""
     def fork(self, cat: Catalog) -> Store:
         """複製したモデル cat 用のエンジン。"""
+    def fresh(self) -> Store:
+        """An empty engine with the same settings, for a new model. Two models must not share one engine."""
     def share(self, storage: Any) -> Any:
         """複製したモデルに渡す格納データ。以後の書き込みが互いに影響しないこと。"""
     def size(self, storage: Any) -> int: ...
@@ -150,6 +149,9 @@ class ReferenceEngine:
     def fork(self, cat):
         return ReferenceEngine()
 
+    def fresh(self):
+        return type(self)()  # a subclass keeps its settings (for example, partitions)
+
     def share(self, storage: Cube) -> Cube:
         return Cube(storage.dims, dict(storage.cells))  # dict は書き換えるので複製する
 
@@ -189,9 +191,6 @@ class ReferenceEngine:
 
     def evaluate_many(self, items, cat):
         return [self.evaluate(expr, cat, restrict) for expr, restrict in items]
-
-    def evaluate_with_count(self, expr, count_expr, cat, restrict):
-        return self.evaluate(expr, cat, restrict), self.evaluate(count_expr, cat, restrict)
 
     def filter(self, storage: Cube, restrict, cat):
         return _filter(storage, restrict)

@@ -99,6 +99,7 @@ fn agg_name(agg: Agg) -> &'static str {
         Agg::Max => "max",
         Agg::Count => "count",
         Agg::First => "first",
+        Agg::Low => "low",
     }
 }
 

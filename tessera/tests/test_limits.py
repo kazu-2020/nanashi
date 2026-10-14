@@ -230,11 +230,7 @@ class Memory(unittest.TestCase):
         import gc
 
         import nanashi_core
-        # heap() は数え始めてからの確保と解放の差なので、前のテストが残した循環参照のゴミ（Rust の格納データを
-        # 持つもの）が数えている途中で回収されると減る。数え始める前に回収しておく
         gc.collect()
-        nanashi_core.track_heap(True)
-        self.addCleanup(nanashi_core.track_heap, False)
         before = nanashi_core.heap()[0]
         m = Named(Model(engine=RustEngine()))
         m.add_dimension("P", [f"p{i}" for i in range(2000)])
@@ -245,21 +241,22 @@ class Memory(unittest.TestCase):
         m.recalc()
         mem = m.memory()
         self.assertEqual(mem["V"]["rows"], 24_000)
-        self.assertEqual(mem["V"]["base"], 24_000 * 16)  # 本体は余分な容量のない列
+        # The values are a column with no extra capacity. The packed keys use less than 8 bytes per row
+        self.assertGreater(mem["V"]["base"], 24_000 * 8)
+        self.assertLess(mem["V"]["base"], 24_000 * 16)
         self.assertEqual(mem["V"]["delta_rows"], 0)
         m.set_cell("V", 1.0, P="p0", M="m0")
         m.recalc()
         self.assertEqual(m.memory()["V"]["delta_rows"], 1)
         self.assertIn("counts", m.memory()["ByGroup"])  # 差分集計の件数
         now, peak = nanashi_core.heap()
-        self.assertGreater(now, before + 24_000 * 16)
+        self.assertGreater(now, before + 24_000 * 8)
         self.assertGreaterEqual(peak, now)
         nanashi_core.reset_heap_peak()
         self.assertEqual(nanashi_core.heap()[1], nanashi_core.heap()[0])
-        nanashi_core.track_heap(False)  # 止めている間は数えない
-        m.add_input("W", ["P", "M"], {(f"p{i}", "m0"): 1.0 for i in range(2000)})
-        m.recalc()
-        self.assertEqual(nanashi_core.heap()[0], now)
+        del m
+        gc.collect()
+        self.assertLess(nanashi_core.heap()[0], before + 24_000 * 16)
 
     def test_reference_reports_rows_only(self):
         m = Named(Model(engine=ReferenceEngine()))

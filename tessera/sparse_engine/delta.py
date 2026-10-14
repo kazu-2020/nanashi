@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 
-from .evaluate import Catalog, infer
+from .evaluate import Catalog, infer, remove_run
 from .expr import AsAxis, By, Const, Expr, On, Ref, Remove, Select
 
 
@@ -25,6 +25,10 @@ class DeltaPlan:
     source: str               # 集計元の Metric
     count: Expr | None        # 各グループの件数を求める式。None なら Metric 自身が件数（COUNT の集計）
     aux: tuple[str, ...] = ()  # 変わっていない前提で読む Metric（Metric を使った BY の対応表）
+    low: Expr | None = None   # The residual formula of a SUM (see _outer_low). None for COUNT
+    # The dimensions that the aggregations under the outermost one remove (SUM only). The delta range does not
+    # limit them, so each inner group with a changed row is read in full and rounds as in a full evaluation
+    widen: tuple[str, ...] = ()
 
 
 # エンジンが件数の式と差分の式を自分で作るとき（Rust）に、count に置く印。「件数が要る」ことだけを表す
@@ -33,6 +37,8 @@ COUNTED = Const(1.0)
 
 def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
     aggs: list[str] = []  # 外側から内側の順
+    agg_dims: list[str] = []  # the dimension that each aggregation removes, in the same order
+    outer = 1  # the number of aggregations in the outermost one (a run of REMOVE SUM is one, see remove_run)
     aux: list[str] = []
     e = formula
     while True:
@@ -40,8 +46,12 @@ def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
             if e.dim not in infer(e.child, cat, []).dims:
                 return None  # 引き下ろし（lookup）は集計ではない
             aggs.append(e.agg or "sum")
+            agg_dims.append(e.dim)
         elif isinstance(e, Remove):
+            if not aggs:
+                outer = len(remove_run(e)[0])
             aggs.append(e.agg)
+            agg_dims.append(e.dim)
         elif isinstance(e, On) and isinstance(e.other, AsAxis) and isinstance(e.other.child, Ref):
             aux.append(e.other.child.name)  # 対応表との結合は、集計元について線形
         elif not isinstance(e, Select):  # SELECT は切り口を取り出すだけで、分解を崩さない
@@ -51,7 +61,9 @@ def plan_for(formula: Expr, cat: Catalog) -> DeltaPlan | None:
         return None
     if aggs[-1] not in ("sum", "count") or any(a != "sum" for a in aggs[:-1]):
         return None
-    return DeltaPlan(e.name, None if aggs[-1] == "count" else _inner_count(formula), tuple(aux))
+    if aggs[-1] == "count":
+        return DeltaPlan(e.name, None, tuple(aux))
+    return DeltaPlan(e.name, _inner_count(formula), tuple(aux), _outer_low(formula), tuple(agg_dims[outer:]))
 
 
 def _has_agg(e: Expr) -> bool:
@@ -63,6 +75,14 @@ def _inner_count(e: Expr) -> Expr:
     if isinstance(e, (By, Remove)) and not _has_agg(e.child):
         return replace(e, agg="count")
     return replace(e, child=_inner_count(e.child))
+
+
+def _outer_low(e: Expr) -> Expr:
+    """The formula with the OUTERMOST aggregation changed to "low": for each group, the exact sum minus the
+    rounded SUM. The inner aggregations stay SUM. Together with the value, it holds the exact sum."""
+    if isinstance(e, (By, Remove)):
+        return replace(e, agg="low")
+    return replace(e, child=_outer_low(e.child))
 
 
 def rename(e: Expr, names: dict[str, str]) -> Expr:

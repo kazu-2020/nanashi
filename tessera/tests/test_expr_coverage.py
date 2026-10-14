@@ -279,7 +279,7 @@ class Aggregations(unittest.TestCase):
         for name in PUBLIC_AGGREGATIONS:
             parse(f"X[REMOVE {name.upper()}: A]")
         hidden = [n for n in AGGREGATIONS if n not in PUBLIC_AGGREGATIONS]
-        self.assertEqual(hidden, ["first"])
+        self.assertEqual(hidden, ["first", "low"])
         with self.assertRaisesRegex(FormulaError, "SUM, AVG, MIN, MAX, COUNT"):
             parse("X[REMOVE FIRST: A]")
         m = model(ReferenceEngine())

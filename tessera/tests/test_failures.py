@@ -119,7 +119,7 @@ class RustBoundary(unittest.TestCase):
         stores = [m._values[n] for n in names]
         stores[1] = stores[0]  # 同じハンドルを 2 回渡す（2 つ目は書き換えの途中で借りられない）
         with self.assertRaisesRegex(RuntimeError, "使用中"):
-            engine.core.recalc_changes(rplan, stores, [None] * len(names), [], [], [], [])
+            engine.core.recalc_changes(rplan, stores, [None] * len(names), [None] * len(names), [], [], [], [])
         check_values(self, m)
 
 
@@ -138,8 +138,25 @@ class MemoryBudget(unittest.TestCase):
 
     def test_split_budget_gives_the_same_results(self):
         from .test_redefine import run_random
+        # the stored data of seed 59 is at most 5.2 KiB, so the room is about 64 KiB
         run_random(self, seed=59, rounds=60,
-                   engines=[ReferenceEngine, lambda: RustEngine(max_bytes=1 << 16, par_min=0, widen_min_rows=0)])
+                   engines=[ReferenceEngine, lambda: RustEngine(max_bytes=70 << 10, par_min=0, widen_min_rows=0)])
+
+    def test_stored_data_counts_against_the_budget(self):
+        m = Named(Model(engine=RustEngine()))
+        m.add_dimension("Customer", [f"c{i}" for i in range(10_000)])
+        m.add_input("Sales", ["Customer"], {(f"c{i}",): float(i) for i in range(10_000)})
+        m.add_formula("Double", ["Customer"], "Sales * 2")
+        # The result (10,000 cells x 16 bytes) fits in the budget alone, but not together with the stored data
+        m.engine.core.configure(max_bytes=stored_bytes(m) + (64 << 10))
+        with self.assertRaisesRegex(ValueError, "格納データが"):
+            m.recalc()
+        m.engine.core.configure(max_bytes=None)
+        self.assertEqual(m.get("Double", Customer="c7"), 14.0)
+
+
+def stored_bytes(m) -> int:
+    return sum(r["base"] + r["delta"] + r["index"] + r.get("counts", 0) for r in m.memory().values())
 
 
 def check_values(test, m) -> None:

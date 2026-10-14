@@ -60,7 +60,7 @@ We did not measure this (see "Risks").
 
 A **base file** is the base of the stored data of 1 Metric as a file. It has 2 immutable columns (u64 keys, f64 values) and the packing of the keys.
 The packing is the partition dimension and the bit width of each dimension. The bytes of a base have a meaning only with their packing.
-The engine keeps the base in this flat layout today (`Box<[u64]>`, `Box<[f64]>`, the same as the Arrow buffers).
+The engine keeps the values in this flat layout today (`Box<[f64]>`, the same as the Arrow buffer). It keeps the keys in frame-of-reference blocks of 1,024 keys (`PackedKeys`, [Engine](engine.md)). A base file can hold the packed blocks as they are, or the keys as a u64 column that the writer decodes.
 
 The writer puts each base file in object storage under the sha256 of its bytes.
 A base never changes, so a base file never changes, and all versions and all processes can share it.
@@ -244,5 +244,5 @@ Each step gives a result alone. After each step, measure the gain. If the next s
 - A manifest from a different engine version must not open without an error. The calculation version in the manifest and the CI test above prevent this. A worker refuses a task with a different calculation version. Upgrade the workers first, then the writer.
 - If the writer stops during a recalculation, its intermediate base files remain in object storage. `prune` must also delete the prefixes of old epochs. Today, there is no cleanup for files that nothing refers to.
 - The object storage holds more data (base files of the formula Metrics). `prune` and compression of the value columns limit this. We did not measure the compression. Random values compress badly, and keys compress well.
-- A deadline that is too short makes the writer calculate locally after it waited. Set the deadline from the estimated rows of the task. Bound the number of tasks and the bytes in flight by the memory budget (`max_bytes`).
+- A deadline that is too short makes the writer calculate locally after it waited. Set the deadline from the estimated rows of the task. Bound the number of tasks and the bytes in flight by the memory budget (`max_bytes`, stored data and intermediate results).
 - The worker endpoint runs plans and reads object storage. It needs mutual authentication, and a worker that caches base files of many models needs separation between the models.

@@ -38,6 +38,7 @@ class RustEngine:
 
     def __init__(self, **config):
         """config has the tuning values for the speed of Rust (nanashi_core.Core gets them; the results do not change)."""
+        self._config = config
         self.core = nanashi_core.Core(**config)
         self._dims: dict[str, tuple[Any, int]] = {}  # dimension id -> (Dimension, Rust number)
         self._names: dict[int, str] = {}  # Rust number -> dimension id
@@ -49,6 +50,7 @@ class RustEngine:
     def fork(self, cat: Catalog) -> RustEngine:
         """cat（複製したモデル）用のエンジン。Rust 側の軸と対応表を引き継ぎ、番号も同じにする。"""
         other = RustEngine.__new__(RustEngine)
+        other._config = self._config
         other.core = self.core.fork()
         other._dims = {d: (cat.dimension(d), i) for d, (_, i) in self._dims.items()}
         other._names = dict(self._names)
@@ -57,6 +59,9 @@ class RustEngine:
         other._widths = dict(self._widths)  # 式の変換結果は軸と対応表の番号だけに依存するので共有してよい
         other.planner = self.planner.fork(other)
         return other
+
+    def fresh(self) -> RustEngine:
+        return RustEngine(**self._config)  # settings from the constructor only, not later core.configure calls
 
     def share(self, store):
         return self.core.share(store)
@@ -313,16 +318,6 @@ class RustEngine:
             jobs.append((compiled, [cat.source(n) for n in names], self._region(cat, restrict)))
         return self.core.evaluate_many(jobs)
 
-    def evaluate_with_count(self, expr, count_expr, cat, restrict):
-        if count_expr is COUNTED:  # 件数の式は Rust が式から作る
-            compiled, names = self._compile(expr, cat)
-            sources = [cat.source(n) for n in names]
-            region = self._region(cat, restrict)
-            value, count = self.core.evaluate_many([(compiled, sources, region),
-                                                    (self.core.count_formula(compiled), sources, region)])
-            return value, count
-        return self.evaluate_many([(expr, restrict), (count_expr, restrict)], cat)
-
     def filter(self, store, restrict, cat):
         return self.core.filter(store, self._region(cat, restrict))
 
@@ -471,14 +466,16 @@ class RustPlanner:
 
     # ------------------------------------------------ 差分再計算の段取り
 
-    def recalc(self, plan, stores: dict, counts: dict, cat: Catalog, changed: dict, added: dict,
+    def recalc(self, plan, stores: dict, counts: dict, lows: dict, cat: Catalog, changed: dict, added: dict,
                olds: dict, forced: dict, full: bool = False) -> tuple[list, Any]:
-        """PyPlanner.recalc と同じ段取りを Rust で行う。plan は Model.compiled()、stores と counts は
-        Metric ごとの格納データと差分集計の件数、changed は入力の変更範囲、added は追加したメンバー、
-        olds は差分集計の集計元になる入力の変更前の値、forced は必ず計算し直す計算 Metric の範囲。
-        格納データはその場で書き換わる。
+        """Do the same schedule as PyPlanner.recalc in Rust. plan is Model.compiled(). stores, counts and lows are
+        the stored data, the counts and the residuals of incremental aggregation of each Metric. changed is the
+        changed range of the inputs, and added is the added members. olds is the old values of the inputs that are
+        a source of incremental aggregation. forced is the range of each formula Metric to calculate again.
+        stores, counts and lows change in place.
 
-        再計算した (Metric の番号, 差分集計か, 範囲) の記録と、それを名前に直す関数を返す。
+        Returns the log of recalculated (Metric number, incremental aggregation or not, range), and a function
+        that changes it to names.
         """
         rplan, names = self._plan_for(plan, cat)
         index = {n: i for i, n in enumerate(names)}
@@ -487,6 +484,7 @@ class RustPlanner:
             rplan,
             [stores[n] for n in names],
             [counts.get(n) for n in names],
+            [lows.get(n) for n in names],
             [(index[n], region(r)) for n, r in changed.items()],
             self._added(cat, added),
             [(index[n], h) for n, h in olds.items()],

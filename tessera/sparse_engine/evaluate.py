@@ -707,6 +707,18 @@ def _dense(dims: tuple[str, ...], cat: Catalog, restrict: Restrict | None):
     return product(*(_members(cat, d, restrict) for d in dims))
 
 
+def remove_run(e: Remove) -> tuple[tuple[str, ...], Expr]:
+    """A run of nested REMOVE SUM (the parser makes `REMOVE SUM: A, B` into nested nodes) is one aggregation with
+    one rounding. Return the removed dimensions (outer first) and the child under the run. The top node can be
+    "low" (the residual formula). Any other node is a run of 1."""
+    dims, c = [e.dim], e.child
+    if e.agg in ("sum", "low"):
+        while isinstance(c, Remove) and c.agg == "sum":
+            dims.append(c.dim)
+            c = c.child
+    return tuple(dims), c
+
+
 def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube:
     match expr:
         case Ref(name):
@@ -815,14 +827,15 @@ def evaluate(expr: Expr, cat: Catalog, restrict: Restrict | None = None) -> Cube
             return Cube(c.dims[:i] + c.dims[i + 1:],
                         {k[:i] + k[i + 1:]: v for k, v in c.cells.items() if k[i] == member})
 
-        case Remove(child, dim, agg):
-            c = evaluate(child, cat, _without(restrict, dim))
-            i = c.dims.index(dim)
+        case Remove(_, _, agg):
+            dims, child = remove_run(expr)
+            c = evaluate(child, cat, _without(restrict, *dims))
+            keep = [i for i, d in enumerate(c.dims) if d not in dims]
             groups = defaultdict(list)
             for k, v in c.cells.items():
-                groups[k[:i] + k[i + 1:]].append(v)
+                groups[tuple(k[i] for i in keep)].append(v)
             fn = AGGREGATORS[agg]
-            return Cube(c.dims[:i] + c.dims[i + 1:], {k: fn(vs) for k, vs in groups.items()})
+            return Cube(tuple(c.dims[i] for i in keep), {k: fn(vs) for k, vs in groups.items()})
 
         case Shift(child, dim, n):
             d = cat.dimension(dim)

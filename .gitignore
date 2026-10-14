@@ -15,3 +15,5 @@ router/nanashi-router
 /node_modules/
 # archify writes one timestamped directory for each diagram run.
 .archify/
+# bench_ab.py makes the git worktrees of the base side here.
+.bench/

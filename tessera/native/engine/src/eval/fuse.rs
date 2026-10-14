@@ -2,7 +2,6 @@
 //! 軸の値（DimRef）、SELECT、時点のずらし（Shift）、引き下ろし（ByLookup）をつないだ式を、演算ごとの途中結果
 //! （Cube）を作らずに、結果のキーを 1 つずつ走査して評価する。
 //!
-//! 各キーでの値は、式の木をそのキーでたどって求める（Cursor::eval）。読み出し元はキーを写して引く。
 //! SELECT、Shift、引き下ろしは、子をたどるキーを変える（例: SELECT は消える軸にメンバーを足したキーで子を引く）。
 //! 値の求め方は、演算ごとの評価（mod.rs の node_value）と同じ意味になるようにしてある。INNER JOIN の演算
 //! （* / 比較、FILTER、ON）は両方に値があるときだけ、FULL OUTER JOIN の演算（+ - AND OR、Coalesce）は片方に
@@ -20,8 +19,10 @@
 //! 全組み合わせへ広げた結果）の 4 倍以下のときだけ使う。疎な結合（`X[P,S] * Y[S,M]`）を全組み合わせで
 //! 走査しないためである。
 //!
-//! 使うのは、範囲の絞り込みがない全体の評価で、読み出し元がすべて差分のない格納データか、
-//! キー順に並んだ Cube のときだけ。当てはまらなければ None を返し、演算ごとに評価する。
+//! Fusion applies only to a full evaluation with no range restriction, and only when each source
+//! is stored data or a Cube in key order. Stored data with a delta is first merged into a Cube in
+//! key order (one copy of its rows). Otherwise `fused` returns None and the engine evaluates one
+//! operation at a time.
 //!
 //! メモリの予算（Budget）には、結果の配列を確保する前に、その大きさを数える。演算ごとに評価したときに
 //! 必ず作る途中結果（mat）さえ予算に収まらないなら、融合せずに演算ごとの評価に任せる（その演算が、
@@ -29,6 +30,7 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use std::cell::OnceCell;
 
 /// 読み出し元の列。キーの昇順に並び、番号で読める。
 #[derive(Clone, Copy)]
@@ -37,7 +39,7 @@ enum Col<'a> {
     Cells(&'a [(u64, f64)]),
 }
 
-impl Col<'_> {
+impl<'a> Col<'a> {
     #[inline]
     fn n(&self) -> usize {
         match self {
@@ -49,7 +51,7 @@ impl Col<'_> {
     #[inline]
     fn key(&self, i: usize) -> u64 {
         match self {
-            Col::Store(s) => s.base.keys[i],
+            Col::Store(s) => s.base.keys.get(i),
             Col::Cells(c) => c[i].0,
         }
     }
@@ -65,70 +67,18 @@ impl Col<'_> {
     /// key 以上の最初の行。
     fn lower_bound(&self, key: u64) -> usize {
         match self {
-            Col::Store(s) => s.base.keys.partition_point(|&k| k < key),
+            Col::Store(s) => s.base.keys.partition_point(|k| k < key),
             Col::Cells(c) => c.partition_point(|x| x.0 < key),
         }
     }
 
-    /// key 以上の最初の行を、前回の位置 from の近くから探す（前後どちらへも指数探索）。
-    /// 続けて引くキーが近ければ、二分探索より速い。
-    #[inline]
-    fn seek(&self, from: usize, key: u64) -> usize {
-        if from == 0 || from > self.n() || self.key(from - 1) < key {
-            return self.gallop(from.min(self.n()), key);
-        }
-        // key(from - 1) >= key: 後ろへ戻る
-        let mut step = 1;
-        let mut hi = from - 1; // key(hi) >= key
-        let mut lo = hi.saturating_sub(1);
-        while lo > 0 && self.key(lo) >= key {
-            hi = lo;
-            step *= 2;
-            lo = lo.saturating_sub(step);
-        }
-        if self.key(lo) >= key {
-            return lo; // lo == 0
-        }
-        // key(lo) < key <= key(hi)
-        let (mut l, mut h) = (lo + 1, hi);
-        while l < h {
-            let mid = (l + h) / 2;
-            if self.key(mid) < key {
-                l = mid + 1;
-            } else {
-                h = mid;
-            }
-        }
-        l
+    /// For a `Col::Store` it decodes one packed block at a time.
+    fn cursor(&self) -> Cursor<'a> {
+        Cursor::new(match self {
+            Col::Store(s) => Sorted::Packed(&s.base.keys),
+            Col::Cells(c) => Sorted::Cells(c),
+        })
     }
-
-    /// from 以降で key 以上の最初の行（指数探索。キー順に進むカーソル用）。
-    #[inline]
-    fn gallop(&self, from: usize, key: u64) -> usize {
-        let n = self.n();
-        if from >= n || self.key(from) >= key {
-            return from;
-        }
-        let mut step = 1;
-        let mut lo = from; // key(lo) < key
-        let mut hi = from + 1;
-        while hi < n && self.key(hi) < key {
-            lo = hi;
-            step *= 2;
-            hi = (hi + step).min(n);
-        }
-        let (mut l, mut h) = (lo + 1, hi);
-        while l < h {
-            let mid = (l + h) / 2;
-            if self.key(mid) < key {
-                l = mid + 1;
-            } else {
-                h = mid;
-            }
-        }
-        l
-    }
-
 }
 
 /// 読み出し元（src の番号ごとに 1 つ）。
@@ -235,8 +185,9 @@ impl<'a> Access<'a> {
         if width <= DENSE_BITS && (1usize << width) <= leaf.col.n().saturating_mul(64).max(1 << 12) {
             let size = 1usize << width;
             let (mut vals, mut has) = (vec![0.0; size], vec![false; size]);
+            let mut rd = leaf.col.cursor();
             for i in 0..leaf.col.n() {
-                let k = leaf.col.key(i) as usize;
+                let k = rd.key(i) as usize;
                 vals[k] = leaf.col.val(i);
                 has[k] = true;
             }
@@ -249,6 +200,9 @@ impl<'a> Access<'a> {
 struct Fuse<'a> {
     cat: &'a Catalog,
     src: &'a [Src],
+    bud: &'a Budget,
+    merged: &'a [OnceCell<Cube>], // Per src index: the stored data merged with its delta, made on first use
+    copied: usize,                // The cell capacity of `merged`. Later budget checks add it, because Budget::need does not keep it
     leaves: Vec<Leaf<'a>>,
     ids: Vec<usize>, // leaves の番号 -> src の番号
 }
@@ -260,6 +214,13 @@ impl<'a> Fuse<'a> {
         }
         let leaf = match &self.src[i] {
             Src::Store(s) if s.base_rows().is_some() => Leaf { col: Col::Store(s), pack: &s.pack, kind: s.kind },
+            Src::Store(s) => {
+                // The merge of the base and the delta is in key order. The copy counts against the budget.
+                self.bud.need(self.copied + s.rows_hint(), "").ok()?;
+                let c = self.merged[i].get_or_init(|| s.read(&Restrict::all(self.cat.dims.len())));
+                self.copied += c.cells.capacity(); // the Vec of the merge can grow past its length
+                Leaf { col: Col::Cells(&c.cells), pack: &s.pack, kind: s.kind }
+            }
             Src::Cube(c) if c.cells.windows(2).all(|w| w[0].0 < w[1].0) => Leaf { col: Col::Cells(&c.cells), pack: &c.pack, kind: c.kind },
             _ => return None,
         };
@@ -479,95 +440,166 @@ impl<'a> Fuse<'a> {
     }
 }
 
-/// 走査の状態（1 つの仕事の単位ごと）。
-struct Cursor<'s, 'a> {
-    access: &'s [Access<'a>],
-    pos: Vec<usize>, // Aligned と Search の読み出し元ごとの、前回の行
+/// The slice holds one `Cursor` for each access (the last row and the decoded block of each `Aligned`
+/// and `Search` access; a `Dense` access gets an empty placeholder).
+type Ev<'s> = Box<dyn Fn(&mut [Cursor], u64) -> Option<f64> + Sync + 's>;
+
+fn readers<'a>(access: &[Access<'a>]) -> Vec<Cursor<'a>> {
+    access
+        .iter()
+        .map(|a| match a {
+            Access::Aligned(col) | Access::Search { col, .. } => col.cursor(),
+            Access::Dense { .. } => Cursor::new(Sorted::Cells(&[])),
+        })
+        .collect()
 }
 
-impl Cursor<'_, '_> {
-    #[inline]
-    fn get(&mut self, l: usize, key: u64) -> Option<f64> {
-        match &self.access[l] {
-            Access::Aligned(col) => {
-                let p = col.gallop(self.pos[l], key);
-                self.pos[l] = p;
-                (p < col.n() && col.key(p) == key).then(|| col.val(p))
-            }
-            Access::Dense { ctx, proj, pack, vals, has } => {
-                let k = proj.apply(ctx, pack, key) as usize;
-                has[k].then(|| vals[k])
-            }
-            Access::Search { ctx, proj, pack, col } => {
-                let k = proj.apply(ctx, pack, key);
-                let p = col.seek(self.pos[l], k);
-                self.pos[l] = p;
-                (p < col.n() && col.key(p) == k).then(|| col.val(p))
-            }
+fn compile<'s>(f: &'s F, acc: &'s [Access]) -> Ev<'s> {
+    let go = |x: &'s F| compile(x, acc);
+    match f {
+        F::Leaf(l) => leaf(*l, &acc[*l]),
+        F::Const(v) => {
+            let v = *v;
+            Box::new(move |_, _| Some(v))
         }
-    }
-
-    fn eval(&mut self, f: &F, key: u64) -> Option<f64> {
-        match f {
-            F::Leaf(l) => self.get(*l, key),
-            F::Const(v) => Some(*v),
-            F::Dim { shift, mask } => Some(((key >> shift) & mask) as f64),
-            F::Bin(op, a, b) => match op {
-                Op::Mul | Op::Div | Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
-                    let x = self.eval(a, key)?;
-                    let y = self.eval(b, key)?;
-                    scalar(*op, x, y)
-                }
-                Op::Add | Op::Sub => {
-                    let (x, y) = (self.eval(a, key), self.eval(b, key));
+        F::Dim { shift, mask } => {
+            let (shift, mask) = (*shift, *mask);
+            Box::new(move |_, key| Some(((key >> shift) & mask) as f64))
+        }
+        F::Bin(op, a, b) => match op {
+            // One arm for each operator gives `scalar` a constant operator. One shared arm was 18% slower.
+            Op::Mul => inner_join(a, b, acc, |x, y| scalar(Op::Mul, x, y)),
+            Op::Div => inner_join(a, b, acc, |x, y| scalar(Op::Div, x, y)),
+            Op::Eq => inner_join(a, b, acc, |x, y| scalar(Op::Eq, x, y)),
+            Op::Ne => inner_join(a, b, acc, |x, y| scalar(Op::Ne, x, y)),
+            Op::Lt => inner_join(a, b, acc, |x, y| scalar(Op::Lt, x, y)),
+            Op::Le => inner_join(a, b, acc, |x, y| scalar(Op::Le, x, y)),
+            Op::Gt => inner_join(a, b, acc, |x, y| scalar(Op::Gt, x, y)),
+            Op::Ge => inner_join(a, b, acc, |x, y| scalar(Op::Ge, x, y)),
+            Op::Add | Op::Sub => {
+                let (op, a, b) = (*op, go(a), go(b));
+                Box::new(move |p, key| {
+                    let (x, y) = (a(p, key), b(p, key));
                     if x.is_none() && y.is_none() {
                         return None;
                     }
-                    scalar(*op, x.unwrap_or(0.0), y.unwrap_or(0.0))
-                }
-                Op::And | Op::Or => {
-                    let (x, y) = (self.eval(a, key), self.eval(b, key));
+                    scalar(op, x.unwrap_or(0.0), y.unwrap_or(0.0))
+                })
+            }
+            Op::And | Op::Or => {
+                let (op, a, b) = (*op, go(a), go(b));
+                Box::new(move |p, key| {
+                    let (x, y) = (a(p, key), b(p, key));
                     if x.is_none() && y.is_none() {
                         return None;
                     }
-                    kleene(*op, x, y)
-                }
-            },
-            F::Not(c) => self.eval(c, key).map(|v| b2f(v == 0.0)),
-            F::If(c, t, e) => {
-                if self.eval(c, key)? != 0.0 {
-                    self.eval(t, key)
-                } else {
-                    self.eval(e.as_ref()?, key)
-                }
+                    kleene(op, x, y)
+                })
             }
-            F::Filter(x, c) => {
-                let v = self.eval(x, key)?;
-                (self.eval(c, key)? != 0.0).then_some(v)
-            }
-            F::On(x, o) => {
-                let v = self.eval(x, key)?;
-                self.eval(o, key).map(|_| v)
-            }
-            F::Coalesce(a, b) => self.eval(a, key).or_else(|| self.eval(b, key)),
-            F::IsBlank(c) => Some(b2f(self.eval(c, key).is_none())),
-            F::IfBlank(c, v) => Some(self.eval(c, key).unwrap_or(*v)),
-            F::Select { at, member, inner } => self.eval(inner, at.apply(key, *member)),
-            F::Shift { shift, mask, n, size, inner } => {
+        },
+        F::Not(c) => {
+            let c = go(c);
+            Box::new(move |p, key| c(p, key).map(|v| b2f(v == 0.0)))
+        }
+        F::If(c, t, e) => {
+            let (c, t, e) = (go(c), go(t), e.as_deref().map(go));
+            Box::new(move |p, key| if c(p, key)? != 0.0 { t(p, key) } else { e.as_ref()?(p, key) })
+        }
+        F::Filter(x, c) => {
+            let (x, c) = (go(x), go(c));
+            Box::new(move |p, key| {
+                let v = x(p, key)?;
+                (c(p, key)? != 0.0).then_some(v)
+            })
+        }
+        F::On(x, o) => {
+            let (x, o) = (go(x), go(o));
+            Box::new(move |p, key| {
+                let v = x(p, key)?;
+                o(p, key).map(|_| v)
+            })
+        }
+        F::Coalesce(a, b) => {
+            let (a, b) = (go(a), go(b));
+            Box::new(move |p, key| a(p, key).or_else(|| b(p, key)))
+        }
+        F::IsBlank(c) => {
+            let c = go(c);
+            Box::new(move |p, key| Some(b2f(c(p, key).is_none())))
+        }
+        F::IfBlank(c, v) => {
+            let (c, v) = (go(c), *v);
+            Box::new(move |p, key| Some(c(p, key).unwrap_or(v)))
+        }
+        F::Select { at, member, inner } => {
+            let (at, member, inner) = (&**at, *member, go(inner));
+            Box::new(move |p, key| inner(p, at.apply(key, member)))
+        }
+        F::Shift { shift, mask, n, size, inner } => {
+            let (shift, mask, n, size, inner) = (*shift, *mask, *n, *size, go(inner));
+            Box::new(move |p, key| {
                 let s = ((key >> shift) & mask) as i64 - n;
-                if !(0..*size).contains(&s) {
+                if !(0..size).contains(&s) {
                     return None;
                 }
-                self.eval(inner, (key & !(mask << shift)) | ((s as u64) << shift))
-            }
-            F::Lookup { at, src_shift, src_mask, fwd, inner } => {
-                let m = ((key >> src_shift) & src_mask) as usize;
-                let t = *fwd.get(m)?;
+                inner(p, (key & !(mask << shift)) | ((s as u64) << shift))
+            })
+        }
+        F::Lookup { at, src_shift, src_mask, fwd, inner } => {
+            let (at, src_shift, src_mask, fwd, inner) = (&**at, *src_shift, *src_mask, *fwd, go(inner));
+            Box::new(move |p, key| {
+                let t = *fwd.get(((key >> src_shift) & src_mask) as usize)?;
                 if t < 0 {
                     return None;
                 }
-                self.eval(inner, at.apply(key, t as u32))
-            }
+                inner(p, at.apply(key, t as u32))
+            })
+        }
+    }
+}
+
+fn leaf<'s>(l: usize, a: &'s Access) -> Ev<'s> {
+    match a {
+        Access::Aligned(col) => {
+            let col = *col;
+            Box::new(move |p, key| {
+                let rd = &mut p[l];
+                let i = rd.gallop(key);
+                (i < col.n() && rd.key(i) == key).then(|| col.val(i))
+            })
+        }
+        Access::Dense { ctx, proj, pack, vals, has } => Box::new(move |_, key| {
+            let k = proj.apply(ctx, pack, key) as usize;
+            has[k].then(|| vals[k])
+        }),
+        Access::Search { ctx, proj, pack, col } => {
+            let col = *col;
+            Box::new(move |p, key| {
+                let k = proj.apply(ctx, pack, key);
+                let rd = &mut p[l];
+                let i = rd.seek(k);
+                (i < col.n() && rd.key(i) == k).then(|| col.val(i))
+            })
+        }
+    }
+}
+
+fn inner_join<'s>(a: &'s F, b: &'s F, acc: &'s [Access], g: impl Fn(f64, f64) -> Option<f64> + Sync + 's) -> Ev<'s> {
+    match (a, b) {
+        (_, F::Const(y)) => {
+            let (a, y) = (compile(a, acc), *y);
+            Box::new(move |p, key| g(a(p, key)?, y))
+        }
+        (F::Const(x), _) => {
+            let (x, b) = (*x, compile(b, acc));
+            Box::new(move |p, key| g(x, b(p, key)?))
+        }
+        _ => {
+            let (a, b) = (compile(a, acc), compile(b, acc));
+            Box::new(move |p, key| {
+                let x = a(p, key)?;
+                g(x, b(p, key)?)
+            })
         }
     }
 }
@@ -580,9 +612,10 @@ pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: 
     if !r.is_all() || matches!(node, Node::Ref(_) | Node::Const(..) | Node::MemberConst(..)) {
         return Ok(None);
     }
-    let mut fu = Fuse { cat, src, leaves: Vec::new(), ids: Vec::new() };
+    let merged: Vec<OnceCell<Cube>> = src.iter().map(|_| OnceCell::new()).collect();
+    let mut fu = Fuse { cat, src, bud, merged: &merged, copied: 0, leaves: Vec::new(), ids: Vec::new() };
     let Some(info) = fu.info(node) else { return Ok(None) };
-    if info.mat > usize::MAX as f64 || bud.need(info.mat as usize, "").is_err() {
+    if info.mat > usize::MAX as f64 || bud.need(info.mat as usize + fu.copied, "").is_err() {
         return Ok(None);
     }
     fused_with(node, &mut fu, info, bud)
@@ -598,8 +631,8 @@ fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Op
             let mut access = Vec::new();
             let Some(f) = fu.build(node, out, true, &mut access) else { return Ok(None) };
             let drivers: Vec<Col> = ls.iter().map(|&l| fu.leaves[l].col).collect();
-            bud.need(drivers.iter().map(|d| d.n()).sum(), "式の結果")?;
-            let cells = run_sorted(cfg, &drivers, &access, &f);
+            bud.need(drivers.iter().map(|d| d.n()).sum::<usize>() + fu.copied, "式の結果")?;
+            let cells = run_sorted(cfg, &drivers, &access, &compile(&f, &access));
             return Ok(Some(Cube { pack: out.clone(), kind: info.kind, cells }));
         }
     }
@@ -639,16 +672,17 @@ fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Op
         .map(|(i, &d)| (i, (0..cat.dims[d].size).collect()))
         .collect();
     let space = Space { base: base.as_ref().map(|(c, p, pk)| (*c, p, *pk)), out: &out, fill: &fill };
-    let mut cells = run_space(cfg, &space, &access, &f, bud)?;
+    let mut cells = run_space(cfg, &space, &access, &compile(&f, &access), bud, fu.copied)?;
     if !cells.windows(2).all(|w| w[0].0 < w[1].0) {
         sort_cells(cfg, &mut cells);
     }
     Ok(Some(Cube { pack: out, kind: info.kind, cells }))
 }
 
-/// 被覆（drivers、同じ詰め方）のキーの和を順に走査し、各キーで f の値を求める。結果はキー順に並ぶ。
-fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &F) -> Vec<(u64, f64)> {
-    // 仕事の単位: 最も大きい被覆の cfg.chunk 行おきのキーで区切り、各被覆のその区間の行の範囲を求める
+/// Scan the union of the keys of the drivers (same packing) in order, and get the value of f at each key.
+/// The result is in key order.
+fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev) -> Vec<(u64, f64)> {
+    // A unit of work: split at every cfg.chunk-th key of the largest driver, and find the row range of each driver
     let chunk = cfg.chunk.max(1);
     let big = (0..drivers.len()).max_by_key(|&i| drivers[i].n()).unwrap();
     let mut bounds: Vec<u64> = (chunk..drivers[big].n()).step_by(chunk).map(|i| drivers[big].key(i)).collect();
@@ -665,7 +699,7 @@ fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &F) -> Vec<(u
     let sizes: Vec<usize> = ranges.iter().map(|(lo, hi)| lo.iter().zip(hi).map(|(a, b)| b - a).sum()).collect();
     let total: usize = sizes.iter().sum();
 
-    // 結果は、各区間の行数の和を上限に 1 つの配列へ書き、空のセルを詰めてから切り詰める
+    // Write the result into one array with room for all rows of each range, then remove the gaps and truncate
     let mut cells = vec![(0u64, 0f64); total];
     let mut slices = Vec::with_capacity(ranges.len());
     let mut rest = &mut cells[..];
@@ -675,36 +709,30 @@ fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &F) -> Vec<(u
         rest = tail;
     }
     let work = |((lo, hi), slice): (&Span, &mut [(u64, f64)])| -> usize {
-        let mut cur = Cursor { access, pos: vec![0; access.len()] };
-        // Aligned の読み出し元は、区間の先頭のキーから読み始める
+        let mut readers = readers(access);
+        // Each Aligned access starts to read at the first key of the range
         let first = lo.iter().zip(hi).zip(drivers).filter(|((a, b), _)| a < b).map(|((a, _), d)| d.key(*a)).min();
         let Some(first) = first else { return 0 };
         for (l, a) in access.iter().enumerate() {
             if let Access::Aligned(col) = a {
-                cur.pos[l] = col.lower_bound(first);
+                readers[l].pos = col.lower_bound(first);
             }
         }
         let mut at = lo.clone();
+        let mut rds: Vec<Cursor> = drivers.iter().map(Col::cursor).collect();
+        // The key at `at[j]` while `at[j] < hi[j]`. A packed key read is not free, so read it once.
+        let mut next: Vec<u64> = rds.iter_mut().zip(&at).zip(hi).map(|((d, &a), &h)| if a < h { d.key(a) } else { 0 }).collect();
         let mut w = 0;
-        loop {
-            // 被覆の次のキー（和を取る）
-            let mut key = u64::MAX;
-            let mut any = false;
-            for (j, d) in drivers.iter().enumerate() {
-                if at[j] < hi[j] {
-                    key = key.min(d.key(at[j]));
-                    any = true;
-                }
-            }
-            if !any {
-                break;
-            }
-            for (j, d) in drivers.iter().enumerate() {
-                if at[j] < hi[j] && d.key(at[j]) == key {
+        while let Some(key) = (0..drivers.len()).filter(|&j| at[j] < hi[j]).map(|j| next[j]).min() {
+            for (j, d) in rds.iter_mut().enumerate() {
+                if at[j] < hi[j] && next[j] == key {
                     at[j] += 1;
+                    if at[j] < hi[j] {
+                        next[j] = d.key(at[j]);
+                    }
                 }
             }
-            if let Some(v) = cur.eval(f, key) {
+            if let Some(v) = f(&mut readers, key) {
                 slice[w] = (key, v);
                 w += 1;
             }
@@ -731,7 +759,7 @@ struct Space<'s, 'a> {
     fill: &'s [(usize, Vec<u32>)],
 }
 
-impl Space<'_, '_> {
+impl<'a> Space<'_, 'a> {
     fn combos(&self) -> usize {
         self.fill.iter().map(|(_, ms)| ms.len()).product()
     }
@@ -740,11 +768,16 @@ impl Space<'_, '_> {
         self.base.as_ref().map_or(1, |(c, _, _)| c.n()) * self.combos()
     }
 
+    fn cursor(&self) -> Cursor<'a> {
+        self.base.as_ref().map_or(Col::Cells(&[]), |(c, _, _)| *c).cursor()
+    }
+
+    /// The key at `i`. `rd` is `self.cursor()`.
     #[inline]
-    fn key(&self, i: usize, combos: usize) -> u64 {
+    fn key(&self, i: usize, combos: usize, rd: &mut Cursor) -> u64 {
         let (row, mut c) = (i / combos, i % combos);
         let mut key = match &self.base {
-            Some((col, proj, pack)) => proj.apply(pack, self.out, col.key(row)),
+            Some((_, proj, pack)) => proj.apply(pack, self.out, rd.key(row)),
             None => 0,
         };
         for (pos, ms) in self.fill.iter().rev() {
@@ -755,10 +788,10 @@ impl Space<'_, '_> {
     }
 }
 
-/// space のキーを走査し、各キーで f の値を求める。件数を数えてから結果の配列を確保するので、
-/// 結果の分しか持たない（各キーで 2 回求める）。base の読み出し元の軸が結果のキーの先頭に並べば、
-/// 結果はキー順に並ぶ。
-fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget) -> Result<Vec<(u64, f64)>> {
+/// Scan the keys of space, and get the value of f at each key. It counts the values before it makes the
+/// result array, so the array is only as large as the result (f runs two times at each key).
+/// If the dimensions of the base source come first in the result key, the result is in key order.
+fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budget, copied: usize) -> Result<Vec<(u64, f64)>> {
     let (n, combos) = (space.len(), space.combos());
     if n == 0 || combos == 0 {
         return Ok(Vec::new());
@@ -766,11 +799,11 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget
     let chunk = cfg.chunk.max(1);
     let parts: Vec<(usize, usize)> = (0..n).step_by(chunk).map(|lo| (lo, (lo + chunk).min(n))).collect();
     let count = |&(lo, hi): &(usize, usize)| {
-        let mut cur = Cursor { access, pos: vec![0; access.len()] };
-        (lo..hi).filter(|&i| cur.eval(f, space.key(i, combos)).is_some()).count()
+        let (mut readers, mut rd) = (readers(access), space.cursor());
+        (lo..hi).filter(|&i| f(&mut readers, space.key(i, combos, &mut rd)).is_some()).count()
     };
     let sizes: Vec<usize> = if cfg.par(n) { parts.par_iter().map(count).collect() } else { parts.iter().map(count).collect() };
-    bud.need(sizes.iter().sum(), "式の結果")?;
+    bud.need(sizes.iter().sum::<usize>() + copied, "式の結果")?;
     let mut cells = vec![(0u64, 0f64); sizes.iter().sum()];
     let mut slices = Vec::with_capacity(parts.len());
     let mut rest = &mut cells[..];
@@ -780,11 +813,11 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &F, bud: &Budget
         rest = tail;
     }
     let write = |(&(lo, hi), slice): (&(usize, usize), &mut [(u64, f64)])| {
-        let mut cur = Cursor { access, pos: vec![0; access.len()] };
+        let (mut readers, mut rd) = (readers(access), space.cursor());
         let mut w = 0;
         for i in lo..hi {
-            let key = space.key(i, combos);
-            if let Some(v) = cur.eval(f, key) {
+            let key = space.key(i, combos, &mut rd);
+            if let Some(v) = f(&mut readers, key) {
                 slice[w] = (key, v);
                 w += 1;
             }
@@ -815,29 +848,3 @@ pub(crate) fn compact(cells: &mut Vec<(u64, f64)>, sizes: &[usize], written: &[u
     }
 }
 
-/// i = 0..n の各行を f で写し、None を捨てた列（件数が多ければ並列に）。結果は 1 つの配列へ直接書き、
-/// 写す前に全体を集めて写し直すことはしない（途中で持つのは、n 件分の結果の配列だけ）。
-pub(crate) fn collect_rows(cfg: &Config, n: usize, f: impl Fn(usize) -> Option<(u64, f64)> + Sync) -> Vec<(u64, f64)> {
-    if !cfg.par(n) {
-        return (0..n).filter_map(f).collect();
-    }
-    let chunk = cfg.chunk.max(1);
-    let mut cells = vec![(0u64, 0f64); n];
-    let sizes: Vec<usize> = (0..n).step_by(chunk).map(|lo| chunk.min(n - lo)).collect();
-    let written: Vec<usize> = cells
-        .par_chunks_mut(chunk)
-        .enumerate()
-        .map(|(c, slice)| {
-            let mut w = 0;
-            for i in c * chunk..c * chunk + slice.len() {
-                if let Some(x) = f(i) {
-                    slice[w] = x;
-                    w += 1;
-                }
-            }
-            w
-        })
-        .collect();
-    compact(&mut cells, &sizes, &written);
-    cells
-}

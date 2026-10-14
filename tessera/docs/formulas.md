@@ -57,11 +57,16 @@ The engine estimates again only when you change a definition. It estimates only 
 The engine does not estimate again if only the input cell counts or the member counts increase. Thus, if the inputs increase later and become more than the limit, the engine does not check until the next definition change.
 
 The estimate is a maximum for the result. Thus, an intermediate result can use all the memory, also if the estimate is in the limit. Examples of intermediate results are an `EXPAND` in the formula and the values that `+` expands.
-The Rust engine can set a budget for the intermediate results that one formula evaluation keeps at the same time (`RustEngine(max_bytes=8 << 30)`; for the server, `--max-bytes`).
+The Rust engine can set one memory budget for an operation (`RustEngine(max_bytes=8 << 30)`; for the server, `--max-bytes`).
+The budget covers the stored data that the operation holds plus the intermediate results that it keeps at the same time.
+A recalculation holds all the stored data of the model: the values, the counts and residuals, the old values, and the new values that wait for the write-back.
+A query holds only the stored data that its formula reads. If two references read the same stored data, the engine counts it one time.
+If the stored data alone is more than the budget, a recalculation that calculates a Metric gives an error. Increase `max_bytes` or make the model smaller.
+A write checks the budget with an incremental recalculation, but a server start, a reload and a replica do a full recalculation. The full recalculation holds all stores, so it can need more than the writes did. If the server cannot open the model, increase `--max-bytes`.
 For an operation that makes all combinations (`EXPAND`, `ISBLANK`, `IFBLANK`), the engine checks the necessary size first. If the size is more than the budget, the engine gives an error before it allocates memory.
 A fused formula ([Engine](engine.md)) does not make intermediate results. Thus, the engine counts only the size of the result array against the budget, before it allocates the array.
 The engine does not fuse a formula if the intermediate results that the evaluation of one operation at a time must make are more than the budget. It evaluates one operation at a time and gives an error as above.
-When the engine calculates the Metrics of one stage in parallel, it divides the budget into equal parts. It calculates together only the Metrics with an estimate in one part. Each other Metric gets the full budget, and the engine calculates these Metrics one at a time.
+When the engine calculates the Metrics of one stage in parallel, it divides the budget that is left after the held data into equal parts. It calculates together only the Metrics with an estimate in one part. Each other Metric gets the full budget, and the engine calculates these Metrics one at a time.
 
 ## Blank cells
 

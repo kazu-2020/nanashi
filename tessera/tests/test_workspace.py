@@ -312,6 +312,24 @@ class WithJournal(JournalCase, unittest.TestCase):
         self.assertEqual(ws.write(take_all, client_op_id="r2"), 1)  # The resend is not refused
         ws.close()
 
+    def test_reopened_version_does_not_share_the_engine(self):
+        """Issue #71: the old version and the reopened version use the engine in turns."""
+        m = Named(Model(engine=self.engine()))
+        m.add_dimension("D", ["d1", "d2"])
+        m.add_dimension("E", ["e1", "e2", "e3"])
+        m.add_property("E", "DeptOf", "D", {"e1": "d1", "e2": "d1", "e3": "d1"})
+        m.add_input("S", ["E"], {("e1",): 1.0, ("e2",): 1.0, ("e3",): 1.0})
+        m.add_formula("T", ["D"], "S[BY SUM: E.DeptOf]")
+        ws = workspace(self, m)
+        old = Named(ws.version)
+        ws.journal.catch_up = lambda model: (_ for _ in ()).throw(OSError("記録先が読めない"))
+        ws._reload()
+        self.assertIsNot(ws.version, old.model)
+        self.assertEqual(old.summarize("S", E=["e1", "e2"]).cells, {(): 2.0})  # A reader keeps the old version
+        ws.write(lambda m: Named(m).remove_member("E", "e1"))
+        self.assertEqual(Named(ws.version).get("T", D="d1"), 2)
+        ws.close()
+
 
 @unittest.skipIf(RustEngine is None, "nanashi_core が必要")
 class RustWithJournal(WithJournal):

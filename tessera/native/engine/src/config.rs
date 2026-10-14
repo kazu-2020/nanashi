@@ -21,6 +21,9 @@ pub struct Config {
     pub chunk: usize,
     /// 集計先の全組み合わせの配列へ足し込む集計を、配列の大きさによらず使う（テスト用）。
     pub dense_always: bool,
+    /// If the first 2^16 rows of an aggregation into an array touch more bytes of it than this, the rows go
+    /// through bucket buffers (eval/agg.rs).
+    pub scatter_bytes: usize,
     /// 要素ごとの演算をつないだ式を、途中結果を作らずに 1 回の走査で評価する（eval/fuse.rs）。
     /// false にすると演算ごとに評価する（テストで両方の結果を突き合わせる）。
     pub fuse: bool,
@@ -40,6 +43,7 @@ impl Default for Config {
             fuse: true,
             chunk: 1 << 16,
             dense_always: false,
+            scatter_bytes: 4 << 20,
             fail_at: None,
         }
     }

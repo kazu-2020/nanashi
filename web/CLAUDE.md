@@ -21,6 +21,13 @@ It calls the application server (`api/`) with Connect.
 - Use the HeroUI components before you write a new component. HeroUI v3 does not need a provider.
 - Do not edit `src/gen/`. `pnpm generate` makes it.
 - In development, the Vite dev server sends `/nanashi.v1.*` to `nanashi-api`. Thus, the API does not need CORS.
+- Put each page in `src/routes/` (TanStack Router, file-based routing). The router plugin makes `src/routeTree.gen.ts`. Do not edit it.
+- Call the API with the hooks of `@connectrpc/connect-query` (`useQuery(PlanService.method.x)`). They use TanStack Query.
+- Make tables with `@tanstack/react-table` (v9, `useTable`) and the HeroUI `Table`. `src/routes/index.tsx` is an example.
+- Make forms with `@tanstack/react-form`. Validate them with `zod` schemas.
+- If a list or a grid has many rows, render only the visible rows with `@tanstack/react-virtual`.
+- Keep UI state that the URL must keep (filters, the selected tab) in search params with `nuqs`.
+- In development, the TanStack Devtools panel shows Query, Router and Form (`src/devtools.tsx`). To see the nuqs logs in the console, set `localStorage.debug = "nuqs"`.
 
 ## HeroUI docs for agents
 

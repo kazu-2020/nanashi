@@ -16,6 +16,17 @@ For each changed row of the aggregation source, the engine subtracts the old con
 This also applies to BY with a hierarchy that changes over time. For each employee with a changed department, the engine subtracts the contribution in the old department and adds the contribution in the new department.
 The engine also keeps the count of each group. This tells if a SUM is 0 or blank.
 
+Incremental aggregation of a SUM gives the same bits as a full recalculation:
+
+- A SUM adds the values into an exact sum and rounds one time at the end (see "Aggregation" in [Engine](engine.md)).
+- For each group, the engine also keeps the **residual**: the exact sum minus the stored value, if that is one f64. A missing cell means 0. Thus, for integer data (for example, yen amounts) the residual store stays empty. `Model.memory()` adds it to `counts`.
+- For each group, the engine adds the stored value, the stored residual, and the new and old contributions into one exact sum. The new value is the correctly rounded sum. The new residual is the rest.
+- If the formula has more than one aggregation (for example, `BY SUM` and then `REMOVE SUM`), the engine reads each inner group with a changed row in full. Thus, each inner value rounds as in a full recalculation. `REMOVE SUM` with more than one dimension is one aggregation, so the engine reads only the changed rows.
+- The Rust engine gets the value, the count and the residual of each group from one pass over the source of the outermost aggregation. This is also true when it calculates the Metric without incremental aggregation. The count is then the number of cells that go into the outermost aggregation.
+- The residual of a group can be not one f64: the exact sum needs more than 2 f64 values, or a value is not finite. Then the engine calculates the range again without incremental aggregation.
+
+Thus floating-point errors do not accumulate. A full recalculation (`refresh()`) is not necessary to remove them.
+
 If the changed range of a dimension includes all members, the engine propagates that dimension as "full" to the downstream Metrics.
 This is because the write-back of the full Metric only needs a sort, and a recalculation is faster than an incremental aggregation.
 In the Rust engine, the engine also propagates the range as full for a large Metric (4096 rows or more) if the range is half of the cells or more.
