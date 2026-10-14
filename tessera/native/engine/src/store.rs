@@ -70,12 +70,13 @@ impl Base {
 /// The index of a dimension other than the partition dimension: the base rows of each member (an inverted index).
 #[derive(Debug)]
 pub(crate) struct Postings {
-    pub(crate) offsets: Vec<u32>, // the rows of member m are rows[offsets[m]..offsets[m + 1]]
-    pub(crate) rows: PackedKeys,  // `(m << 32) | row`, so the sequence is sorted and packs well
+    pub(crate) offsets: Vec<u32>, // the entries of member m are entries[offsets[m]..offsets[m + 1]]
+    pub(crate) entries: PackedKeys, // `m * n + row` for each base row, sorted
+    pub(crate) n: u64,              // the number of base rows
 }
 
 impl Postings {
-    /// The positions in `rows` of the rows of member `m`.
+    /// The positions in `entries` of member `m`.
     pub(crate) fn span(&self, m: u32) -> Range<usize> {
         let m = m as usize;
         if m + 1 >= self.offsets.len() {
@@ -86,7 +87,8 @@ impl Postings {
 
     /// The base rows of member `m`, in ascending order.
     pub(crate) fn of(&self, m: u32) -> impl Iterator<Item = u32> + '_ {
-        self.rows.range(self.span(m)).map(|k| k as u32)
+        let first = m as u64 * self.n;
+        self.entries.range(self.span(m)).map(move |k| (k - first) as u32)
     }
 }
 
@@ -166,7 +168,7 @@ impl Store {
             }
         }
         if let Some((sel, post)) = self.best_postings(r) {
-            // 索引でその軸のメンバーの行だけを集める。差分の B 木にある変更は別に突き合わせる
+            // Collect only the rows of the selected members with the index. Match the changes in the delta tree separately
             let mut cells = Vec::new();
             for &m in &sel.members {
                 for row in post.of(m) {
@@ -253,7 +255,7 @@ impl Store {
     /// この Store の分として数える。
     pub fn memory(&self) -> Mem {
         let b = &*self.base;
-        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| p.offsets.capacity() * 4 + p.rows.bytes()).sum();
+        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| p.offsets.capacity() * 4 + p.entries.bytes()).sum();
         Mem {
             rows: b.keys.len(),
             base: b.keys.bytes() + b.vals.len() * 8,
@@ -298,7 +300,8 @@ impl Store {
         self.delta = OrdMap::new();
     }
 
-    /// 詰め方の位置 pos の軸の索引。初めて使うときに計数ソートで作る（本体の行数に比例）。
+    /// The index of the dimension at packing position pos. The first use makes it with a counting sort (linear in the base rows).
+    /// The build is sequential: a rayon wait inside `get_or_init` can run a task that waits on the same cell.
     pub(crate) fn postings(&self, pos: usize) -> &Postings {
         let base = &*self.base;
         base.postings[pos].get_or_init(|| {
@@ -311,17 +314,19 @@ impl Store {
                 offsets[i] += offsets[i - 1];
             }
             let mut fill = offsets.clone();
-            let mut rows = vec![0u64; self.base.keys.len()];
+            let n = self.base.keys.len() as u64;
+            let mut entries = vec![0u64; self.base.keys.len()];
             for (row, k) in self.base.keys.iter().enumerate() {
                 let m = self.pack.get(k, pos) as usize;
-                rows[fill[m] as usize] = (m as u64) << 32 | row as u64;
+                entries[fill[m] as usize] = m as u64 * n + row as u64;
                 fill[m] += 1;
             }
-            Arc::new(Postings { offsets, rows: PackedKeys::new(&rows, self.cfg.par(rows.len())) })
+            Arc::new(Postings { offsets, entries: PackedKeys::new(&entries, false), n })
         })
     }
 
-    /// 分割軸以外の軸で絞られていて、索引を使うと対象が十分減るなら、その軸の位置と索引を返す。
+    /// If r filters a dimension other than the partition dimension and its index makes the rows much fewer,
+    /// return the selection and the index of that dimension.
     pub(crate) fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, &'a Postings)> {
         let min_rows = self.cfg.postings_min_rows;
         let n = self.base.keys.len();
@@ -332,7 +337,7 @@ impl Store {
         for (pos, &d) in self.pack.dims.iter().enumerate().skip(1) {
             let Some(sel) = r.get(d) else { continue };
             if self.pack.masks[pos] >= (1 << 22) {
-                continue; // メンバー数が大きすぎる軸には索引を作らない
+                continue; // no index for a dimension with too many members
             }
             let post = self.postings(pos);
             let cand: usize = sel.members.iter().map(|&m| post.span(m).len()).sum();
