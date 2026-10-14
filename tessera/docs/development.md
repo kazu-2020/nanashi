@@ -99,6 +99,25 @@ With large models, they use some GB of memory.
 Thus, run them one at a time.
 We removed the measurement programs for key layouts ([member-numbering.md](member-numbering.md)) and for stored data on NVMe ([out-of-core.md](out-of-core.md)). They are in the git history.
 
+### Compare two versions
+
+`bench_ab.py` runs one benchmark on a git ref (base) and on this checkout (head), with the uncommitted changes.
+
+```bash
+python3 bench_ab.py --base origin/main -- bench.py --engine rust --size large
+```
+
+- It makes a git worktree of the base in `.bench/<sha>` at the repository root, and uses it again in the next runs.
+- Before the measurement, it builds `nanashi_core` for each side with `maturin develop --release`. Thus it never measures an old build.
+- It runs base and head alternately (5 times each by default, `--runs`).
+- It shows the environment, the number of errors, and the median (minimum to maximum) of each metric. The metrics are the wall time, the peak memory, and each number in the JSON on the last line of the output.
+- It adds each run to `bench_ab_results.jsonl`. If a run fails, the exit code is not 0.
+
+Before you compare a change, run base against base (`--base HEAD` with no uncommitted changes) one time. This A/A run shows the noise of the computer.
+Keep a change only if the ranges of base and head do not overlap (the column "ranges overlap" is "no").
+`max_rss_mb` includes the pages of shared libraries such as numpy. In an A/A run in a cloud session, it was different by 8 MB between two virtual environments. Thus use it only for changes of more than some tens of MB.
+For memory, use `heap.increase_mb` of `bench.py` (the maximum increase of the Rust heap during the full recalculation). For speed, use `full`. `load` is mostly the time that Python uses to make the input cells, not the engine.
+
 ## Test policy
 
 The same tests run with the reference implementation and with Rust.
@@ -168,7 +187,7 @@ The role changes of the standby (promotion, demotion, writes that entered the qu
 | `native/engine/` | The Rust engine (`nanashi-engine`, no dependency on Python). `key.rs` packs keys. `store.rs` is the storage. `ast.rs` is the syntax tree of formulas. `eval/` is the evaluation (`fuse.rs` fuses element-wise operations, `join.rs` does joins, `agg.rs` does aggregation, `scan.rs` calculates a scan with a chain of `+`, `-`, `*`, `/` and `COALESCE` for all periods). `check.rs` does the type check and the BY rewrite. `graph.rs` makes the calculation plan. `plan.rs` does the incremental aggregation decision, the affected range and the recalculation schedule. `pq.rs` reads and writes Parquet. `config.rs` has the tuning values for speed. `tests/` has the property tests for the storage (they match the results with a BTreeMap) |
 | `native/src/lib.rs` | The thin layer for Python (`nanashi_core`, PyO3). It checks the numbers and lengths that it receives |
 | `examples/fpa.py` | The example of a profit and loss plan and a headcount plan |
-| `bench.py`, `bench_metrics.py`, `bench_versions.py`, `bench_journal.py`, `bench_reads.py`, `bench_http.py`, `bench_memory.py`, `bench_layout.py` | Benchmarks |
+| `bench.py`, `bench_metrics.py`, `bench_versions.py`, `bench_journal.py`, `bench_reads.py`, `bench_http.py`, `bench_memory.py`, `bench_layout.py`, `bench_ab.py` | Benchmarks. `bench_ab.py` compares two versions |
 | `tests/test_expr_coverage.py` | It sends all kinds of expression nodes through all implementation locations (syntax, type inference, affected range, evaluation, dependencies, Rust) |
 
 The Python reference implementation and Rust both implement the meaning of formulas.
