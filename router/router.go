@@ -53,10 +53,13 @@ var upstream = &http.Client{
 }
 
 // Router is an http.Handler for /models/{id}/... that forwards to the model's leader.
+// DefaultUserHeader carries the user to the engine when Router.UserHeader is empty.
+const DefaultUserHeader = "X-Forwarded-User"
+
 type Router struct {
 	Resolve    Resolver
 	Auth       func(*http.Request) (user string, err error)  // nil = no auth (loopback dev); see also ProxyUser
-	UserHeader string                                        // header set toward engines, default "X-Forwarded-User"
+	UserHeader string                                        // header set toward engines, default DefaultUserHeader
 	Deadline   time.Duration                                 // overall per request, default 90s
 	Create     func(ctx context.Context, model string) error // PUT /models/{id}; nil = 405
 
@@ -200,10 +203,7 @@ func (rt *Router) upstreamHeader(in http.Header, user, model string) http.Header
 	h := in.Clone()
 	removeHopByHop(h)
 	h.Set("X-Nanashi-Model", model)
-	name := rt.UserHeader
-	if name == "" {
-		name = "X-Forwarded-User"
-	}
+	name := cmp.Or(rt.UserHeader, DefaultUserHeader)
 	h.Del(name) // only the user that Auth found goes to the engine
 	h.Del("Content-Length")
 	if rt.Auth != nil {
