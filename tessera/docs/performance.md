@@ -196,6 +196,22 @@ We measured a full recalculation after the edits of `bench.py`, when Volume, Pri
 The heap decrease is the same in each run. The time ranges overlap, so the time difference is inside the noise of this VM.
 Most of the time after the edit is the write-back and the aggregations, not `Volume * Price`. The maximum heap is now lower than for the first full recalculation (1,194 MB).
 
+### Write-back without a second copy of the keys
+
+At the write-back of a full result, the engine changed the sorted cells into the 2 columns of the base with an unzip.
+For a short time, the cells and both new columns existed together (32 bytes for each cell).
+Now only the values get a new column. The keys go into the buffer of the cells (24 bytes for each cell).
+We measured the retail model (xlarge of `bench.py`, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
+
+| Measurement | Before | After |
+|---|---|---|
+| Maximum increase of the heap, full recalculation | 1,194 MB | 1,070 MB (1,063–1,101) |
+| Maximum increase of the heap, full recalculation after the edits | 1,120 MB | 1,070 MB (1,063–1,094) |
+| Full recalculation | 2,183 ms (1,972–2,418) | 1,997 ms (1,804–2,579) |
+
+The time ranges overlap, so the time difference is inside the noise of this VM.
+The maximum is now at a different point of the recalculation. A trial version without any copy of the cells also gave 1,063 MB.
+
 RSS is larger than the Rust heap because the standard macOS allocator keeps large released blocks for reuse (MALLOC_LARGE (empty) in `vmmap`).
 In the version from before the engine aggregated while it read, RSS increased with each recalculation (1,919 MB the first time, 2,559 MB the fourth time).
 When we started the process with the environment variable `MallocLargeCache=0`, RSS stopped at 791–812 MB. The recalculation time did not change.
