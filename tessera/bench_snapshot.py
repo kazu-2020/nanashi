@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import resource
 import statistics
@@ -125,12 +126,14 @@ def write(path, employees: int, products: int, months: int, seed: int = 0) -> No
     m.add_input("OtherOpex", ["Department", "Version", "Month"], other_opex)
     for name, dims, formula, *kind in FORMULAS:
         m.add_formula(name, dims, formula, kind=kind[0] if kind else "number")
-    m.save(path)
+    tmp = Path(f"{path}.tmp")  # a failed write must not leave a loadable partial model at path
+    m.save(tmp)
     for name, (cols, values) in big.items():
         x = m.metric(name)
         meta = [("nanashi", json.dumps({"format": FORMAT_VERSION, "metric": x.id}))]
         data = nanashi_core.write_parquet(parquet_columns(x.dims, m.model), cols, values, parquet_value(x.kind), meta)
-        (Path(path) / input_file(x.id)).write_bytes(data)
+        (tmp / input_file(x.id)).write_bytes(data)
+    os.rename(tmp, path)  # fails if path has files, so that old input files do not stay with the new model.json
 
 
 def run(path) -> dict:
