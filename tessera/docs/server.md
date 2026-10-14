@@ -81,8 +81,11 @@ These are the limits:
 - The request body can be up to 16 MiB (`--max-body`).
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`).
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`). The default of `socketserver` is 5. With 5, about 64 clients that connect at the same time made some of them wait 1 s for a second SYN.
-- The server can process up to 64 requests at the same time (`--max-threads`). Above this, it returns 503.
-- If the read or write of a request stops for 30 seconds, the server closes the connection.
+- The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 30 seconds, it gets 503 `busy`.
+- The server keeps up to 1024 connections open at the same time (`--max-connections`). Each open connection holds a thread. A connection above this gets 503 `busy`, and the server closes it.
+- If the read or write of a request stops for 30 seconds, the server closes the connection. The same limit closes a keep-alive connection that is idle.
+
+The server speaks HTTP/1.1 and keeps a connection open for the next request (keep-alive). The router and the Go `http.Client` of `api/` reuse their connections, so the engine does not accept a new connection for each request. The idle limit of 30 seconds is shorter than the 90 seconds of the connection pool of the router. This is safe: Go removes a connection that the server closed from its pool, and sends a GET again on a new connection. A write that hits the close comes back to the router as a broken connection, and the router resends it (`client_op_id`). A response that goes out before the server read the request body (for example 401 or 413) carries `Connection: close`, so the body is not read as the next request.
 
 The server keeps the results of summary reads for the published version, up to about `--max-cells` cells in total.
 When a summary read sees a newer published version (after a write, or after a standby catches up), the server removes those results.
@@ -121,7 +124,7 @@ On SIGTERM and SIGINT, the server completes the received requests, commits the w
 The standby sees the release at its next poll (0.2 seconds), gets the right, and becomes the writer.
 If the server crashes (SIGKILL), the failover occurs at the next poll after the lease expires.
 
-With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress, the count does not start. If the value is 0 (the default), the server does not stop for this reason.
+With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress, the count does not start. An open keep-alive connection with no request in progress does not keep the server alive. If the value is 0 (the default), the server does not stop for this reason.
 
 In the profit and loss plan (large), a read of 1 cell through HTTP takes 0.24 ms. A write that changes the salary of 1 employee takes 0.9 ms.
 A write while 8 readers read continuously takes 2.2 ms (`bench_http.py`, local loopback, about 2,800 reads per second).

@@ -51,16 +51,21 @@ Authentication, not the request body, sets the user that the audit records (user
 - With neither, the server does no authentication and the user is None (for local development).
   Then main refuses to listen on an address other than 127.0.0.1.
 
-大きさの上限: 本文は max_body バイト、slice、rows、summary で返すセルは max_cells、同時に処理する
-要求は max_threads（超えたら 503）。要求の読み書きが request_timeout 秒止まれば接続を切る。
+The limits: a body has max_body bytes, slice, rows, and summary return max_cells cells, max_threads
+requests are processed at the same time, and max_connections connections are open at the same time. A request
+above max_threads waits for a slot, and gets 503 after request_timeout seconds. A connection above
+max_connections gets 503 and is closed. If the read or write of a request stops for request_timeout seconds,
+the server closes the connection.
 
 SIGTERM と SIGINT で、受け付けた要求を処理し終え、列の書き込みを確定させ、リースを手放してから止まる
 （ECS などのコンテナは SIGTERM で止める）。
 With --idle-exit SECONDS, the server stops on the same path when no request comes for that time.
 Requests to /health, /ready, and /stats do not count, so a monitor does not keep the server alive.
 
-標準ライブラリの HTTP サーバーで、要求ごとにスレッドを作る。読み手が多いプロセスでは
---switch-interval で Python のスレッド切り替えの間隔を短くする（docs/performance.md）。
+The server is the HTTP server of the standard library, with 1 thread for each connection. It speaks
+HTTP/1.1 and keeps a connection open for the next request (keep-alive). An idle connection is closed after
+request_timeout seconds. In a process with many readers, --switch-interval makes the thread switch interval
+of Python shorter (docs/performance.md).
 """
 from __future__ import annotations
 
@@ -357,9 +362,16 @@ def idle_for(active: int, last: float, now: float) -> float:
 
 class Handler(BaseHTTPRequestHandler):
     server: "Server"
+    protocol_version = "HTTP/1.1"  # keep the connection open for the next request (the router pools connections)
+    # The headers and the body go out in 2 writes. With Nagle, the second write waits for the ACK of the
+    # first, and the client delays that ACK by 40 ms.
+    disable_nagle_algorithm = True
+    unread_body = False  # _serve sets it for each request
 
     def setup(self) -> None:
-        self.timeout = self.server.request_timeout  # 読み書きが止まった接続でスレッドを塞がない
+        # Also the limit for an idle keep-alive connection. It is shorter than the 90 s pool of the router:
+        # Go drops a connection that the server closed and sends a GET again, the router resends a write.
+        self.timeout = self.server.request_timeout
         super().setup()
 
     def log_message(self, fmt, *args):  # 標準の出力を logging に寄せる
@@ -375,6 +387,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
+        if self.unread_body:  # the body of the request is still on the connection, so close it after this response
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -407,13 +421,25 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:
-        if self._misdirected():
+        self._serve(self._get)
+
+    def do_POST(self) -> None:
+        self._serve(self._post)
+
+    def _serve(self, fn) -> None:
+        """Answer 1 request on this connection in a request slot (503 busy if no slot frees up in time)."""
+        srv = self.server
+        # A response that goes out before the body is read leaves the body on the connection. _json then
+        # closes the connection, so that the server does not read the body as the next request.
+        self.unread_body = "Content-Length" in self.headers or "Transfer-Encoding" in self.headers
+        if not srv.begin_request():
+            self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
             return
         try:
-            self._run(self._get)
+            if not self._misdirected():
+                self._run(fn)
         finally:
-            if not is_probe(self.path):
-                self.server.touch()
+            srv.end_request(probe=is_probe(self.path))
 
     def _user(self) -> str | None:
         """Return the authenticated user, or None without an authentication setting. Raise 401 on failure."""
@@ -505,14 +531,6 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 書き込み
 
-    def do_POST(self) -> None:
-        if self._misdirected():
-            return
-        try:
-            self._run(self._post)
-        finally:
-            self.server.touch()
-
     def _post(self) -> tuple[int, Any]:
         url = urllib.parse.urlsplit(self.path)
         if [p for p in url.path.split("/") if p] != ["writes"]:
@@ -528,10 +546,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise ApiError(400, "bad_request", "Content-Length は整数") from None
         if length < 0 or length > self.server.max_body:
-            self.close_connection = True  # 読まずに返すので、残りの本文を次の要求と取り違えない
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
+        raw = self.rfile.read(length)
+        self.unread_body = False
         try:
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body = json.loads(raw or b"{}")
         except ValueError:
             raise ApiError(400, "bad_request", "本文が JSON ではない") from None
         if not isinstance(body, dict) or not isinstance(body.get("ops"), list) or not body["ops"]:
@@ -704,8 +723,8 @@ class Server(ThreadingHTTPServer):
     def __init__(self, workspace: Workspace | Replica | None, host: str = "127.0.0.1", port: int = 8080, *,
                  write_timeout: float | None = 30.0, tokens: dict[str, str] | None = None,
                  user_header: str | None = None, trusted_proxies: Iterable[str] = (), max_body: int = 16 << 20,
-                 max_cells: int = 100_000, max_threads: int = 64, request_timeout: float | None = 30.0,
-                 model_id: str | None = None):
+                 max_cells: int = 100_000, max_threads: int = 64, max_connections: int = 1024,
+                 request_timeout: float | None = 30.0, model_id: str | None = None):
         if tokens is not None and user_header is not None:
             raise ValueError("tokens と user_header はどちらか一方")
         trusted = parse_networks(trusted_proxies)
@@ -719,11 +738,12 @@ class Server(ThreadingHTTPServer):
         self.tokens, self.user_header, self.trusted_proxies = tokens, user_header, trusted
         self.max_body, self.max_cells, self.request_timeout = max_body, max_cells, request_timeout
         self.model_id = model_id  # with a PgJournal: refuse requests that X-Nanashi-Model sends for another model
-        self._slots = threading.BoundedSemaphore(max_threads)
+        self.max_threads = max_threads
+        self._connections = threading.BoundedSemaphore(max_connections)  # each open connection holds a thread
         self.summaries = SummaryCache(max_cells)
         self._thread: threading.Thread | None = None
-        # Connections in progress (probes too) and the monotonic time of the last use (probes not).
-        self._active, self._last, self._use = 0, time.monotonic(), threading.Lock()
+        # Requests in progress (probes too) and the monotonic time of the last use (probes not).
+        self._active, self._last, self._use = 0, time.monotonic(), threading.Condition()
 
     def trusted(self, host: str) -> bool:
         """Return True if host is in one of the trusted_proxies."""
@@ -738,9 +758,9 @@ class Server(ThreadingHTTPServer):
         return any(addr in net for net in self.trusted_proxies)
 
     def process_request(self, request, client_address) -> None:
-        """同時に処理する要求が max_threads に達していれば、スレッドを作らずに 503 を返す。"""
-        if not self._slots.acquire(blocking=False):
-            body = json.dumps({"error": "busy", "message": "同時に処理できる要求の数を超えた"}).encode()
+        """If max_connections are open, answer 503 and close the connection. No thread is made for it."""
+        if not self._connections.acquire(blocking=False):
+            body = json.dumps({"error": "busy", "message": "同時に開ける接続の数を超えた"}).encode()
             try:
                 request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\n"
                                 b"Retry-After: 1\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
@@ -748,33 +768,43 @@ class Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
-        with self._use:
-            self._active += 1
-        # 枠を返すのは、スレッドを起こせなかったとき（Exception）だけにする。KeyboardInterrupt（Ctrl-C）は
-        # スレッドを起こしたあとにも届き、そのスレッドも枠を返す。ここでも返すと 2 度返して ValueError になり、
-        # socketserver がそれを握りつぶして止まらなくなる（止まるので、枠が 1 つ減っても困らない）
+        # Return the connection slot only when the thread did not start (Exception). A KeyboardInterrupt
+        # (Ctrl-C) can also come after the thread started, and that thread returns the slot too. A second
+        # release is a ValueError that socketserver swallows, and then the server does not stop.
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
-            with self._use:
-                self._active -= 1
+            self._connections.release()
             raise
 
     def process_request_thread(self, request, client_address) -> None:
-        """ThreadingMixIn のものと同じだが、接続を閉じる前に枠を返す。
+        """The same as in ThreadingMixIn, but returns the connection slot before it closes the connection.
 
-        閉じたのを見てすぐにつなぎ直した要求が、まだ返していない枠のせいで 503 にならないようにする。
-        """
+        Then a client that connects again as soon as it sees the close does not get 503 for a slot
+        that is not returned yet."""
         try:
             self.finish_request(request, client_address)
         except Exception:
             self.handle_error(request, client_address)
         finally:
-            self._slots.release()
-            with self._use:
-                self._active -= 1
+            self._connections.release()
             self.shutdown_request(request)
+
+    def begin_request(self) -> bool:
+        """Take a request slot. Return False if no slot frees up in request_timeout seconds."""
+        with self._use:
+            if not self._use.wait_for(lambda: self._active < self.max_threads, self.request_timeout):
+                return False
+            self._active += 1
+            return True
+
+    def end_request(self, probe: bool) -> None:
+        """Return the request slot. A request that is not a probe counts as use (--idle-exit)."""
+        with self._use:
+            self._active -= 1
+            if not probe:
+                self._last = time.monotonic()
+            self._use.notify()
 
     def touch(self) -> None:
         with self._use:
@@ -825,7 +855,8 @@ def main(argv=None) -> None:
     ap.add_argument("--insecure", action="store_true", help="認証なしで 127.0.0.1 以外でも待ち受ける")
     ap.add_argument("--max-body", type=int, default=16 << 20, help="本文の上限（バイト）")
     ap.add_argument("--max-cells", type=int, default=100_000, help="slice、rows、summary で返すセルの上限")
-    ap.add_argument("--max-threads", type=int, default=64, help="同時に処理する要求の上限（超えたら 503）")
+    ap.add_argument("--max-threads", type=int, default=64, help="同時に処理する要求の上限（空くのを待ち、待ちきれなければ 503）")
+    ap.add_argument("--max-connections", type=int, default=1024, help="同時に開ける接続の上限（超えたら 503 で閉じる）")
     ap.add_argument("--max-bytes", type=int, help="Rust のエンジンで、1 つの処理が持つ格納データと途中結果の合計の上限（バイト）")
     ap.add_argument("--follow", action="store_true",
                     help="書き込まず、記録先に追従する読み出し専用のサーバーにする（読み手を増やすとき）")
@@ -865,7 +896,8 @@ def main(argv=None) -> None:
     # 先に待ち受けて番地を決める（--port 0 でも、知らせる番地に実際の番号が入る）。要求は serve_forever まで受けない
     server = Server(None, args.host, args.port, tokens=tokens, user_header=args.user_header,
                     trusted_proxies=args.trusted_proxy, max_body=args.max_body, max_cells=args.max_cells,
-                    max_threads=args.max_threads, model_id=args.model_id if args.pg else None)
+                    max_threads=args.max_threads, max_connections=args.max_connections,
+                    model_id=args.model_id if args.pg else None)
     if args.pg:
         from .pg_journal import PgJournal, migrate
         if args.migrate:

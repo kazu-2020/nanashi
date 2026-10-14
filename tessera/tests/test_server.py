@@ -515,11 +515,11 @@ class Limits(unittest.TestCase):
         finally:
             server.stop()
 
-    def test_requests_beyond_max_threads_are_refused(self):
-        server = Server(self.ws, "127.0.0.1", 0, max_threads=2, request_timeout=5).start()
+    def test_connections_beyond_max_connections_are_refused(self):
+        server = Server(self.ws, "127.0.0.1", 0, max_connections=2, request_timeout=5).start()
         idle = []
         try:
-            for _ in range(2):  # 要求を送らずにつないだままの接続が、処理のスレッドを 2 本とも使う
+            for _ in range(2):  # 2 connections that send no request hold the 2 connection slots
                 s = socket.create_connection(server.server_address[:2])
                 idle.append(s)
             for _ in range(50):
@@ -560,10 +560,10 @@ class Limits(unittest.TestCase):
                 with socket.create_connection(server.server_address[:2]) as s:
                     s.sendall(b"GET /health HTTP/1.0\r\n\r\n")
                     s.settimeout(5)
-                    self.assertTrue(s.recv(100).startswith(b"HTTP/1.0 200"))
+                    self.assertTrue(s.recv(100).startswith(b"HTTP/1.1 200"))
                 serving.join(timeout=5)
             self.assertEqual([type(e) for e in raised], [KeyboardInterrupt])
-            self.assertTrue(server._slots.acquire(blocking=False))  # 枠は 1 度だけ返っている
+            self.assertTrue(server._connections.acquire(blocking=False))  # the slot came back 1 time
         finally:
             if serving.is_alive():
                 server.shutdown()
@@ -580,6 +580,104 @@ class Limits(unittest.TestCase):
             self.assertEqual(Client(server.url).get("/health")[0], 200)
         finally:
             server.stop()
+
+
+def exchange(sock: socket.socket, request: bytes) -> tuple[int, dict, bytes]:
+    """Send 1 request on an open connection and read 1 response (status, headers, body)."""
+    sock.sendall(request)
+    f = sock.makefile("rb")
+    status, headers = int(f.readline().split()[1]), {}
+    while (line := f.readline()) not in (b"\r\n", b""):
+        k, _, v = line.decode().partition(":")
+        headers[k.lower()] = v.strip()
+    body = f.read(int(headers["content-length"]))
+    f.close()
+    return status, headers, body
+
+
+class KeepAlive(unittest.TestCase):
+    """HTTP/1.1: a connection stays open for the next request, and the request slot is per request."""
+
+    def setUp(self):
+        self.ws = Workspace(model(ReferenceEngine()).model)
+
+    def serve(self, **kw) -> Server:
+        server = Server(self.ws, "127.0.0.1", 0, tokens=TOKENS, **kw).start()
+        self.addCleanup(server.stop)
+        return server
+
+    def connect(self, server: Server) -> socket.socket:
+        s = socket.create_connection(server.server_address[:2], timeout=10)
+        self.addCleanup(s.close)
+        return s
+
+    def test_two_requests_on_one_connection(self):
+        server = self.serve()
+        s = self.connect(server)
+        req = b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n"
+        for _ in range(2):
+            status, headers, body = exchange(s, req)
+            self.assertEqual((status, headers.get("connection"), json.loads(body)["seq"]), (200, None, 0))
+        s.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        self.assertTrue(s.recv(100).startswith(b"HTTP/1.1 200"))
+        start = time.monotonic()
+        s2 = self.connect(server)
+        for _ in range(100):  # with Nagle and the delayed ACK of the client, each answer takes 40 ms
+            self.assertEqual(exchange(s2, req)[0], 200)
+        self.assertLess(time.monotonic() - start, 2.0)
+
+    def test_the_slot_is_per_request_not_per_connection(self):
+        server = self.serve(max_threads=1)
+        conns = [http.client.HTTPConnection(*server.server_address[:2], timeout=10) for _ in range(3)]
+        for c in conns:
+            self.addCleanup(c.close)
+        for _ in range(2):
+            for c in conns:  # 3 open connections, requests that do not overlap: no 503
+                c.request("GET", "/health")
+                self.assertEqual(c.getresponse().read()[:7], b'{"seq":')
+        self.assertEqual(len({id(c.sock) for c in conns}), 3)  # each connection was kept open and used again
+
+    def test_a_request_waits_for_a_slot_then_gets_503(self):
+        server = self.serve(max_threads=1, request_timeout=0.5)
+        release = hold(self.ws)
+        self.addCleanup(release)  # a second call does nothing
+        op = write(self.ws, "Stock", 1, Product="p0", Month="Jan")
+        posted = []
+        t = threading.Thread(target=lambda: posted.append(Client(server.url).post("/writes", {"client_op_id": "k", "ops": [op]})))
+        t.start()
+        while server.idle():  # the write holds the only slot while it waits for the writer
+            time.sleep(0.01)
+        c = http.client.HTTPConnection(*server.server_address[:2], timeout=10)
+        self.addCleanup(c.close)
+        start = time.monotonic()
+        c.request("GET", "/health")
+        r = c.getresponse()
+        self.assertEqual((r.status, json.loads(r.read())["error"]), (503, "busy"))
+        self.assertGreaterEqual(time.monotonic() - start, 0.5)
+        waiter = threading.Thread(target=lambda: (time.sleep(0.2), release()))
+        waiter.start()
+        c.request("GET", "/health")  # the same connection: the slot frees up within the wait
+        r = c.getresponse()
+        self.assertEqual((r.status, json.loads(r.read())["seq"]), (200, 1))
+        t.join(10), waiter.join(10)
+        self.assertEqual(posted, [(200, {"seq": 1})])
+
+    def test_a_response_before_the_body_is_read_closes_the_connection(self):
+        server = self.serve(max_body=1024)
+        body = json.dumps({"client_op_id": "b", "ops": [write(self.ws, "Stock", 1, Product="p0", Month="Jan")]}).encode()
+        post = lambda token, length: (f"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n"
+                                      f"Content-Length: {length}\r\n\r\n").encode()
+        s = self.connect(server)
+        status, headers, _ = exchange(s, post("t-alice", len(body)) + body)  # the body is read: the connection stays open
+        self.assertEqual((status, headers.get("connection")), (200, None))
+        status, headers, _ = exchange(s, post("t-alice", 2000))  # 413 before the body is read
+        self.assertEqual((status, headers.get("connection")), (413, "close"))
+        self.assertEqual(s.recv(100), b"")
+        s = self.connect(server)
+        status, headers, _ = exchange(s, post("t-eve", len(body)))  # 401 before the body is read
+        self.assertEqual((status, headers.get("connection")), (401, "close"))
+        self.assertEqual(s.recv(100), b"")
+        self.assertEqual(self.ws.seq, 1)
 
 
 class ProxyHeader(JournalCase, unittest.TestCase):
@@ -772,6 +870,16 @@ class IdleExit(unittest.TestCase):
         proc, url = self.start("1")
         self.assertEqual(Client(url, token=None).get("/")[0], 200)
         _, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("要求がなかったので止める", err)
+
+    def test_an_open_keep_alive_connection_does_not_keep_the_server_alive(self):
+        proc, url = self.start("1")
+        c = http.client.HTTPConnection(url.removeprefix("http://"), timeout=10)
+        self.addCleanup(c.close)
+        c.request("GET", "/")
+        self.assertEqual(c.getresponse().status, 200)
+        _, err = proc.communicate(timeout=10)  # the connection is still open
         self.assertEqual(proc.returncode, 0)
         self.assertIn("要求がなかったので止める", err)
 
