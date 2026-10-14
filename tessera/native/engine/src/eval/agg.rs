@@ -229,7 +229,7 @@ pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catal
     let xp = rows.pack();
     let k = |x| key(xp, &out, x);
     let groups = combos_in(&out.dims, cat, r);
-    let dense_first = !cfg.stream_always && groups == combos_in(&out.dims, cat, &Restrict::all(0));
+    let dense_first = dense_first(cat, &out.dims, r);
     if dense_first {
         if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, k) {
             return c;
@@ -250,6 +250,12 @@ pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catal
     });
     drop(rows);
     group(cfg, pairs, out, aggs)
+}
+
+/// True if aggregate_rows tries the array before the hash map: r does not narrow the groups and stream_always
+/// is off.
+fn dense_first(cat: &Catalog, dims: &[DimId], r: &Restrict) -> bool {
+    !cat.cfg.stream_always && combos_in(dims, cat, r) == combos_in(dims, cat, &Restrict::all(0))
 }
 
 /// 対応表（メンバー型の Metric、例: 社員・月 -> 部署）を、その軸の全組み合わせの配列にしたもの。
@@ -412,5 +418,22 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             push_group(&mut cells, self.aggs, k, |a| finish(&vals[s], cnt[s], a));
         }
         Some(cubes(out.clone(), cells))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_first_only_for_the_full_range_without_stream_always() {
+        let dims = (0..2).map(|i| DimInfo { size: 12, ordered: false, name: format!("d{i}") }).collect();
+        let mut cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        let all = Restrict::all(2);
+        assert!(dense_first(&cat, &[0], &all));
+        assert!(dense_first(&cat, &[0], &all.with(1, Sel::new(vec![3], 12))), "a range on a removed dimension");
+        assert!(!dense_first(&cat, &[0], &all.with(0, Sel::new(vec![3], 12))), "a narrowed group dimension");
+        cat.cfg.stream_always = true;
+        assert!(!dense_first(&cat, &[0], &all));
     }
 }
