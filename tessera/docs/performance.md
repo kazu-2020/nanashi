@@ -236,6 +236,21 @@ PostgreSQL in Docker Desktop writes inside a virtual machine, and each write tak
 This speed shows that the data does not get to the physical device. Thus, in this environment, a PostgreSQL commit is not safe from a power failure.
 In a production environment (with writes to the disk and network round trips), we expect commit times to increase by a few ms. You must measure again.
 
+### Before and after the closure chain
+
+The engine now compiles a fused formula into a chain of closures before the scan ([Engine](engine.md)). Before, the scan went through the expression tree at each key.
+We measured the evaluation of each fused formula alone (retail xlarge, after a full recalculation, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
+
+| Formula | 4 threads, before | 4 threads, after | 1 thread, before | 1 thread, after |
+|---|---|---|---|---|
+| `Volume * Price` | 216 ms (209–243) | 177 ms (170–187) | 861 ms (756–995) | 693 ms (631–878) |
+| `IF(Revenue > 1000, Revenue * 0.1, 0)` | 283 ms (271–304) | 203 ms (186–206) | 1,234 ms (1,045–2,135) | 830 ms (703–1,003) |
+| `Revenue[FILTER: Active]` | 310 ms (295–325) | 262 ms (244–267) | 988 ms (826–1,523) | 789 ms (698–841) |
+
+The full recalculation on 1 thread went from 8,051 ms (7,758–8,281) to 7,453 ms (6,963–8,139). On 4 threads, it did not change (2,472 ms and 2,501 ms). The ranges overlap in both cases.
+The results of all 11 formula Metrics are bit-identical before and after (SHA-256 of the keys and values). The heap does not change.
+Each operator (`*`, `/`, comparisons) has its own closure, so the operator is a constant in the compiled code. One shared closure that reads the operator at each key made `IF(Revenue > 1000, Revenue * 0.1, 0)` 18% slower on 4 threads (134 ms and 158 ms, the ranges do not overlap).
+
 ### Aggregation into an array before the hash map
 
 Before this change, the engine tried the hash map path first and the array path second. In the retail model, `StoreRev = Revenue[REMOVE SUM: Product]` has 36,000 targets, which is few for 17.56 million rows, so it used the hash map. The array for 36,000 targets is 1 MB a thread. Now the engine tries the array first ([Engine](engine.md)). An incremental recalculation on a narrowed range keeps the old order, because the array ignores the range.
