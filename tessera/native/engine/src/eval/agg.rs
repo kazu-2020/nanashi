@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use std::ops::Range;
 
 use super::exact::ExactSum;
 
@@ -114,13 +115,39 @@ impl Rows {
         }
     }
 
-    #[inline]
-    pub(crate) fn get(&self, i: usize) -> (u64, f64) {
+    /// For a Store it reads the keys block by block (see `Store::base_range`).
+    pub(crate) fn for_each_in(&self, r: Range<usize>, mut f: impl FnMut(u64, f64)) {
         match self {
-            Rows::Store(s) => s.base_cell(i),
-            Rows::Shared(c) => c.cells[i],
-            Rows::Owned(c) => c.cells[i],
+            Rows::Store(s) => s.base_range(r).for_each(|(k, v)| f(k, v)),
+            Rows::Shared(c) => c.cells[r].iter().for_each(|&(k, v)| f(k, v)),
+            Rows::Owned(c) => c.cells[r].iter().for_each(|&(k, v)| f(k, v)),
         }
+    }
+
+    /// Maps each row with `f` and drops the None results. On many rows the parts run in parallel and
+    /// write directly into one array, so only that array is held while it is made.
+    pub(crate) fn collect(&self, cfg: &Config, f: impl Fn(u64, f64) -> Option<(u64, f64)> + Sync) -> Vec<(u64, f64)> {
+        let (n, chunk) = (self.len(), cfg.chunk.max(1));
+        if !cfg.par(n) {
+            let mut cells = Vec::new();
+            self.for_each_in(0..n, |k, v| cells.extend(f(k, v)));
+            return cells;
+        }
+        let mut cells = vec![(0u64, 0f64); n];
+        let fill = |(c, part): (usize, &mut [(u64, f64)])| {
+            let mut w = 0;
+            self.for_each_in(c * chunk..c * chunk + part.len(), |k, v| {
+                if let Some(x) = f(k, v) {
+                    part[w] = x;
+                    w += 1;
+                }
+            });
+            w
+        };
+        let sizes: Vec<usize> = (0..n).step_by(chunk).map(|lo| chunk.min(n - lo)).collect();
+        let written: Vec<usize> = cells.par_chunks_mut(chunk).enumerate().map(fill).collect();
+        compact(&mut cells, &sizes, &written);
+        cells
     }
 
     pub(crate) fn into_cube(self) -> Cube {
@@ -163,21 +190,24 @@ pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -
     cfg.stream_always || groups * (rayon::current_num_threads() * 16) as f64 <= rows as f64
 }
 
-/// rows を読みながら、key が返す集計先ごとに値を足し込む（件数が多ければ並列に）。
+/// Reads `rows` and adds each value to the group that `key` gives. Many rows are read in parallel.
 pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option<u64> + Sync) -> FxHashMap<u64, Acc> {
-    let add = |mut g: FxHashMap<u64, Acc>, i: usize| {
-        let (k, v) = rows.get(i);
-        if let Some(o) = key(k) {
-            g.entry(o).or_insert_with(Acc::new).add(v);
-        }
+    use crate::packed::BLOCK; // one unit of work is one block of packed keys
+    let n = rows.len();
+    let add = |mut g: FxHashMap<u64, Acc>, b: usize| {
+        rows.for_each_in(b * BLOCK..((b + 1) * BLOCK).min(n), |k, v| {
+            if let Some(o) = key(k) {
+                g.entry(o).or_insert_with(Acc::new).add(v);
+            }
+        });
         g
     };
-    let n = rows.len();
+    let blocks = n.div_ceil(BLOCK);
     if !cfg.par(n) {
-        return (0..n).fold(FxHashMap::default(), add);
+        return (0..blocks).fold(FxHashMap::default(), add);
     }
-    let min_len = (n / rayon::current_num_threads()).max(1); // スレッドごとに 1 つの途中の値の表
-    (0..n).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
+    let min_len = (blocks / rayon::current_num_threads()).max(1); // one table of intermediate values per thread
+    (0..blocks).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
         for (k, x) in &b {
             a.entry(*k).or_insert_with(Acc::new).merge(x);
         }
@@ -244,10 +274,7 @@ pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catal
         }
     }
     // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
-    let pairs = collect_rows(cfg, rows.len(), |i| {
-        let (x, v) = rows.get(i);
-        k(x).map(|o| (o, v))
-    });
+    let pairs = rows.collect(cfg, |x, v| k(x).map(|o| (o, v)));
     drop(rows);
     group(cfg, pairs, out, aggs)
 }
@@ -380,14 +407,13 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
         let fill = |lo: usize, hi: usize| {
             let (mut vals, mut cnt) = (vec![init.clone(); slots], vec![0u32; slots]);
-            for i in lo..hi {
-                let (k, v) = rows.get(i);
+            rows.for_each_in(lo..hi, |k, v| {
                 if let Some(o) = (self.key)(k) {
                     let s = index(o);
                     add(&mut vals[s], v);
                     cnt[s] += 1;
                 }
-            }
+            });
             (vals, cnt)
         };
         let step = n.div_ceil(parts).max(1);
