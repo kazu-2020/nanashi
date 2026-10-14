@@ -397,10 +397,11 @@ impl Core {
         Ok(core)
     }
 
-    /// 調整値を変える。max_bytes（1 つの式の評価が同時に持つ途中結果のバイト数の上限。None は上限なし）は
-    /// メモリの予算で、超えれば計算を始める前か途中で ValueError にする。評価と再計算の段取りにはすぐ効き、格納データの持ち方（差分をまとめ直す件数、
-    /// 索引を作る行数、並列にする件数）は、このあと作る格納データから効く。fail_at はテスト用で、
-    /// (Metric の番号, panic させるか) か None。
+    /// Change the tuning values. max_bytes is the memory budget of one operation: the stored data that it holds plus
+    /// its intermediate results (bytes, None for no limit). If an operation is over it, the engine gives a ValueError
+    /// before or during the calculation. Evaluation and the recalculation schedule use a new value at once. The
+    /// values for the stored data (compaction, index and parallel thresholds) apply to the stored data made after the
+    /// change. fail_at is for tests: (Metric number, panic or not), or None.
     #[pyo3(signature = (**config))]
     fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let Some(config) = config else { return Ok(()) };

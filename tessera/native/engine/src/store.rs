@@ -36,6 +36,12 @@ pub struct Mem {
     pub index: usize,      // 分割軸以外の軸の索引（バイト）
 }
 
+impl Mem {
+    pub fn bytes(&self) -> usize {
+        self.base + self.delta + self.index
+    }
+}
+
 /// The base of a Store. Nothing changes it after it is made.
 ///
 /// The keys and values are immutable columns with no gaps (`Box<[T]>`, with no extra capacity).
