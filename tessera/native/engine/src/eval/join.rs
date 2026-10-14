@@ -10,10 +10,10 @@ pub(crate) fn merge(a: &[DimId], b: &[DimId]) -> Vec<DimId> {
     out
 }
 
-/// キーの昇順に並び、番号で読めるセルの列。Cube のセルのほか、差分のない格納データの本体を写さずに読む。
+/// Cells in ascending key order. The cells of a Cube, or the base of stored data without a delta (no copy).
 pub(crate) trait Cells {
     fn n(&self) -> usize;
-    fn at(&self, i: usize) -> (u64, f64);
+    fn iter(&self) -> impl Iterator<Item = (u64, f64)> + '_;
 }
 
 impl Cells for [(u64, f64)] {
@@ -23,8 +23,8 @@ impl Cells for [(u64, f64)] {
     }
 
     #[inline]
-    fn at(&self, i: usize) -> (u64, f64) {
-        self[i]
+    fn iter(&self) -> impl Iterator<Item = (u64, f64)> + '_ {
+        <[(u64, f64)]>::iter(self).copied()
     }
 }
 
@@ -35,12 +35,13 @@ impl Cells for Store {
     }
 
     #[inline]
-    fn at(&self, i: usize) -> (u64, f64) {
-        self.base_cell(i)
+    fn iter(&self) -> impl Iterator<Item = (u64, f64)> + '_ {
+        self.base_range(0..self.n())
     }
 }
 
-/// 並んだ 2 つのセル列を突き合わせる（sort-merge）。outer なら片側だけのキーも f に None を渡して残す。
+/// Merges 2 sorted cell columns (sort-merge). With `outer`, a key on one side only stays, and f gets None
+/// for the other side.
 pub(crate) fn merge_sorted<A: Cells + ?Sized, B: Cells + ?Sized>(
     a: &A,
     b: &B,
@@ -54,30 +55,29 @@ pub(crate) fn merge_sorted<A: Cells + ?Sized, B: Cells + ?Sized>(
             out.push((k, x));
         }
     };
-    let (mut i, mut j) = (0, 0);
-    while i < an && j < bn {
-        let ((x, xv), (y, yv)) = (a.at(i), b.at(j));
+    let (mut a, mut b) = (a.iter().peekable(), b.iter().peekable());
+    while let (Some(&(x, xv)), Some(&(y, yv))) = (a.peek(), b.peek()) {
         if x == y {
             push(x, f(Some(xv), Some(yv)));
-            i += 1;
-            j += 1;
+            a.next();
+            b.next();
         } else if x < y {
             if outer {
                 push(x, f(Some(xv), None));
             }
-            i += 1;
+            a.next();
         } else {
             if outer {
                 push(y, f(None, Some(yv)));
             }
-            j += 1;
+            b.next();
         }
     }
     if outer {
-        for (k, v) in (i..an).map(|i| a.at(i)) {
+        for (k, v) in a {
             push(k, f(Some(v), None));
         }
-        for (k, v) in (j..bn).map(|j| b.at(j)) {
+        for (k, v) in b {
             push(k, f(None, Some(v)));
         }
     }

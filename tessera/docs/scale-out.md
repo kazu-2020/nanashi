@@ -60,7 +60,7 @@ We did not measure this (see "Risks").
 
 A **base file** is the base of the stored data of 1 Metric as a file. It has 2 immutable columns (u64 keys, f64 values) and the packing of the keys.
 The packing is the partition dimension and the bit width of each dimension. The bytes of a base have a meaning only with their packing.
-The engine keeps the base in this flat layout today (`Box<[u64]>`, `Box<[f64]>`, the same as the Arrow buffers).
+The engine keeps the values in this flat layout today (`Box<[f64]>`, the same as the Arrow buffer). It keeps the keys in frame-of-reference blocks of 1,024 keys (`PackedKeys`, [Engine](engine.md)). A base file can hold the packed blocks as they are, or the keys as a u64 column that the writer decodes.
 
 The writer puts each base file in object storage under the sha256 of its bytes.
 A base never changes, so a base file never changes, and all versions and all processes can share it.

@@ -39,7 +39,7 @@ enum Col<'a> {
     Cells(&'a [(u64, f64)]),
 }
 
-impl Col<'_> {
+impl<'a> Col<'a> {
     #[inline]
     fn n(&self) -> usize {
         match self {
@@ -51,7 +51,7 @@ impl Col<'_> {
     #[inline]
     fn key(&self, i: usize) -> u64 {
         match self {
-            Col::Store(s) => s.base.keys[i],
+            Col::Store(s) => s.base.keys.get(i),
             Col::Cells(c) => c[i].0,
         }
     }
@@ -67,70 +67,18 @@ impl Col<'_> {
     /// key 以上の最初の行。
     fn lower_bound(&self, key: u64) -> usize {
         match self {
-            Col::Store(s) => s.base.keys.partition_point(|&k| k < key),
+            Col::Store(s) => s.base.keys.partition_point(|k| k < key),
             Col::Cells(c) => c.partition_point(|x| x.0 < key),
         }
     }
 
-    /// key 以上の最初の行を、前回の位置 from の近くから探す（前後どちらへも指数探索）。
-    /// 続けて引くキーが近ければ、二分探索より速い。
-    #[inline]
-    fn seek(&self, from: usize, key: u64) -> usize {
-        if from == 0 || from > self.n() || self.key(from - 1) < key {
-            return self.gallop(from.min(self.n()), key);
-        }
-        // key(from - 1) >= key: 後ろへ戻る
-        let mut step = 1;
-        let mut hi = from - 1; // key(hi) >= key
-        let mut lo = hi.saturating_sub(1);
-        while lo > 0 && self.key(lo) >= key {
-            hi = lo;
-            step *= 2;
-            lo = lo.saturating_sub(step);
-        }
-        if self.key(lo) >= key {
-            return lo; // lo == 0
-        }
-        // key(lo) < key <= key(hi)
-        let (mut l, mut h) = (lo + 1, hi);
-        while l < h {
-            let mid = (l + h) / 2;
-            if self.key(mid) < key {
-                l = mid + 1;
-            } else {
-                h = mid;
-            }
-        }
-        l
+    /// For a `Col::Store` it decodes one packed block at a time.
+    fn cursor(&self) -> Cursor<'a> {
+        Cursor::new(match self {
+            Col::Store(s) => Sorted::Packed(&s.base.keys),
+            Col::Cells(c) => Sorted::Cells(c),
+        })
     }
-
-    /// from 以降で key 以上の最初の行（指数探索。キー順に進むカーソル用）。
-    #[inline]
-    fn gallop(&self, from: usize, key: u64) -> usize {
-        let n = self.n();
-        if from >= n || self.key(from) >= key {
-            return from;
-        }
-        let mut step = 1;
-        let mut lo = from; // key(lo) < key
-        let mut hi = from + 1;
-        while hi < n && self.key(hi) < key {
-            lo = hi;
-            step *= 2;
-            hi = (hi + step).min(n);
-        }
-        let (mut l, mut h) = (lo + 1, hi);
-        while l < h {
-            let mid = (l + h) / 2;
-            if self.key(mid) < key {
-                l = mid + 1;
-            } else {
-                h = mid;
-            }
-        }
-        l
-    }
-
 }
 
 /// 読み出し元（src の番号ごとに 1 つ）。
@@ -237,8 +185,9 @@ impl<'a> Access<'a> {
         if width <= DENSE_BITS && (1usize << width) <= leaf.col.n().saturating_mul(64).max(1 << 12) {
             let size = 1usize << width;
             let (mut vals, mut has) = (vec![0.0; size], vec![false; size]);
+            let mut rd = leaf.col.cursor();
             for i in 0..leaf.col.n() {
-                let k = leaf.col.key(i) as usize;
+                let k = rd.key(i) as usize;
                 vals[k] = leaf.col.val(i);
                 has[k] = true;
             }
@@ -491,8 +440,19 @@ impl<'a> Fuse<'a> {
     }
 }
 
-/// The slice holds the last row of each `Aligned` and `Search` access.
-type Ev<'s> = Box<dyn Fn(&mut [usize], u64) -> Option<f64> + Sync + 's>;
+/// The slice holds one `Cursor` for each access (the last row and the decoded block of each `Aligned`
+/// and `Search` access; a `Dense` access gets an empty placeholder).
+type Ev<'s> = Box<dyn Fn(&mut [Cursor], u64) -> Option<f64> + Sync + 's>;
+
+fn readers<'a>(access: &[Access<'a>]) -> Vec<Cursor<'a>> {
+    access
+        .iter()
+        .map(|a| match a {
+            Access::Aligned(col) | Access::Search { col, .. } => col.cursor(),
+            Access::Dense { .. } => Cursor::new(Sorted::Cells(&[])),
+        })
+        .collect()
+}
 
 fn compile<'s>(f: &'s F, acc: &'s [Access]) -> Ev<'s> {
     let go = |x: &'s F| compile(x, acc);
@@ -603,9 +563,9 @@ fn leaf<'s>(l: usize, a: &'s Access) -> Ev<'s> {
         Access::Aligned(col) => {
             let col = *col;
             Box::new(move |p, key| {
-                let i = col.gallop(p[l], key);
-                p[l] = i;
-                (i < col.n() && col.key(i) == key).then(|| col.val(i))
+                let rd = &mut p[l];
+                let i = rd.gallop(key);
+                (i < col.n() && rd.key(i) == key).then(|| col.val(i))
             })
         }
         Access::Dense { ctx, proj, pack, vals, has } => Box::new(move |_, key| {
@@ -616,9 +576,9 @@ fn leaf<'s>(l: usize, a: &'s Access) -> Ev<'s> {
             let col = *col;
             Box::new(move |p, key| {
                 let k = proj.apply(ctx, pack, key);
-                let i = col.seek(p[l], k);
-                p[l] = i;
-                (i < col.n() && col.key(i) == k).then(|| col.val(i))
+                let rd = &mut p[l];
+                let i = rd.seek(k);
+                (i < col.n() && rd.key(i) == k).then(|| col.val(i))
             })
         }
     }
@@ -749,36 +709,30 @@ fn run_sorted(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev) -> Vec<(
         rest = tail;
     }
     let work = |((lo, hi), slice): (&Span, &mut [(u64, f64)])| -> usize {
-        let mut pos = vec![0; access.len()];
+        let mut readers = readers(access);
         // Each Aligned access starts to read at the first key of the range
         let first = lo.iter().zip(hi).zip(drivers).filter(|((a, b), _)| a < b).map(|((a, _), d)| d.key(*a)).min();
         let Some(first) = first else { return 0 };
         for (l, a) in access.iter().enumerate() {
             if let Access::Aligned(col) = a {
-                pos[l] = col.lower_bound(first);
+                readers[l].pos = col.lower_bound(first);
             }
         }
         let mut at = lo.clone();
+        let mut rds: Vec<Cursor> = drivers.iter().map(Col::cursor).collect();
+        // The key at `at[j]` while `at[j] < hi[j]`. A packed key read is not free, so read it once.
+        let mut next: Vec<u64> = rds.iter_mut().zip(&at).zip(hi).map(|((d, &a), &h)| if a < h { d.key(a) } else { 0 }).collect();
         let mut w = 0;
-        loop {
-            // The next key of the drivers (their union)
-            let mut key = u64::MAX;
-            let mut any = false;
-            for (j, d) in drivers.iter().enumerate() {
-                if at[j] < hi[j] {
-                    key = key.min(d.key(at[j]));
-                    any = true;
-                }
-            }
-            if !any {
-                break;
-            }
-            for (j, d) in drivers.iter().enumerate() {
-                if at[j] < hi[j] && d.key(at[j]) == key {
+        while let Some(key) = (0..drivers.len()).filter(|&j| at[j] < hi[j]).map(|j| next[j]).min() {
+            for (j, d) in rds.iter_mut().enumerate() {
+                if at[j] < hi[j] && next[j] == key {
                     at[j] += 1;
+                    if at[j] < hi[j] {
+                        next[j] = d.key(at[j]);
+                    }
                 }
             }
-            if let Some(v) = f(&mut pos, key) {
+            if let Some(v) = f(&mut readers, key) {
                 slice[w] = (key, v);
                 w += 1;
             }
@@ -805,7 +759,7 @@ struct Space<'s, 'a> {
     fill: &'s [(usize, Vec<u32>)],
 }
 
-impl Space<'_, '_> {
+impl<'a> Space<'_, 'a> {
     fn combos(&self) -> usize {
         self.fill.iter().map(|(_, ms)| ms.len()).product()
     }
@@ -814,11 +768,16 @@ impl Space<'_, '_> {
         self.base.as_ref().map_or(1, |(c, _, _)| c.n()) * self.combos()
     }
 
+    fn cursor(&self) -> Cursor<'a> {
+        self.base.as_ref().map_or(Col::Cells(&[]), |(c, _, _)| *c).cursor()
+    }
+
+    /// The key at `i`. `rd` is `self.cursor()`.
     #[inline]
-    fn key(&self, i: usize, combos: usize) -> u64 {
+    fn key(&self, i: usize, combos: usize, rd: &mut Cursor) -> u64 {
         let (row, mut c) = (i / combos, i % combos);
         let mut key = match &self.base {
-            Some((col, proj, pack)) => proj.apply(pack, self.out, col.key(row)),
+            Some((_, proj, pack)) => proj.apply(pack, self.out, rd.key(row)),
             None => 0,
         };
         for (pos, ms) in self.fill.iter().rev() {
@@ -840,8 +799,8 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budge
     let chunk = cfg.chunk.max(1);
     let parts: Vec<(usize, usize)> = (0..n).step_by(chunk).map(|lo| (lo, (lo + chunk).min(n))).collect();
     let count = |&(lo, hi): &(usize, usize)| {
-        let mut pos = vec![0; access.len()];
-        (lo..hi).filter(|&i| f(&mut pos, space.key(i, combos)).is_some()).count()
+        let (mut readers, mut rd) = (readers(access), space.cursor());
+        (lo..hi).filter(|&i| f(&mut readers, space.key(i, combos, &mut rd)).is_some()).count()
     };
     let sizes: Vec<usize> = if cfg.par(n) { parts.par_iter().map(count).collect() } else { parts.iter().map(count).collect() };
     bud.need(sizes.iter().sum::<usize>() + copied, "式の結果")?;
@@ -854,11 +813,11 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budge
         rest = tail;
     }
     let write = |(&(lo, hi), slice): (&(usize, usize), &mut [(u64, f64)])| {
-        let mut pos = vec![0; access.len()];
+        let (mut readers, mut rd) = (readers(access), space.cursor());
         let mut w = 0;
         for i in lo..hi {
-            let key = space.key(i, combos);
-            if let Some(v) = f(&mut pos, key) {
+            let key = space.key(i, combos, &mut rd);
+            if let Some(v) = f(&mut readers, key) {
                 slice[w] = (key, v);
                 w += 1;
             }
@@ -889,29 +848,3 @@ pub(crate) fn compact(cells: &mut Vec<(u64, f64)>, sizes: &[usize], written: &[u
     }
 }
 
-/// i = 0..n の各行を f で写し、None を捨てた列（件数が多ければ並列に）。結果は 1 つの配列へ直接書き、
-/// 写す前に全体を集めて写し直すことはしない（途中で持つのは、n 件分の結果の配列だけ）。
-pub(crate) fn collect_rows(cfg: &Config, n: usize, f: impl Fn(usize) -> Option<(u64, f64)> + Sync) -> Vec<(u64, f64)> {
-    if !cfg.par(n) {
-        return (0..n).filter_map(f).collect();
-    }
-    let chunk = cfg.chunk.max(1);
-    let mut cells = vec![(0u64, 0f64); n];
-    let sizes: Vec<usize> = (0..n).step_by(chunk).map(|lo| chunk.min(n - lo)).collect();
-    let written: Vec<usize> = cells
-        .par_chunks_mut(chunk)
-        .enumerate()
-        .map(|(c, slice)| {
-            let mut w = 0;
-            for i in c * chunk..c * chunk + slice.len() {
-                if let Some(x) = f(i) {
-                    slice[w] = x;
-                    w += 1;
-                }
-            }
-            w
-        })
-        .collect();
-    compact(&mut cells, &sizes, &written);
-    cells
-}

@@ -482,15 +482,41 @@ struct Done {
     value: Write,
     count: Option<Write>, // 差分集計する SUM の、各グループの件数（Whole の範囲は使わない）
     low: Option<Write>,   // the residual of each group of an incremental SUM (cells that are not 0)
-    old: Option<Src>,     // 書き戻す前の値（下流の差分集計の集計元なら）
+    old: Option<Old>,     // the value before the write (if it is the source of a downstream incremental aggregation)
+}
+
+enum Old {
+    Held(Arc<Store>),
+    Slice(Arc<Store>),
+}
+
+/// The value before the write. For the whole region, keep the store itself (do not copy it).
+fn old_of(store: &Arc<Store>, r: &Reg, cat: &Catalog) -> Old {
+    if r.is_all() { Old::Held(store.clone()) } else { Old::Slice(Arc::new(store.slice(&r.restrict(cat)))) }
+}
+
+impl Old {
+    /// The bytes of the copy. Held is the store itself, which held counts already.
+    fn copied(&self) -> usize {
+        match self {
+            Old::Held(_) => 0,
+            Old::Slice(s) => s.memory().bytes(),
+        }
+    }
+}
+
+impl From<Old> for Src {
+    fn from(old: Old) -> Src {
+        match old {
+            Old::Held(s) | Old::Slice(s) => Src::Store(s),
+        }
+    }
 }
 
 impl Done {
     fn bytes(&self) -> usize {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
-        // For the whole region, old is the Arc of the store, which held counts already
-        let old = if self.region.is_all() { 0 } else { held(&self.old) };
-        writes.saturating_add(old)
+        writes.saturating_add(self.old.as_ref().map_or(0, Old::copied))
     }
 }
 
@@ -559,7 +585,8 @@ fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
     out
 }
 
-/// Add held to each share because the Budget subtracts it again. Never more than max, so held data over max is an error.
+/// The limit of each task in a wave: held plus an equal part of the room. A task adds its copies to held, not to the
+/// limit. Never more than max, so held data over max is an error.
 fn share(max: usize, held: usize, n: usize) -> usize {
     held.saturating_add(max.saturating_sub(held) / n).min(max)
 }
@@ -611,8 +638,9 @@ pub fn recalc(
 }
 
 impl<'a> Run<'a> {
-    /// 依存の段を 1 つ計算し直す。同じ段の Metric は互いを読まないので、範囲を決めてから並列に計算し、
-    /// 順に書き戻す。scan は時点ごとに自分の格納データへ書き込むので、そのあとで順に計算する。
+    /// Calculate one level of the dependencies again. The Metrics of one level do not read each other.
+    /// Thus decide the regions, calculate them in parallel, and then write them back in sequence.
+    /// A scan writes to its own stored data at each time point, so it calculates after them in sequence.
     fn level(&mut self, level: &[Step]) -> Result<()> {
         let mut tasks = Vec::new();
         let mut scans = Vec::new();
@@ -689,10 +717,6 @@ impl<'a> Run<'a> {
         eval_sums(&f.node, self.cat, &self.srcs(f, work), r, b)
     }
 
-    fn slice(&self, m: usize, r: &Reg) -> Src {
-        Src::Store(Arc::new(self.stores[m].slice(&r.restrict(self.cat))))
-    }
-
     /// 段の 1 つの Metric について、計算し直す範囲と方法を決める。計算し直さなくてよければ None。
     fn prepare(&self, m: usize) -> Option<Task> {
         let plan: &'a Plan = self.plan;
@@ -715,17 +739,8 @@ impl<'a> Run<'a> {
     fn compute(&self, t: &Task, limit: usize, held: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
-        // 集計元なら、書き戻す前の値を下流の差分集計のために取っておく。全体を計算し直すなら、
-        // 置き換える前の格納データをそのまま使う（複製しない）
-        let old = metric.source.then(|| {
-            if t.region.is_all() {
-                Src::Store(self.stores[t.m].clone())
-            } else {
-                self.slice(t.m, &t.region)
-            }
-        });
-        // A slice of old is a new copy, so count it (the same rule as Done::bytes)
-        let held = if t.region.is_all() { held } else { held.saturating_add(crate::held(&old)) };
+        let old = metric.source.then(|| old_of(&self.stores[t.m], &t.region, self.cat));
+        let held = held.saturating_add(old.as_ref().map_or(0, Old::copied));
         let delta = match (&metric.delta, t.delta) {
             (Some(d), true) => self.compute_delta(t.m, d, &t.region, limit, held)?,
             _ => None,
@@ -761,7 +776,7 @@ impl<'a> Run<'a> {
         Ok(Done { m: t.m, region: t.region.clone(), delta: delta_used, value, count, low, old })
     }
 
-    /// 計算した値を書き戻し、値が実際に変わったセルの範囲を下流への影響範囲にする。
+    /// Write back the calculated values. The region of the cells whose values changed goes downstream.
     fn apply(&mut self, done: Done) -> Result<()> {
         let Done { m, region, delta, value, count, low, old } = done;
         match self.cat.cfg.fail_at {
@@ -784,8 +799,8 @@ impl<'a> Run<'a> {
                 None => {}
             }
         }
-        if old.is_some() {
-            self.olds[m] = old;
+        if let Some(old) = old {
+            self.olds[m] = Some(old.into());
         }
         self.log.push((m, delta, region));
         if let Some(sets) = sets {
@@ -912,8 +927,7 @@ impl<'a> Run<'a> {
         let active: Vec<(usize, Reg)> = names.iter().filter_map(|&n| self.regions[n].clone().map(|r| (n, r))).collect();
         for (n, r) in &active {
             if self.plan.metrics[*n].source {
-                let old = if r.is_all() { Src::Store(self.stores[*n].clone()) } else { self.slice(*n, r) };
-                self.olds[*n] = Some(old);
+                self.olds[*n] = Some(old_of(&self.stores[*n], r, self.cat).into());
             }
             if r.is_all() {
                 // 全時点を書き直すので、空から書き込む（既存のセルを時点ごとに消して書き直すより速い）
@@ -992,14 +1006,19 @@ mod tests {
     }
 
     #[test]
-    fn a_slice_of_old_counts_but_the_shared_store_does_not() {
+    fn the_old_value_of_a_partial_region_counts_but_of_the_whole_region_does_not() {
         let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
         let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
-        let old = Src::Store(Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap()));
-        let done = |region| Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old.clone()) };
+        let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
+        let done = |region: Reg| {
+            let old = old_of(&store, &region, &cat);
+            Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old) }
+        };
         assert_eq!(done(Reg::new(vec![])).bytes(), 0);
-        assert_eq!(done(Reg::new(vec![(0, vec![1])])).bytes(), held([&old]));
-        assert!(held([&old]) > 0);
+        let part = Reg::new(vec![(0, vec![1])]);
+        let bytes = store.slice(&part.restrict(&cat)).memory().bytes();
+        assert!(bytes > 0);
+        assert_eq!(done(part).bytes(), bytes);
     }
 
     #[test]

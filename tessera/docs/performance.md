@@ -140,7 +140,7 @@ The Rust heap does not change with the machine. The values from before fusion we
 | Same as above, calculated on 1 thread | 15.9 B | 25.2 B |
 | RSS (after recalculation) | 23.0 B | 58 B (M4) |
 
-The stored data is equal to the 16 B of the key and the value. After recalculation, the stored data is the only data that Rust keeps.
+The stored data was equal to the 16 B of the key and the value. After recalculation, the stored data is the only data that Rust keeps. The keys are now packed, and the stored data is about 10 B for each cell (see "Packed keys" below).
 The increase during recalculation (312 MB) is only about 1.25 times the new values of the formula Metrics (249 MB).
 Fused formulas do not do reads with a limited range.
 Thus a full recalculation does not make indexes for dimensions other than the partition dimension. (The engine makes these indexes when incremental recalculation reads a limited range.)
@@ -286,6 +286,24 @@ We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.10 GHz) with `bench_ab.p
 | Maximum increase of the heap after the edits | 1,064 MB | 997 MB |
 
 The evaluation of `CatRev` alone on 4 threads (the minimum of 5 evaluations, 2 or 3 runs) went from 496–537 ms to 152–159 ms. In a later VM session, it went from 571–637 ms to 231–242 ms.
+
+### Packed keys
+
+The keys of a base were a `Box<[u64]>` (8 B for each cell). Now they are frame-of-reference blocks of 1,024 keys (`PackedKeys`, [Engine](engine.md)). In the retail model the offsets are 14 to 19 bits wide, so the keys use about 2 B for each cell.
+A read of one key decodes it from its block, which is slower than an array read. Thus every scan (the fused evaluation, the merge of the base and the delta, the aggregation source, and the joins) decodes one block at a time into a buffer and reads the buffer.
+We measured on a cloud VM (4 cores, Intel Xeon 2.80 GHz) with `bench_ab.py` and retail xlarge (`bench.py --engine rust --size xlarge --repeats 3`, 5 alternating runs for each side, median with minimum–maximum in parentheses). The results `total` are bit-identical on both sides.
+
+| Measurement | Before | After |
+|---|---|---|
+| Rust heap after the full recalculation | 1,162 MB (all 5 runs equal) | 738 MB (all 5 runs equal) |
+| Maximum increase of the heap, full recalculation | 1,064 MB (1,064–1,089) | 963 MB (all 5 runs equal) |
+| Maximum RSS | 2,329 MB (2,303–2,340) | 1,750 MB (1,720–1,803) |
+| Full recalculation | 2,772 ms (2,546–2,888) | 2,938 ms (2,546–2,975) |
+| Full recalculation after the edits | 5,199 ms (4,913–6,220) | 3,641 ms (3,498–3,845) |
+| Edit of 1 Volume cell | 2.79 ms (2.13–4.13) | 1.77 ms (1.67–4.89) |
+
+The heap after the recalculation is the stored data, so the stored data went from 16 B to about 10 B for each cell. The time ranges of the full recalculation and of the edits overlap, so these differences are inside the noise of this VM. The full recalculation after the edits is faster. We do not know the cause. A likely cause is the smaller base, but we did not measure it.
+A random read with `PackedKeys::get` (a binary search, `value_at`) is about 1.6 times slower than a `Vec` read in a micro-benchmark of 10 million reads (`bench_reads` in `packed.rs`, run with `--ignored`).
 
 ## Save and journal formats
 
