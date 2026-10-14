@@ -13,7 +13,8 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyIterator, PyList, PyString, PyTuple
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 fn err(msg: String) -> PyErr {
@@ -1062,23 +1063,47 @@ fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
 
 // ------------------------------------------------------------------ ヒープの計測
 
-/// Rust の側で確保しているメモリを数えるアロケータ。中身の確保は System に任せる。
-/// 数えるのは track_heap(true) の後だけで、止めている間は確保のたびにフラグを 1 回読むだけにする
-/// （原子的な加減算を毎回すると、並列の再計算で数 % 遅くなったため）。Python のオブジェクトは数えない。
+/// An allocator that counts the memory that Rust allocates. System does the allocation. It does not count Python objects.
+/// The count is always on. Each thread adds to its own slot, so that threads do not write to one shared cache line
+/// (a shared atomic counter made the parallel recalculation a few % slower).
+/// If a slot holds more than SLOT_FLUSH bytes, the thread moves the slot value into HEAP_NOW and updates HEAP_PEAK.
+/// Thus HEAP_PEAK can be low by the values that stay in the slots (at most SLOT_FLUSH for each slot).
 struct Counting;
 
-static HEAP_TRACK: AtomicBool = AtomicBool::new(false);
-static HEAP_NOW: AtomicIsize = AtomicIsize::new(0); // 数え始めてからの確保と解放の差
+const SLOTS: usize = 64;
+const SLOT_FLUSH: usize = 64 << 10;
+
+#[repr(align(128))] // 128, not 64: the adjacent-line prefetch moves cache lines in pairs
+struct Slot(AtomicIsize);
+
+static HEAP_SLOTS: [Slot; SLOTS] = [const { Slot(AtomicIsize::new(0)) }; SLOTS];
+static HEAP_NOW: AtomicIsize = AtomicIsize::new(0); // allocations minus frees, without the values in the slots
 static HEAP_PEAK: AtomicIsize = AtomicIsize::new(0);
+static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    // No destructor: the allocator must not use a thread local with a destructor. A slot keeps its value after the thread stops.
+    static MY_SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
+}
 
 fn heap_add(n: isize) {
-    if !HEAP_TRACK.load(Ordering::Relaxed) {
-        return;
-    }
-    let now = HEAP_NOW.fetch_add(n, Ordering::Relaxed) + n;
-    if n > 0 && now > HEAP_PEAK.load(Ordering::Relaxed) {
+    let i = MY_SLOT.with(|c| {
+        if c.get() == usize::MAX {
+            c.set(NEXT_SLOT.fetch_add(1, Ordering::Relaxed) % SLOTS);
+        }
+        c.get()
+    });
+    let slot = &HEAP_SLOTS[i].0;
+    let v = slot.fetch_add(n, Ordering::Relaxed) + n;
+    if v.unsigned_abs() > SLOT_FLUSH {
+        slot.fetch_sub(v, Ordering::Relaxed);
+        let now = HEAP_NOW.fetch_add(v, Ordering::Relaxed) + v;
         HEAP_PEAK.fetch_max(now, Ordering::Relaxed);
     }
+}
+
+fn heap_now() -> isize {
+    HEAP_NOW.load(Ordering::Relaxed) + HEAP_SLOTS.iter().map(|s| s.0.load(Ordering::Relaxed)).sum::<isize>()
 }
 
 unsafe impl GlobalAlloc for Counting {
@@ -1115,27 +1140,17 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
-/// ヒープを数えるかを切り替える。数え始めるときは今の量と最大を 0 にする。
-/// 数える前に確保したメモリの解放は差し引かれるので、モデルを作る前に数え始める。
-#[pyfunction]
-fn track_heap(on: bool) {
-    if on {
-        HEAP_NOW.store(0, Ordering::Relaxed);
-        HEAP_PEAK.store(0, Ordering::Relaxed);
-    }
-    HEAP_TRACK.store(on, Ordering::Relaxed);
-}
-
-/// 数え始めてから Rust の側で確保しているメモリと、reset_heap_peak の後の最大（バイト）。
+/// The memory that Rust allocated after the process started, and the maximum after reset_heap_peak (bytes).
 #[pyfunction]
 fn heap() -> (usize, usize) {
-    (HEAP_NOW.load(Ordering::Relaxed).max(0) as usize, HEAP_PEAK.load(Ordering::Relaxed).max(0) as usize)
+    let now = heap_now();
+    (now.max(0) as usize, HEAP_PEAK.load(Ordering::Relaxed).max(now).max(0) as usize)
 }
 
-/// ヒープの最大を今の量に戻す（ある処理の間の最大を測るときに、その前に呼ぶ）。
+/// Set the maximum of the heap to the current value. To measure the maximum during an operation, call this before it.
 #[pyfunction]
 fn reset_heap_peak() {
-    HEAP_PEAK.store(HEAP_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
+    HEAP_PEAK.store(heap_now(), Ordering::Relaxed);
 }
 
 /// 2 つの格納データの差（宣言した軸の順のメンバー番号の列と、変更前後の値）。Python のオブジェクトにはしない。
@@ -1492,7 +1507,6 @@ fn parquet_metadata(py: Python<'_>, data: PyBackedBytes) -> PyResult<Vec<(String
 
 #[pymodule(gil_used = false)] // free-threaded の Python でも GIL を有効に戻さない（格納データは Arc と永続的な木で共有する）
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(track_heap, m)?)?;
     m.add_function(wrap_pyfunction!(heap, m)?)?;
     m.add_function(wrap_pyfunction!(reset_heap_peak, m)?)?;
     m.add_function(wrap_pyfunction!(write_parquet, m)?)?;

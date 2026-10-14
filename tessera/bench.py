@@ -158,7 +158,7 @@ def run(engine_name: str, size: str, repeats: int) -> dict:
     heap = None
     if engine_name == "rust":
         import nanashi_core
-        nanashi_core.track_heap(True)  # Start before the model exists. Frees of older allocations are subtracted.
+        start = nanashi_core.heap()[0]  # The heap count is always on. Read it before the model exists.
     t0 = time.perf_counter()
     m = build(engine_name, size)
     load = time.perf_counter() - t0
@@ -171,7 +171,7 @@ def run(engine_name: str, size: str, repeats: int) -> dict:
     full = time.perf_counter() - t0
     if engine_name == "rust":
         now, peak_heap = nanashi_core.heap()
-        heap = {"increase_mb": (peak_heap - loaded) / 1e6, "after_mb": now / 1e6}  # MB = 1e6, as in docs/performance.md
+        heap = {"increase_mb": (peak_heap - loaded) / 1e6, "after_mb": (now - start) / 1e6}  # MB = 1e6, as in docs/performance.md
 
     cells = {n: m.engine.size(m.raw(n)) for n in m.metrics}
     total_value = m.value("Total").cells.get(())

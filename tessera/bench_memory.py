@@ -5,7 +5,7 @@
     python bench_memory.py --scales 1
 
 測るのは次の 3 つで、それぞれ別のプロセスで開き直して測る。
-- Rust のヒープ（nanashi_core.track_heap と heap）: Rust の側で確保している量。格納データと計算の途中結果
+- Rust のヒープ（nanashi_core.heap）: Rust の側で確保している量。格納データと計算の途中結果
 - プロセスの RSS: Python のオブジェクトと、アロケータが解放後も抱えている分を含む
 - 式ごとの途中結果: Metric を 1 つずつ評価したときのヒープの最大と、結果の大きさの比
 """
@@ -48,15 +48,16 @@ def child(path: str, per_formula: bool) -> dict:
     from sparse_engine import Named, to_formula
     from sparse_engine.rust_engine import RustEngine
 
-    nanashi_core.track_heap(True)  # モデルを作る前に数え始める
+    start = nanashi_core.heap()[0]  # Read the heap before the model exists. The values below are increases from it.
     out: dict = {"rss_start": rss()}
     m = Named.load(path, RustEngine())
-    out["heap_loaded"], out["rss_loaded"] = nanashi_core.heap()[0], rss()
+    out["heap_loaded"], out["rss_loaded"] = nanashi_core.heap()[0] - start, rss()
     nanashi_core.reset_heap_peak()
     t = time.perf_counter()
     m.refresh()
     out["recalc_ms"] = 1e3 * (time.perf_counter() - t)
-    out["heap_now"], out["heap_peak"] = nanashi_core.heap()
+    now, peak = nanashi_core.heap()
+    out["heap_now"], out["heap_peak"] = now - start, peak - start
     out["rss_now"], out["rss_max"] = rss(), max_rss()
 
     mem = m.memory()
