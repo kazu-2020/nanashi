@@ -9,6 +9,7 @@ Metric の格納データと評価の途中結果は Rust 側に置き、Python 
 """
 from __future__ import annotations
 
+from array import array
 from typing import Any
 
 import nanashi_core
@@ -234,8 +235,11 @@ class RustEngine:
 
     def from_cells(self, dims, kind, cells, cat, partition=None):
         indexes = [cat.dimension(d)._by_id for d in dims]
-        cols = [[indexes[i][k[i]] for k in cells] for i in range(len(dims))]
-        values = [float(v) for v in cells.values()]
+        cols, values = [array("I") for _ in dims], array("d")
+        for key, value in cells:
+            for col, index, member in zip(cols, indexes, key):
+                col.append(index[member])
+            values.append(float(value))
         return self.core.from_rows([self._dim(cat, d) for d in dims], self._index(cat, dims, partition),
                                    kind == "boolean", cols, values)
 

@@ -103,7 +103,8 @@ We removed the measurement programs for key layouts ([member-numbering.md](membe
 
 `bench_snapshot.py` makes the saved model of `examples/fpa.py` at scale k (k times the employees and products of large) without Python dicts.
 Then `run` loads it and measures the full recalculation and the edits of `examples/fpa.py`.
-At scale 32 (157 million cells), `write` used 1.2 GB RSS and 39 seconds, and `build()` used about 11.5 GB RSS.
+At scale 32 (157 million cells), `write` used 1.2 GB RSS and 39 seconds, and `build()` used about 4.7 GB RSS and 160 seconds.
+`build()` keeps a Python dict with a tuple key for each input cell. `add_input` does not copy the dict.
 
 ```bash
 .venv/bin/python bench_snapshot.py write --scale 32 /tmp/fpa32

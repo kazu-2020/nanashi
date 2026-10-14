@@ -13,7 +13,8 @@ boundary passes ids through.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping
+from collections.abc import Mapping
+from typing import Any, Callable, Iterable
 
 from .core import Cube, Dimension, Key
 from .engine import Store
@@ -149,8 +150,7 @@ class Named:
         dims = tuple(self._dim(d) for d in dims)
         kind = self._kind(kind)
         if cells:
-            m = Metric(name, dims, kind)
-            cells = {self._key(dims, tuple(k)): self._value_in(m, v) for k, v in cells.items()}
+            cells = _ById(self, Metric(name, dims, kind), cells)
         return self.model.add_input(name, dims, cells, kind=kind, storage=storage,
                                     partition=None if partition is None else self._dim(partition), id=id)
 
@@ -315,3 +315,24 @@ class NamedLog:
 
     def __repr__(self) -> str:
         return repr(self._shown())
+
+
+class _ById(Mapping):
+    """The cells {(member name, ...): value} of an input Metric m as {(member id, ...): value}. The ids are made
+    when the Model reads the cells, because a copy of a large input can need more memory than the engine."""
+
+    def __init__(self, named: Named, m: Metric, cells: Mapping[Key, Any]):
+        self._named, self._metric, self._cells = named, m, cells
+
+    def __len__(self) -> int:
+        return len(self._cells)
+
+    def __iter__(self):
+        return (key for key, _ in self.items())
+
+    def __getitem__(self, key: Key) -> Any:
+        return self._named._value_in(self._metric, self._cells[self._named._names(self._metric.dims)(key)])
+
+    def items(self):
+        named, m = self._named, self._metric
+        return ((named._key(m.dims, tuple(k)), named._value_in(m, v)) for k, v in self._cells.items())

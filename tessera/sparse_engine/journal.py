@@ -91,7 +91,7 @@ def jsonable(x: Any) -> Any:
         return x
     if isinstance(x, Expr):
         return to_formula(x)
-    if isinstance(x, dict):
+    if isinstance(x, Mapping):
         if len(x) > 1000:
             return {"cells": len(x)}
         return [[jsonable(k), jsonable(v)] for k, v in x.items()] if any(
@@ -413,7 +413,7 @@ def _define(model, specs: list[dict]) -> None:
             model._values.pop(m.id, None)  # the values of a formula Metric are calculated again after the replay
         elif (old is None or old.formula is not None or m.id not in model._values
               or (old.dims, old.kind) != (m.dims, m.kind)):
-            model._values[m.id] = model.engine.from_cells(m.dims, m.kind, {}, model, m.partition)
+            model._values[m.id] = model.engine.from_cells(m.dims, m.kind, (), model, m.partition)
         m.override = model._metric_ids.get(m.override_name)  # the link stays also while not overridable
 
 

@@ -187,6 +187,19 @@ def random_round(rng: random.Random, m: Model) -> None:
         m.spread("Budget", float(rng.randint(10, 100)), Month=t)
 
 
+class BadCells(unittest.TestCase):
+    def test_rejected_input_keeps_the_old_definition(self):
+        for engine in engines():
+            m = model(engine)
+            with self.assertRaisesRegex(ValueError, "^X: Employee に 'e9' がない$"):
+                m.add_input("X", ["Employee"], {("e1",): 1.0, ("e9",): 2.0})
+            self.assertNotIn("X", [x.name for x in m.metrics.values()])
+            with self.assertRaisesRegex(ValueError, "^Salary は number の Metric: 'a'$"):
+                m.add_input("Salary", ["Employee"], {("e1",): "a"}, id=m.metric("Salary").id)
+            self.assertEqual(m.metric("Salary").dims, m.metric("Budget").dims)
+            self.assertEqual(m.get("Total"), 120.0)
+
+
 class MatchesFullRecalc(unittest.TestCase):
     def test_random_edits(self):
         m = model()

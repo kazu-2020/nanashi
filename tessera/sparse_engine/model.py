@@ -653,16 +653,18 @@ class Model:
                      override=None if old is None else old.override)  # rename and remove still follow the link
         if storage is None:
             self.metrics[id] = new  # _check uses the dimensions of the registered Metric
+            # A generator: a copy of a large cells dict can need more memory than the stored data
+            checked = ((key, self._check(id, key, value)) for key, value in
+                       ((tuple(key), value) for key, value in (cells or {}).items()))
             try:
-                checked = {tuple(key): self._check(id, tuple(key), value) for key, value in (cells or {}).items()}
+                storage = self.engine.from_cells(dims, kind, ((k, v) for k, v in checked if v is not None),
+                                                 self, partition)
             except ValueError:
                 if old is None:
                     del self.metrics[id]
                 else:
                     self.metrics[id] = old
                 raise
-            storage = self.engine.from_cells(dims, kind, {k: v for k, v in checked.items() if v is not None},
-                                             self, partition)
         if old is not None and self._plan is not None and self._same_type(old, new) and id not in self._pending.forced:
             # Incremental aggregation needs the old values. If changes wait for a recalc, go back to the values before them
             self._keep_old(id)
