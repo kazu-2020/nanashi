@@ -1,4 +1,4 @@
-"""Write a snapshot of the profit and loss plan without Python dicts, and measure a load of it.
+"""Write a snapshot of the profit and loss plan without Python dicts, then measure how it loads.
 
     python bench_snapshot.py write --scale 32 /tmp/fpa32   # make the snapshot directory
     python bench_snapshot.py run /tmp/fpa32                 # load it, then time the recalculations
@@ -6,7 +6,6 @@
 Scale k multiplies the employees and the products of SIZES["large"] (examples/fpa.py) by k.
 build() keeps a Python tuple key for each input cell, so it used about 11.5 GB RSS at scale 32.
 This script keeps the member numbers in array.array columns and writes the Parquet files of storage.py directly.
-It uses the random stream in the same order as build(), so the snapshot holds the same model.
 """
 from __future__ import annotations
 
@@ -15,8 +14,10 @@ import json
 import os
 import random
 import resource
+import shutil
 import statistics
 import sys
+import tempfile
 import time
 from array import array
 from pathlib import Path
@@ -29,7 +30,7 @@ from sparse_engine.engine import parquet_columns, parquet_value
 from sparse_engine.rust_engine import RustEngine
 from sparse_engine.storage import FORMAT_VERSION, input_file
 
-BIG = {  # the large inputs: dimensions and kind, as in build()
+BIG = {  # the large inputs: dimensions and kind
     "Units": (["Product", "Version", "Month"], "number"),
     "Price": (["Product", "Version"], "number"),
     "Salary": (["Employee", "Version"], "number"),
@@ -37,7 +38,7 @@ BIG = {  # the large inputs: dimensions and kind, as in build()
     "HireMonth": (["Employee"], "member:Month"),
     "LeaveMonth": (["Employee"], "member:Month"),
 }
-REPEATS = 5  # runs of each edit, as in examples/fpa.py
+REPEATS = 5  # runs of each edit
 
 
 # ---------------------------------------------------------------- calculations
@@ -89,7 +90,7 @@ def generate(employees: int, products: int, months: int, seed: int = 0) -> tuple
 
 
 def table(r: dict) -> str:
-    """Return a Markdown table of 1 result of run."""
+    """Return a Markdown table of one result of run()."""
     lines = [f"セル数 {r['cells']:,}、RSS の最大 {r['rss_max'] / 2**30:.2f} GB", "",
              "| 段階 | 時間 | ヒープの最大 | 段階の後のヒープ |", "|---|---|---|---|"]
     for phase, v in r["phases"].items():
@@ -106,6 +107,9 @@ def _months(months: int) -> list[str]:
 
 def write(path, employees: int, products: int, months: int, seed: int = 0) -> None:
     """Save the model of examples.fpa.build at these sizes to path, with the large inputs from generate."""
+    path = Path(path)
+    if path.exists() and any(path.iterdir()):  # old input files must not stay with the new model.json
+        raise FileExistsError(f"空でないディレクトリには書き出せません: {path}")
     big, other_opex = generate(employees, products, months, seed)
     month_names = _months(months)
     prods = [f"p{i:04d}" for i in range(products)]
@@ -126,14 +130,19 @@ def write(path, employees: int, products: int, months: int, seed: int = 0) -> No
     m.add_input("OtherOpex", ["Department", "Version", "Month"], other_opex)
     for name, dims, formula, *kind in FORMULAS:
         m.add_formula(name, dims, formula, kind=kind[0] if kind else "number")
-    tmp = Path(f"{path}.tmp")  # a failed write must not leave a loadable partial model at path
-    m.save(tmp)
-    for name, (cols, values) in big.items():
-        x = m.metric(name)
-        meta = [("nanashi", json.dumps({"format": FORMAT_VERSION, "metric": x.id}))]
-        data = nanashi_core.write_parquet(parquet_columns(x.dims, m.model), cols, values, parquet_value(x.kind), meta)
-        (tmp / input_file(x.id)).write_bytes(data)
-    os.rename(tmp, path)  # fails if path has files, so that old input files do not stay with the new model.json
+    # a failed write must not leave a loadable partial model at path
+    tmp = Path(tempfile.mkdtemp(dir=path.parent, prefix=f"{path.name}."))
+    try:
+        m.save(tmp)
+        for name, (cols, values) in big.items():
+            x = m.metric(name)
+            meta = [("nanashi", json.dumps({"format": FORMAT_VERSION, "metric": x.id}))]
+            data = nanashi_core.write_parquet(parquet_columns(x.dims, m.model), cols, values, parquet_value(x.kind), meta)
+            (tmp / input_file(x.id)).write_bytes(data)
+        os.rename(tmp, path)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
 
 
 def run(path) -> dict:
@@ -156,7 +165,7 @@ def run(path) -> dict:
     phase("全体の再計算", m.recalc)
     cells = sum(m.engine.size(m.raw(n)) for n in m.metrics)  # before the edits, which add employees
     rng = random.Random(1)
-    for label, edit in EDITS:  # time only the recalculation, as examples/fpa.py does
+    for label, edit in EDITS:
         phase(label, m.recalc, REPEATS, prepare=lambda: edit(m, rng))
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024)
     return {"path": str(path), "cells": cells, "phases": phases, "rss_max": rss}
@@ -171,6 +180,8 @@ def main() -> None:
     sub.add_parser("run").add_argument("path")
     args = ap.parse_args()
     if args.cmd == "write":
+        if args.scale < 1:
+            ap.error("--scale は 1 以上にしてください")
         employees, products, months = SIZES["large"]
         write(args.path, employees * args.scale, products * args.scale, months)
         return

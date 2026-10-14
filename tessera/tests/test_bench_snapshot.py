@@ -1,15 +1,16 @@
+import importlib.util
 import tempfile
 import unittest
 
-try:
-    from bench_snapshot import write
-except ImportError:  # nanashi_core is not built
-    write = None
 from examples.fpa import SIZES, build
 from sparse_engine import Named
 
+NATIVE = importlib.util.find_spec("nanashi_core") is not None
+if NATIVE:  # bench_snapshot imports nanashi_core
+    from bench_snapshot import write
 
-@unittest.skipIf(write is None, "nanashi_core が必要")
+
+@unittest.skipIf(not NATIVE, "nanashi_core が必要")
 class SnapshotTest(unittest.TestCase):
     def test_same_model_as_build(self):
         employees, products, months = SIZES["small"]
@@ -22,8 +23,8 @@ class SnapshotTest(unittest.TestCase):
             for name in names:
                 with self.subTest(name):
                     self.assertEqual(got.value(name).cells, want.value(name).cells)
-            self.assertEqual(len(got.value("Units").cells), 30 * (24 + 6))
-            self.assertEqual(len(got.value("DeptOf").cells), 60 * 24)
+            self.assertEqual(len(got.value("Units").cells), products * (months + months // 4))
+            self.assertEqual(len(got.value("DeptOf").cells), employees * months)
 
 
 if __name__ == "__main__":
