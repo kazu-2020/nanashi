@@ -62,6 +62,7 @@ The budget covers the stored data that the operation holds plus the intermediate
 A recalculation holds all the stored data of the model: the values, the counts and residuals, the old values, and the new values that wait for the write-back.
 A query holds only the stored data that its formula reads. If two references read the same stored data, the engine counts it one time.
 If the stored data alone is more than the budget, a recalculation that calculates a Metric gives an error. Increase `max_bytes` or make the model smaller.
+A write checks the budget with an incremental recalculation, but a server start, a reload and a replica do a full recalculation. The full recalculation holds all stores, so it can need more than the writes did. If the server cannot open the model, increase `--max-bytes`.
 For an operation that makes all combinations (`EXPAND`, `ISBLANK`, `IFBLANK`), the engine checks the necessary size first. If the size is more than the budget, the engine gives an error before it allocates memory.
 A fused formula ([Engine](engine.md)) does not make intermediate results. Thus, the engine counts only the size of the result array against the budget, before it allocates the array.
 The engine does not fuse a formula if the intermediate results that the evaluation of one operation at a time must make are more than the budget. It evaluates one operation at a time and gives an error as above.
