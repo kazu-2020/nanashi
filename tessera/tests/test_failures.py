@@ -138,7 +138,7 @@ class MemoryBudget(unittest.TestCase):
 
     def test_split_budget_gives_the_same_results(self):
         from .test_redefine import run_random
-        # the stored data of seed 59 is at most 5.4 KiB
+        # the stored data of seed 59 is at most 5.2 KiB, so the room is about 64 KiB
         run_random(self, seed=59, rounds=60,
                    engines=[ReferenceEngine, lambda: RustEngine(max_bytes=70 << 10, par_min=0, widen_min_rows=0)])
 
