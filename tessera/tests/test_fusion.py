@@ -136,10 +136,11 @@ def run(test: unittest.TestCase, seed: int, rounds: int, configs: list[dict]) ->
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class FusionMatchesReference(unittest.TestCase):
     def test_random(self):
-        # compact_min=0 は書き込みのたびに差分を本体へまとめ直すので、入力が差分のない格納データになり、
-        # 融合の経路を通る（既定では、入力を変えると差分が残り、融合せずに演算ごとに評価する）
+        # With the default compact_min, an edit leaves a delta, so fusion reads the merge of the base and the delta.
+        # compact_min=0 merges the delta into the base when it has more than 1/8 of the base rows, so fusion reads both kinds.
         run(self, seed=61, rounds=60, configs=[
             {"fuse": False},
+            {"fuse": True},
             {"fuse": True, "compact_min": 0},
             {"fuse": True, "compact_min": 0, "par_min": 0, "chunk": 5},  # 並列の走査と、区間ごとの結果の詰め直し
             {"fuse": True, "compact_min": 0, "par_min": 0, "chunk": 3, "dense_always": True},  # 全組み合わせの配列への集計

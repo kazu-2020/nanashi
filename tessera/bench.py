@@ -179,10 +179,24 @@ def run(engine_name: str, size: str, repeats: int) -> dict:
     first_edit, timings = time_edits(m, EDITS, repeats)
     edits = {label: t for label, (t, _) in timings.items()}
 
+    # Full recalculation while the inputs have a delta (the usual state of a model after edits).
+    # The edits above and these two edits leave a delta in Volume, Price, Cost and Target.
+    m.set_cell("Volume", 5.0, Product="p00009", Store="s0005", Month="m07")
+    m.set_cell("Price", 50.0, Product="p00009")
+    if engine_name == "rust":
+        nanashi_core.reset_heap_peak()
+        before = nanashi_core.heap()[0]
+    t0 = time.perf_counter()
+    m.refresh()
+    full_after_edit = time.perf_counter() - t0
+    if engine_name == "rust":
+        heap["after_edit_increase_mb"] = (nanashi_core.heap()[1] - before) / 1e6
+    total_after_edit = m.value("Total").cells.get(())  # makes sure that this recalculation gives the same result on each side
+
     # ru_maxrss is in bytes on macOS and in KiB on Linux.
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10)
     return {"engine": engine_name, "size": size, "load": load, "full": full, "edits": edits,
-            "first_edit": first_edit, "heap": heap,
+            "first_edit": first_edit, "full_after_edit": full_after_edit, "total_after_edit": total_after_edit, "heap": heap,
             "cells": cells, "total": total_value, "peak_mb": peak,
             "layout": dict(m.layout), "delta_metrics": sorted(m._delta)}
 
