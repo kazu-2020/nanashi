@@ -221,23 +221,14 @@ pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Cat
     Ok(aggregate_rows(rows, out, aggs, cat, r, None, move |xp, out, k| Some(proj.apply(xp, out, k))))
 }
 
-/// key gives the group key (packed as out) from (row packing, out, row key). digit is for dense_groups: give it
-/// if the first dimension of out is mapped from the first dimension of the rows (BY). r is the range of the result.
+/// key gives the group key (packed as out) from (row packing, out, row key). digit: see dense_groups. r is the
+/// range of the result.
 /// The array path is 2 to 3 times faster than the hash map (docs/performance.md), but it ignores r. Thus if r
 /// narrows the groups, or with stream_always, the hash map goes first.
 pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catalog, r: &Restrict, digit: Option<&[i64]>, key: impl Fn(&Packing, &Packing, u64) -> Option<u64> + Sync) -> Vec<Cube> {
     let cfg = &cat.cfg;
     let xp = rows.pack();
     let k = |x| key(xp, &out, x);
-    // If out keeps the first dimension of the rows, each member is its own group digit
-    let identity: Vec<i64>;
-    let digit = match digit {
-        None if out.dims.first().is_some_and(|d| xp.dims.first() == Some(d)) => {
-            identity = (0..cat.dims[out.dims[0]].size as i64).collect();
-            Some(&identity[..])
-        }
-        d => d,
-    };
     let groups = combos_in(&out.dims, cat, r);
     let dense_first = dense_first(cat, &out.dims, r);
     if dense_first {
@@ -332,14 +323,11 @@ const DENSE_MAX: usize = 1 << 26;
 
 /// Add the rows into an array of all the group combinations (all members of each dimension of out). key gives
 /// the group key (packed as out) of a row key. digit gives, for each member of the first dimension of the rows,
-/// its member of the first dimension of out (or -1 for no group), if the first dimension of out comes from the
-/// first dimension of the rows. Then the rows of a group are in the runs of the rows of these members (the rows
-/// are in key order), and the work divides the groups over the threads: each thread reads the runs of its
-/// groups into its own part of the array, and there is no merge. Without digit, the work divides the rows over
-/// the threads. Each thread has its own array, and the parts merge in order at the end. If the arrays are
-/// larger than the (group, value) pairs (16 B a row) of the sort path, returns None. For MIN, MAX or COUNT
-/// alone, the limit is half of the pairs. Gives one Cube for each of aggs (Min, Max and First only alone), in
-/// key order.
+/// its member of the first dimension of out (or -1 for no group). Without digit, if out keeps the first
+/// dimension of the rows, each member is its own digit. With digit, if the rows are in the order of the first
+/// dimension, each thread aggregates whole groups and there is no merge (docs/engine.md). Returns None if the
+/// arrays are larger than the (group, value) pairs (16 B a row) of the sort path, or half of the pairs for MIN,
+/// MAX or COUNT alone. Gives one Cube for each of aggs (Min, Max and First only alone), in key order.
 pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, aggs: &[Agg], digit: Option<&[i64]>, key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Vec<Cube>> {
     let d = Dense { cfg, rows, out, cat, aggs, digit, key };
     match aggs {
@@ -377,11 +365,26 @@ struct Dense<'a, K> {
 type Run = (usize, usize, usize);
 
 impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
-    /// The runs of the members with a group, in the order of the group digit. None without digit.
+    /// The runs of the members with a group, in the order of the group digit. None if the rows are not in the
+    /// order of their first dimension (an If appends the THEN cells, then the ELSE cells).
     fn runs(&self) -> Option<Vec<Run>> {
-        let digit = self.digit?;
         let (rows, xp, n) = (self.rows, self.rows.pack(), self.rows.len());
-        // The first dimension is the highest bits of the key, so its member number does not decrease along the rows
+        let identity: Vec<i64>;
+        let digit = match self.digit {
+            Some(d) => d,
+            None if self.out.dims.first().is_some_and(|d| xp.dims.first() == Some(d)) => {
+                identity = (0..self.cat.dims[self.out.dims[0]].size as i64).collect();
+                &identity
+            }
+            None => return None,
+        };
+        let member = |i: usize| xp.get(rows.get(i).0, 0);
+        let in_order = |i: usize| member(i - 1) <= member(i);
+        // The base of stored data is in key order
+        let ordered = matches!(rows, Rows::Store(_)) || if self.cfg.par(n) { (1..n).into_par_iter().all(in_order) } else { (1..n).all(in_order) };
+        if !ordered {
+            return None;
+        }
         let bound = |m: u32| {
             let (mut lo, mut hi) = (0, n);
             while lo < hi {
@@ -395,13 +398,14 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             lo
         };
         let starts: Vec<usize> = (0..=digit.len() as u32).map(bound).collect();
-        let mut members: Vec<usize> = (0..digit.len()).filter(|&m| digit[m] >= 0 && starts[m] < starts[m + 1]).collect();
+        // A digit outside out (a bad mapping) must not reach past the slots
+        let size = self.cat.dims[self.out.dims[0]].size as i64;
+        let mut members: Vec<usize> = (0..digit.len()).filter(|&m| (0..size).contains(&digit[m]) && starts[m] < starts[m + 1]).collect();
         members.sort_by_key(|&m| digit[m]);
         Some(members.iter().map(|&m| (starts[m], starts[m + 1], digit[m] as usize)).collect())
     }
 
-    /// Each slot holds a T and a count (u32). If the arrays are larger than the rows (row_bytes a row), returns
-    /// None.
+    /// If the arrays are larger than the rows (row_bytes a row), returns None.
     fn fold<T: Clone + Send + Sync>(
         &self,
         init: T,
@@ -423,7 +427,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         let runs = self.runs();
         // group key -> array index (the first dimension is the highest digit, so the index order is the key order)
         let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
-        // The count is in the slot, next to the value. base is the slot of the first entry of the array
+        // base is the slot index of vals[0]
         let fill = |base: usize, len: usize, ranges: &[(usize, usize)]| {
             let mut vals = vec![(init.clone(), 0u32); len];
             for &(lo, hi) in ranges {
@@ -440,11 +444,11 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         };
         let emit = |base: usize, vals: &[(T, u32)]| {
             let mut cells = vec![Vec::new(); self.aggs.len()];
-            for (j, (val, cnt)) in vals.iter().enumerate() {
+            for (s, (val, cnt)) in vals.iter().enumerate() {
                 if *cnt == 0 {
                     continue;
                 }
-                let (mut rest, mut k) = (base + j, 0u64);
+                let (mut rest, mut k) = (base + s, 0u64);
                 for j in (0..sizes.len()).rev() {
                     k |= out.put(j, (rest % sizes[j]) as u32);
                     rest /= sizes[j];
@@ -458,7 +462,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 let block = slots / sizes[0];
                 let groups = split_runs(&runs, parts);
                 let part = |rs: &[Run]| {
-                    let (lo, hi) = (rs[0].2 * block, (rs[rs.len() - 1].2 + 1) * block);
+                    let (lo, hi) = (rs[0].2 * block, (rs.last().unwrap().2 + 1) * block);
                     let ranges: Vec<(usize, usize)> = rs.iter().map(|&(lo, hi, _)| (lo, hi)).collect();
                     emit(lo, &fill(lo, hi - lo, &ranges))
                 };
@@ -519,13 +523,31 @@ mod tests {
 
     #[test]
     fn split_runs_ends_a_group_only_where_the_digit_changes() {
-        // (first row, end, digit): 2 members of digit 0 with 10 rows, then 1 row each of digits 1, 2, 3
+        // 2 members of digit 0 with 10 rows, then 1 row each of digits 1, 2, 3
         let runs = [(0, 5, 0), (5, 10, 0), (10, 11, 1), (11, 12, 2), (12, 13, 3)];
         let groups: Vec<Vec<Run>> = split_runs(&runs, 4).into_iter().map(|g| g.to_vec()).collect();
         assert_eq!(groups, [vec![(0, 5, 0), (5, 10, 0)], vec![(10, 11, 1)], vec![(11, 12, 2)], vec![(12, 13, 3)]]);
         assert_eq!(split_runs(&runs, 1), [&runs[..]]);
         assert_eq!(split_runs(&runs[..2], 4), [&runs[..2]], "one digit is one group");
         assert!(split_runs(&[], 4).is_empty());
+    }
+
+    #[test]
+    fn dense_groups_reads_runs_only_from_rows_in_key_order() {
+        // Without fuse, If appends the THEN cells (d0 = 3), then the ELSE cells (d0 = 0, 1, 2)
+        let dims = (0..2).map(|i| DimInfo { size: 4, ordered: false, name: format!("d{i}") }).collect();
+        let mut cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        cat.cfg.dense_always = true;
+        cat.cfg.fuse = false;
+        let pack = Packing::new(&[0, 1], &cat).unwrap();
+        let cells = (0..4).map(|m| (pack.put(0, m) | pack.put(1, 0), [1.0, 2.0, 3.0, 30.0][m as usize])).collect();
+        let src = vec![Src::Cube(Arc::new(Cube { pack, kind: Kind::Num, cells }))];
+        let cond = Node::Bin(Op::Gt, Box::new(Node::Ref(0)), Box::new(Node::Const(5.0, Kind::Num)), vec![]);
+        let branch = Node::If(Box::new(cond), Box::new(Node::Ref(0)), Some(Box::new(Node::Ref(0))), vec![]);
+        let node = Node::Remove { child: Box::new(branch), dim: 1, agg: Agg::Sum };
+        let got = eval_with(&node, &cat, &src, &Restrict::all(2), &Budget::new(1 << 30)).unwrap();
+        let out = Packing::new(&[0], &cat).unwrap();
+        assert_eq!(got.cells, [(out.put(0, 0), 1.0), (out.put(0, 1), 2.0), (out.put(0, 2), 3.0), (out.put(0, 3), 30.0)]);
     }
 
     #[test]

@@ -315,7 +315,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
             let out = Packing::new(&dims, cat)?;
             let (ps, pd) = (rows.pack().pos(*s).unwrap(), out.pos(*dst).unwrap());
             let rest = Proj::new(rows.pack(), &out);
-            // If the source dimension is the first (the rows are in its order), the array path reads its runs
+            // Only the first dimension follows the row order, so only then can the array path read runs
             let digit = (ps == 0).then_some(&mp.fwd[..]);
             Ok(aggregate_rows(rows, out, aggs, cat, r, digit, move |xp, out, k| {
                 let t = mp.fwd[xp.get(k, ps) as usize];
