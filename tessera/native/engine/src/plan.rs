@@ -485,17 +485,16 @@ struct Done {
     old: Option<Old>,     // the value before the write (if it is the source of a downstream incremental aggregation)
 }
 
-/// The value of a region before the write.
 enum Old {
-    Shared(Arc<Store>), // the store that a whole-region recompute replaces; held counts it already
-    Slice(Src),         // a copy of the region
+    Shared(Arc<Store>), // the store that the write replaces; held counts it already
+    Slice(Arc<Store>),
 }
 
 impl Done {
     fn bytes(&self) -> usize {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
         let old = match &self.old {
-            Some(Old::Slice(s)) => held([s]),
+            Some(Old::Slice(s)) => s.memory().bytes(),
             Some(Old::Shared(_)) | None => 0,
         };
         writes.saturating_add(old)
@@ -692,8 +691,8 @@ impl<'a> Run<'a> {
         eval_sums(&f.node, self.cat, &self.srcs(f, work), r, b)
     }
 
-    fn slice(&self, m: usize, r: &Reg) -> Src {
-        Src::Store(Arc::new(self.stores[m].slice(&r.restrict(self.cat))))
+    fn slice(&self, m: usize, r: &Reg) -> Arc<Store> {
+        Arc::new(self.stores[m].slice(&r.restrict(self.cat)))
     }
 
     /// 段の 1 つの Metric について、計算し直す範囲と方法を決める。計算し直さなくてよければ None。
@@ -718,8 +717,6 @@ impl<'a> Run<'a> {
     fn compute(&self, t: &Task, room: usize, held: usize) -> Result<Done> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[t.m];
-        // If it is a source, keep the value before the write for the downstream incremental aggregation.
-        // If the task calculates the whole region again, use the store that it replaces (no copy).
         let old = metric.source.then(|| {
             if t.region.is_all() {
                 Old::Shared(self.stores[t.m].clone())
@@ -785,10 +782,8 @@ impl<'a> Run<'a> {
                 None => {}
             }
         }
-        match old {
-            Some(Old::Shared(a)) => self.olds[m] = Some(Src::Store(a)),
-            Some(Old::Slice(s)) => self.olds[m] = Some(s),
-            None => {}
+        if let Some(Old::Shared(s) | Old::Slice(s)) = old {
+            self.olds[m] = Some(Src::Store(s));
         }
         self.log.push((m, delta, region));
         if let Some(sets) = sets {
@@ -913,7 +908,7 @@ impl<'a> Run<'a> {
         let active: Vec<(usize, Reg)> = names.iter().filter_map(|&n| self.regions[n].clone().map(|r| (n, r))).collect();
         for (n, r) in &active {
             if self.plan.metrics[*n].source {
-                let old = if r.is_all() { Src::Store(self.stores[*n].clone()) } else { self.slice(*n, r) };
+                let old = if r.is_all() { Src::Store(self.stores[*n].clone()) } else { Src::Store(self.slice(*n, r)) };
                 self.olds[*n] = Some(old);
             }
             if r.is_all() {
@@ -994,11 +989,11 @@ mod tests {
         let dims = vec![crate::DimInfo { size: 10, ordered: false, name: "d0".into() }];
         let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config::default() };
         let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
-        let slice = Src::Store(store.clone());
         let done = |old| Done { m: 0, region: Reg::new(vec![]), delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old) };
-        assert_eq!(done(Old::Shared(store)).bytes(), 0);
-        assert_eq!(done(Old::Slice(slice.clone())).bytes(), held([&slice]));
-        assert!(held([&slice]) > 0);
+        let bytes = store.memory().bytes();
+        assert!(bytes > 0);
+        assert_eq!(done(Old::Shared(store.clone())).bytes(), 0);
+        assert_eq!(done(Old::Slice(store)).bytes(), bytes);
     }
 
     #[test]

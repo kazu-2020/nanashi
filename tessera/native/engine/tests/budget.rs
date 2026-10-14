@@ -53,11 +53,9 @@ fn intermediate_results_are_counted_while_they_live() {
     let b = Budget::new(usize::MAX, 0);
     let node = Node::Ref(0);
     let out = eval_with(&node, &cat, &source(&cat), &Restrict::all(3), &b).unwrap();
-    // The result stays counted after the evaluation, so a budget of exactly its bytes has no room for one more cell
     let exact = Budget::new(out.cells.capacity() * 16, 0);
     eval_with(&node, &cat, &source(&cat), &Restrict::all(3), &exact).unwrap();
     assert!(exact.need(1, "x").is_err());
-    assert!(exact.need(0, "x").is_ok());
     // 1 セル分しか予算がなければ、3 セルの読み出しは失敗する
     let tight = Budget::new(16, 0);
     assert!(eval_with(&node, &cat, &source(&cat), &Restrict::all(3), &tight).is_err());

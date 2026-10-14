@@ -14,8 +14,6 @@ pub struct Budget {
     used: Cell<usize>,
 }
 
-/// A count of the intermediate results that Budget::mark gives.
-#[derive(Clone, Copy)]
 pub(crate) struct Mark(usize);
 
 impl Budget {
@@ -28,7 +26,6 @@ impl Budget {
         Budget::new(held.saturating_add(room), held)
     }
 
-    /// The count of the intermediate results now. Give it to settle when the node ends.
     pub(crate) fn mark(&self) -> Mark {
         Mark(self.used.get())
     }
@@ -42,8 +39,8 @@ impl Budget {
         Ok(())
     }
 
-    /// The evaluation of a node ended. Reset the count to start (this drops the child results counted after it),
-    /// and count the node result out.
+    /// The evaluation of a node ended. Set the used bytes back to start (this drops the child results counted
+    /// after it), and count the node result out.
     pub(crate) fn settle(&self, start: Mark, out: &Cube) -> Result<()> {
         let bytes = out.cells.capacity().saturating_mul(CELL_BYTES);
         self.used.set(start.0.saturating_add(bytes));

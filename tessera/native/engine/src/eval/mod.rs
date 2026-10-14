@@ -87,7 +87,7 @@ pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cub
     eval_with(node, cat, src, r, &Budget::new(cat.cfg.max_bytes, held(src)))
 }
 
-/// 予算 b のもとで式を評価する（並列に評価するときは、式ごとに予算を分けて渡す）。
+/// Evaluate a formula in the budget b. If formulas evaluate in parallel, give each formula its own budget.
 pub fn eval_with(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
     let mark = b.mark();
     let out = node_value(node, cat, src, r, b)?;
