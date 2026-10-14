@@ -196,6 +196,27 @@ We measured a full recalculation after the edits of `bench.py`, when Volume, Pri
 The heap decrease is the same in each run. The time ranges overlap, so the time difference is inside the noise of this VM.
 Most of the time after the edit is the write-back and the aggregations, not `Volume * Price`. The maximum heap is now lower than for the first full recalculation (1,194 MB).
 
+### Aggregation into an array before the hash map
+
+Before, the engine tried the hash map path first and the array path second. In the retail model, `StoreRev = Revenue[REMOVE SUM: Product]` has 36,000 targets, which is few for 17.56 million rows, so it used the hash map. The array for 36,000 targets is 1 MB a thread. Now the engine tries the array first ([Engine](engine.md)).
+We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.80 GHz) with `bench_ab.py`, retail xlarge, median of 5 alternating runs, minimum–maximum in parentheses. The result `Total` is bit-identical on both sides, because both paths use the exact sum.
+
+| Measurement | Before | After |
+|---|---|---|
+| Full recalculation | 1,790 ms (1,718–2,359) | 1,709 ms (1,541–2,427) |
+| Full recalculation after the edits | 3,083 ms (2,780–3,443) | 2,968 ms (2,838–3,221) |
+| Maximum increase of the heap | 1,194 MB | 1,194 MB |
+
+The ranges of the full recalculation overlap, so the change is inside the noise of this VM. The evaluation of one Metric shows the change (median of 5 evaluations after a full recalculation, 2 runs for each side with 4 threads, 1 run with 1 thread):
+
+| Formula | Path before → after | 4 threads, before | 4 threads, after | 1 thread, before | 1 thread, after |
+|---|---|---|---|---|---|
+| `Revenue[REMOVE SUM: Product]` (36 thousand targets) | hash map → array | 255–278 ms | 87–110 ms | 597 ms | 320 ms |
+| `Revenue[REMOVE SUM: Store]` (360 thousand targets) | array (1 thread: hash map → array) | 99–114 ms | 85–102 ms | 578 ms | 270 ms |
+| `Revenue[BY SUM: Product.Category]` (1.8 million targets) | array | 578–580 ms | 564–566 ms | 1,473 ms | 1,537 ms |
+
+With 1 thread, the full recalculation went from 6,550 ms to 6,001 ms (1 run each). The hash map path was 22% of the 1-thread time before the change (callgrind, `fold_groups` 33% of the instructions), so this is the upper limit of the gain.
+
 RSS is larger than the Rust heap because the standard macOS allocator keeps large released blocks for reuse (MALLOC_LARGE (empty) in `vmmap`).
 In the version from before the engine aggregated while it read, RSS increased with each recalculation (1,919 MB the first time, 2,559 MB the fourth time).
 When we started the process with the environment variable `MallocLargeCache=0`, RSS stopped at 791–812 MB. The recalculation time did not change.

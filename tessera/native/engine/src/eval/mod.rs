@@ -314,16 +314,6 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
             let rows = rows_of(child, cat, src, &sub, bud)?;
             let dims = replace_dim(&rows.pack().dims, *s, *dst);
             let out = Packing::new(&dims, cat)?;
-            if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
-                let xp = rows.pack();
-                let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
-                let rest = Proj::new(xp, &out);
-                let groups = fold_groups(cfg, &rows, |k| {
-                    let t = mp.fwd[xp.get(k, ps) as usize];
-                    (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
-                });
-                return Ok(finish_groups(groups, out, aggs));
-            }
             let xp = rows.pack();
             let (ps, pd) = (xp.pos(*s).unwrap(), out.pos(*dst).unwrap());
             let rest = Proj::new(xp, &out);
@@ -331,8 +321,14 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                 let t = mp.fwd[xp.get(k, ps) as usize];
                 (t >= 0).then(|| rest.apply(xp, &out, k) | out.put(pd, t as u32))
             };
-            if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, target) {
-                return Ok(c);
+            if !cfg.stream_always {
+                if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, target) {
+                    return Ok(c);
+                }
+            }
+            if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
+                let groups = fold_groups(cfg, &rows, target);
+                return Ok(finish_groups(groups, out, aggs));
             }
             // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
             let pairs = collect_rows(cfg, rows.len(), |i| {

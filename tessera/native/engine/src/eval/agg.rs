@@ -151,11 +151,12 @@ pub(crate) fn combos_in(dims: &[DimId], cat: &Catalog, r: &Restrict) -> f64 {
     dims.iter().fold(1.0, |n, &d| n * r.get(d).map_or(cat.dims[d].size as usize, |s| s.members.len()) as f64)
 }
 
-/// If the number of groups is this or less, read the source and add each value to its group, with no copy.
-/// Each thread keeps an intermediate value (about 64 B) for each group, and the threads merge them at the end.
-/// Thus the limit is 1/(16 x thread count) of the source rows. With more groups, the merge time and memory
-/// come near the cost to copy the source to (group, value) pairs and sort them. First is not used here,
-/// because the order of the rows has a meaning for it.
+/// If the number of groups is this or less, read the source and add each value to its group in a hash map, with
+/// no copy. Each thread keeps an intermediate value (about 64 B) for each group, and the threads merge them at
+/// the end. Thus the limit is 1/(16 x thread count) of the source rows. With more groups, the merge time and
+/// memory come near the cost to copy the source to (group, value) pairs and sort them. First is not used here,
+/// because the order of the rows has a meaning for it. The callers try `dense_groups` first (an array is 2 to 3
+/// times faster than the hash map, see docs/performance.md), and come here if the array does not fit.
 pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -> bool {
     if aggs.contains(&Agg::First) {
         return false;
@@ -218,15 +219,16 @@ pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Cat
     let cfg = &cat.cfg;
     let dims: Vec<DimId> = rows.pack().dims.iter().copied().filter(|d| !removed.contains(d)).collect();
     let out = Packing::new(&dims, cat)?;
-    if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
-        let proj = Proj::new(rows.pack(), &out);
-        let groups = fold_groups(cfg, &rows, |k| Some(proj.apply(rows.pack(), &out, k)));
-        return Ok(finish_groups(groups, out, aggs));
-    }
     let xp = rows.pack();
     let proj = Proj::new(xp, &out);
-    if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, |k| Some(proj.apply(xp, &out, k))) {
-        return Ok(c);
+    if !cfg.stream_always {
+        if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, |k| Some(proj.apply(xp, &out, k))) {
+            return Ok(c);
+        }
+    }
+    if few_groups(cfg, aggs, combos_in(&dims, cat, r), rows.len()) {
+        let groups = fold_groups(cfg, &rows, |k| Some(proj.apply(xp, &out, k)));
+        return Ok(finish_groups(groups, out, aggs));
     }
     // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
     let pairs = collect_rows(cfg, rows.len(), |i| {
