@@ -227,14 +227,13 @@ impl Store {
         self.delta.is_empty().then(|| self.base.keys.len())
     }
 
-    /// Row `i` of the base (only when `base_rows` is Some).
-    #[inline]
-    pub fn base_cell(&self, i: usize) -> (u64, f64) {
-        (self.base.keys.get(i), self.base.vals[i])
+    /// The base rows in order. It decodes the keys one block at a time.
+    pub(crate) fn base_iter(&self) -> impl Iterator<Item = (u64, f64)> + '_ {
+        self.base.keys.iter().zip(self.base.vals.iter().copied())
     }
 
     /// Gives the base rows in `r` in order. It decodes the keys one block at a time, so it is much
-    /// faster than `base_cell` for each row.
+    /// faster than `PackedKeys::get` for each row.
     pub(crate) fn base_range(&self, r: Range<usize>, mut f: impl FnMut(u64, f64)) {
         let mut buf = [0u64; BLOCK];
         let mut i = r.start;
