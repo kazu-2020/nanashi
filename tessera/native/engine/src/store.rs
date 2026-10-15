@@ -350,8 +350,11 @@ impl Store {
         (min_rows == 0 || cand * 4 < n).then_some((sel, post))
     }
 
-    /// r の範囲の行だけを持つ Store（同じ軸と分割軸）。
+    /// A Store with only the rows in r (the same dimensions and partition dimension).
     pub fn slice(&self, r: &Restrict) -> Store {
+        if r.is_all() {
+            return self.clone(); // O(1): the base and the delta are shared
+        }
         let mut out = self.empty_like();
         out.set_sorted(self.read(r).cells);
         out
@@ -569,24 +572,45 @@ impl Store {
         self.value_at(self.encode(key))
     }
 
-    /// r の範囲の行を、宣言した軸の順に各軸のメンバーの並び順で並べ、offset 件目から limit 件だけ返す
-    /// （軸ごとのメンバー番号の列、値の列、範囲の全行数）。ranks は宣言した軸ごとの「番号 -> 並び順の
-    /// 位置」の表で、None の軸は番号の順に並ぶ。どの軸も番号の順で、分割軸が宣言の先頭なら並べ直さずに済む。
+    /// Give the rows in r from row offset, and at most limit rows (the member number columns in the declared dimension
+    /// order, the values, and the number of rows in r). The rows sort by the declared dimensions, and in each dimension
+    /// by the member order. ranks gives the position of each member number for each declared dimension. A dimension
+    /// with None sorts by member number. If all dimensions sort by number and the partition dimension is first in the
+    /// declaration, the key order is the row order and the read does not sort.
     pub fn rows_in(&self, r: &Restrict, ranks: &[Option<Vec<u32>>], offset: usize, limit: Option<usize>) -> (Vec<Vec<u32>>, Vec<f64>, usize) {
-        let mut cells = Vec::new();
-        self.for_each_in(r, |k, v| cells.push((k, v)));
         let pos: Vec<usize> = self.metric_dims.iter().map(|d| self.pack.pos(*d).unwrap()).collect();
+        let want = limit.map_or(usize::MAX, |l| offset.saturating_add(l));
+        let (mut cells, mut total) = (Vec::new(), 0);
         if pos.windows(2).any(|w| w[0] > w[1]) || ranks.iter().any(Option::is_some) {
             let rank = |i: usize, m: u32| ranks.get(i).and_then(Option::as_ref).map_or(m, |t| t[m as usize]);
-            cells.sort_by_cached_key(|c| pos.iter().enumerate().map(|(i, &p)| rank(i, self.pack.get(c.0, p))).collect::<Vec<u32>>());
+            let order = |a: &(u64, f64), b: &(u64, f64)| {
+                pos.iter().enumerate().map(|(i, &p)| rank(i, self.pack.get(a.0, p)).cmp(&rank(i, self.pack.get(b.0, p)))).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal)
+            };
+            // Keep only the first `want` rows: a short page must not copy and sort the whole range
+            self.for_each_in(r, |k, v| {
+                total += 1;
+                if want > 0 {
+                    cells.push((k, v));
+                    if cells.len() == want.saturating_mul(2) {
+                        cells.select_nth_unstable_by(want - 1, order);
+                        cells.truncate(want);
+                    }
+                }
+            });
+            cells.sort_unstable_by(order);
+            cells.truncate(want);
+            cells.drain(..offset.min(cells.len()));
+        } else {
+            self.for_each_in(r, |k, v| {
+                if (offset..want).contains(&total) {
+                    cells.push((k, v));
+                }
+                total += 1;
+            });
         }
-        let total = cells.len();
-        let start = offset.min(total);
-        let end = limit.map_or(total, |l| start.saturating_add(l).min(total));
-        let page = &cells[start..end];
-        let mut cols = vec![Vec::with_capacity(page.len()); pos.len()];
-        let mut values = Vec::with_capacity(page.len());
-        for &(k, v) in page {
+        let mut cols = vec![Vec::with_capacity(cells.len()); pos.len()];
+        let mut values = Vec::with_capacity(cells.len());
+        for (k, v) in cells {
             for (c, &p) in cols.iter_mut().zip(&pos) {
                 c.push(self.pack.get(k, p));
             }
