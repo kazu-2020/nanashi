@@ -706,6 +706,9 @@ class Model:
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
+        if old is not None and not self._same_type(old, m):
+            # _apply_layout keeps a store with the wanted partition dimension, so drop the old shape here
+            self._values[id] = self.engine.empty(dims, kind, m.partition, cat=self)
         if overridable and m.override is None:
             if m.override_name not in self._metric_ids:  # a load reads the override values first
                 self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
