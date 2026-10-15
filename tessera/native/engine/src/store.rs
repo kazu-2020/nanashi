@@ -804,4 +804,15 @@ mod tests {
         assert_eq!(keys.as_ptr(), ptr);
         assert_eq!(keys, (0..1000).collect::<Vec<u64>>());
     }
+
+    #[test]
+    fn new_rejects_a_repeated_dimension() {
+        let dims = (0..2).map(|i| DimInfo { size: 4, ordered: false, name: format!("d{i}") }).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        for index in [None, Some(0)] {
+            let res = Store::new(&[0, 1, 0], index, Kind::Num, &cat);
+            assert!(res.is_err_and(|e| e.contains("同じ軸")));
+        }
+        assert!(Store::new(&[0, 1], Some(0), Kind::Num, &cat).is_ok());
+    }
 }
