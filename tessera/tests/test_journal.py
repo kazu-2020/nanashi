@@ -148,6 +148,15 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual(self.m.seq, 4)
         check_same_state(self, self.m, self.reopen())
 
+    def test_a_member_with_an_empty_name_replays(self):
+        """An old journal can hold a member named "" (the API accepted it before). A reopen must not refuse it."""
+        d = self.m.dimension("Product")
+        with self.m.transaction():
+            self.m.set_cell("Price", 12, Product="A")
+            d.add_member("")  # the internal path, as a replay uses it
+            self.m.model._member_added(d.id)
+        self.assertEqual(self.reopen().dimension("Product").members, d.members)
+
     def test_member_renames_replay(self):
         """A rename of a member in a formula, of a property target, and renames that change places."""
         m = self.m
