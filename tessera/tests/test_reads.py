@@ -79,6 +79,24 @@ class Reads:
         self.assertEqual(m.rows("Home", Employee="e4"), ([(("e4",), "Eng")], 1))
         self.assertEqual(m.rows("Flag", Product=["B"]), ([(("B",), False)], 1))
 
+    def test_pages_follow_a_custom_member_order(self):
+        m = Named(Model(engine=self.engine()))
+        m.add_dimension("P", ["p0", "p1", "p2", "p3"])
+        m.add_dimension("Q", ["q0", "q1", "q2"])
+        m.add_input("X", ["Q", "P"], {(q, p): float(10 * i + j) for i, q in enumerate(["q0", "q1", "q2"])
+                                      for j, p in enumerate(["p0", "p1", "p2", "p3"]) if (i + j) % 3})
+        m.move_member("P", "p3", 0)
+        m.move_member("Q", "q2", 0)
+        whole = [(("q2", "p3"), 23.0), (("q2", "p0"), 20.0), (("q2", "p2"), 22.0),
+                 (("q0", "p1"), 1.0), (("q0", "p2"), 2.0),
+                 (("q1", "p3"), 13.0), (("q1", "p0"), 10.0), (("q1", "p1"), 11.0)]
+        self.assertEqual(m.rows("X"), (whole, 8))
+        for offset in range(10):
+            for limit in range(10):
+                self.assertEqual(m.rows("X", offset=offset, limit=limit), (whole[offset:offset + limit], 8),
+                                 (offset, limit))
+        self.assertEqual(m.rows("X", offset=1, limit=2, P=["p0", "p3"]), ([(("q2", "p0"), 20.0), (("q1", "p3"), 13.0)], 4))
+
     def test_summarize_matches_reference_aggregation(self):
         m = self.m
         for name in ["Revenue", "Margin", "Volume", "RevByCat"]:
@@ -113,6 +131,24 @@ class ReferenceReads(Reads, unittest.TestCase):
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class RustReads(Reads, unittest.TestCase):
     engine = staticmethod(RustEngine)
+
+    def test_a_short_page_does_not_copy_the_range(self):
+        import nanashi_core
+        m = Named(Model(engine=self.engine()))
+        m.add_dimension("A", [f"a{i}" for i in range(400)])
+        m.add_dimension("B", [f"b{i}" for i in range(500)])
+        m.add_input("X", ["A", "B"], {(f"a{i}", f"b{j}"): 1.0 for i in range(400) for j in range(500)})
+        m.move_member("B", "b499", 0)
+        m.recalc()
+        for offset in [0, 100]:
+            nanashi_core.reset_heap_peak()
+            before = nanashi_core.heap()[0]
+            self.assertEqual(m.rows("X", offset=offset, limit=1), ([(("a0", f"b{offset - 1 if offset else 499}"), 1.0)], 200_000))
+            self.assertLess(nanashi_core.heap()[1] - before, 64 << 10)  # the range is 200,000 cells (3.2 MB as key and value)
+        nanashi_core.reset_heap_peak()
+        before = nanashi_core.heap()[0]
+        self.assertEqual(m.summarize("X").cells, {(): 200_000.0})
+        self.assertLess(nanashi_core.heap()[1] - before, 64 << 10)
 
 
 class VersionView(unittest.TestCase):
