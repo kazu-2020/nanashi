@@ -176,8 +176,9 @@ class PgJournal(Journal):
         self.endpoint = endpoint
         self.objects = open_objects(objects)
         self.bulk_cells = bulk_cells
-        # 接続はスレッドをまたいで使われうる（ライターと読み出し）。トランザクションの途中に別の文が
-        # 割り込まないよう、接続を使う処理はロックで順に並べる。後からの反映は別の接続で行う
+        # More than one thread uses the connection (the writer, the heartbeat, the watcher, the readers).
+        # The lock puts the statements in sequence, so that no statement interrupts a transaction.
+        # The lock also covers the reconnect in conn. index_pending uses a separate connection
         self._lock = threading.RLock()
         self._index_conn = None
         self._index_lock = threading.Lock()
@@ -193,10 +194,10 @@ class PgJournal(Journal):
         self.lease_error: BaseException | None = None  # 最後に延長できなかった理由（延長できたら None）
         # Put a group of statements in transaction(). prepare_threshold=None: in transaction pooling mode,
         # PgBouncer can send a statement to a server connection that does not have the prepared statement.
-        self.conn = psycopg.connect(dsn, autocommit=True, prepare_threshold=None)
+        self._conn = psycopg.connect(dsn, autocommit=True, prepare_threshold=None)
         version = schema_version(self.conn)
         if version != SCHEMA_VERSION:
-            self.conn.close()
+            self._conn.close()
             raise SchemaError(f"データベースのスキーマの版が {version} で、このプログラムは {SCHEMA_VERSION} を使う。"
                               f"python -m sparse_engine.pg_journal migrate <DSN> で最新にする")
         self.conn.execute("insert into nanashi_model (model_id) values (%s) on conflict do nothing", (model_id,))
@@ -208,23 +209,35 @@ class PgJournal(Journal):
             self._heartbeat = threading.Thread(target=self._beat, name="nanashi-lease", daemon=True)
             self._heartbeat.start()
 
+    @property
+    def conn(self):
+        """The connection. If the server closed it (a restart, an idle kill), connect again. The lease is in
+        the table, not in the session, so the next commit and heartbeat still check the epoch and the holder."""
+        if self._conn.closed:
+            self._conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
+        return self._conn
+
+    @conn.setter
+    def conn(self, value) -> None:
+        self._conn = value
+
     def close(self) -> None:
-        """リースを手放してから閉じる（次に書くプロセスが期限を待たずに済む）。"""
+        """Release the lease, then close (the next writer does not wait for the expiry)."""
         self._stop.set()
         if self._heartbeat is not None:
             self._heartbeat.join()
         try:
             self.release()
         finally:
-            self.conn.close()
+            self._conn.close()
             if self._index_conn is not None:
                 self._index_conn.close()
 
     def release(self) -> None:
         """Release the lease if this process has it. A standby in wait sees the release at its next poll,
-        so it does not wait for lease_ttl."""
+        so it does not wait for lease_ttl. If the connection is closed, do not connect again for it."""
         with self._lock:
-            if self.epoch is None or self.conn.closed:
+            if self.epoch is None or self._conn.closed:
                 return
             self.conn.execute("update nanashi_model set lease_expires = now()"
                               " where model_id = %s and writer_epoch = %s and lease_holder = %s",
@@ -361,9 +374,10 @@ class PgJournal(Journal):
             self.lease_error = e
 
     def lease(self) -> dict:
-        """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
+        """The state of the write right: held (the lease is taken and not expired), the seconds left, and the
+        last reason the heartbeat could not extend it."""
         left = None if self.lease_until is None else self.lease_until - time.monotonic()
-        return {"held": self.epoch is not None, "expires_in": left,
+        return {"held": self.epoch is not None and left is not None and left > 0, "expires_in": left,
                 "error": None if self.lease_error is None else repr(self.lease_error)}
 
     # ------------------------------------------------ 記録
@@ -424,7 +438,7 @@ class PgJournal(Journal):
         connection, so that writes do not stop. Return the number of journal entries that it wrote.
         If many processes call it at the same time, each entry is written 1 time."""
         with self._index_lock:
-            if self._index_conn is None:
+            if self._index_conn is None or self._index_conn.closed:
                 self._index_conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
             return self._index_entries(self._index_conn)
 
