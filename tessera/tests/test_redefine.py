@@ -227,6 +227,15 @@ class Redefine(unittest.TestCase):
         self.assertEqual(m.get("Plus1", Product="A"), 11)
         check_full(self, m)
 
+    def test_formula_dims_change_with_same_partition(self):
+        self.m.add_formula("Plus1", ["Product", "Month"], "Cost + 10", partition="Product", id=self.m.metric("Plus1").id)
+        self.m.recalc()
+        self.assertEqual(self.m.get("Plus1", Product="A", Month="Jan"), 17)
+        self.m.add_formula("Plus1", ["Product"], "Price + 1", partition="Product", id=self.m.metric("Plus1").id)
+        self.m.recalc()
+        self.assertEqual(self.m.get("Plus1", Product="B"), 21)
+        check_full(self, self.m)
+
     def test_fork_is_independent(self):
         before = snapshot(self.m)
         fork = self.m.fork()

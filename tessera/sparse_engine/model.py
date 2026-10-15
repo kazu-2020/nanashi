@@ -724,6 +724,9 @@ class Model:
                                            and (old is None or self._same_type(old, m))):
             # The dimensions or kind changed, so this removes all overrides
             self._add_input(m.override_name, dims, kind=kind, partition=m.partition, id=m.override)
+        if old is not None and not self._same_type(old, m):
+            # _apply_layout compares only the partition dimension, so a store with the old dims or kind stays
+            self._values[id] = self.engine.empty(dims, kind, m.partition, cat=self)
         if overridable and m.override is None:
             m.override = self._add_input(m.override_name, dims, kind=kind, partition=m.partition)
         self._redefine(id, old)
