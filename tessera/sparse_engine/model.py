@@ -176,8 +176,8 @@ class _CellCounts(dict):
     def __missing__(self, name: str) -> float:
         if name in self.known:
             n = self.known[name]
-        else:
-            n = float(self.model.engine.size_hint(self.model._values[name]))
+        else:  # an empty input counts as 1 cell: it gets values later, and a write does not estimate again
+            n = float(max(1, self.model.engine.size_hint(self.model._values[name])))
         self[name] = n
         return n
 
@@ -863,10 +863,13 @@ class Model:
                 index = [self.dimension(d)._by_id for d in m.dims]
                 picks = [sorted(ix[x] for x in region[d]) if d in region else range(len(ix))
                          for d, ix in zip(m.dims, index)]
-                combos = list(itertools.product(*picks))
-                if not combos:
+                n = math.prod(len(p) for p in picks)
+                if n == 0:
                     raise ValueError(f"{name}: 按分先のセルがない")
-                cols, n = [list(c) for c in zip(*combos)], len(combos)
+                if self.max_cells is not None and n > self.max_cells:  # count before the combinations exist
+                    raise ValueError(f"{name}: 按分先のセル数 {n:,} が上限 {self.max_cells:,} を超える。"
+                                     "coords か where で範囲を絞るか、Model(max_cells=...) で上限を変える")
+                cols = [list(c) for c in zip(*itertools.product(*picks))]
             new = [float(total / n)] * n
         self._write_many(m.id, cols, new)
         return len(new)
