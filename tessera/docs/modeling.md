@@ -100,6 +100,9 @@ m.add_formula("Bonus", ["Employee"], "Salary * 0.1", overridable=True)
 m.set_cell("Bonus", 8, Employee="alice")   # Manual input for alice only
 ```
 
+If you define the Metric again with the same dimensions and kind, the overrides stay.
+If the dimensions or the kind change, the engine removes all overrides of the Metric, as it removes the cells of a changed input.
+
 `spread` sends a total value to a range of an input Metric.
 You specify the range with members of dimensions and with filters of the form "dimension.property".
 By default, `spread` uses the ratios of the current values. If there are no values, it spreads evenly. With `how="even"`, it always spreads evenly.

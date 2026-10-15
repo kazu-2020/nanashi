@@ -140,6 +140,19 @@ class Journal(JournalCase, unittest.TestCase):
         if self.store is not FileStore:
             self.skipTest("ファイルの記録先の形式を調べるテスト")
 
+    def test_replay_of_an_override_shape_change(self):
+        """A replay gives the same overrides as the model after the dimensions of an overridable Metric change."""
+        m = self.m
+        plus1 = m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=m.metric("Plus1").id)
+        m.set_cell("Plus1", 50, Product="A")
+        m.add_formula("Plus1", ["Product", "Month"], "Cost + 10", overridable=True, id=plus1)
+        m.set_cell("Plus1", 60, Product="A", Month="Feb")
+        m.recalc()
+        loaded = self.reopen()
+        check_same_state(self, m, loaded)
+        self.assertEqual(loaded.get("Plus1", Product="A", Month="Feb"), 60)
+        self.assertEqual(loaded.get("Plus1", Product="A", Month="Jan"), 17)
+
     def test_each_call_is_recorded(self):
         self.m.set_cell("Price", 12, Product="A")
         self.m.add_member("Product", "E", Category="Y")

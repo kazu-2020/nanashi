@@ -706,6 +706,9 @@ class Model:
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
+        if m.override is not None and not self._same_type(self.metrics[m.override], m):
+            # The old overrides do not fit the new shape: they go, as the cells of a redefined input go
+            self.add_input(m.override_name, dims, kind=kind, partition=m.partition, id=m.override)
         if overridable and m.override is None:
             if m.override_name not in self._metric_ids:  # a load reads the override values first
                 self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
