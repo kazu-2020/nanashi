@@ -536,13 +536,14 @@ class PgJournal(Journal):
         return [(seq, Snapshot(uri, meta["files"])) for seq, uri, meta in rows]
 
     def prune(self, keep: int = 2, op_window: int = 100_000) -> dict:
-        """Keep the keep newest snapshots (keep >= 1) and delete the older snapshots. Also delete the files of
-        large changes of the records before the oldest kept snapshot. The cell history table gets them first, so
+        """Keep the `keep` newest snapshots and delete the older snapshots. Also delete the files of large
+        changes of the records before the oldest kept snapshot. The cell history table gets them first, so
         replay and the cell history read that table. Forget the client_op_ids of the records before the last
-        op_window entries. This sets the range where a resend does not commit two times. Return the counts."""
+        op_window records. This sets the range where a resend does not commit two times. Return the counts.
+        Raise ValueError if keep is less than 1."""
         if keep < 1:
             raise ValueError(f"keep は 1 以上（{keep}）。スナップショットがなくなると開けない")
-        self.index_pending()  # 消すファイルの分は、先にセルの履歴に反映しておく
+        self.index_pending()
         out = {"snapshots": 0, "cells": 0, "client_op_ids": 0}
         snaps = self.snapshots()
         if len(snaps) > keep:

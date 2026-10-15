@@ -101,10 +101,12 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
   The engine puts each file first, and then puts `manifest.json` last. Thus it does not use a snapshot that stopped before completion.
   The engine checks the hashes while it reads the files at open. If a file is damaged, it uses the snapshot before that one and replays more journal entries.
 
-`journal.prune(keep=2)` keeps the 2 newest snapshots. It deletes the older snapshots, and the journal and the files for large changes before them.
+`journal.prune(keep=2)` keeps the 2 newest snapshots and deletes the older snapshots.
+It also deletes the segments before the oldest kept snapshot, and their files for large changes.
 It does not delete a segment with an entry in the last `op_window` entries. Thus a resend after a restart still gets `AlreadyCommitted`.
+Prune uses the `op_window` of the journal object that runs it. Thus, run prune with the same `op_window` as the server.
 (After this, you cannot go back to a time before the oldest kept segment.)
-`keep` must be 1 or more, because the engine cannot open a model with no snapshot. Each journal raises `ValueError` for a smaller value.
+Use a `keep` value of 1 or more. The engine cannot open a model with no snapshot. For a smaller value, `FileJournal` and `PgJournal` raise `ValueError`.
 
 If you give the ID from the sender to `transaction(client_op_id=...)`, and a transaction with the same ID is already committed, the engine raises `AlreadyCommitted`. It does not do the operations in the transaction.
 Thus, if a user does not receive the response and sends again, the engine does not commit twice.

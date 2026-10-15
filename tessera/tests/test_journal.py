@@ -380,7 +380,7 @@ class Journal(JournalCase, unittest.TestCase):
         self.m.set_cell("Price", 13, Product="A")
         self.m.checkpoint()
         self.m.journal.prune(keep=1)
-        self.m.journal.release()  # restart
+        self.m.journal.release()
         reopened = self.reopen()
         with self.assertRaises(AlreadyCommitted):
             with reopened.transaction(client_op_id="req-1"):
@@ -444,9 +444,28 @@ class Journal(JournalCase, unittest.TestCase):
         self.m.checkpoint()
         self.m.set_cell("Price", 14, Product="A")
         lines = old.read_text().splitlines(keepends=True)
-        old.write_text(lines[0] + "{broken\n")
-        with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 3"):
-            list(self.journals.journal().records())
+        for broken, prev in [(0, 0), (1, 1)]:
+            with self.subTest(broken_line=broken + 1):
+                old.write_text("".join("{broken\n" if i == broken else line for i, line in enumerate(lines)))
+                j = self.journals.journal(op_window=1)  # Open reads only the last segment
+                with self.assertRaisesRegex(ValueError, f"通し番号が {prev} の次でなく"):
+                    list(j.records())
+
+    def test_a_broken_line_in_the_op_window_is_an_error_at_open(self):
+        self.file_only()
+        self.m.set_cell("Price", 11, Product="A")
+        self.m.set_cell("Price", 12, Product="A")
+        with self.m.transaction(client_op_id="req-3"):
+            self.m.set_cell("Price", 13, Product="A")
+        self.m.set_cell("Price", 14, Product="A")
+        old = self.m.journal.log_path
+        self.m.checkpoint()
+        self.m.set_cell("Price", 15, Product="A")
+        lines = old.read_text().splitlines(keepends=True)
+        old.write_text(lines[0] + "{broken\n" + "".join(lines[2:]))
+        self.m.journal.release()
+        with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 5"):
+            self.reopen()
 
     def test_cell_history(self):
         with self.m.transaction(user="alice", reason="見直し"):

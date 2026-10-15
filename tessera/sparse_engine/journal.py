@@ -599,8 +599,9 @@ class FileJournal(Journal):
 
     記録はスナップショットを置いたあと（か、区切りが segment_bytes を超えたら）、次の追記から新しい区切りに
     書く。開くときは最後の区切りと、client_op_id を覚えておく範囲（最後の op_window 件）だけを読み、
-    記録の再生はスナップショットより後の区切りだけを読む。prune で、古いスナップショットと、それより前の
-    区切りと大量の変更のファイルを消せる。
+    記録の再生はスナップショットより後の区切りだけを読む。
+    prune deletes the old snapshots. It also deletes the segments before the oldest kept snapshot and before
+    the last op_window records, and their files of large changes.
 
     書き込むプロセスは 1 つに限る。最初に追記するときに path/lock の排他ロックを取り、release まで持つ。
     最後の行が途中で切れていれば（書いている途中で落ちた）、読むときは無視し、ロックを取ったときに捨てる。
@@ -694,6 +695,17 @@ class FileJournal(Journal):
                 pos += len(line)
                 yield rec, len(line)
 
+    def _read_segments(self, segs: list[tuple[int, Path]]) -> Iterator[dict]:
+        """Read the complete records of the segments in order. A gap in the seqs means a broken line
+        (a broken line stops the read of its segment), so raise ValueError."""
+        expected = segs[0][0]
+        for first, path in segs:
+            for rec, _ in self._read_segment(first, path):
+                if rec["seq"] != expected:
+                    raise ValueError(f"{path}: 通し番号が {expected - 1} の次でなく {rec['seq']}")
+                expected += 1
+                yield rec
+
     def _remember(self, client_op_id: str | None, seq: int) -> None:
         if client_op_id is not None:
             self._by_client_op[client_op_id] = seq
@@ -717,15 +729,14 @@ class FileJournal(Journal):
                 raise ValueError(f"{path}: 通し番号が {self.head} の次でなく {rec['seq']}")
             self.head = rec["seq"]
             self._size += n
-        # client_op_id を覚えておく範囲が前の区切りにかかれば、そこから読む
+        # If the op_window starts in an older segment, read from that segment
         oldest = self.head - self.op_window
         start = len(self._segments) - 1
         while start > 0 and self._segments[start][0] > oldest + 1:
             start -= 1
-        for i in range(start, len(self._segments)):
-            for rec, _ in self._read_segment(*self._segments[i]):
-                if rec["seq"] > oldest and rec.get("client_op_id") is not None:
-                    self._by_client_op[rec["client_op_id"]] = rec["seq"]
+        for rec in self._read_segments(self._segments[start:]):
+            if rec["seq"] > oldest and rec.get("client_op_id") is not None:
+                self._by_client_op[rec["client_op_id"]] = rec["seq"]
         if repair and path.exists() and path.stat().st_size > self._size:
             with open(path, "r+b") as f:
                 f.truncate(self._size)
@@ -850,28 +861,24 @@ class FileJournal(Journal):
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
-        expected = None  # The next seq. A gap means a broken line in an older segment.
-        for i, (first, path) in enumerate(segs):
-            if i + 1 < len(segs) and segs[i + 1][0] <= after + 1:
-                continue  # All the records of this segment are at or before after
-            if first > after + 1 and i == 0 and first > 1:
-                raise ValueError(f"{self.path}: 通し番号 {after + 1} からの記録は prune で消した")
-            for rec, _ in self._read_segment(first, path):
-                if expected is not None and rec["seq"] != expected:
-                    raise ValueError(f"{path}: 通し番号が {expected - 1} の次でなく {rec['seq']}")
-                expected = rec["seq"] + 1
-                if rec["seq"] > self.head:
-                    return  # Another process wrote this record after the read (ignore it until a reopen)
-                if rec["seq"] > after:
-                    if "cells_blob" in rec:  # 大量のセルはファイルから、変更の塊として読む
-                        rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"],
-                                                                   self.objects.get)
-                    yield rec
+        if segs[0][0] > after + 1:
+            raise ValueError(f"{self.path}: 通し番号 {after + 1} からの記録は prune で消した")
+        start = 0
+        while start + 1 < len(segs) and segs[start + 1][0] <= after + 1:
+            start += 1
+        for rec in self._read_segments(segs[start:]):
+            if rec["seq"] > self.head:
+                return  # Another process wrote this record after the read (ignore it until a reopen)
+            if rec["seq"] > after:
+                if "cells_blob" in rec:  # Read the cells of a large change from its files, as one block of changes
+                    rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"], self.objects.get)
+                yield rec
 
     def prune(self, keep: int = 2) -> dict:
-        """Keep the keep newest snapshots (keep >= 1). Delete the older snapshots. Also delete the segments
-        before the oldest kept snapshot and before the last op_window entries, and their files of large changes.
-        Return the counts. After prune, you cannot go back before the oldest kept segment (the cell history too)."""
+        """Keep the `keep` newest snapshots and delete the older snapshots. Also delete the segments before the
+        oldest kept snapshot and before the last op_window records, and their files of large changes.
+        Return the counts. After prune, you cannot go back before the oldest kept segment (the cell history too).
+        Raise ValueError if keep is less than 1."""
         if keep < 1:
             raise ValueError(f"keep は 1 以上（{keep}）。スナップショットがなくなると開けない")
         self.acquire()
@@ -887,7 +894,7 @@ class FileJournal(Journal):
         segs = self._list_segments()
         for i, (first, path) in enumerate(segs[:-1]):
             if segs[i + 1][0] > oldest + 1:
-                break  # This segment has a record after oldest
+                break
             for rec, _ in self._read_segment(first, path):
                 for f in rec.get("cells_blob", {}).get("files", []):
                     self.objects.delete(f["uri"])
