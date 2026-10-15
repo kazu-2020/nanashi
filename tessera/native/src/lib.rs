@@ -804,7 +804,8 @@ impl Core {
     /// Write a block of changes to the stored data at one time (journal replay). dim_ids is the table of
     /// position -> member id of each dimension, in the declared order of the dimensions. value_ids is the same
     /// table of the dimension of a member-type value (None for the other kinds). A cell of an id that is not in
-    /// the dimension now (a member that the transaction removed) is skipped.
+    /// the dimension now (a member that the transaction removed) is skipped. A block whose number of dimensions
+    /// differs from the Metric is skipped.
     #[pyo3(signature = (store, block, dim_ids, value_ids))]
     fn apply_block(
         &self,
@@ -817,7 +818,16 @@ impl Core {
         let mut s = read(store)?;
         let c = &block.c;
         if c.cols.len() != s.metric_dims.len() || dim_ids.len() != c.cols.len() {
-            return Ok(()); // 軸の数が違う（Metric を定義し直した）。名前で比べる経路と同じく飛ばす
+            return Ok(());
+        }
+        for (&d, table) in s.metric_dims.iter().zip(&dim_ids) {
+            let dim = &self.cat.dims[d];
+            if table.len() > dim.size as usize {
+                return Err(err(format!("軸 {} の ID の表の長さ {} が軸の大きさ {} を超える", dim.name, table.len(), dim.size)));
+            }
+        }
+        if (c.kind == pq::Value::Member) != value_ids.is_some() && c.new.iter().any(Option::is_some) {
+            return Err(err("変更の塊の値の種類が Metric の値の種類と合わない".into()));
         }
         let s = py.detach(move || -> Result<Arc<Store>, String> {
             let maps: Vec<Vec<Option<u32>>> = c.ids.iter().zip(&dim_ids).map(|(used, table)| positions(used, table)).collect();

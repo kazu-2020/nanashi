@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import Model, Named
+from sparse_engine import Model, Named, journal
 from sparse_engine.engine import ReferenceEngine, parquet_columns
 
 try:
@@ -171,10 +171,10 @@ class CellBlocks(unittest.TestCase):
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class ApplyBlock(unittest.TestCase):
-    """記録の再生で、変更の塊をまとめて書き込む（Rust）。1 セルずつ書いた結果と同じになる。"""
+    """Journal replay writes a block of changes at one time (Rust). The result is the same as writing cell by cell."""
 
-    def model(self):
-        m = Named(Model(engine=RustEngine()))
+    def model(self, engine=None):
+        m = Named(Model(engine=engine or RustEngine()))
         m.add_dimension("K", [f"k{i}" for i in range(300)])
         m.add_dimension("T", [f"t{i}" for i in range(12)], ordered=True)
         m.add_dimension("D", ["a", "b", "c"])
@@ -215,6 +215,35 @@ class ApplyBlock(unittest.TestCase):
                         value = new if new is None or vdim is None else float(vdim._by_id[new])
                         store = b.engine.write(store, key, value, b)
                     self.assertEqual(cells(a, name), cells(b, name))
+
+    def test_value_kind_differs_from_metric(self):
+        for engine in (ReferenceEngine, RustEngine):
+            m = self.model(engine())
+            k, t, d = m.dimension("K").ids, m.dimension("T").ids, m.dimension("D").ids
+            for name, key, new in (("M", [k[1]], 5.0), ("V", [k[1], t[0]], d[1])):
+                record = {"changes": {"cells": [{"metric": m.metric(name).id,
+                                                 "rows": nanashi_core.CellBlock.from_rows([[key, None, new]])}]}}
+                with self.subTest(engine=engine.__name__, metric=name), \
+                        self.assertRaisesRegex(ValueError, "値の種類"):
+                    journal.apply(m, record)
+
+    def test_value_member_not_in_the_dimension(self):
+        for engine in (ReferenceEngine, RustEngine):
+            m = self.model(engine())
+            rows = nanashi_core.CellBlock.from_rows([[[m.dimension("K").ids[1]], None, "nope"]])
+            record = {"changes": {"cells": [{"metric": m.metric("M").id, "rows": rows}]}}
+            with self.subTest(engine=engine.__name__), \
+                    self.assertRaisesRegex(ValueError, "^値のメンバーの ID nope が軸にない$"):
+                journal.apply(m, record)
+
+    def test_position_beyond_the_dimension(self):
+        m = self.model()
+        k = m.dimension("K").ids
+        store = m._values[m.metric("M").id]
+        block = nanashi_core.CellBlock.from_rows([[["extra"], None, None]])
+        with self.assertRaisesRegex(ValueError, "軸の大きさ"):
+            m.engine.apply_block(store, block, [k + ["extra"]], m.dimension("D").ids)
+        self.assertEqual(cells(m, "M"), cells(self.model(), "M"))
 
 
 if __name__ == "__main__":
