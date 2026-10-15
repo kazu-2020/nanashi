@@ -75,6 +75,7 @@ import argparse
 import hmac
 import inspect
 import ipaddress
+import itertools
 import json
 import logging
 import math
@@ -372,17 +373,18 @@ _BAD_CHAR = re.compile("[\x00\ud800-\udfff]")  # PostgreSQL refuses a NUL, and U
 
 def _body_problem(body) -> str | None:
     """A deeply nested body makes later code recurse past the stack of a server thread."""
-    stack = [(body, 0)]
+    stack = [iter((body,))]  # one iterator for each level, so the memory is in proportion to the depth
     while stack:
-        x, depth = stack.pop()
-        if depth > MAX_BODY_DEPTH:
-            return f"本文の入れ子は {MAX_BODY_DEPTH} 段まで"
-        if isinstance(x, str) and _BAD_CHAR.search(x):
-            return "文字列に NUL 文字や単独のサロゲート文字は使えない"
-        if isinstance(x, dict):
-            stack.extend((y, depth + 1) for y in (*x.keys(), *x.values()))
-        elif isinstance(x, list):
-            stack.extend((y, depth + 1) for y in x)
+        for x in stack[-1]:
+            if len(stack) > MAX_BODY_DEPTH + 1:  # x is at depth len(stack) - 1
+                return f"本文の入れ子は {MAX_BODY_DEPTH} 段まで"
+            if isinstance(x, str) and _BAD_CHAR.search(x):
+                return "文字列に NUL 文字や単独のサロゲート文字は使えない"
+            if isinstance(x, (dict, list)):
+                stack.append(itertools.chain(x.keys(), x.values()) if isinstance(x, dict) else iter(x))
+                break
+        else:
+            stack.pop()
     return None
 
 
