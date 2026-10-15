@@ -2,7 +2,7 @@
 import random
 import unittest
 
-from sparse_engine import Model, Named
+from sparse_engine import Model, Named, journal
 from sparse_engine.engine import ReferenceEngine
 
 try:
@@ -159,8 +159,8 @@ class CellBlocks(unittest.TestCase):
 class ApplyBlock(unittest.TestCase):
     """記録の再生で、変更の塊をまとめて書き込む（Rust）。1 セルずつ書いた結果と同じになる。"""
 
-    def model(self):
-        m = Named(Model(engine=RustEngine()))
+    def model(self, engine=None):
+        m = Named(Model(engine=engine or RustEngine()))
         m.add_dimension("K", [f"k{i}" for i in range(300)])
         m.add_dimension("T", [f"t{i}" for i in range(12)], ordered=True)
         m.add_dimension("D", ["a", "b", "c"])
@@ -201,6 +201,29 @@ class ApplyBlock(unittest.TestCase):
                         value = new if new is None or vdim is None else float(vdim._by_id[new])
                         store = b.engine.write(store, key, value, b)
                     self.assertEqual(cells(a, name), cells(b, name))
+
+    def test_value_kind_differs_from_metric(self):
+        """A member id into a number Metric, or a number into a member-type Metric, is an error in both engines."""
+        for engine in (ReferenceEngine, RustEngine):
+            m = self.model(engine())
+            k, d = m.dimension("K").ids, m.dimension("D").ids
+            for name, new in (("M", 5.0), ("V", d[1])):
+                rows = [[[k[1]] + ([m.dimension("T").ids[0]] if name == "V" else []), None, new]]
+                record = {"changes": {"cells": [{"metric": m.metric(name).id,
+                                                 "rows": nanashi_core.CellBlock.from_rows(rows)}]}}
+                with self.subTest(engine=engine.__name__, metric=name), \
+                        self.assertRaisesRegex(ValueError, "値の種類"):
+                    journal.apply(m, record)
+
+    def test_position_beyond_the_dimension(self):
+        """A table of ids longer than the dimension gives positions out of range: an error, not a broken key."""
+        m = self.model()
+        k = m.dimension("K").ids
+        store = m._values[m.metric("M").id]
+        block = nanashi_core.CellBlock.from_rows([[["extra"], None, None]])
+        with self.assertRaisesRegex(ValueError, "軸の大きさ"):
+            m.engine.apply_block(store, block, [k + ["extra"]], m.dimension("D").ids)
+        self.assertEqual(cells(m, "M"), cells(self.model(), "M"))
 
 
 if __name__ == "__main__":
