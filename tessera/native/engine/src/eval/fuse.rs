@@ -803,15 +803,16 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budge
         return Ok(Vec::new());
     }
     let chunk = cfg.chunk.max(1);
-    // The list of parts uses the memory of n / chunk cells. Check it before the list exists.
-    bud.need(n.div_ceil(chunk).saturating_add(copied), "式の結果")?;
+    // parts, sizes and slices use 40 bytes for each part, which is less than 3 cells. Check them before they exist.
+    let lists = n.div_ceil(chunk).saturating_mul(3).saturating_add(copied);
+    bud.need(lists, "式の結果")?;
     let parts: Vec<(usize, usize)> = (0..n).step_by(chunk).map(|lo| (lo, (lo + chunk).min(n))).collect();
     let count = |&(lo, hi): &(usize, usize)| {
         let (mut readers, mut rd) = (readers(access), space.cursor());
         (lo..hi).filter(|&i| f(&mut readers, space.key(i, combos, &mut rd)).is_some()).count()
     };
     let sizes: Vec<usize> = if cfg.par(n) { parts.par_iter().map(count).collect() } else { parts.iter().map(count).collect() };
-    bud.need(sizes.iter().sum::<usize>() + copied, "式の結果")?;
+    bud.need(sizes.iter().sum::<usize>().saturating_add(lists), "式の結果")?;
     let mut cells = vec![(0u64, 0f64); sizes.iter().sum()];
     let mut slices = Vec::with_capacity(parts.len());
     let mut rest = &mut cells[..];

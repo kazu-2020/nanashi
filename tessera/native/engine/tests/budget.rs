@@ -40,8 +40,8 @@ fn ifblank_beyond_the_budget_fails_before_allocating() {
     let small = catalog_with(Config { max_bytes: stored + 100_000 * 16, fuse: false, ..Config::default() });
     let err = eval(&node, &small, &source(&small), &Restrict::all(3)).unwrap_err();
     assert!(err.contains("IFBLANK"), "{err}");
-    // 融合すれば結果の分しか持たないので、同じ予算で計算できる
-    let fused = catalog(stored + 100_000 * 16);
+    // Fused, the evaluation holds only the result and the small lists of the chunks (4 KiB is enough for them)
+    let fused = catalog(stored + 100_000 * 16 + 4096);
     assert_eq!(eval(&node, &fused, &source(&fused), &Restrict::all(3)).unwrap().cells.len(), 100_000);
     // 結果も収まらなければ、確保する前に失敗する
     let tiny = catalog(stored + 100_000 * 8);
