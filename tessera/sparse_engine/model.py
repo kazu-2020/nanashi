@@ -162,8 +162,8 @@ def _operation(fn):
 
 
 class _CellCounts(dict):
-    """見積もりに使う Metric ごとのセル数。計算 Metric は known（見積もり）から、入力は今の行数から、
-    初めて読まれたときに取る。読まれた名前を read に記録する。"""
+    """The cell count of each Metric for the estimate, taken when a name is read first.
+    A formula Metric uses known (its estimate). An input uses its current row count, at least 1. read records the names."""
 
     def __init__(self, model: Model, known: dict[str, float]):
         super().__init__()
@@ -866,7 +866,7 @@ class Model:
                 n = math.prod(len(p) for p in picks)
                 if n == 0:
                     raise ValueError(f"{name}: 按分先のセルがない")
-                if self.max_cells is not None and n > self.max_cells:  # count before the combinations exist
+                if self.max_cells is not None and n > self.max_cells:
                     raise ValueError(f"{name}: 按分先のセル数 {n:,} が上限 {self.max_cells:,} を超える。"
                                      "coords か where で範囲を絞るか、Model(max_cells=...) で上限を変える")
                 cols = [list(c) for c in zip(*itertools.product(*picks))]

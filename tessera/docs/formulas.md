@@ -41,7 +41,7 @@ Thus, after you register a formula and before the first calculation, the engine 
 Filled: 結果のセル数が最大 2,000,000,000 と見積もられ、上限 1,000,000,000 を超える。密になる演算: IFBLANK が ['Customer', 'SKU'] の全組み合わせに展開される（密化）。値のあるセルだけに絞るなら [ON: 相手] か FILTER を使う。上限は Model(max_cells=...) で変えられる
 ```
 
-The engine calculates the estimate from the current cell counts of the inputs. An empty input counts as 1 cell, because it gets values later. It goes through the formulas in the order of the plan.
+The engine calculates the estimate from the current cell counts of the inputs. An empty input counts as 1 cell, because it gets values later and a write does not make a new estimate. It goes through the formulas in the order of the plan.
 These are the rules for the estimate:
 
 - For an operation that keeps only cells with values on both sides, for example `*` or comparisons, the estimate is the smaller side.
