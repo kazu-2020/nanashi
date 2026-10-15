@@ -13,7 +13,7 @@ from pathlib import Path
 
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.named import Named
-from sparse_engine.workspace import Workspace
+from sparse_engine.workspace import Role, Workspace
 
 from .journals import DSN, PG_AVAILABLE
 from .test_engines import build_with
@@ -320,6 +320,68 @@ class PgJournalTests(unittest.TestCase):
         self.assertEqual(ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2"), 2)
         self.assertEqual(ws.ready(), [])
         ws.close()
+
+    def test_resend_waits_for_a_commit_that_became_visible_late(self):
+        import contextlib
+        import psycopg
+        m = stock_model(ReferenceEngine())
+        self.journal().start(m.model)
+        j = self.journal(heartbeat=False)
+        ws = Workspace(m.model, j)
+        ws.write(move("p0", "p1", "Jan", 1), client_op_id="r1")
+        real = j.conn.transaction
+
+        @contextlib.contextmanager
+        def lost_commit_response():
+            with real():
+                yield
+            j.conn.close()
+            raise psycopg.OperationalError("the connection closed before the COMMIT response")
+        j.conn.transaction = lost_commit_response
+        with self.assertRaises(psycopg.OperationalError):
+            ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2")
+        calls = []
+
+        def before_the_commit_is_visible(model):  # catch_up read the head before the old backend committed
+            calls.append(model)
+            if len(calls) == 2:
+                del j.catch_up
+            return False
+        j.catch_up = before_the_commit_is_visible
+        with self.assertRaises(RuntimeError):
+            ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2")
+        self.assertEqual(Named(ws.version).get("Stock", Product="p3", Month="Jan"), 100)
+        self.assertEqual(ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2"), 2)  # the resend
+        self.assertEqual(Named(ws.version).get("Stock", Product="p3", Month="Jan"), 105)
+        ws.close()
+
+    def test_standby_releases_an_expired_lease_while_its_recovery_fails(self):
+        import psycopg
+        m = stock_model(ReferenceEngine())
+        self.journal().start(m.model)
+        ja = self.journal(lease_ttl=1, endpoint="http://a")
+        a = Workspace(m.model, ja, standby=True, interval=0.05)
+        self.assertIs(a.role, Role.LEADER)
+        dsn = ja.dsn
+        with ja._lock:  # the server is not available until the lease of a expires
+            ja.dsn = "postgresql://postgres@127.0.0.1:1/nanashi"
+            ja._conn.close()
+
+        def down(*args):
+            raise psycopg.OperationalError("bulk storage is not available")
+        ja.catch_up = ja.open = down
+        deadline = time.monotonic() + 3
+        while a.role is Role.LEADER and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIs(a.role, Role.STANDBY)
+        ja.dsn = dsn
+        time.sleep(0.5)  # the heartbeat of a connects again, but the recovery of a still fails
+        b = self.journal(heartbeat=False)
+        deadline = time.monotonic() + 4
+        while not (taken := b.take()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(taken)
+        a.close()
 
     def test_release_on_a_closed_connection_stops_the_heartbeat(self):
         import psycopg

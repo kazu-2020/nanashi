@@ -405,26 +405,25 @@ class Workspace:
 
     def _process(self, batch: list[_Request]) -> None:
         if self._role is Role.STANDBY:  # 待機系に戻る直前に列に入った書き込み
-            err = self._not_leader()
-            for req in batch:
-                if req.future.set_running_or_notify_cancel():
-                    req.future.set_exception(err)
+            self._fail(batch, self._not_leader())
             return
         if self._unsure:  # Catch up before the lookup of _outcomes acknowledges a resend of those entries
             if not self._reload():  # A resend or a new write on the old version would use a stale model
-                err = RuntimeError(self._degraded)
-                for req in batch:
-                    if req.future.set_running_or_notify_cancel():
-                        req.future.set_exception(err)
+                self._fail(batch, RuntimeError(self._degraded))
                 return
             self._unsure = False
+        ids = [r.client_op_id for r in batch if r.client_op_id is not None]
+        known, rejected = self._outcomes(ids)  # Find the known client_op_ids with one lookup for each batch
+        # The old backend can finish an unsure COMMIT after the catch-up read the head
+        if known and max(known.values()) > self._version.seq:
+            if not self._reload() or max(known.values()) > self._version.seq:
+                self._fail(batch, RuntimeError(self._degraded or "記録先の記録にまだ追いつけない"))
+                return
         working = self._version.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
         refused: list[tuple[_Request, Exception]] = []
         aliases: list[tuple[_Request, _Request]] = []  # 同じまとまりで同じ client_op_id を送ったもの
         firsts: dict[str, _Request] = {}
-        ids = [r.client_op_id for r in batch if r.client_op_id is not None]
-        known, rejected = self._outcomes(ids)  # Find the known client_op_ids with one lookup for each batch
         for req in batch:
             if not req.future.set_running_or_notify_cancel():
                 continue
@@ -500,6 +499,12 @@ class Workspace:
         for req, first in aliases:
             _follow(req, first)
         self._maybe_checkpoint()
+
+    @staticmethod
+    def _fail(batch: list[_Request], err: Exception) -> None:
+        for req in batch:
+            if req.future.set_running_or_notify_cancel():
+                req.future.set_exception(err)
 
     def _refuse(self, refused: list[tuple[_Request, Exception]]) -> None:
         """Give each refused request its error. Record a terminal rejection first, so a resend cannot apply the
@@ -602,10 +607,15 @@ class Workspace:
         log.info("書き手になった（版 %d）", self.seq)
 
     def _demote(self) -> None:
-        """書き込みの権利を失ったときに呼ぶ（_role_lock の中で）。待機系に戻り、見張りが追いつき直す。"""
+        """Call this when the write right is lost (in _role_lock). Return to standby and release the lease.
+        The watcher catches up again. If the recovery fails, the heartbeat must not renew the lease."""
         if self._role is Role.LEADER:
             self._role = Role.STANDBY
             log.warning("書き込みの権利を失ったので、待機系に戻る")
+            try:
+                self.journal.release()  # It forgets the epoch also if PostgreSQL is not available
+            except Exception:
+                log.warning("リースを手放せなかった（期限が過ぎれば別のプロセスが取れる）", exc_info=True)
 
     def _watch(self) -> None:
         """待機系なら、記録が増えるたびに追いつき、間隔ごとに権利を取れるか試す。書き手なら、間隔ごとに

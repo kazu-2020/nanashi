@@ -181,8 +181,9 @@ It returns when `head_seq` changes, or when the lease is released or expires. Th
 If the server closes the connection (a restart or an idle kill), the next operation fails. The operation after it connects again.
 A closed connection can lose the answer to a commit that PostgreSQL did. Thus after an append fails, the next batch of `Workspace` catches up from the journal before it looks up the `client_op_id` values.
 If the catch-up and the reopen both fail, the batch fails with 503 `closed`, and the next batch tries again. Thus a resend is not acknowledged against an old model.
+The old backend can finish the COMMIT after the catch-up read the head. If the journal has a `client_op_id` with a sequence number above the published version, the batch catches up again. If the entry is still not available, the batch fails with 503 `closed`.
 The lease is in the table, not in the session. Thus the next commit still checks the epoch and the holder. If a different process took the lease, the commit raises `Fenced`.
-`journal.lease()["held"]` is false after the lease expires, also before the heartbeat finds the loss. A standby `Workspace` returns to standby on this.
+`journal.lease()["held"]` is false after the lease expires, also before the heartbeat finds the loss. A standby `Workspace` returns to standby on this and releases the lease. Thus the heartbeat does not renew the lease while the catch-up fails.
 The router uses pgx, and pgx uses prepared statements by default. If the router connects through PgBouncer, add `default_query_exec_mode=exec` to the router DSN.
 PgBouncer 1.21 or later with `max_prepared_statements` more than 0 also works.
 
