@@ -930,11 +930,11 @@ class PgObservability(Observability):
             def execute(self, *a, **k):
                 raise OSError("接続が切れた")
         with self.assertLogs("sparse_engine.pg_journal", "WARNING") as logs:
-            j.conn = Broken()
+            j._conn = Broken()
             deadline = time.monotonic() + 5
             while j.lease()["error"] is None and time.monotonic() < deadline:
                 time.sleep(0.02)
-            j.conn = real
+            j._conn = real
         self.assertIn("延長できなかった", logs.output[0])
         status, body = self.c.get("/ready")
         self.assertEqual(status, 503)
