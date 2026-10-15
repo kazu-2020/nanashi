@@ -227,6 +227,7 @@ class Workspace:
         self._checkpointing: threading.Thread | None = None
         self.stats = Stats()
         self._degraded: str | None = None  # 記録先に追いつけず、開き直しにも失敗した（古い版を公開している）
+        self._unsure = False  # The last append failed with no answer, so the journal can have its entries
         self._role = Role.LEADER
         self._role_lock = threading.RLock()  # 役割の変更と、まとまりの処理を順に並べる
         self._stop = threading.Event()
@@ -404,18 +405,25 @@ class Workspace:
 
     def _process(self, batch: list[_Request]) -> None:
         if self._role is Role.STANDBY:  # 待機系に戻る直前に列に入った書き込み
-            err = self._not_leader()
-            for req in batch:
-                if req.future.set_running_or_notify_cancel():
-                    req.future.set_exception(err)
+            self._fail(batch, self._not_leader())
             return
+        if self._unsure:  # Catch up before the lookup of _outcomes acknowledges a resend of those entries
+            if not self._reload():  # A resend or a new write on the old version would use a stale model
+                self._fail(batch, RuntimeError(self._degraded))
+                return
+            self._unsure = False
+        ids = [r.client_op_id for r in batch if r.client_op_id is not None]
+        known, rejected = self._outcomes(ids)  # Find the known client_op_ids with one lookup for each batch
+        # The old backend can finish an unsure COMMIT after the catch-up read the head
+        if known and max(known.values()) > self._version.seq:
+            if not self._reload() or max(known.values()) > self._version.seq:
+                self._fail(batch, RuntimeError(self._degraded or "記録先の記録にまだ追いつけない"))
+                return
         working = self._version.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
         refused: list[tuple[_Request, Exception]] = []
         aliases: list[tuple[_Request, _Request]] = []  # 同じまとまりで同じ client_op_id を送ったもの
         firsts: dict[str, _Request] = {}
-        ids = [r.client_op_id for r in batch if r.client_op_id is not None]
-        known, rejected = self._outcomes(ids)  # Find the known client_op_ids with one lookup for each batch
         for req in batch:
             if not req.future.set_running_or_notify_cancel():
                 continue
@@ -463,6 +471,8 @@ class Workspace:
                 self._demote()
             elif isinstance(e, Stale):
                 self._reload()  # 別のプロセスが書き込んでいた。知らせる前に、記録先から最新の版を開き直す
+            elif self.journal is not None:
+                self._unsure = True  # A lost connection can lose the COMMIT response after the commit
             # An earlier request of the batch can cause a refusal. Thus do not record the refusals.
             for req, _ in applied + refused:
                 req.future.set_exception(e)
@@ -489,6 +499,12 @@ class Workspace:
         for req, first in aliases:
             _follow(req, first)
         self._maybe_checkpoint()
+
+    @staticmethod
+    def _fail(batch: list[_Request], err: Exception) -> None:
+        for req in batch:
+            if req.future.set_running_or_notify_cancel():
+                req.future.set_exception(err)
 
     def _refuse(self, refused: list[tuple[_Request, Exception]]) -> None:
         """Give each refused request its error. Record a terminal rejection first, so a resend cannot apply the
@@ -520,13 +536,15 @@ class Workspace:
         while len(self._rejected) > self._recent.maxlen:
             self._rejected.popitem(last=False)
 
-    def _reload(self) -> None:
-        """記録先の最新の版に追いつく（手元の版が古いと言われたとき）。公開中の版の複製に、ほかのプロセスが
-        確定した記録を書き込み、影響範囲だけを計算し直す。追いつけなければ、記録先から開き直す。"""
+    def _reload(self) -> bool:
+        """Catch up with the latest version in the journal. Apply the entries that other processes committed
+        to a copy of the published version, and calculate again only the affected cells. If the catch-up
+        fails, open the model again from the journal. Return False if that also fails (then _degraded is set)."""
         try:
             model = self._version.fork()
             if not self.journal.catch_up(model):
-                return
+                self._degraded = None
+                return True
         except Exception:
             log.warning("記録先の記録に追いつけなかったので、開き直す", exc_info=True)
             try:
@@ -535,12 +553,13 @@ class Workspace:
                 log.exception("記録先からの開き直しに失敗した")
                 self.stats.add(reopen_failures=1)
                 self._degraded = f"記録先からの開き直しに失敗した: {type(e).__name__}: {e}"
-                return
+                return False
         self.stats.add(catch_ups=1)
         self._degraded = None
         self._publish(model)
         self._recent.clear()
         self._ops.clear()
+        return True
 
     def _check(self, req: _Request, record: dict, pending: list[Written]) -> None:
         """読んだ版（req.expect）より後に、同じセルを変えた書き込みがあれば Conflict。"""
@@ -588,10 +607,15 @@ class Workspace:
         log.info("書き手になった（版 %d）", self.seq)
 
     def _demote(self) -> None:
-        """書き込みの権利を失ったときに呼ぶ（_role_lock の中で）。待機系に戻り、見張りが追いつき直す。"""
+        """Call this when the write right is lost (in _role_lock). Return to standby and release the lease.
+        The watcher catches up again. If the recovery fails, the heartbeat must not renew the lease."""
         if self._role is Role.LEADER:
             self._role = Role.STANDBY
             log.warning("書き込みの権利を失ったので、待機系に戻る")
+            try:
+                self.journal.release()  # It forgets the epoch also if PostgreSQL is not available
+            except Exception:
+                log.warning("リースを手放せなかった（期限が過ぎれば別のプロセスが取れる）", exc_info=True)
 
     def _watch(self) -> None:
         """待機系なら、記録が増えるたびに追いつき、間隔ごとに権利を取れるか試す。書き手なら、間隔ごとに

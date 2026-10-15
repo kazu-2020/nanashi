@@ -13,6 +13,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
+import weakref
 
 from .delta import DeltaPlan, plan_for, rename
 from .evaluate import (Catalog, Edge, FormulaError, Restrict, Type, affected, collect_refs, estimate, infer,
@@ -115,7 +116,7 @@ class PyPlanner:
     """Python による Planner の参照実装。engine は格納と評価に使う Store。"""
 
     def __init__(self, engine):
-        self.engine = engine
+        self.engine = weakref.proxy(engine)  # the engine owns the planner: a strong reference makes a cycle
         self._delta_exprs: dict[str, tuple] = {}  # Metric -> (計画, 式, 件数の差分の式, 値の差分の式)
 
     # ------------------------------------------------ 型検査と計画
@@ -202,7 +203,8 @@ class PyPlanner:
             run.all()
         else:
             run.changes(dict(changed), added, dict(olds), forced)
-        return run.done, lambda: run.named
+        named = run.named  # not run itself: run holds cat, and that makes a cycle through Model.slice_log
+        return run.done, lambda: named
 
     def delta_exprs(self, name: str, formula: Expr, plan: DeltaPlan) -> tuple[Expr, tuple[Expr, ...]]:
         """The formula for the change of the counts, and for a SUM the formula and the residual formula on the new

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from array import array
 from typing import Any
+import weakref
 
 import nanashi_core
 
@@ -438,7 +439,7 @@ class RustPlanner:
     """Planner（planner.py）を Rust で行う。式の変換と軸の番号は RustEngine のものを使う。"""
 
     def __init__(self, engine: RustEngine):
-        self.e = engine
+        self.e = weakref.proxy(engine)  # the engine owns the planner: a strong reference makes a cycle
         self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
         self._prop_plan: tuple[Any, Any, list[str]] | None = None  # 影響範囲の伝搬だけに使う、式だけの計画
 
@@ -494,8 +495,12 @@ class RustPlanner:
             [(index[n], h) for n, h in olds.items()],
             [(index[n], region(r)) for n, r in forced.items()], full)
 
+        # Weak: a strong reference makes a cycle through Model.slice_log. Only the model reads its log, so
+        # the model is alive when named runs.
+        cat_ref = weakref.ref(cat)
+
         def named(entries):
-            return [(names[i], self.e._to_ids(cat, r)) for i, _, r in entries]
+            return [(names[i], self.e._to_ids(cat_ref(), r)) for i, _, r in entries]
         return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
 
     # ------------------------------------------------ 計算計画

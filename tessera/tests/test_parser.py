@@ -160,6 +160,48 @@ class Errors(unittest.TestCase):
             model().add_formula("R", ["Product"], "X +")
 
 
+class Limits(unittest.TestCase):
+    def test_deep_nesting_is_a_parse_error(self):
+        for text in ["(" * 5000 + "X" + ")" * 5000, "-" * 5000 + "X", "NOT " * 5000 + "P",
+                     "IF(P, 1, " * 5000 + "0" + ")" * 5000, "X" + "[FILTER: X" * 5000 + "]" * 5000]:
+            with self.subTest(text[:16]):
+                with self.assertRaisesRegex(ParseError, "深すぎる"):
+                    parse(text)
+
+    def test_long_chain_is_a_parse_error(self):
+        for text in [" + ".join(["X"] * 201), " AND ".join(["P"] * 201), "X" + "[REMOVE: Month]" * 200]:
+            with self.subTest(text[:16]):
+                with self.assertRaisesRegex(ParseError, "長すぎる"):
+                    parse(text)
+
+    def test_text_in_the_limits_works_end_to_end(self):
+        chain = " + ".join(["X"] * 200)
+        nested = "(" * 50 + "X" + ")" * 50
+        m = model()
+        m.add_formula("Chain", ["Product"], chain)
+        m.add_formula("Nested", ["Product"], nested)
+        self.assertEqual(m.get("Chain", Product="A"), 200)
+        self.assertEqual(m.get("Nested", Product="A"), 1)
+        self.assertEqual(to_formula(parse(chain)), chain)
+
+    def test_integer_bound(self):
+        with self.assertRaisesRegex(ParseError, "以下"):
+            parse("X[SELECT: Month - 2147483648]")
+        with self.assertRaisesRegex(ParseError, "以下"):
+            parse("PREVIOUS(Month, 99999999999999999999)", self_name="S")
+        with self.assertRaisesRegex(ParseError, "以下"):
+            parse("X[SELECT: Month + " + "9" * 5000 + "]")
+        for text, n in [("00000000001", 1), ("02147483647", 2147483647), ("0" * 5000, 0)]:
+            self.assertEqual(parse(f"PREVIOUS(Month, {text})", self_name="S").n, n)
+        m = model()
+        m.add_formula("R", ["Product", "Month"], "Z[SELECT: Month - 2147483647]")
+        self.assertIsNone(m.get("R", Product="A", Month="Jan"))
+
+    def test_infinite_number_is_a_parse_error(self):
+        with self.assertRaisesRegex(ParseError, "大きすぎる"):
+            parse("X * 1e400")
+
+
 class ModelWithText(unittest.TestCase):
     def test_previous_refers_to_self(self):
         m = model()

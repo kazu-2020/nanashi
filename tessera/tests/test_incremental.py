@@ -154,5 +154,21 @@ class RecomputesOnlyTheSlice(unittest.TestCase):
         self.assertEqual(self.m.get("Plus1", Product="A"), 12)
 
 
+class RefOnlyFormula(unittest.TestCase):
+    """A formula that is only a Ref (Y = X) does not share the stored data of X. A change of X then changes Y
+    and the Metrics that read Y."""
+
+    def test_source_change_reaches_downstream(self):
+        m = Named(Model())
+        m.add_dimension("P", ["a", "b"])
+        m.add_input("X", ["P"], {("a",): 7})
+        m.add_formula("Y", ["P"], "X")
+        m.add_formula("Z", ["P"], "Y * 2")
+        m.recalc()
+        m.set_cell("X", 1.0, P="a")
+        self.assertEqual(cells(m, "Z"), {("a",): 2.0})
+        check_full(self, m)
+
+
 if __name__ == "__main__":
     unittest.main()

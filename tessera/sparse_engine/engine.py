@@ -208,7 +208,7 @@ class ReferenceEngine:
 
     def replace(self, storage: Cube, region, new: Cube, cat):
         if not region:
-            return new
+            return Cube(new.dims, dict(new.cells))  # new can be a view of another Metric: do not share its cells
         cells = storage.cells
         for k in [k for k in cells if inside(k, storage.dims, region)]:
             del cells[k]

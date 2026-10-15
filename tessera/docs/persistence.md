@@ -91,6 +91,7 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
   The engine appends the entry and writes it to the disk (`F_FULLFSYNC` on macOS), and then commits.
   If the write or the check of the write fails, the engine makes the file the length from before the append again. If it cannot do this, it refuses all subsequent writes.
   If the last line is not complete (the process stopped during the write), readers ignore it, and the next writer removes it.
+  If a line before the last line is damaged, or the sequence numbers have a gap, the read raises `ValueError`.
 - `lock`: An exclusive lock (`flock`) that lets only 1 process write. The engine gets it at the first append. If a different process has it, the result is `Fenced`.
 - `cells/<random number>-<Metric ID>.parquet`: The cell changes of a journal entry that changes more than 10 thousand cells (`bulk_cells`).
   The format is the same as `PgJournal`. The journal line has only the file name (relative to the directory) and the hash.
@@ -100,8 +101,12 @@ The production journal is `PgJournal` (next section). `FileJournal` is mainly fo
   The engine puts each file first, and then puts `manifest.json` last. Thus it does not use a snapshot that stopped before completion.
   The engine checks the hashes while it reads the files at open. If a file is damaged, it uses the snapshot before that one and replays more journal entries.
 
-`journal.prune(keep=2)` keeps the 2 newest snapshots. It deletes the older snapshots, and the journal and the files for large changes before them.
-(After this, you cannot go back to a time before the kept snapshots.)
+`journal.prune(keep=2)` keeps the 2 newest snapshots and deletes the older snapshots.
+It also deletes the segments before the oldest kept snapshot, and their files for large changes.
+It does not delete a segment with an entry in the last `op_window` entries. Thus a resend after a restart still gets `AlreadyCommitted`.
+Prune uses the `op_window` of the journal object that runs it. Thus, run prune with the same `op_window` as the server.
+(After this, you cannot go back to a time before the oldest kept segment.)
+Use a `keep` value of 1 or more. The engine cannot open a model with no snapshot. For a smaller value, `FileJournal` and `PgJournal` raise `ValueError`.
 
 If you give the ID from the sender to `transaction(client_op_id=...)`, and a transaction with the same ID is already committed, the engine raises `AlreadyCommitted`. It does not do the operations in the transaction.
 Thus, if a user does not receive the response and sends again, the engine does not commit twice.
@@ -178,6 +183,12 @@ Unlike `acquire`, it does not check the local sequence number. Thus the process 
 It returns when `head_seq` changes, or when the lease is released or expires. Thus the standby can try to get the lease without a wait for the interval.
 
 `PgJournal` does not use session state (`LISTEN`/`NOTIFY`, session advisory locks, prepared statements). Thus it works through PgBouncer in transaction pooling mode.
+If the server closes the connection (a restart or an idle kill), the next operation fails. The operation after it connects again.
+A closed connection can lose the answer to a commit that PostgreSQL did. Thus after an append fails, the next batch of `Workspace` catches up from the journal before it looks up the `client_op_id` values.
+If the catch-up and the reopen both fail, the batch fails with 503 `closed`, and the next batch tries again. Thus a resend is not acknowledged against an old model.
+The old backend can finish the COMMIT after the catch-up read the head. If the journal has a `client_op_id` with a sequence number above the published version, the batch catches up again. If the entry is still not available, the batch fails with 503 `closed`.
+The lease is in the table, not in the session. Thus the next commit still checks the epoch and the holder. If a different process took the lease, the commit raises `Fenced`.
+`journal.lease()["held"]` is false after the lease expires, also before the heartbeat finds the loss. A standby `Workspace` returns to standby on this and releases the lease. Thus the heartbeat does not renew the lease while the catch-up fails.
 The router uses pgx, and pgx uses prepared statements by default. If the router connects through PgBouncer, add `default_query_exec_mode=exec` to the router DSN.
 PgBouncer 1.21 or later with `max_prepared_statements` more than 0 also works.
 
