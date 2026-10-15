@@ -289,7 +289,8 @@ class _Parser:
         if t.kind != "num" or not t.text.isdigit():
             self.error(f"整数が必要だが {t.describe()} がある")
         # Check the length first. int() rejects a text of more than 4300 digits.
-        if len(t.text) > len(str(MAX_SHIFT)) or (n := int(t.text)) > MAX_SHIFT:
+        digits = t.text.lstrip("0") or "0"  # leading zeros do not count
+        if len(digits) > len(str(MAX_SHIFT)) or (n := int(digits)) > MAX_SHIFT:
             self.error(f"整数は {MAX_SHIFT} 以下")
         self.advance()
         return n

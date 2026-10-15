@@ -191,6 +191,8 @@ class Limits(unittest.TestCase):
             parse("PREVIOUS(Month, 99999999999999999999)", self_name="S")
         with self.assertRaisesRegex(ParseError, "以下"):
             parse("X[SELECT: Month + " + "9" * 5000 + "]")
+        for text, n in [("00000000001", 1), ("02147483647", 2147483647), ("0" * 5000, 0)]:
+            self.assertEqual(parse(f"PREVIOUS(Month, {text})", self_name="S").n, n)
         m = model()
         m.add_formula("R", ["Product", "Month"], "Z[SELECT: Month - 2147483647]")
         self.assertIsNone(m.get("R", Product="A", Month="Jan"))
