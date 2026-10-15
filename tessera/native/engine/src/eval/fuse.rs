@@ -765,7 +765,7 @@ impl<'a> Space<'_, 'a> {
     }
 
     fn len(&self) -> usize {
-        self.base.as_ref().map_or(1, |(c, _, _)| c.n()) * self.combos()
+        self.base.as_ref().map_or(1, |(c, _, _)| c.n()).saturating_mul(self.combos())
     }
 
     fn cursor(&self) -> Cursor<'a> {

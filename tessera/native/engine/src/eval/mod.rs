@@ -131,9 +131,9 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 _ => ev(rt)?,
             };
             match op {
-                Op::Mul | Op::Div => intersect(&a, &b, Kind::Num, cat, |x, y| scalar(*op, x, y)),
+                Op::Mul | Op::Div => intersect(&a, &b, Kind::Num, cat, bud, |x, y| scalar(*op, x, y)),
                 Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
-                    intersect(&a, &b, Kind::Bool, cat, |x, y| scalar(*op, x, y))
+                    intersect(&a, &b, Kind::Bool, cat, bud, |x, y| scalar(*op, x, y))
                 }
                 Op::Add | Op::Sub => {
                     let dims = merge(a.dims(), b.dims());
@@ -174,9 +174,9 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
             let (yes, no) = (pick(true), pick(false));
             let t = branch(then, &yes)?;
             let kind = t.kind;
-            let mut parts = vec![intersect(&yes, &t, kind, cat, |_, y| Some(y))?];
+            let mut parts = vec![intersect(&yes, &t, kind, cat, bud, |_, y| Some(y))?];
             if let Some(e) = else_ {
-                parts.push(intersect(&no, &branch(e, &no)?, kind, cat, |_, y| Some(y))?);
+                parts.push(intersect(&no, &branch(e, &no)?, kind, cat, bud, |_, y| Some(y))?);
             }
             let dims = parts.iter().fold(Vec::new(), |acc, p| merge(&acc, p.dims()));
             let mut out = Cube { pack: Packing::new(&dims, cat)?, kind, cells: Vec::new() };
@@ -193,7 +193,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 None => ev(cond)?,
             };
             let keep = Cube { pack: c.pack.clone(), kind: Kind::Bool, cells: map_cells(cfg, &c.cells, |k, v| (v != 0.0).then_some((k, v))) };
-            intersect(&x, &keep, x.kind, cat, |a, _| Some(a))
+            intersect(&x, &keep, x.kind, cat, bud, |a, _| Some(a))
         }
 
         Node::Coalesce(first, second) => {
@@ -209,7 +209,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 Some(r2) => eval_with(other, cat, src, &r2, bud)?,
                 None => ev(other)?,
             };
-            intersect(&x, &o, x.kind, cat, |a, _| Some(a))
+            intersect(&x, &o, x.kind, cat, bud, |a, _| Some(a))
         }
 
         Node::Expand(child, dims) => {
@@ -244,7 +244,10 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
             let out = Packing::new(&replace_dim(c.dims(), *dst, *s), cat)?;
             let (pt, ps) = (c.pack.pos(*dst).unwrap(), out.pos(*s).unwrap());
             let rest = Proj::new(&c.pack, &out);
-            let mut cells = Vec::new();
+            // Count the target cells before the result exists: one cell goes down to all the members of its group
+            let n = c.cells.iter().fold(0usize, |n, &(k, _)| n.saturating_add(mp.inv[c.pack.get(k, pt) as usize].len()));
+            bud.need(n, "BY（上位の値の引き下ろし）")?;
+            let mut cells = Vec::with_capacity(n);
             for &(k, v) in &c.cells {
                 let base = rest.apply(&c.pack, &out, k);
                 for &m in &mp.inv[c.pack.get(k, pt) as usize] {
@@ -339,7 +342,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                                 Some(r2) => eval_with(edges, cat, src, &r2, bud)?,
                                 None => eval_with(edges, cat, src, &sub, bud)?,
                             };
-                            let joined = intersect(&xc, &o, xc.kind, cat, |a, _| Some(a))?;
+                            let joined = intersect(&xc, &o, xc.kind, cat, bud, |a, _| Some(a))?;
                             return remove_rows(Rows::Owned(joined), &dims, aggs, cat, r);
                         }
                     }
