@@ -104,6 +104,7 @@ m.set_cell("Bonus", 8, Employee="alice")   # Manual input for alice only
 `spread` sends a total value to a range of an input Metric.
 You specify the range with members of dimensions and with filters of the form "dimension.property".
 By default, `spread` uses the ratios of the current values. If there are no values, it spreads evenly. With `how="even"`, it always spreads evenly.
+If there are no values and the range has more cells than `Model(max_cells=...)`, `spread` gives an error.
 The engine writes the spread cells together, not one cell at a time. Thus, a spread to 225,000 cells takes some tens of ms.
 
 ```python
