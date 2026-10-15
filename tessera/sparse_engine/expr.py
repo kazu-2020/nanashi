@@ -38,7 +38,7 @@ def residual(vs) -> float:
 
 
 def _extreme(pick):
-    """MIN or MAX that does not depend on the order: a NaN gives nan (as for SUM), and -0.0 is less than 0.0."""
+    """Python min and max give a result that depends on the order if a NaN, or both -0.0 and 0.0, are in the values."""
     return lambda vs: math.nan if any(map(math.isnan, vs)) else pick(vs, key=lambda v: (v, math.copysign(1.0, v)))
 
 

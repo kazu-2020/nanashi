@@ -105,9 +105,6 @@ class OneRoundingForRemoveRun(unittest.TestCase):
 
 
 class MinMaxSpecialValues(unittest.TestCase):
-    """A NaN in the group makes MIN and MAX NaN, as for SUM. -0.0 is less than 0.0. The order of the rows, the path
-    and the engine do not change the result."""
-
     def test_functions_do_not_depend_on_the_order(self):
         mn, mx = AGGREGATORS["min"], AGGREGATORS["max"]
         for vs in [[1.0, math.nan, 2.0], [math.nan, 1.0, 2.0], [1.0, 2.0, math.nan]]:

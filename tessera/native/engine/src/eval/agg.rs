@@ -10,30 +10,26 @@ use super::exact::ExactSum;
 pub(crate) struct Acc {
     pub(crate) sum: ExactSum,
     pub(crate) cnt: u64,
-    pub(crate) min: i64, // min_key
-    pub(crate) max: i64, // max_key
+    pub(crate) min: i64, // a key of min_key, not a value
+    pub(crate) max: i64, // a key of max_key, not a value
     pub(crate) first: f64,
 }
 
-/// A key whose integer order is the order of MIN: a NaN is the least (it gives NaN, as for SUM), and -0.0 is less
-/// than 0.0. Thus the result does not depend on the order of the values (f64::min ignores a NaN and can give
-/// either zero).
+/// A NaN is the least key, so that MIN gives NaN as SUM does. f64::min ignores a NaN and can give either zero, so its
+/// result depends on the order of the values.
 fn min_key(v: f64) -> i64 {
     if v.is_nan() { i64::MIN } else { order(v.to_bits() as i64) }
 }
 
-/// A key whose integer order is the order of MAX: a NaN is the greatest, and 0.0 is greater than -0.0.
 fn max_key(v: f64) -> i64 {
     if v.is_nan() { i64::MAX } else { order(v.to_bits() as i64) }
 }
 
-/// Maps the bits of a value to a key in the order of the values (the same map as f64::total_cmp). The map is its
-/// own inverse.
+/// The same map as f64::total_cmp. It is its own inverse, so from_key uses it too.
 fn order(b: i64) -> i64 {
     b ^ (((b >> 63) as u64) >> 1) as i64
 }
 
-/// The value of a key of min_key or max_key.
 fn from_key(k: i64) -> f64 {
     if k == i64::MIN || k == i64::MAX { f64::NAN } else { f64::from_bits(order(k) as u64) }
 }
