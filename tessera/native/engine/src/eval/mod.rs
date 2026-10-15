@@ -232,7 +232,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         }
 
         Node::ByLookup { child, src: s, dst, map } => {
-            // 引き下ろし: dst の値を、そこへ対応する src の各メンバーへ配る
+            // Move each value on `dst` down to the members of `s` that map to it.
             let mp = &cat.maps[*map];
             let mut sub = r.without(&[*s, *dst]);
             let only = r.get(*s).cloned();
@@ -244,17 +244,13 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
             let out = Packing::new(&replace_dim(c.dims(), *dst, *s), cat)?;
             let (pt, ps) = (c.pack.pos(*dst).unwrap(), out.pos(*s).unwrap());
             let rest = Proj::new(&c.pack, &out);
-            // Count the target cells before the result exists: one cell goes down to all the members of its group
-            let n = c.cells.iter().fold(0usize, |n, &(k, _)| n.saturating_add(mp.inv[c.pack.get(k, pt) as usize].len()));
+            let targets = |k: u64| mp.inv[c.pack.get(k, pt) as usize].iter().copied().filter(|&m| only.as_ref().is_none_or(|sel| sel.has(m)));
+            let n = c.cells.iter().fold(0usize, |n, &(k, _)| n.saturating_add(targets(k).count()));
             bud.need(n, "BY（上位の値の引き下ろし）")?;
             let mut cells = Vec::with_capacity(n);
             for &(k, v) in &c.cells {
                 let base = rest.apply(&c.pack, &out, k);
-                for &m in &mp.inv[c.pack.get(k, pt) as usize] {
-                    if only.as_ref().is_none_or(|sel| sel.has(m)) {
-                        cells.push((base | out.put(ps, m), v));
-                    }
-                }
+                cells.extend(targets(k).map(|m| (base | out.put(ps, m), v)));
             }
             Ok(Cube { pack: out, kind: c.kind, cells })
         }

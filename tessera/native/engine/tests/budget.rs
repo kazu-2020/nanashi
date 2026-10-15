@@ -1,6 +1,6 @@
-//! メモリの予算。全組み合わせを作る演算は、作る前に予算を確かめる。
+//! Memory budget tests. An operation that can make a large result checks the budget before it makes the result.
 
-use nanashi_engine::{eval, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Src, Store};
+use nanashi_engine::{eval, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
 use std::sync::Arc;
 
 fn catalog(max_bytes: usize) -> Catalog {
@@ -48,18 +48,17 @@ fn ifblank_beyond_the_budget_fails_before_allocating() {
     assert!(eval(&node, &tiny, &source(&tiny), &Restrict::all(3)).unwrap_err().contains("メモリの予算を超える"));
 }
 
-/// A Store on `dims` with `n` rows: the row i is at member i of the last dimension and at member 0 of the others.
+/// Makes a Store on `dims` with `n` rows. Row `i` has member `i` of the last dimension and member 0 of each other dimension.
 fn column(cat: &Catalog, dims: &[usize], n: u32) -> Src {
     let last: Vec<u32> = (0..n).collect();
     let zeros = vec![0u32; n as usize];
-    let cols: Vec<&[u32]> = dims.iter().enumerate().map(|(i, _)| if i + 1 == dims.len() { &last[..] } else { &zeros[..] }).collect();
+    let cols: Vec<&[u32]> = (0..dims.len()).map(|i| if i + 1 == dims.len() { &last[..] } else { &zeros[..] }).collect();
     let s = Store::new(dims, None, Kind::Num, cat).unwrap().with_rows(&cols, &vec![1.0; n as usize]).unwrap();
     Src::Store(Arc::new(s))
 }
 
 #[test]
 fn join_beyond_the_budget_fails_before_allocating() {
-    // 3000 cells on d0 x 3000 cells on d1 = 9 x 10^6 cells (144 MB). The error names the join, not the result
     let cat = catalog(usize::MAX);
     let src = [column(&cat, &[0], 3000), column(&cat, &[1], 3000)];
     let cat = catalog(held(&src) + (1 << 20));
@@ -68,9 +67,8 @@ fn join_beyond_the_budget_fails_before_allocating() {
     assert!(err.contains("メモリの予算を超える") && err.contains("結合"), "{err}");
 }
 
-#[test]
-fn by_lookup_beyond_the_budget_fails_before_allocating() {
-    // The 3000 cells of (d1 = 0, d2) go down to the 3000 members of d0 that map to d1 = 0
+/// Members 0 to 2999 of d0 map to member 0 of d1. The source has 3000 cells on (d1 = 0, d2).
+fn by_lookup() -> (Catalog, [Src; 1], Node) {
     let mut cat = catalog(usize::MAX);
     let mut fwd = vec![-1i64; 100_000];
     fwd[..3000].fill(0);
@@ -79,9 +77,23 @@ fn by_lookup_beyond_the_budget_fails_before_allocating() {
     cat.maps = vec![Arc::new(Mapping { fwd, inv })];
     let src = [column(&cat, &[1, 2], 3000)];
     cat.cfg.max_bytes = held(&src) + (1 << 20);
-    let node = Node::ByLookup { child: Box::new(Node::Ref(0)), src: 0, dst: 1, map: 0 };
+    (cat, src, Node::ByLookup { child: Box::new(Node::Ref(0)), src: 0, dst: 1, map: 0 })
+}
+
+#[test]
+fn by_lookup_beyond_the_budget_fails_before_allocating() {
+    let (cat, src, node) = by_lookup();
     let err = eval(&node, &cat, &src, &Restrict::all(3)).unwrap_err();
     assert!(err.contains("メモリの予算を超える") && err.contains("引き下ろし"), "{err}");
+}
+
+#[test]
+fn by_lookup_on_one_member_counts_only_that_member() {
+    let (cat, src, node) = by_lookup();
+    let one = Restrict::all(3).with(0, Sel::new(vec![5], 100_000));
+    let c = eval(&node, &cat, &src, &one).unwrap();
+    assert_eq!(c.cells.len(), 3000);
+    assert!(c.cells.iter().all(|&(_, v)| v == 1.0));
 }
 
 #[test]

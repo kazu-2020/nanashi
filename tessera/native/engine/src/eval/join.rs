@@ -98,8 +98,7 @@ pub(crate) fn in_order<'a>(cfg: &Config, cells: &'a [(u64, f64)]) -> Cow<'a, [(u
     }
 }
 
-/// INNER JOIN. Only the cells with a value on both sides are in the result. A cell is empty if f gives None.
-/// Err if the join of different dimensions (many-to-many) does not fit in the budget bud.
+/// INNER JOIN. Only the cells with a value on both sides are in the result. A cell is empty if `f` gives None.
 pub(crate) fn intersect(
     a: &Cube,
     b: &Cube,
@@ -159,17 +158,21 @@ pub(crate) fn intersect(
 
     let (index, entries, f) = (&index, &entries, &f);
     let range = |k: u64| index.get(&a_sk.apply(&a.pack, &sk, k)).copied().unwrap_or((0, 0));
-    // Count the pairs before the result exists: the result of a many-to-many join can be far larger than the sides
-    let pairs = |&(k, _): &(u64, f64)| {
-        let (i, j) = range(k);
-        j - i
+    // If each key of b has one entry, each cell of a has a maximum of one pair.
+    let n: usize = if index.len() == entries.len() {
+        a.cells.len()
+    } else {
+        let pairs = |&(k, _): &(u64, f64)| {
+            let (i, j) = range(k);
+            j - i
+        };
+        if cfg.par(a.cells.len()) { a.cells.par_iter().map(pairs).sum() } else { a.cells.iter().map(pairs).sum() }
     };
-    let n: usize = if cfg.par(a.cells.len()) { a.cells.par_iter().map(pairs).sum() } else { a.cells.iter().map(pairs).sum() };
     bud.need(n, "軸の違う式の結合")?;
     let cells = flat_map_cells(cfg, &a.cells, |k, v| {
-        let range = range(k);
+        let (i, j) = range(k);
         let base = a_out.apply(&a.pack, &out, k);
-        entries[range.0..range.1].iter().filter_map(move |&(_, bk, bv)| f(v, bv).map(|x| (base | bk, x)))
+        entries[i..j].iter().filter_map(move |&(_, bk, bv)| f(v, bv).map(|x| (base | bk, x)))
     });
     Ok(Cube { pack: out, kind, cells })
 }
@@ -199,8 +202,7 @@ pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &
     Ok(Cube { pack: out, kind: c.kind, cells })
 }
 
-/// The number of combinations of the given dimensions (position, members). usize::MAX if more than that: a
-/// release build does not check the overflow, and a wrap to 0 passes the budget check.
+/// Gives the number of combinations of the members in `spans`. Stops at `usize::MAX` and does not wrap.
 pub(crate) fn combos(spans: &[(usize, Vec<u32>)]) -> usize {
     spans.iter().fold(1, |n, (_, ms)| n.saturating_mul(ms.len()))
 }
@@ -262,10 +264,10 @@ mod tests {
 
     #[test]
     fn combos_saturates_instead_of_wrapping_to_zero() {
-        // 4 dimensions of 65536 members are 2^64 combinations. A wrap to 0 passes the budget check.
-        let spans: Vec<(usize, Vec<u32>)> = (0..4).map(|i| (i, (0..65536).collect())).collect();
+        let members = 1usize << 16;
+        let spans: Vec<(usize, Vec<u32>)> = (0..4).map(|i| (i, (0..members as u32).collect())).collect();
         assert_eq!(combos(&spans), usize::MAX);
-        assert_eq!(combos(&spans[..3]), 1 << 48);
+        assert_eq!(combos(&spans[..3]), members.pow(3));
         assert_eq!(combos(&[]), 1);
     }
 }

@@ -607,7 +607,8 @@ fn inner_join<'s>(a: &'s F, b: &'s F, acc: &'s [Access], g: impl Fn(f64, f64) ->
 /// Part と All で走査してよい数: 演算ごとに評価したときに必ず作る途中結果の件数の、この倍まで。
 const SPAN_RATIO: f64 = 4.0;
 
-/// node を融合して評価する。融合できなければ Ok(None)。結果が予算を超えるなら Err。
+/// Evaluates `node` as one fused loop. Gives Ok(None) if the engine cannot fuse it.
+/// Gives Err if the result does not fit in `bud`.
 pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Option<Cube>> {
     if !r.is_all() || matches!(node, Node::Ref(_) | Node::Const(..) | Node::MemberConst(..)) {
         return Ok(None);
@@ -615,10 +616,15 @@ pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: 
     let merged: Vec<OnceCell<Cube>> = src.iter().map(|_| OnceCell::new()).collect();
     let mut fu = Fuse { cat, src, bud, merged: &merged, copied: 0, leaves: Vec::new(), ids: Vec::new() };
     let Some(info) = fu.info(node) else { return Ok(None) };
-    if info.mat > usize::MAX as f64 || bud.need(info.mat as usize + fu.copied, "").is_err() {
+    if !fits(info.mat, fu.copied, bud) {
         return Ok(None);
     }
     fused_with(node, &mut fu, info, bud)
+}
+
+/// True if `mat` estimated cells and `copied` cells fit in `bud`. An estimate of `2^64` or more does not fit.
+fn fits(mat: f64, copied: usize, bud: &Budget) -> bool {
+    mat < usize::MAX as f64 && bud.need((mat as usize).saturating_add(copied), "").is_ok()
 }
 
 fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Option<Cube>> {
@@ -797,6 +803,8 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budge
         return Ok(Vec::new());
     }
     let chunk = cfg.chunk.max(1);
+    // The list of parts uses the memory of n / chunk cells. Check it before the list exists.
+    bud.need(n.div_ceil(chunk).saturating_add(copied), "式の結果")?;
     let parts: Vec<(usize, usize)> = (0..n).step_by(chunk).map(|lo| (lo, (lo + chunk).min(n))).collect();
     let count = |&(lo, hi): &(usize, usize)| {
         let (mut readers, mut rd) = (readers(access), space.cursor());
@@ -848,3 +856,16 @@ pub(crate) fn compact(cells: &mut Vec<(u64, f64)>, sizes: &[usize], written: &[u
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::fits;
+    use crate::Budget;
+
+    #[test]
+    fn an_estimate_of_2_to_the_64_does_not_fit() {
+        let bud = Budget::new(1 << 40, 0);
+        assert!(!fits(2f64.powi(64), 1, &bud));
+        assert!(!fits(2f64.powi(64), 0, &bud));
+        assert!(fits(1000.0, 1, &bud));
+    }
+}
