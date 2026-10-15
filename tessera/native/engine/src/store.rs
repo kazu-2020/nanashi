@@ -98,6 +98,9 @@ pub(crate) fn fresh_postings(n: usize) -> Vec<OnceLock<Arc<Postings>>> {
 
 impl Store {
     pub fn new(metric_dims: &[DimId], index: Option<DimId>, kind: Kind, cat: &Catalog) -> Result<Store> {
+        if metric_dims.iter().enumerate().any(|(i, d)| metric_dims[..i].contains(d)) {
+            return Err("Metric に同じ軸が 2 回ある".into());
+        }
         let mut order: Vec<DimId> = Vec::with_capacity(metric_dims.len());
         if let Some(i) = index {
             if !metric_dims.contains(&i) {

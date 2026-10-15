@@ -647,6 +647,7 @@ class Model:
         self._check_name(name)
         kind = self._check_kind(name, kind)
         dims = tuple(self.dimension(d).id for d in dims)
+        self._check_repeated(name, dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
         new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition), id=id,
@@ -698,6 +699,7 @@ class Model:
         if isinstance(formula, str):
             formula = parse(formula, self_name=name)
         dims = tuple(self.dimension(d).id for d in dims)
+        self._check_repeated(name, dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
         formula = bind(formula, self, {name: id})  # the formula can refer to the Metric that it defines
@@ -803,6 +805,12 @@ class Model:
 
     def _dim_names(self, dims) -> tuple[str, ...]:
         return tuple(self.dimensions[d].name for d in dims)
+
+    def _check_repeated(self, name: str, dims: tuple[str, ...]) -> None:
+        """Make sure that no dimension occurs two times in dims. Else the keys overlap."""
+        repeated = sorted({self.dimension(d).name for d in dims if dims.count(d) > 1})
+        if repeated:
+            raise ValueError(f"{name}: 軸 {', '.join(repeated)} を 2 回以上持てない")
 
     def _check_key_width(self, name: str, dims: tuple[str, ...]) -> None:
         """If the engine holds the key of a cell in a fixed-width integer, make sure that the dimensions fit
