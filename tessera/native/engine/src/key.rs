@@ -60,8 +60,7 @@ impl Packing {
         self.dims.iter().position(|&x| x == d)
     }
 
-    /// The position of the copy of `dims[j]`. A Metric from an old journal can have one dimension two times.
-    /// Then the n-th copy in `dims` goes to the n-th copy here.
+    /// The slot of dims[j] in this packing. If dims has one dimension two times, the n-th copy in dims goes to the n-th copy here.
     pub fn slot_of(&self, dims: &[DimId], j: usize) -> Option<usize> {
         let d = dims[j];
         let n = dims[..j].iter().filter(|&&x| x == d).count();

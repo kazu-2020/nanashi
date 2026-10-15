@@ -144,7 +144,7 @@ class ReferenceEngine:
         return Cube(storage.dims, {k: v for k, v in storage.cells.items() if v != value})
 
     def remove_member(self, storage: Cube, dim, index, member, values, cat):
-        at = [i for i, d in enumerate(storage.dims) if d == dim]  # a Metric from an old journal can repeat dim
+        at = [i for i, d in enumerate(storage.dims) if d == dim]
         cells = {k: v for k, v in storage.cells.items() if all(k[i] != member for i in at)}
         if values:
             cells = {k: v - 1.0 if v > index else v for k, v in cells.items() if v != index}
@@ -243,7 +243,8 @@ class ReferenceEngine:
     def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
         nanashi_core = native()
         dims = [cat.dimension(d).id for d in dims]
-        order = [storage.dims.index(d) for d in dims]
+        # the n-th copy of a repeated dimension reads the n-th copy in storage.dims
+        order = [[i for i, x in enumerate(storage.dims) if x == d][dims[:j].count(d)] for j, d in enumerate(dims)]
         index = [cat.dimension(d)._by_id for d in dims]
         keys = list(storage.cells)
         cols = [[index[j][k[i]] for k in keys] for j, i in enumerate(order)]

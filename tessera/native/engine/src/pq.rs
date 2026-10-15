@@ -85,14 +85,16 @@ pub fn write(names: &[String], cols: Vec<Vec<u32>>, values: Vec<f64>, value: Val
     encode(fields, arrays, meta)
 }
 
-/// 列を名前で選んで読む。expected の各列（名前と型）がファイルのどこにあってもよく、ほかの列は読まない
-/// （あとの版が列を足しても、前の版が読める）。見つからないか型が違えばエラー。返すのは、読んだ組の
-/// 列の中での、expected の各列の位置。
+/// Select the columns by name. Each column of expected (name and type) can be at any position in the file. Other
+/// columns are not read, so an old version can read a file with more columns. If a column is missing or has a
+/// different type, give an error. Return the position of each column of expected in the batch that is read.
 fn project(builder: ParquetRecordBatchReaderBuilder<Bytes>, expected: &[(&str, DataType)]) -> Result<(ParquetRecordBatchReaderBuilder<Bytes>, Vec<usize>)> {
     let schema = builder.schema().clone();
     let mut roots = Vec::with_capacity(expected.len());
-    for (name, t) in expected {
-        match schema.fields().iter().position(|f| f.name() == name) {
+    for (j, (name, t)) in expected.iter().enumerate() {
+        // A Metric can have one dimension two times. Then the n-th copy of a name reads the n-th column with that name.
+        let n = expected[..j].iter().filter(|(x, _)| x == name).count();
+        match schema.fields().iter().enumerate().filter(|(_, f)| f.name() == name).nth(n).map(|(i, _)| i) {
             Some(i) if schema.field(i).data_type() == t => roots.push(i),
             _ => {
                 let show = |xs: Vec<String>| xs.join(", ");
@@ -367,6 +369,17 @@ mod tests {
         }
         let store = Bytes::from(write(&names(1), vec![vec![0]], vec![1.0], Value::Num, &[]).unwrap());
         assert!(read_changes(store).unwrap_err().contains("変更の形でない"));
+    }
+
+    #[test]
+    fn a_repeated_name_reads_the_nth_column() {
+        let names: Vec<String> = ["d0", "d1", "d0"].map(String::from).to_vec();
+        let cols = vec![vec![0, 1], vec![2, 2], vec![1, 0]];
+        let buf = write(&names, cols.clone(), vec![1.0, 2.0], Value::Num, &[]).unwrap();
+        assert_eq!(read(Bytes::from(buf), &names, Value::Num, &[2, 3, 2]).unwrap(), (cols, vec![1.0, 2.0]));
+        let c = Changes { cols: vec![vec![0, 1], vec![0, 1]], ids: vec![strs(&["a", "b"]), strs(&["b", "a"])], old: vec![None, None], new: vec![Some(1.0), Some(2.0)], value_ids: vec![], kind: Value::Num };
+        let names: Vec<String> = ["d0", "d0"].map(String::from).to_vec();
+        assert_eq!(read_changes(Bytes::from(write_changes(&names, &c, &[]).unwrap())).unwrap(), (names, c));
     }
 
     #[test]

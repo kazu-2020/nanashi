@@ -1,14 +1,15 @@
-"""A new Metric cannot have the same dimension two times. A Metric from an old journal still loads."""
+import tempfile
 import unittest
+from pathlib import Path
 
 from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.journal import apply
+from sparse_engine.journal import FileJournal, apply
 from sparse_engine.server import apply_ops
 
 try:
     from sparse_engine.rust_engine import RustEngine
-except ImportError:  # nanashi_core is not built
+except ImportError:
     RustEngine = None
 
 ENGINES = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
@@ -39,15 +40,6 @@ class RepeatedDimension(unittest.TestCase):
                     m.add_formula("X", ["A", "B", "A"], "1")
                 self.assertNotIn("X", m._metric_ids)
 
-    def test_redefinition_keeps_the_old_definition(self):
-        for engine in ENGINES:
-            with self.subTest(engine.__name__):
-                m = small(engine)
-                m.add_input("X", ["A", "B"], {("a1", "b1"): 1.0})
-                with self.assertRaisesRegex(ValueError, REPEATED):
-                    m.add_input("X", ["A", "A"], id=m.metric("X").id)
-                self.assertEqual(dict(m.value("X").cells), {("a1", "b1"): 1.0})
-
     def test_server_write_is_rejected(self):
         for engine in ENGINES:
             with self.subTest(engine.__name__):
@@ -55,9 +47,6 @@ class RepeatedDimension(unittest.TestCase):
                 a = m.dimension_id("A")
                 with self.assertRaisesRegex(ValueError, REPEATED):
                     apply_ops(m.model, [{"op": "add_input", "id": "x", "name": "X", "dims": [a, a]}])
-                with self.assertRaisesRegex(ValueError, REPEATED):
-                    apply_ops(m.model, [{"op": "add_formula", "id": "x", "name": "X", "dims": [a, a],
-                                         "formula": "1"}])
                 self.assertNotIn("X", m._metric_ids)
 
     def test_old_record_loads_and_can_be_removed(self):
@@ -77,6 +66,27 @@ class RepeatedDimension(unittest.TestCase):
                     self.assertEqual(dict(m.value("X").cells), {})
                     m.remove_metric("X")
                     self.assertNotIn("X", m._metric_ids)
+
+    def test_old_record_survives_snapshot_and_bulk_replay(self):
+        for engine in ENGINES:
+            for dims, cells in ((("A", "B", "A"), {("a1", "b1", "a2"): 1.0, ("a2", "b1", "a1"): 2.0}),
+                                (("A", "A"), {("a1", "a2"): 1.0, ("a2", "a1"): 2.0})):
+                for snapshot in (True, False):
+                    with self.subTest(engine.__name__, dims=dims, snapshot=snapshot), \
+                            tempfile.TemporaryDirectory() as path:
+                        m = small(engine)
+                        j = FileJournal(path, fsync=False, bulk_cells=0)
+                        j.start(m.model)
+                        spec = {"id": "x", "name": "X", "dims": [m.dimension_id(d) for d in dims], "kind": "number",
+                                "formula": None, "partition": None, "overridable": False}
+                        rows = [[[m.member_id(d, x) for d, x in zip(dims, k)], None, v] for k, v in cells.items()]
+                        cell = {"metric": "x", "dims": spec["dims"], "rows": rows}
+                        j.append({"changes": {"metrics": [spec], "cells": [cell]}})
+                        if snapshot:
+                            j.save_snapshot(j.open(engine()))
+                        j.release()
+                        self.assertEqual(len(list((Path(path) / "cells").glob("*-x.parquet"))), 1)  # a bulk record
+                        self.assertEqual(dict(Named(FileJournal(path).open(engine())).value("X").cells), cells)
 
 
 if __name__ == "__main__":

@@ -807,7 +807,7 @@ class Model:
         return tuple(self.dimensions[d].name for d in dims)
 
     def _check_repeated(self, name: str, dims: tuple[str, ...]) -> None:
-        """Make sure that no dimension occurs two times in dims. Else the keys overlap."""
+        """Reject a repeated dimension, because formulas and set_cell find a dimension by its name."""
         repeated = sorted({self.dimension(d).name for d in dims if dims.count(d) > 1})
         if repeated:
             raise ValueError(f"{name}: 軸 {', '.join(repeated)} を 2 回以上持てない。"

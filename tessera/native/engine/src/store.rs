@@ -103,7 +103,7 @@ impl Store {
             let Some(p) = order.iter().position(|&d| d == i) else {
                 return Err("分割軸が Metric の軸にない".into());
             };
-            order[..=p].rotate_right(1); // move only the first copy, so that a repeated dimension keeps all its slots
+            order[..=p].rotate_right(1); // move only the first copy of a repeated dimension
         }
         Ok(Store {
             metric_dims: metric_dims.to_vec(),
@@ -269,7 +269,6 @@ impl Store {
         self.base.keys.len() + self.delta.len()
     }
 
-    /// The key slot of each declared dimension, in the declared order.
     fn slots(&self) -> Vec<usize> {
         (0..self.metric_dims.len()).map(|j| self.pack.slot_of(&self.metric_dims, j).unwrap()).collect()
     }
