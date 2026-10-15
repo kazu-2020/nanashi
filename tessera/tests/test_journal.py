@@ -152,6 +152,27 @@ class Journal(JournalCase, unittest.TestCase):
         self.assertEqual(loaded.get("Plus1", Product="A", Month="Feb"), 60)
         self.assertEqual(loaded.get("Plus1", Product="A", Month="Jan"), 17)
 
+    def test_replay_of_a_kind_change_and_an_override_in_one_transaction(self):
+        m = self.m
+        plus1 = m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=m.metric("Plus1").id)
+        m.set_cell("Plus1", 1, Product="A")
+        with m.transaction():
+            m.add_formula("Plus1", ["Product"], "Price > 100", kind="boolean", overridable=True, id=plus1)
+            m.set_cell("Plus1", True, Product="A")
+        loaded = self.reopen()
+        check_same_state(self, m, loaded)
+        self.assertIs(loaded.get("Plus1", Product="A"), True)
+
+    def test_replay_of_a_kind_change_and_an_equal_value_in_one_transaction(self):
+        m = self.m
+        x = m.add_input("X", ["Product"], {("A",): 1})
+        with m.transaction():
+            m.add_input("X", ["Product"], kind="boolean", id=x)
+            m.set_cell("X", True, Product="A")
+        loaded = self.reopen()
+        check_same_state(self, m, loaded)
+        self.assertIs(loaded.get("X", Product="A"), True)
+
     def test_each_call_is_recorded(self):
         self.m.set_cell("Price", 12, Product="A")
         self.m.add_member("Product", "E", Category="Y")

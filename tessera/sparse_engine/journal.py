@@ -249,7 +249,9 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
         return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
     # Compare by id (a member was removed, or the engine cannot compare by position)
     new = _by_id(after, m, new_store)
-    old = {} if old_store is None else _by_id(before, o, old_store)
+    # A replay empties the store when the dims or the kind change (_define), so all new cells are changes
+    same_type = old_store is not None and (o.dims, o.kind) == (m.dims, m.kind)
+    old = _by_id(before, o, old_store) if same_type else {}
     return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
 
 
