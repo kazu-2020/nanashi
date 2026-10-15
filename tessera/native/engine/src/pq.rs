@@ -85,14 +85,16 @@ pub fn write(names: &[String], cols: Vec<Vec<u32>>, values: Vec<f64>, value: Val
     encode(fields, arrays, meta)
 }
 
-/// 列を名前で選んで読む。expected の各列（名前と型）がファイルのどこにあってもよく、ほかの列は読まない
-/// （あとの版が列を足しても、前の版が読める）。見つからないか型が違えばエラー。返すのは、読んだ組の
-/// 列の中での、expected の各列の位置。
+/// Select the columns by name. Each column of expected (name and type) can be at any position in the file. Other
+/// columns are not read, so an old version can read a file with more columns. If a column is missing or has a
+/// different type, give an error. Return the position of each column of expected in the batch that is read.
 fn project(builder: ParquetRecordBatchReaderBuilder<Bytes>, expected: &[(&str, DataType)]) -> Result<(ParquetRecordBatchReaderBuilder<Bytes>, Vec<usize>)> {
     let schema = builder.schema().clone();
     let mut roots = Vec::with_capacity(expected.len());
-    for (name, t) in expected {
-        match schema.fields().iter().position(|f| f.name() == name) {
+    for (j, (name, t)) in expected.iter().enumerate() {
+        // A Metric can have one dimension two times. Then the n-th copy of a name reads the n-th column with that name.
+        let n = expected[..j].iter().filter(|(x, _)| x == name).count();
+        match schema.fields().iter().enumerate().filter(|(_, f)| f.name() == name).nth(n).map(|(i, _)| i) {
             Some(i) if schema.field(i).data_type() == t => roots.push(i),
             _ => {
                 let show = |xs: Vec<String>| xs.join(", ");
@@ -111,9 +113,14 @@ fn project(builder: ParquetRecordBatchReaderBuilder<Bytes>, expected: &[(&str, D
     Ok((builder.with_projection(mask), at))
 }
 
-/// Parquet のバイト列を列に戻す。列は名前で選ぶ（並び順は問わず、ほかの列は読まない）。
-/// 列の型が names と value に合い、メンバー番号が軸の大きさ（sizes）未満でなければエラーにする。
+/// Reads Parquet bytes into columns. It selects each column by name, in any order, and does not read other columns.
+/// `sizes` has the member count of each dimension in `names`. For a member value, the last item is the member count
+/// of the value dimension. Gives an error if a column type does not agree with `names` and `value`, or if a member
+/// number is equal to or more than its member count.
 pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Result<(Vec<Vec<u32>>, Vec<f64>)> {
+    if sizes.len() != names.len() + usize::from(value == Value::Member) {
+        return Err(format!("軸の大きさの数 {} が列の数と合わない", sizes.len()));
+    }
     let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(pq_err)?;
     let expected: Vec<(&str, DataType)> = names
         .iter()
@@ -121,7 +128,8 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
         .chain(std::iter::once((VALUE, value.data_type(DataType::UInt32))))
         .collect();
     let (builder, at) = project(builder, &expected)?;
-    let rows = builder.metadata().file_metadata().num_rows() as usize;
+    // The footer row count can be false, so cap the first reservation and shrink to the decoded rows at the end.
+    let rows = (builder.metadata().file_metadata().num_rows().max(0) as usize).min(1 << 24);
     let mut cols: Vec<Vec<u32>> = names.iter().map(|_| Vec::with_capacity(rows)).collect();
     let mut values = Vec::with_capacity(rows);
     for batch in builder.build().map_err(pq_err)? {
@@ -145,10 +153,16 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
             }
             Value::Member => {
                 let u = v.as_any().downcast_ref::<UInt32Array>().unwrap();
+                let size = sizes[names.len()];
+                if let Some(&x) = u.values().iter().find(|&&x| x >= size) {
+                    return Err(format!("値のメンバー番号 {x} が値の軸の大きさ {size} を超える"));
+                }
                 values.extend(u.values().iter().map(|&x| x as f64));
             }
         }
     }
+    cols.iter_mut().for_each(|c| c.shrink_to_fit());
+    values.shrink_to_fit();
     Ok((cols, values))
 }
 
@@ -262,11 +276,10 @@ pub fn read_changes(data: Bytes) -> Result<(Vec<String>, Changes)> {
     expected.push(("new", new_t.clone()));
     let (builder, at) = project(builder, &expected)?;
     let n = names.len();
-    let rows = builder.metadata().file_metadata().num_rows() as usize;
-    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| Vec::with_capacity(rows)).collect();
+    let mut cols: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut tables: Vec<Interner> = names.iter().map(|_| Interner::default()).collect();
     let mut values = Interner::default();
-    let (mut old, mut new) = (Vec::with_capacity(rows), Vec::with_capacity(rows));
+    let (mut old, mut new) = (Vec::new(), Vec::new());
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
         for j in 0..n {
@@ -316,7 +329,8 @@ mod tests {
         ] {
             let meta = vec![("k".to_string(), "値".to_string())];
             let buf = write(&names(2), cols.clone(), vals.clone(), value, &meta).unwrap();
-            let (c, v) = read(Bytes::from(buf.clone()), &names(2), value, &[3, 4]).unwrap();
+            let sizes: &[u32] = if value == Value::Member { &[3, 4, 5] } else { &[3, 4] };
+            let (c, v) = read(Bytes::from(buf.clone()), &names(2), value, sizes).unwrap();
             assert_eq!((c, v), (cols.clone(), vals));
             assert_eq!(metadata(Bytes::from(buf)).unwrap(), meta);
         }
@@ -370,6 +384,17 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_name_reads_the_nth_column() {
+        let names: Vec<String> = ["d0", "d1", "d0"].map(String::from).to_vec();
+        let cols = vec![vec![0, 1], vec![2, 2], vec![1, 0]];
+        let buf = write(&names, cols.clone(), vec![1.0, 2.0], Value::Num, &[]).unwrap();
+        assert_eq!(read(Bytes::from(buf), &names, Value::Num, &[2, 3, 2]).unwrap(), (cols, vec![1.0, 2.0]));
+        let c = Changes { cols: vec![vec![0, 1], vec![0, 1]], ids: vec![strs(&["a", "b"]), strs(&["b", "a"])], old: vec![None, None], new: vec![Some(1.0), Some(2.0)], value_ids: vec![], kind: Value::Num };
+        let names: Vec<String> = ["d0", "d0"].map(String::from).to_vec();
+        assert_eq!(read_changes(Bytes::from(write_changes(&names, &c, &[]).unwrap())).unwrap(), (names, c));
+    }
+
+    #[test]
     fn empty_store() {
         let buf = write(&names(1), vec![vec![]], vec![], Value::Num, &[]).unwrap();
         let (c, v) = read(Bytes::from(buf), &names(1), Value::Num, &[0]).unwrap();
@@ -386,5 +411,47 @@ mod tests {
         let e = read(buf, &names(2), Value::Num, &[1, 5]).unwrap_err();
         assert!(e.contains("メンバー番号 5"), "{e}");
         assert!(read(Bytes::from_static(b"broken"), &names(2), Value::Num, &[1, 9]).is_err());
+    }
+
+    fn false_row_count(buf: Vec<u8>, rows: i64) -> Bytes {
+        use parquet::file::metadata::{ParquetMetaDataReader, ParquetMetaDataWriter};
+        let buf = Bytes::from(buf);
+        let md = ParquetMetaDataReader::new().parse_and_finish(&buf).unwrap();
+        let groups = md.row_groups().iter().map(|g| g.clone().into_builder().set_num_rows(rows).build().unwrap()).collect();
+        let md = md.into_builder().set_row_groups(groups).build();
+        let footer = u32::from_le_bytes(buf[buf.len() - 8..buf.len() - 4].try_into().unwrap()) as usize;
+        let mut out = buf[..buf.len() - 8 - footer].to_vec();
+        ParquetMetaDataWriter::new(&mut out, &md).finish().unwrap();
+        Bytes::from(out)
+    }
+
+    #[test]
+    fn ignores_a_false_row_count() {
+        let rows = 1 << 36;
+        let (cols, vals) = (vec![vec![0, 1], vec![2, 3]], vec![1.5, 2.5]);
+        let buf = write(&names(2), cols.clone(), vals.clone(), Value::Num, &[]).unwrap();
+        let (c, v) = read(false_row_count(buf, rows), &names(2), Value::Num, &[3, 4]).unwrap();
+        assert!(c.iter().all(|c| c.capacity() < 1 << 20) && v.capacity() < 1 << 20);
+        assert_eq!((c, v), (cols, vals));
+        let c = Changes { cols: vec![vec![0, 1]], ids: vec![strs(&["a", "b"])], old: vec![None, None], new: vec![Some(1.0), Some(2.0)], value_ids: vec![], kind: Value::Num };
+        let (_, got) = read_changes(false_row_count(write_changes(&["d0".into()], &c, &[]).unwrap(), rows)).unwrap();
+        assert!(got.cols[0].capacity() < 1 << 20 && got.old.capacity() < 1 << 20 && got.new.capacity() < 1 << 20);
+        assert_eq!(got, c);
+    }
+
+    #[test]
+    fn rejects_member_value_out_of_value_dimension() {
+        let buf = Bytes::from(write(&names(1), vec![vec![0, 1]], vec![0.0, 5.0], Value::Member, &[]).unwrap());
+        let e = read(buf, &names(1), Value::Member, &[2, 5]).unwrap_err();
+        assert!(e.contains("値のメンバー番号 5"), "{e}");
+    }
+
+    #[test]
+    fn rejects_sizes_that_do_not_match_names() {
+        let buf = Bytes::from(write(&names(2), vec![vec![0], vec![1]], vec![1.0], Value::Member, &[]).unwrap());
+        for sizes in [&[3][..], &[3, 4], &[3, 4, 5, 6]] {
+            let e = read(buf.clone(), &names(2), Value::Member, sizes).unwrap_err();
+            assert!(e.contains("軸の大きさの数"), "{e}");
+        }
     }
 }
