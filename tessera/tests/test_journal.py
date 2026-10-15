@@ -366,7 +366,7 @@ class Journal(JournalCase, unittest.TestCase):
 
     def test_snapshots_split_the_log_and_prune_removes_the_old_part(self):
         self.file_only()
-        j = self.m.journal
+        j = self.m.journal = self.journals.journal(op_window=1)  # prune keeps the segments in the window
         for i in range(3):
             self.m.set_cell("Price", 10 + i, Product="A")
             self.m.checkpoint()
@@ -381,6 +381,28 @@ class Journal(JournalCase, unittest.TestCase):
         check_same_state(self, self.m, self.reopen())
         with self.assertRaisesRegex(ValueError, "prune で消した"):
             list(self.journals.journal().records(after=0))
+
+    def test_resend_after_prune_and_reopen_is_not_applied_twice(self):
+        with self.m.transaction(client_op_id="req-1"):
+            self.m.set_cell("Price", 12, Product="A")
+        self.m.checkpoint()
+        self.m.set_cell("Price", 13, Product="A")
+        self.m.checkpoint()
+        self.m.journal.prune(keep=1)
+        self.m.journal.release()
+        reopened = self.reopen()
+        with self.assertRaises(AlreadyCommitted):
+            with reopened.transaction(client_op_id="req-1"):
+                reopened.set_cell("Price", 14, Product="A")
+        self.assertEqual(self.reopen().get("Price", Product="A"), 13)
+
+    def test_prune_keeps_at_least_one_snapshot(self):
+        self.m.set_cell("Price", 12, Product="A")
+        self.m.checkpoint()
+        with self.assertRaisesRegex(ValueError, "keep"):
+            self.m.journal.prune(keep=0)
+        self.assertEqual(len(self.journals.journal().snapshots()), 2)
+        check_same_state(self, self.m, self.reopen())
 
     def test_client_op_ids_are_remembered_within_the_window(self):
         self.file_only()
@@ -422,6 +444,54 @@ class Journal(JournalCase, unittest.TestCase):
         (self.m.journal.log_path).write_text("{broken\n" + lines[1])
         with self.assertRaisesRegex(ValueError, "壊れている"):
             FileJournal(self.path)
+
+    def test_a_broken_line_in_an_old_segment_is_an_error(self):
+        self.file_only()
+        self.m.set_cell("Price", 12, Product="A")
+        self.m.set_cell("Price", 13, Product="A")
+        old = self.m.journal.log_path
+        self.m.checkpoint()
+        self.m.set_cell("Price", 14, Product="A")
+        lines = old.read_text().splitlines(keepends=True)
+        for broken, prev in [(0, 0), (1, 1)]:
+            with self.subTest(broken_line=broken + 1):
+                old.write_text("".join("{broken\n" if i == broken else line for i, line in enumerate(lines)))
+                j = self.journals.journal(op_window=1)  # Open reads only the last segment
+                with self.assertRaisesRegex(ValueError, f"通し番号が {prev} の次でなく"):
+                    list(j.records())
+
+    def test_a_broken_line_in_the_op_window_is_an_error_at_open(self):
+        self.file_only()
+        self.m.set_cell("Price", 11, Product="A")
+        self.m.set_cell("Price", 12, Product="A")
+        with self.m.transaction(client_op_id="req-3"):
+            self.m.set_cell("Price", 13, Product="A")
+        self.m.set_cell("Price", 14, Product="A")
+        old = self.m.journal.log_path
+        self.m.checkpoint()
+        self.m.set_cell("Price", 15, Product="A")
+        lines = old.read_text().splitlines(keepends=True)
+        old.write_text(lines[0] + "{broken\n" + "".join(lines[2:]))
+        self.m.journal.release()
+        with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 5"):
+            self.reopen()
+
+    def test_a_broken_last_line_before_an_empty_segment_is_an_error(self):
+        self.file_only()
+        self.m.set_cell("Price", 11, Product="A")
+        self.m.set_cell("Price", 12, Product="A")
+        with self.m.transaction(client_op_id="req-3"):
+            self.m.set_cell("Price", 13, Product="A")
+        old = self.m.journal.log_path
+        self.m.checkpoint()
+        lines = old.read_text().splitlines(keepends=True)
+        old.write_text(lines[0] + "{broken\n" + lines[2])
+        (old.parent / f"{4:020d}.jsonl").touch()  # A failed append after the rotation leaves an empty segment
+        self.m.journal.release()
+        with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 4"):
+            self.reopen()
+        with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 4"):
+            list(self.journals.journal(op_window=0).records())
 
     def test_cell_history(self):
         with self.m.transaction(user="alice", reason="見直し"):
