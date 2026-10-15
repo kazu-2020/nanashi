@@ -734,8 +734,8 @@ impl Core {
         Ok(PyBytes::new(py, &buf))
     }
 
-    /// Make stored data from bytes that store_to_parquet wrote. value_dim is the dimension of a member value.
-    /// The GIL is released during the work.
+    /// Makes stored data from bytes that store_to_parquet wrote. It releases the GIL during the work.
+    /// For a member value, give value_dim, the dimension of the value.
     #[allow(clippy::wrong_self_convention)] // keep the name that Python calls
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (data, dims, index, value, names, value_dim=None))]
@@ -750,6 +750,11 @@ impl Core {
         value_dim: Option<DimId>,
     ) -> PyResult<StoreHandle> {
         let value = pq::Value::parse(value).map_err(err)?;
+        match (value == pq::Value::Member, value_dim) {
+            (true, None) => return Err(err("メンバー型の値には値の軸 (value_dim) が必要".into())),
+            (false, Some(d)) => return Err(err(format!("メンバー型でない値に値の軸 (value_dim = {d}) は使えない"))),
+            _ => {}
+        }
         self.dims(&dims)?;
         self.dims(value_dim.as_slice())?;
         let cat = self.cat.clone();
@@ -1496,8 +1501,8 @@ fn write_parquet<'py>(
     Ok(PyBytes::new(py, &buf))
 }
 
-/// Read bytes that write_parquet wrote back into (columns, values). sizes is the member count of each dimension,
-/// and for a member value also of the value dimension at the end.
+/// Reads bytes that write_parquet wrote into (columns, values). `sizes` has the member count of each dimension.
+/// For a member value, the last item is the member count of the value dimension.
 #[pyfunction]
 fn read_parquet(
     py: Python<'_>,

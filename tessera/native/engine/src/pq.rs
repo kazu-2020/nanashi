@@ -111,21 +111,10 @@ fn project(builder: ParquetRecordBatchReaderBuilder<Bytes>, expected: &[(&str, D
     Ok((builder.with_projection(mask), at))
 }
 
-/// The row count in the footer. A changed file can give any number, so use it only through `column`.
-fn rows(builder: &ParquetRecordBatchReaderBuilder<Bytes>) -> usize {
-    builder.metadata().file_metadata().num_rows().max(0) as usize
-}
-
-/// An empty column with space for rows. If the memory is not available, give an error, not an abort.
-fn column<T>(rows: usize) -> Result<Vec<T>> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(rows).map_err(|_| format!("Parquet の行数 {rows} の分のメモリを確保できない"))?;
-    Ok(v)
-}
-
-/// Read Parquet bytes back into columns. The columns are selected by name (in any order; other columns are not read).
-/// sizes has the member count of each dimension in names, and for a member value also of the value dimension at the end.
-/// If a column type does not agree with names and value, or a member number is not less than its size, give an error.
+/// Reads Parquet bytes into columns. It selects each column by name, in any order, and does not read other columns.
+/// `sizes` has the member count of each dimension in `names`. For a member value, the last item is the member count
+/// of the value dimension. Gives an error if a column type does not agree with `names` and `value`, or if a member
+/// number is equal to or more than its member count.
 pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Result<(Vec<Vec<u32>>, Vec<f64>)> {
     if sizes.len() != names.len() + usize::from(value == Value::Member) {
         return Err(format!("軸の大きさの数 {} が列の数と合わない", sizes.len()));
@@ -137,9 +126,9 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
         .chain(std::iter::once((VALUE, value.data_type(DataType::UInt32))))
         .collect();
     let (builder, at) = project(builder, &expected)?;
-    let rows = rows(&builder);
-    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| column(rows)).collect::<Result<_>>()?;
-    let mut values = column(rows)?;
+    // The footer row count can be false, so the columns grow only from the decoded batches.
+    let mut cols: Vec<Vec<u32>> = vec![Vec::new(); names.len()];
+    let mut values = Vec::new();
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
         if batch.columns().iter().any(|c| c.null_count() > 0) {
@@ -282,11 +271,10 @@ pub fn read_changes(data: Bytes) -> Result<(Vec<String>, Changes)> {
     expected.push(("new", new_t.clone()));
     let (builder, at) = project(builder, &expected)?;
     let n = names.len();
-    let rows = rows(&builder);
-    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| column(rows)).collect::<Result<_>>()?;
+    let mut cols: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut tables: Vec<Interner> = names.iter().map(|_| Interner::default()).collect();
     let mut values = Interner::default();
-    let (mut old, mut new) = (column(rows)?, column(rows)?);
+    let (mut old, mut new) = (Vec::new(), Vec::new());
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
         for j in 0..n {
@@ -409,7 +397,6 @@ mod tests {
         assert!(read(Bytes::from_static(b"broken"), &names(2), Value::Num, &[1, 9]).is_err());
     }
 
-    /// The bytes of buf with a false row count in each row group, and so also in the file footer.
     fn false_row_count(buf: Vec<u8>, rows: i64) -> Bytes {
         use parquet::file::metadata::{ParquetMetaDataReader, ParquetMetaDataWriter};
         let buf = Bytes::from(buf);
@@ -419,20 +406,21 @@ mod tests {
         let footer = u32::from_le_bytes(buf[buf.len() - 8..buf.len() - 4].try_into().unwrap()) as usize;
         let mut out = buf[..buf.len() - 8 - footer].to_vec();
         ParquetMetaDataWriter::new(&mut out, &md).finish().unwrap();
-        assert_eq!(ParquetMetaDataReader::new().parse_and_finish(&Bytes::from(out.clone())).unwrap().file_metadata().num_rows(), rows);
         Bytes::from(out)
     }
 
     #[test]
-    fn false_row_count_gives_an_error() {
-        // So large that the old Vec::with_capacity panicked with a capacity overflow, which does not abort the test run.
-        let rows = 1 << 62;
-        let buf = write(&names(2), vec![vec![0, 1], vec![2, 3]], vec![1.5, 2.5], Value::Num, &[]).unwrap();
-        let e = read(false_row_count(buf, rows), &names(2), Value::Num, &[3, 4]).unwrap_err();
-        assert!(e.contains("行数 4611686018427387904"), "{e}");
+    fn ignores_a_false_row_count() {
+        let rows = 1 << 36;
+        let (cols, vals) = (vec![vec![0, 1], vec![2, 3]], vec![1.5, 2.5]);
+        let buf = write(&names(2), cols.clone(), vals.clone(), Value::Num, &[]).unwrap();
+        let (c, v) = read(false_row_count(buf, rows), &names(2), Value::Num, &[3, 4]).unwrap();
+        assert!(c.iter().all(|c| c.capacity() < 1 << 20) && v.capacity() < 1 << 20);
+        assert_eq!((c, v), (cols, vals));
         let c = Changes { cols: vec![vec![0, 1]], ids: vec![strs(&["a", "b"])], old: vec![None, None], new: vec![Some(1.0), Some(2.0)], value_ids: vec![], kind: Value::Num };
-        let e = read_changes(false_row_count(write_changes(&["d0".into()], &c, &[]).unwrap(), rows)).unwrap_err();
-        assert!(e.contains("行数 4611686018427387904"), "{e}");
+        let (_, got) = read_changes(false_row_count(write_changes(&["d0".into()], &c, &[]).unwrap(), rows)).unwrap();
+        assert!(got.cols[0].capacity() < 1 << 20 && got.old.capacity() < 1 << 20 && got.new.capacity() < 1 << 20);
+        assert_eq!(got, c);
     }
 
     #[test]
