@@ -270,7 +270,8 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
 def _by_id(model, m, store) -> dict:
     """The cells of the store as {member ids in the order of m.dims: value (a member id for a member type)}."""
     cube = model.engine.to_cube(store, model)
-    order = [cube.dims.index(d) for d in m.dims]  # the dimensions of the store in the order of the definition
+    # the store's dimensions in the order of the definition; the n-th copy of a repeated dimension reads the n-th copy
+    order = [[i for i, x in enumerate(cube.dims) if x == d][m.dims[:j].count(d)] for j, d in enumerate(m.dims)]
     vdim = _value_dim(model, m)
     return {tuple(k[i] for i in order): vdim.ids[int(v)] if vdim is not None else v for k, v in cube.cells.items()}
 

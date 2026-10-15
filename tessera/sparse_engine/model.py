@@ -653,6 +653,7 @@ class Model:
         """add_input without the name check: add_formula makes the hidden override input with it."""
         kind = self._check_kind(name, kind)
         dims = tuple(self.dimension(d).id for d in dims)
+        self._check_repeated(name, dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
         new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition), id=id,
@@ -707,6 +708,7 @@ class Model:
         elif not isinstance(formula, Expr):
             raise ValueError(f"{name}: 式は文字列か AST: {formula!r}")
         dims = tuple(self.dimension(d).id for d in dims)
+        self._check_repeated(name, dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
         formula = bind(formula, self, {name: id})  # the formula can refer to the Metric that it defines
@@ -817,6 +819,13 @@ class Model:
 
     def _dim_names(self, dims) -> tuple[str, ...]:
         return tuple(self.dimensions[d].name for d in dims)
+
+    def _check_repeated(self, name: str, dims: tuple[str, ...]) -> None:
+        """Reject a repeated dimension, because formulas and set_cell find a dimension by its name."""
+        repeated = sorted({self.dimension(d).name for d in dims if dims.count(d) > 1})
+        if repeated:
+            raise ValueError(f"{name}: 軸 {', '.join(repeated)} を 2 回以上持てない。"
+                             "同じメンバーの軸をもう 1 つ作る")
 
     def _check_key_width(self, name: str, dims: tuple[str, ...]) -> None:
         """If the engine holds the key of a cell in a fixed-width integer, make sure that the dimensions fit
