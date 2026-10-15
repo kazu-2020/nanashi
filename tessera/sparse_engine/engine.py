@@ -144,10 +144,8 @@ class ReferenceEngine:
         return Cube(storage.dims, {k: v for k, v in storage.cells.items() if v != value})
 
     def remove_member(self, storage: Cube, dim, index, member, values, cat):
-        cells = storage.cells
-        if dim in storage.dims:
-            i = storage.dims.index(dim)
-            cells = {k: v for k, v in cells.items() if k[i] != member}
+        at = [i for i, d in enumerate(storage.dims) if d == dim]
+        cells = {k: v for k, v in storage.cells.items() if all(k[i] != member for i in at)}
         if values:
             cells = {k: v - 1.0 if v > index else v for k, v in cells.items() if v != index}
         return Cube(storage.dims, dict(cells))
@@ -208,7 +206,7 @@ class ReferenceEngine:
 
     def replace(self, storage: Cube, region, new: Cube, cat):
         if not region:
-            return new
+            return Cube(new.dims, dict(new.cells))  # new can be a view of another Metric: do not share its cells
         cells = storage.cells
         for k in [k for k in cells if inside(k, storage.dims, region)]:
             del cells[k]
@@ -245,7 +243,8 @@ class ReferenceEngine:
     def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
         nanashi_core = native()
         dims = [cat.dimension(d).id for d in dims]
-        order = [storage.dims.index(d) for d in dims]
+        # the n-th copy of a repeated dimension reads the n-th copy in storage.dims
+        order = [[i for i, x in enumerate(storage.dims) if x == d][dims[:j].count(d)] for j, d in enumerate(dims)]
         index = [cat.dimension(d)._by_id for d in dims]
         keys = list(storage.cells)
         cols = [[index[j][k[i]] for k in keys] for j, i in enumerate(order)]
@@ -257,8 +256,9 @@ class ReferenceEngine:
         nanashi_core = native()
         dims = tuple(cat.dimension(d).id for d in dims)
         members = [cat.dimension(d).ids for d in dims]
+        value_dim = [cat.dimension(kind.removeprefix("member:")).ids] if kind.startswith("member:") else []
         cols, values = nanashi_core.read_parquet(data, parquet_columns(dims, cat), parquet_value(kind),
-                                                 [len(ms) for ms in members])
+                                                 [len(ms) for ms in members + value_dim])
         if kind == "boolean":
             values = [v != 0.0 for v in values]
         return Cube(dims, {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]

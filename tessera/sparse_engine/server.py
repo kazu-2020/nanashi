@@ -75,9 +75,12 @@ import argparse
 import hmac
 import inspect
 import ipaddress
+import itertools
 import json
 import logging
+import math
 import os
+import re
 import signal
 import sys
 import threading
@@ -104,6 +107,8 @@ WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "move_member", "renam
                        "add_input", "add_property", "set_property_values", "add_dimension", "remove_metric",
                        "rename_metric", "rename_dimension", "rename_property"})
 READ_PARAMS = frozenset({"offset", "limit", "keep", "agg"})
+MAX_CLIENT_OP_ID = 200  # characters. PostgreSQL refuses an index row that is too large, and the journal indexes it
+MAX_BODY_DEPTH = 32
 # The router gives an attempt 70 s: a slot wait of 5 s + the write queue 30 s + the commit 30 s stays below it.
 SLOT_WAIT = 5.0
 
@@ -354,6 +359,35 @@ def is_probe(path: str) -> bool:
     return path.split("?", 1)[0].strip("/") in PROBES
 
 
+def _finite_number(text: str) -> float:
+    """json.loads hook for parse_float and parse_constant. Python json accepts NaN, Infinity and 1e999, but
+    they are not JSON, and jsonb refuses NaN."""
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(text)
+    return number
+
+
+_BAD_CHAR = re.compile("[\x00\ud800-\udfff]")  # PostgreSQL refuses a NUL, and UTF-8 cannot encode a lone surrogate
+
+
+def _body_problem(body) -> str | None:
+    """A deeply nested body makes later code recurse past the stack of a server thread."""
+    stack = [iter((body,))]  # one iterator for each level, so the memory is in proportion to the depth
+    while stack:
+        for x in stack[-1]:
+            if len(stack) > MAX_BODY_DEPTH + 1:  # x is at depth len(stack) - 1
+                return f"本文の入れ子は {MAX_BODY_DEPTH} 段まで"
+            if isinstance(x, str) and _BAD_CHAR.search(x):
+                return "文字列に NUL 文字や単独のサロゲート文字は使えない"
+            if isinstance(x, (dict, list)):
+                stack.append(itertools.chain(x.keys(), x.values()) if isinstance(x, dict) else iter(x))
+                break
+        else:
+            stack.pop()
+    return None
+
+
 def misdirected(header: str | None, model_id: str | None) -> bool:
     """Return True if the router sent the request for a different model (X-Nanashi-Model)."""
     return header is not None and model_id is not None and header != model_id
@@ -564,15 +598,23 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         self.unread_body = False
         try:
-            body = json.loads(raw or b"{}")
-        except ValueError:
-            raise ApiError(400, "bad_request", "本文が JSON ではない") from None
+            body = json.loads(raw or b"{}", parse_float=_finite_number, parse_constant=_finite_number)
+        except (ValueError, RecursionError):
+            raise ApiError(400, "bad_request", "本文が JSON ではない（NaN や Infinity、深すぎる入れ子は使えない）") from None
         if not isinstance(body, dict) or not isinstance(body.get("ops"), list) or not body["ops"]:
             raise ApiError(400, "bad_request", "ops（操作の列）が要る")
         if "user" in body:
             raise ApiError(400, "bad_request", "user は認証で決まる（本文では指定しない）")
         if not isinstance(body.get("client_op_id"), str) or not body["client_op_id"]:
             raise ApiError(400, "bad_request", "client_op_id（再送しても二重に確定しないための ID）が要る")
+        if len(body["client_op_id"]) > MAX_CLIENT_OP_ID:
+            raise ApiError(400, "bad_request", f"client_op_id は {MAX_CLIENT_OP_ID} 文字まで")
+        if body.get("expect") is not None and (isinstance(body["expect"], bool) or not isinstance(body["expect"], int)):
+            raise ApiError(400, "bad_request", "expect は読んだ版の通し番号（整数）")
+        if body.get("reason") is not None and not isinstance(body["reason"], str):
+            raise ApiError(400, "bad_request", "reason は文字列")
+        if (problem := _body_problem(body)) is not None:
+            raise ApiError(400, "bad_request", problem)
         ops, client_op_id = body["ops"], body["client_op_id"]
         try:
             seq = self.server.workspace.write(

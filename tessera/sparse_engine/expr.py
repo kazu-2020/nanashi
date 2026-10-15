@@ -169,6 +169,16 @@ def _children(e: Expr):
             yield f.name, v
 
 
+def depth(e: Expr) -> int:
+    """Return the number of node levels in the tree. A leaf has depth 1. A deep tree does not cause a RecursionError."""
+    deepest, stack = 0, [(e, 1)]
+    while stack:
+        x, d = stack.pop()
+        deepest = max(deepest, d)
+        stack.extend((c, d + 1) for _, c in _children(x))
+    return deepest
+
+
 def mentions_member(e: Expr, dim: str, member: str) -> bool:
     """Tell if the formula holds the member (a constant or a SELECT). dim and member are ids."""
     here = isinstance(e, (Member, Select)) and e.dim == dim and e.member == member

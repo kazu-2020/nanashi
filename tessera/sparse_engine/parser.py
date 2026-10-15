@@ -40,6 +40,7 @@ PREVIOUS(Month) はその式を持つ Metric 自身の前の時点を指す（se
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -47,12 +48,19 @@ from typing import Callable, TypeVar
 
 from .evaluate import FormulaError
 from .expr import (PUBLIC_AGGREGATIONS, BinOp, By, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
-                   IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
+                   IsBlank, Member, Not, On, Ref, Remove, Select, Shift, depth)
 
 KEYWORDS = {"AND", "OR", "NOT", "TRUE", "FALSE"}
 FUNCTIONS = {"IF", "IFBLANK", "ISBLANK", "PREVIOUS"}
 MODIFIERS = {"BY", "REMOVE", "FILTER", "SELECT", "EXPAND", "ON"}
 COMPARE_OPS = ("=", "<>", "<", "<=", ">", ">=")
+
+# The parser, bind, recalc and to_formula recurse. The limits keep them inside the Python stack (docs/formulas.md "Size limits").
+MAX_NESTING = 50
+MAX_DEPTH = 200
+# Rust sums the shifts of chained SELECT and PREVIOUS (graph.rs add_lag) and computes `index - n` (eval/fuse.rs)
+# in i64. An i32 bound keeps both inside i64.
+MAX_SHIFT = 2**31 - 1
 
 _TOKEN = re.compile(r"""
     (?P<ws>\s+)
@@ -118,6 +126,7 @@ class _Parser:
         self.tokens = tokenize(text)
         self.i = 0
         self.self_name = self_name
+        self.nesting = -1  # the top-level expression is not nested
 
     # ------------------------------------------------ トークン操作
 
@@ -157,13 +166,23 @@ class _Parser:
         e = self.or_()
         if self.tok.kind != "eof":
             self.error(f"{self.tok.describe()} は余分")
+        if depth(e) > MAX_DEPTH:
+            self.error(f"式が長すぎる（演算子の連結と入れ子は合わせて {MAX_DEPTH} 段まで）", self.tokens[0])
         return e
 
+    def nest(self):
+        """Each caller subtracts one when its level ends."""
+        self.nesting += 1
+        if self.nesting > MAX_NESTING:
+            self.error(f"入れ子が深すぎる（括弧、関数、FILTER、ON、NOT、符号は {MAX_NESTING} 段まで）")
+
     def or_(self) -> Expr:
+        self.nest()
         e = self.and_()
         while self.at_word("OR"):
             self.advance()
             e = BinOp("or", e, self.and_())
+        self.nesting -= 1
         return e
 
     def and_(self) -> Expr:
@@ -176,7 +195,10 @@ class _Parser:
     def not_(self) -> Expr:
         if self.at_word("NOT"):
             self.advance()
-            return Not(self.not_())
+            self.nest()
+            e = Not(self.not_())
+            self.nesting -= 1
+            return e
         return self.cmp()
 
     def cmp(self) -> Expr:
@@ -205,7 +227,9 @@ class _Parser:
     def unary(self) -> Expr:
         if self.at_op("-"):
             self.advance()
+            self.nest()
             operand = self.unary()
+            self.nesting -= 1
             if isinstance(operand, Const) and not isinstance(operand.value, bool):
                 return Const(-operand.value)
             return -operand
@@ -222,8 +246,11 @@ class _Parser:
     def primary(self) -> Expr:
         t = self.tok
         if t.kind == "num":
+            value = float(t.text)
+            if math.isinf(value):  # to_formula would write it as the name "inf"
+                self.error("数が大きすぎる")
             self.advance()
-            return Const(float(t.text))
+            return Const(value)
         if self.at_op("("):
             self.advance()
             e = self.or_()
@@ -261,8 +288,12 @@ class _Parser:
         t = self.tok
         if t.kind != "num" or not t.text.isdigit():
             self.error(f"整数が必要だが {t.describe()} がある")
+        # Check the length first. int() rejects a text of more than 4300 digits.
+        digits = t.text.lstrip("0") or "0"  # leading zeros do not count
+        if len(digits) > len(str(MAX_SHIFT)) or (n := int(digits)) > MAX_SHIFT:
+            self.error(f"整数は {MAX_SHIFT} 以下")
         self.advance()
-        return int(t.text)
+        return n
 
     # ------------------------------------------------ 関数
 

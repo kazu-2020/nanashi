@@ -60,6 +60,13 @@ impl Packing {
         self.dims.iter().position(|&x| x == d)
     }
 
+    /// The slot of dims[j] in this packing. If dims has one dimension two times, the n-th copy in dims goes to the n-th copy here.
+    pub fn slot_of(&self, dims: &[DimId], j: usize) -> Option<usize> {
+        let d = dims[j];
+        let n = dims[..j].iter().filter(|&&x| x == d).count();
+        self.dims.iter().enumerate().filter(|&(_, &x)| x == d).nth(n).map(|(i, _)| i)
+    }
+
     /// 今のメンバー数のメンバー番号が、すべてのビット幅に収まるか。
     pub fn fits(&self, cat: &Catalog) -> bool {
         self.dims.iter().zip(&self.masks).all(|(&d, &mask)| (cat.dims[d].size as u64).saturating_sub(1) <= mask)
@@ -73,7 +80,7 @@ pub(crate) struct Proj {
 
 impl Proj {
     pub(crate) fn new(src: &Packing, dst: &Packing) -> Proj {
-        let pairs = dst.dims.iter().enumerate().filter_map(|(j, &d)| src.pos(d).map(|i| (i, j))).collect();
+        let pairs = (0..dst.dims.len()).filter_map(|j| src.slot_of(&dst.dims, j).map(|i| (i, j))).collect();
         Proj { pairs }
     }
 

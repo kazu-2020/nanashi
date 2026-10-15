@@ -116,14 +116,14 @@ class MinMaxSpecialValues(unittest.TestCase):
     def test_engines_and_paths_give_the_same_result(self):
         engines = [ReferenceEngine] + ([] if RustEngine is None else [
             RustEngine, lambda: RustEngine(par_min=0, dense_always=True), lambda: RustEngine(stream_always=True)])
-        groups = {"nan": [math.inf, math.inf], "nan1": [math.inf, 1.0], "nan2": [1.0, math.inf],
+        groups = {"nan": [2.0, 2.0], "nan1": [2.0, 1.0], "nan2": [1.0, 2.0],
                   "zero1": [0.0, -0.0], "zero2": [-0.0, 0.0]}
         for engine in engines:
             m = Named(Model(engine=engine()))
             m.add_dimension("E", ["a", "b"])
             m.add_dimension("G", list(groups))
             m.add_input("X", ["G", "E"], {(g, e): v for g, vs in groups.items() for e, v in zip("ab", vs)})
-            m.add_formula("Y", ["G", "E"], "IF(X > 1, X - X, X)")  # inf - inf is NaN
+            m.add_formula("Y", ["G", "E"], "IF(X > 1, X * 1e308 - X * 1e308, X)")  # an input must be finite, so make inf - inf (NaN) here
             m.add_formula("Mn", ["G"], "Y[REMOVE MIN: E]")
             m.add_formula("Mx", ["G"], "Y[REMOVE MAX: E]")
             got = {f: {g: repr(v) for (g,), v in sorted(cells(m, f).items())} for f in ["Mn", "Mx"]}
