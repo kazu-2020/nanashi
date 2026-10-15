@@ -6,6 +6,7 @@ import unittest
 
 from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.evaluate import FormulaError
 
 from .test_incremental import same, snapshot
 
@@ -75,6 +76,53 @@ class Overrides(unittest.TestCase):
     def test_override_value_is_checked(self):
         with self.assertRaisesRegex(ValueError, "number"):
             model().set_cell("Bonus", True, Employee="e1", Month="Jan")
+
+    def test_formula_cannot_reference_the_hidden_input(self):
+        m = model()
+        with self.assertRaisesRegex(FormulaError, "未知の Metric __override__Bonus"):
+            m.add_formula("Leak", ["Employee", "Month"], "'__override__Bonus' + 0")
+        for name in ("Total", "DeptBonus", "Bonus"):  # nothing refers to the hidden input, so the owner can go
+            m.remove_metric(name)
+        m.set_cell("Salary", 1, Employee="e1", Month="Jan")
+        self.assertEqual(m.get("Salary", Employee="e1", Month="Jan"), 1)
+
+    def test_hidden_names_are_reserved(self):
+        m = model()
+        with self.assertRaisesRegex(ValueError, "__ で始まらない"):
+            m.add_input("__override__Z", ["Employee", "Month"], {("e1", "Jan"): 99})
+        with self.assertRaisesRegex(ValueError, "__ で始まらない"):
+            m.add_formula("__x", ["Employee", "Month"], "Salary")
+        self.assertNotIn("__override__Z", m.model._metric_ids)
+        with self.assertRaisesRegex(ValueError, "__ で始まらない"):
+            m.rename_metric("Budget", "__override__Bonus")
+        with self.assertRaisesRegex(ValueError, "__ で始まらない"):
+            m.rename_metric("Budget", ["Budget2"])
+        self.assertEqual(m.metric("Budget").name, "Budget")
+
+    def test_hidden_input_added_after_a_recalc_gets_a_layout(self):
+        for engine in engines():
+            with self.subTest(type(engine).__name__):
+                m = model(engine)
+                m.add_formula("Late", ["Employee", "Month"], "Salary * 2", overridable=True)
+                m.recalc()
+                hidden = m.metric("__override__Late").id
+                self.assertIn(hidden, m.layout)
+                m.set_cell("Late", 5, Employee="e1", Month="Jan")
+                self.assertEqual(m.get("Late", Employee="e1", Month="Jan"), 5)
+
+    def test_legacy_metric_with_the_hidden_name(self):
+        # a model from before the name rule: add_input accepted "__override__Z" and "__tmp"
+        m = model()
+        dims = [m.dimension_id("Employee"), m.dimension_id("Month")]
+        legacy = m.model._add_input("__override__Z", dims)
+        m.model._add_input("__tmp", dims, {(m.member_id("Employee", "e1"), m.member_id("Month", "Jan")): 3})
+        with self.assertRaisesRegex(ValueError, "__override__Z: 同じ名前の Metric がある"):
+            m.add_formula("Z", ["Employee", "Month"], "Salary", overridable=True)
+        self.assertEqual(m.metric("__override__Z").id, legacy)
+        self.assertNotIn("Z", m.model._metric_ids)
+        m.add_formula("UsesTmp", ["Employee", "Month"], "'__tmp' + 1")  # a user Metric stays usable
+        m.recalc()
+        self.assertEqual(m.get("UsesTmp", Employee="e1", Month="Jan"), 4)
 
     @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
     def test_overrides_are_saved(self):
@@ -207,6 +255,41 @@ class BadCells(unittest.TestCase):
                 m.add_input("Y", ["Employee"], [(("e1",), 1.0)])
             self.assertNotIn("Y", [x.name for x in m.metrics.values()])
             m.recalc()
+
+    def test_names_must_be_non_empty_strings(self):
+        for engine in engines():
+            m = model(engine)
+            metrics = sorted(x.name for x in m.metrics.values())
+            for name in [5, None, "", True, [1]]:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_input(name, ["Employee"])
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_formula(name, ["Employee"], "Salary * 2")
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_member("Employee", name)
+            self.assertEqual(sorted(x.name for x in m.metrics.values()), metrics)
+            self.assertEqual(m.dimension("Employee").members, ["e1", "e2", "e3"])
+
+    def test_values_must_be_finite(self):
+        for engine in engines():
+            m = model(engine)
+            for value in [math.nan, math.inf, -math.inf, 10 ** 400]:
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "^Salary: 値は有限の数"):
+                        m.set_cell("Salary", value, Employee="e1", Month="Jan")
+                    with self.assertRaisesRegex(ValueError, "^X: 値は有限の数"):
+                        m.add_input("X", ["Employee"], {("e1",): value})
+                    with self.assertRaisesRegex(ValueError, "^Budget: 値は有限の数"):
+                        m.spread("Budget", value, Month="Jan")
+            self.assertEqual(m.get("Total"), 120.0)
+            m.spread("Budget", 1e10, Month="Jan")
+            with self.assertRaisesRegex(ValueError, "^Budget: 値は有限の数"):
+                m.spread("Budget", 1e300, Month="Jan")  # proportional: total * value overflows
+            m.set_cell("Budget", 1e308, Employee="e1", Month="Jan")
+            m.set_cell("Budget", 1e308, Employee="e2", Month="Jan")
+            with self.assertRaisesRegex(ValueError, "^Budget: 今の値の合計"):
+                m.spread("Budget", 1, Month="Jan")  # the sum of the current values overflows
 
 
 class MatchesFullRecalc(unittest.TestCase):

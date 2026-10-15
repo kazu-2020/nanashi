@@ -222,6 +222,18 @@ def _value_dim(model, m):
     return model.dimension(m.kind.removeprefix("member:")) if m.kind.startswith("member:") else None
 
 
+def _engine_value(m, value_dim, new):
+    if new is None:
+        return None
+    if isinstance(new, str) != (value_dim is not None):
+        raise ValueError(f"Metric {m.name} の値の種類が記録の値の種類と合わない")
+    if value_dim is not None:
+        if new not in value_dim._by_id:
+            raise ValueError(f"値のメンバーの ID {new} が軸にない")
+        return float(value_dim._by_id[new])
+    return bool(new) if m.kind == "boolean" else new
+
+
 def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
     """The changed cells of the input Metric m as [the member ids of the coordinates, the old value, the new
     value] (a block of changes if there are many). A member-type value is a member id."""
@@ -352,11 +364,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             key = tuple(key)
             if len(key) != len(dims) or not all(u in d._by_id for d, u in zip(dims, key)):
                 continue  # a cell of a member that this transaction removed (it went with the member)
-            if new is not None and vdim is not None:
-                new = float(vdim._by_id[new])
-            elif new is not None and m.kind == "boolean":
-                new = bool(new)
-            store = model.engine.write(store, key, new, model)
+            store = model.engine.write(store, key, _engine_value(m, vdim, new), model)
         model._values[m.id] = store
 
     model._invalidate()
@@ -371,7 +379,7 @@ def _apply_cells(model, cells: list[dict]) -> None:
         rows = c["rows"]
         if not isinstance(rows, list):
             if model._plan is not None and m.id in model._delta_sources():
-                model._keep_old(m.id)  # 差分集計には変更前の値が要る
+                model._keep_old(m.id)  # The delta aggregation needs the old values
             written = model.engine.apply_block(model._values[m.id], rows, [d.ids for d in dims],
                                                None if vdim is None else vdim.ids)
             if written is not None:
@@ -385,11 +393,7 @@ def _apply_cells(model, cells: list[dict]) -> None:
                 continue
             for col, d, u in zip(cols, dims, key):
                 col.append(d._by_id[u])
-            if new is not None and vdim is not None:
-                new = float(vdim._by_id[new])
-            elif new is not None and m.kind == "boolean":
-                new = bool(new)
-            values.append(new)
+            values.append(_engine_value(m, vdim, new))
         if values:
             model._write_many(m.id, cols, values)
 
@@ -601,8 +605,9 @@ class FileJournal(Journal):
 
     記録はスナップショットを置いたあと（か、区切りが segment_bytes を超えたら）、次の追記から新しい区切りに
     書く。開くときは最後の区切りと、client_op_id を覚えておく範囲（最後の op_window 件）だけを読み、
-    記録の再生はスナップショットより後の区切りだけを読む。prune で、古いスナップショットと、それより前の
-    区切りと大量の変更のファイルを消せる。
+    記録の再生はスナップショットより後の区切りだけを読む。
+    prune deletes the old snapshots. It also deletes the segments before the oldest kept snapshot and before
+    the last op_window records, and their files of large changes.
 
     書き込むプロセスは 1 つに限る。最初に追記するときに path/lock の排他ロックを取り、release まで持つ。
     最後の行が途中で切れていれば（書いている途中で落ちた）、読むときは無視し、ロックを取ったときに捨てる。
@@ -696,6 +701,19 @@ class FileJournal(Journal):
                 pos += len(line)
                 yield rec, len(line)
 
+    def _read_segments(self, segs: list[tuple[int, Path]]) -> Iterator[dict]:
+        """Read the complete records of the segments in order. A gap in the seqs means a broken line
+        (a broken line stops the read of its segment), so raise ValueError."""
+        expected = segs[0][0]
+        for first, path in segs:
+            if first != expected:  # An empty segment yields no records, so check its first seq too
+                raise ValueError(f"{path}: 通し番号が {expected - 1} の次でなく {first}")
+            for rec, _ in self._read_segment(first, path):
+                if rec["seq"] != expected:
+                    raise ValueError(f"{path}: 通し番号が {expected - 1} の次でなく {rec['seq']}")
+                expected += 1
+                yield rec
+
     def _remember(self, client_op_id: str | None, seq: int) -> None:
         if client_op_id is not None:
             self._by_client_op[client_op_id] = seq
@@ -719,15 +737,14 @@ class FileJournal(Journal):
                 raise ValueError(f"{path}: 通し番号が {self.head} の次でなく {rec['seq']}")
             self.head = rec["seq"]
             self._size += n
-        # client_op_id を覚えておく範囲が前の区切りにかかれば、そこから読む
+        # If the op_window starts in an older segment, read from that segment
         oldest = self.head - self.op_window
         start = len(self._segments) - 1
         while start > 0 and self._segments[start][0] > oldest + 1:
             start -= 1
-        for i in range(start, len(self._segments)):
-            for rec, _ in self._read_segment(*self._segments[i]):
-                if rec["seq"] > oldest and rec.get("client_op_id") is not None:
-                    self._by_client_op[rec["client_op_id"]] = rec["seq"]
+        for rec in self._read_segments(self._segments[start:]):
+            if rec["seq"] > oldest and rec.get("client_op_id") is not None:
+                self._by_client_op[rec["client_op_id"]] = rec["seq"]
         if repair and path.exists() and path.stat().st_size > self._size:
             with open(path, "r+b") as f:
                 f.truncate(self._size)
@@ -852,29 +869,31 @@ class FileJournal(Journal):
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
-        for i, (first, path) in enumerate(segs):
-            if i + 1 < len(segs) and segs[i + 1][0] <= after + 1:
-                continue  # この区切りの記録は、すべて after 以前
-            if first > after + 1 and i == 0 and first > 1:
-                raise ValueError(f"{self.path}: 通し番号 {after + 1} からの記録は prune で消した")
-            for rec, _ in self._read_segment(first, path):
-                if rec["seq"] > self.head:
-                    return  # 読み込んだあとに別のプロセスが書いた記録（開き直すまで見ない）
-                if rec["seq"] > after:
-                    if "cells_blob" in rec:  # 大量のセルはファイルから、変更の塊として読む
-                        rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"],
-                                                                   self.objects.get)
-                    yield rec
+        if segs[0][0] > after + 1:
+            raise ValueError(f"{self.path}: 通し番号 {after + 1} からの記録は prune で消した")
+        start = 0
+        while start + 1 < len(segs) and segs[start + 1][0] <= after + 1:
+            start += 1
+        for rec in self._read_segments(segs[start:]):
+            if rec["seq"] > self.head:
+                return  # Another process wrote this record after the read (ignore it until a reopen)
+            if rec["seq"] > after:
+                if "cells_blob" in rec:  # Read the cells of a large change from its files, as one block of changes
+                    rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"], self.objects.get)
+                yield rec
 
     def prune(self, keep: int = 2) -> dict:
-        """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットと、残す一番古い
-        スナップショットより前の記録の区切りと、その記録の大量の変更のファイルを消す。消した数を返す。
-        記録を消すので、残すスナップショットより前へは戻れなくなる（セルの履歴もそこから後だけになる）。"""
+        """Keep the `keep` newest snapshots and delete the older snapshots. Also delete the segments before the
+        oldest kept snapshot and before the last op_window records, and their files of large changes.
+        Return the counts. After prune, you cannot go back before the oldest kept segment (the cell history too).
+        Raise ValueError if keep is less than 1."""
+        if keep < 1:
+            raise ValueError(f"keep は 1 以上（{keep}）。スナップショットがなくなると開けない")
         self.acquire()
         snaps = self.snapshots()
         if len(snaps) <= keep:
             return {"snapshots": 0, "segments": 0, "cells": 0}
-        oldest = snaps[keep - 1][0]
+        oldest = min(snaps[keep - 1][0], self.head - self.op_window)  # Keep the client_op_ids in the op_window
         out = {"snapshots": 0, "segments": 0, "cells": 0}
         for _, place in snaps[keep:]:
             for key in self.objects.list(place.uri + "/"):
@@ -883,7 +902,7 @@ class FileJournal(Journal):
         segs = self._list_segments()
         for i, (first, path) in enumerate(segs[:-1]):
             if segs[i + 1][0] > oldest + 1:
-                break  # この区切りには、残すスナップショットより後の記録がある
+                break
             for rec, _ in self._read_segment(first, path):
                 for f in rec.get("cells_blob", {}).get("files", []):
                     self.objects.delete(f["uri"])
