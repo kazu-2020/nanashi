@@ -3,17 +3,16 @@
     python bench_load.py clients --size large --clients 1,10,100,1000      # 1 engine, closed loop
     python bench_load.py clients --keep-alive --router 8090 --model-id <uuid>  # HTTP/1.1, through the router
     python bench_load.py engines --size medium --engines 10,50 --rate 1400  # N engines, open loop
-    python bench_load.py engines --size large --engines 10 --rate 600 --writer cutoff --writer-size largex4 --shares 128
+    python bench_load.py engines --size large --engines 10 --rate 600 --writer cutoff --writer-size largex4
 
 clients: N clients send reads to 1 engine with no pause. It records the reads per second, the latency
 percentiles, and the number of 503 (busy) answers and of failed connections.
 engines: N engine processes start on this host. It records the RSS of each engine, the CPU time when no
 request comes, and the read latency at a total rate split over all engines. With --writer, engine 0 also
-receives writes, so that its recalculation runs at the same time (the noisy neighbor): "salary" is a small
-set_cell, "cutoff" moves the Cutoff month and recalculates most of the plan. It also records the latency of
+receives writes, so that its recalculation runs at the same time (the noisy neighbor). "salary" is a small
+set_cell. "cutoff" moves the Cutoff month and recalculates most of the plan. It also records the latency of
 each write and the CPU of engine 0. --writer-size gives engine 0 a bigger plan ("largex4" is large with 4
-times the employees and products). --rayon0 and --shares limit only engine 0 (RAYON_NUM_THREADS, or a cgroup
-v1 with that cpu.shares; the other engines keep 1024). --shares needs root.
+times the employees and products).
 The engines have no journal. The load generator runs on the same host and uses some of the CPU.
 With --router, the clients send to the router on that port under /models/<--model-id>.
 The router finds the engine in nanashi_model. Before you use --router, add the row:
@@ -76,7 +75,8 @@ def engine_main(size: str, port: int) -> None:
     sys.setswitchinterval(0.0005)  # the same as the default of sparse_engine.server
     name, _, scale = size.partition("x")
     employees, products, months = SIZES[name]
-    m = build(RustEngine(), employees * int(scale or 1), products * int(scale or 1), months)
+    k = int(scale or 1)
+    m = build(RustEngine(), employees * k, products * k, months)
     m.recalc()
     did, xid, mid = m.dimension_id, m.member_id, (lambda n: m.metric(n).id)
     q = lambda **c: "&".join(f"{did(d)}={xid(d, x)}" for d, x in c.items())
@@ -84,7 +84,7 @@ def engine_main(size: str, port: int) -> None:
     paths = [f"/metrics/{mid('PayrollByEmployee')}/cell?" + q(Employee=emp, Version="予算", Month="m01"),
              f"/metrics/{mid('Revenue')}/slice?" + q(Product=prod, Version="予算"),
              f"/metrics/{mid('Revenue')}/summary?keep={did('Month')}&" + q(Version="予算")]
-    month_ids = [xid("Month", x) for x in m.dimension("Month").members[:-1]]  # as examples.fpa._advance_cutoff
+    month_ids = [xid("Month", x) for x in m.dimension("Month").members[:-1]]  # the last month is never the Cutoff (see examples.fpa._advance_cutoff)
     writes = {"salary": {"op": "set_cell", "metric": mid("Salary"), "values": [float(v) for v in range(1000)],
                          "coords": {did("Employee"): xid("Employee", emp), did("Version"): xid("Version", "予算")}},
               "cutoff": {"op": "set_cell", "metric": mid("Cutoff"), "values": month_ids, "coords": {}}}
@@ -154,19 +154,18 @@ def _open_worker(args) -> dict:
     return asyncio.run(_open(*args))
 
 
-def start_engines(n: int, size: str, base_port: int, rayon: str | None, size0: str | None = None,
-                  rayon0: str | None = None) -> list[tuple[subprocess.Popen, int, dict]]:
-    """Start n engines. Engine 0 gets size0 and rayon0 when they are given."""
+def start_engines(n: int, size: str, base_port: int, rayon: str | None,
+                  size0: str | None = None) -> list[tuple[subprocess.Popen, int, dict]]:
+    """Start n engines. Engine 0 gets size0 when it is given."""
     env = dict(os.environ)
     if rayon:
         env["RAYON_NUM_THREADS"] = rayon
-    env0 = {**env, "RAYON_NUM_THREADS": rayon0} if rayon0 else env
     procs: list[subprocess.Popen] = []
     out = []
     try:
         for i in range(n):  # one at a time: a parallel build of 50 models needs 50 times the build memory
             procs.append(subprocess.Popen([sys.executable, __file__, "engine", size0 if i == 0 and size0 else size,
-                                           str(base_port + i)], stdout=subprocess.PIPE, text=True, env=env0 if i == 0 else env))
+                                           str(base_port + i)], stdout=subprocess.PIPE, text=True, env=env))
             out.append((procs[-1], base_port + i, json.loads(procs[-1].stdout.readline())))
     except BaseException:
         for p in procs:
@@ -186,25 +185,13 @@ def cpu_seconds(pid: int) -> float:
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
-CGROUP = "/sys/fs/cgroup/cpu/bench_load"
-
-
-def put_in_cgroup(pid: int, shares: int) -> None:
-    """Make the cgroup (cgroup v1, cpu controller), set its cpu.shares, and move the process into it."""
-    os.makedirs(CGROUP, exist_ok=True)
-    with open(f"{CGROUP}/cpu.shares", "w") as f:
-        f.write(str(shares))
-    with open(f"{CGROUP}/cgroup.procs", "w") as f:
-        f.write(str(pid))
-
-
 def writer_loop(port: int, write: dict, stop: float) -> list[float]:
-    """Send 1 write after the other to engine 0 until the time stop. The values of the write go around
-    in a cycle. Return the latency of each write in seconds."""
+    """Send writes to engine 0 one at a time until stop. The write values repeat in a cycle. Return the latency
+    of each write in seconds."""
     import urllib.request
-    values, lat = write.pop("values"), []
+    values, op, lat = write["values"], {k: v for k, v in write.items() if k != "values"}, []
     while time.perf_counter() < stop:
-        body = {"client_op_id": f"w{time.perf_counter_ns()}", "ops": [{**write, "value": values[len(lat) % len(values)]}]}
+        body = {"client_op_id": f"w{time.perf_counter_ns()}", "ops": [{**op, "value": values[len(lat) % len(values)]}]}
         req = urllib.request.Request(f"http://127.0.0.1:{port}/writes", data=json.dumps(body).encode(),
                                      method="POST", headers={"Content-Type": "application/json"})
         t0 = time.perf_counter()
@@ -235,10 +222,8 @@ def run_clients(args) -> None:
 
 def run_engines(args) -> None:
     for n in map(int, args.engines.split(",")):
-        engines = start_engines(n, args.size, args.port, args.rayon, args.writer_size, args.rayon0)
+        engines = start_engines(n, args.size, args.port, args.rayon, args.writer_size)
         try:
-            if args.shares:
-                put_in_cgroup(engines[0][0].pid, args.shares)
             rss = [rss_mb(p.pid) for p, _, _ in engines]
             c0 = [cpu_seconds(p.pid) for p, _, _ in engines]
             time.sleep(args.idle)
@@ -265,8 +250,6 @@ def run_engines(args) -> None:
             for p, _, _ in engines:
                 p.kill()
                 p.wait()
-            if args.shares:
-                os.rmdir(CGROUP)
 
 
 def main() -> None:
@@ -293,8 +276,6 @@ def main() -> None:
     sub.choices["engines"].add_argument("--writer", nargs="?", const="salary", choices=["salary", "cutoff"],
                                         help="send writes to engine 0: a small set_cell, or the Cutoff month")
     sub.choices["engines"].add_argument("--writer-size", help="the size of engine 0, for example largex4")
-    sub.choices["engines"].add_argument("--rayon0", help="RAYON_NUM_THREADS of engine 0 only")
-    sub.choices["engines"].add_argument("--shares", type=int, help="put engine 0 in a cgroup with this cpu.shares")
     args = ap.parse_args()
     if args.cmd == "clients" and args.router and not args.model_id:
         ap.error("--router には --model-id が要る")

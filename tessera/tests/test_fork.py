@@ -95,7 +95,7 @@ class Fork(unittest.TestCase):
         gc.disable()
         try:
             del fork
-            self.assertTrue(ref() is None, "the fork is still alive")
+            self.assertIsNone(ref(), "the fork is still alive")
         finally:
             gc.enable()
 

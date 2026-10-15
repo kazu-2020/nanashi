@@ -10,8 +10,8 @@ Metric の格納データと評価の途中結果は Rust 側に置き、Python 
 from __future__ import annotations
 
 from array import array
-import weakref
 from typing import Any
+import weakref
 
 import nanashi_core
 
