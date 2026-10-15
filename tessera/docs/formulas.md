@@ -21,6 +21,17 @@ For the property of `BY`, you can specify a fixed property of a dimension. You c
 `Salary[BY SUM: Employee.DeptOf]` aggregates by department. It uses the department of each employee for each month (`DeptOf[Employee, Month]`).
 Thus, a hierarchy that changes over time, for example a transfer, is an input change.
 
+## Size limits
+
+The parser rejects a formula that is too large for the engine. It gives a syntax error with the limit.
+
+- Parentheses, function arguments, `FILTER`, `ON`, `NOT` and unary `-` nest up to 50 levels.
+- The tree of the formula has up to 200 levels. A chain of operators adds one level for each operator. Thus `X + X + ...` can have up to 200 terms, and `X[REMOVE: A][REMOVE: B]...` up to 199 modifiers.
+- The integer of `SELECT: Month - n` and `PREVIOUS(Month, n)` is at most 2,147,483,647.
+- A number must be finite. `1e400` is an error.
+
+These limits apply to the formula text. A saved model keeps a formula as an AST, so a load does not parse it again.
+
 ## Type check
 
 The engine checks the dimensions and the value kind of each formula before it runs the formula.
