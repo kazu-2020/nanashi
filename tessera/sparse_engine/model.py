@@ -645,6 +645,12 @@ class Model:
         of all cells incrementally (a formula Metric can become an input Metric).
         """
         self._check_name(name)
+        return self._add_input(name, dims, cells, kind=kind, storage=storage, partition=partition, id=id)
+
+    def _add_input(self, name: str, dims: Iterable[str], cells: Mapping[Key, float | bool | str] | None = None,
+                   *, kind: Kind = "number", storage: Any = None, partition: str | None = None,
+                   id: str | None = None) -> str:
+        """add_input without the name check: add_formula makes the hidden override input with it."""
         kind = self._check_kind(name, kind)
         dims = tuple(self.dimension(d).id for d in dims)
         self._check_key_width(name, dims)
@@ -703,13 +709,14 @@ class Model:
         formula = bind(formula, self, {name: id})  # the formula can refer to the Metric that it defines
         m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable,
                    id=id, override=None if old is None else old.override)  # also kept while not overridable
+        if overridable and m.override is None and m.override_name in self._metric_ids:
+            # a model from before the name rule can hold a user Metric with the hidden name
+            raise ValueError(f"{m.override_name}: 同じ名前の Metric があるので、{name} を上書き可能にできない")
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
         if overridable and m.override is None:
-            if m.override_name not in self._metric_ids:  # a load reads the override values first
-                self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
-            m.override = self._metric_ids[m.override_name]
+            m.override = self._add_input(m.override_name, dims, kind=kind, partition=m.partition)
         self._redefine(id, old)
         return id
 
@@ -745,11 +752,9 @@ class Model:
         m = self._own_metric(id)
         if new == m.name:
             return
-        if not isinstance(new, str) or not new or new.startswith("__"):
-            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {new!r}")
+        self._check_name(new)
         if new in self._metric_ids:
             raise ValueError(f"{new}: 同じ名前の Metric がある")
-        self._check_name(new)
         renamed = [(m, new)]
         if m.override is not None:
             renamed.append((self.metrics[m.override], f"__override__{new}"))
@@ -782,6 +787,8 @@ class Model:
         self._pending.dirty.add(id)
 
     def _check_name(self, name: str) -> None:
+        if not isinstance(name, str) or not name or name.startswith("__"):
+            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {name!r}")
         if name in self._dim_ids:
             raise ValueError(f"{name}: 同じ名前の軸がある（式の中で軸と区別できなくなる）")
 

@@ -94,6 +94,7 @@ The engine calculates again only the range that these two items affect.
 If you register a formula Metric with `add_formula(..., overridable=True)`, you can override the formula result manually with `set_cell`.
 An override has priority over the formula. The downstream aggregations also use the override value.
 If you set a cell to `None` with `set_cell`, the cell returns to the formula result.
+The override values are in a hidden input Metric with the name `__override__<Name>`. A formula cannot refer to it, and the name of a Metric cannot start with `__`.
 
 ```python
 m.add_formula("Bonus", ["Employee"], "Salary * 0.1", overridable=True)
