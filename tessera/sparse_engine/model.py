@@ -162,8 +162,8 @@ def _operation(fn):
 
 
 class _CellCounts(dict):
-    """見積もりに使う Metric ごとのセル数。計算 Metric は known（見積もり）から、入力は今の行数から、
-    初めて読まれたときに取る。読まれた名前を read に記録する。"""
+    """The cell count of each Metric for the estimate, taken when a name is read first.
+    A formula Metric uses known (its estimate). An input uses its current row count, at least 1. read records the names."""
 
     def __init__(self, model: Model, known: dict[str, float]):
         super().__init__()
@@ -176,8 +176,8 @@ class _CellCounts(dict):
     def __missing__(self, name: str) -> float:
         if name in self.known:
             n = self.known[name]
-        else:
-            n = float(self.model.engine.size_hint(self.model._values[name]))
+        else:  # an empty input counts as 1 cell: it gets values later, and a write does not estimate again
+            n = float(max(1, self.model.engine.size_hint(self.model._values[name])))
         self[name] = n
         return n
 
@@ -645,6 +645,12 @@ class Model:
         of all cells incrementally (a formula Metric can become an input Metric).
         """
         self._check_name(name)
+        return self._add_input(name, dims, cells, kind=kind, storage=storage, partition=partition, id=id)
+
+    def _add_input(self, name: str, dims: Iterable[str], cells: Mapping[Key, float | bool | str] | None = None,
+                   *, kind: Kind = "number", storage: Any = None, partition: str | None = None,
+                   id: str | None = None) -> str:
+        """add_input without the name check: add_formula makes the hidden override input with it."""
         kind = self._check_kind(name, kind)
         dims = tuple(self.dimension(d).id for d in dims)
         self._check_key_width(name, dims)
@@ -705,13 +711,14 @@ class Model:
         formula = bind(formula, self, {name: id})  # the formula can refer to the Metric that it defines
         m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable,
                    id=id, override=None if old is None else old.override)  # also kept while not overridable
+        if overridable and m.override is None and m.override_name in self._metric_ids:
+            # a model from before the name rule can hold a user Metric with the hidden name
+            raise ValueError(f"{m.override_name}: 同じ名前の Metric があるので、{name} を上書き可能にできない")
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
         if overridable and m.override is None:
-            if m.override_name not in self._metric_ids:  # a load reads the override values first
-                self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
-            m.override = self._metric_ids[m.override_name]
+            m.override = self._add_input(m.override_name, dims, kind=kind, partition=m.partition)
         self._redefine(id, old)
         return id
 
@@ -747,11 +754,9 @@ class Model:
         m = self._own_metric(id)
         if new == m.name:
             return
-        if not isinstance(new, str) or not new or new.startswith("__"):
-            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {new!r}")
+        self._check_name(new)
         if new in self._metric_ids:
             raise ValueError(f"{new}: 同じ名前の Metric がある")
-        self._check_name(new)
         renamed = [(m, new)]
         if m.override is not None:
             renamed.append((self.metrics[m.override], f"__override__{new}"))
@@ -784,8 +789,8 @@ class Model:
         self._pending.dirty.add(id)
 
     def _check_name(self, name: str) -> None:
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"Metric の名前は空でない文字列: {name!r}")
+        if not isinstance(name, str) or not name or name.startswith("__"):
+            raise ValueError(f"Metric の名前は空でない文字列で、__ で始まらない: {name!r}")
         if name in self._dim_ids:
             raise ValueError(f"{name}: 同じ名前の軸がある（式の中で軸と区別できなくなる）")
 
@@ -871,10 +876,13 @@ class Model:
                 index = [self.dimension(d)._by_id for d in m.dims]
                 picks = [sorted(ix[x] for x in region[d]) if d in region else range(len(ix))
                          for d, ix in zip(m.dims, index)]
-                combos = list(itertools.product(*picks))
-                if not combos:
+                n = math.prod(len(p) for p in picks)
+                if n == 0:
                     raise ValueError(f"{name}: 按分先のセルがない")
-                cols, n = [list(c) for c in zip(*combos)], len(combos)
+                if self.max_cells is not None and n > self.max_cells:
+                    raise ValueError(f"{name}: 按分先のセル数 {n:,} が上限 {self.max_cells:,} を超える。"
+                                     "coords か where で範囲を絞るか、Model(max_cells=...) で上限を変える")
+                cols = [list(c) for c in zip(*itertools.product(*picks))]
             new = [float(total / n)] * n
         self._write_many(m.id, cols, new)
         return len(new)

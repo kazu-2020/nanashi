@@ -1,6 +1,8 @@
 """モデルの複製（ホワットイフ分析）。複製と元の変更が互いに影響しない。"""
+import gc
 import random
 import unittest
+import weakref
 
 from examples.fpa import EDITS, build
 from sparse_engine.engine import ReferenceEngine
@@ -81,6 +83,21 @@ class Fork(unittest.TestCase):
         second = first.fork()
         what_if(second, 6)
         check_equal(self, snapshot(first), before)
+
+    def test_dropped_fork_is_freed_without_the_cycle_collector(self):
+        """Workspace publishes a fork for each write. A fork that nothing refers to must go away at once,
+        or the old versions and their stored data stay until a full garbage collection."""
+        original = small(self.engine())
+        fork = original.fork()
+        fork.set_cell("Salary", 1.0, Employee=fork.dimension("Employee").members[0], Version="予算")
+        fork.recalc()
+        refs = weakref.ref(fork.model), weakref.ref(fork.model.engine)  # the Model behind the Named facade
+        gc.disable()
+        try:
+            del fork
+            self.assertEqual([r() for r in refs], [None, None], "the fork is still alive")
+        finally:
+            gc.enable()
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
