@@ -20,7 +20,7 @@ The column names use the dimension IDs, which do not change when you rename a di
 The Rust engine writes Parquet directly from the stored data, and it makes the stored data directly from Parquet when it loads.
 Thus it does not make Python objects, also for large models (it also releases the GIL).
 When the engine loads a file, it gives an error if a member number is equal to or more than the member count of its dimension. This applies to the dimension columns and to a member-type `v`.
-The read does not use the row count in the Parquet footer to get memory. It gets memory only for the rows that it decodes. Thus a false row count in a changed file does not use up the memory.
+The read uses the row count in the Parquet footer only for a first reservation of a maximum of 2^24 rows. At the end, the columns keep only the memory for the decoded rows. Thus a false row count in a changed file does not use up the memory.
 Known limit: a changed file can have a run-length encoded run that decodes to very many rows. Such a file can still use up the memory.
 
 A member number is the position of the member in the member list of `model.json`.

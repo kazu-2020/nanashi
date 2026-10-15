@@ -126,9 +126,10 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
         .chain(std::iter::once((VALUE, value.data_type(DataType::UInt32))))
         .collect();
     let (builder, at) = project(builder, &expected)?;
-    // The footer row count can be false, so the columns grow only from the decoded batches.
-    let mut cols: Vec<Vec<u32>> = vec![Vec::new(); names.len()];
-    let mut values = Vec::new();
+    // The footer row count can be false, so cap the first reservation and shrink to the decoded rows at the end.
+    let rows = (builder.metadata().file_metadata().num_rows().max(0) as usize).min(1 << 24);
+    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| Vec::with_capacity(rows)).collect();
+    let mut values = Vec::with_capacity(rows);
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
         if batch.columns().iter().any(|c| c.null_count() > 0) {
@@ -158,6 +159,8 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
             }
         }
     }
+    cols.iter_mut().for_each(|c| c.shrink_to_fit());
+    values.shrink_to_fit();
     Ok((cols, values))
 }
 
