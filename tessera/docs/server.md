@@ -82,6 +82,7 @@ These are the limits:
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`).
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`). The default of `socketserver` is 5. With 5, about 64 clients that connect at the same time made some of them wait 1 s for a second SYN.
 - The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 5 seconds, it gets 503 `busy`. The short wait keeps a write below the 70 seconds that the router gives an attempt.
+- The server reads the body of a write before it takes a slot. Thus a client that sends a body slowly does not block other requests. Bodies that the server reads at the same time can use up to `--max-connections` × `--max-body` of memory.
 - The server keeps up to 1024 connections open at the same time (`--max-connections`). Each open connection holds a thread. A connection above this gets 503 `busy`, and the server closes it.
 - If the read or write of a request stops for 30 seconds, the server closes the connection. The same limit closes a keep-alive connection that is idle.
 

@@ -462,10 +462,11 @@ class Handler(BaseHTTPRequestHandler):
         self._serve(self._get)
 
     def do_POST(self) -> None:
-        self._serve(self._post)
+        self._serve(self._post, self._read_write)
 
-    def _serve(self, fn) -> None:
-        """Answer 1 request on this connection in a request slot (503 busy if no slot frees up in time)."""
+    def _serve(self, fn, read=None) -> None:
+        """Answer 1 request on this connection in a request slot (503 busy if no slot frees up in time).
+        read gets the body before the slot, so a client that sends its body slowly does not hold a slot."""
         self.unread_body = "Transfer-Encoding" in self.headers or self.headers.get("Content-Length", "0") != "0"
         if self.server.stopping:
             self.close_connection = True
@@ -476,6 +477,15 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._fail(ApiError(400, "bad_request", "Transfer-Encoding と、値の違う Content-Length には対応しない"))
             return
+        if self._misdirected():
+            return
+        args = ()
+        if read is not None:
+            try:
+                args = read()
+            except ApiError as e:
+                self._fail(e)
+                return
         if not self.server.begin_request():
             if self.server.stopping:
                 self.close_connection = True
@@ -484,8 +494,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
             return
         try:
-            if not self._misdirected():
-                self._run(fn)
+            self._run(lambda: fn(*args))
         finally:
             self.server.end_request(probe=is_probe(self.path))
 
@@ -579,7 +588,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 書き込み
 
-    def _post(self) -> tuple[int, Any]:
+    def _read_write(self) -> tuple[str | None, bytes]:
+        """Check a write request before its body, then read the body. Return the user and the body."""
         url = urllib.parse.urlsplit(self.path)
         if [p for p in url.path.split("/") if p] != ["writes"]:
             raise ApiError(404, "not_found", f"{url.path} はない")
@@ -597,6 +607,9 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
         raw = self.rfile.read(length)
         self.unread_body = False
+        return user, raw
+
+    def _post(self, user: str | None, raw: bytes) -> tuple[int, Any]:
         try:
             body = json.loads(raw or b"{}", parse_float=_finite_number, parse_constant=_finite_number)
         except (ValueError, RecursionError):
