@@ -19,6 +19,8 @@ The type of `v` is Float64 for number, Boolean for boolean, and UInt32 (the memb
 The column names use the dimension IDs, which do not change when you rename a dimension. Thus other tools, for example DuckDB, can also read the files (the member names are in `model.json`).
 The Rust engine writes Parquet directly from the stored data, and it makes the stored data directly from Parquet when it loads.
 Thus it does not make Python objects, also for large models (it also releases the GIL).
+When the engine loads a file, it gives an error if a member number is not less than the size of its dimension. This applies to the dimension columns and to a member-type `v`.
+The engine gets memory for the row count in the Parquet footer before it reads the rows. If a changed file gives a row count that is too large for the memory, the read gives an error. The process does not stop.
 
 A member number is the position of the member in the member list of `model.json`.
 Some dimensions have an order that is different from the order of the numbers. These are dimensions that have an inserted member or a changed order, and dimensions without order.

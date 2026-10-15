@@ -734,9 +734,11 @@ impl Core {
         Ok(PyBytes::new(py, &buf))
     }
 
-    /// store_to_parquet で書いたバイト列から格納データを作る。GIL を外して行う。
-    #[allow(clippy::wrong_self_convention)] // Python から呼ぶ名前を保つ
-    #[pyo3(signature = (data, dims, index, value, names))]
+    /// Make stored data from bytes that store_to_parquet wrote. value_dim is the dimension of a member value.
+    /// The GIL is released during the work.
+    #[allow(clippy::wrong_self_convention)] // keep the name that Python calls
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (data, dims, index, value, names, value_dim=None))]
     fn store_from_parquet(
         &self,
         py: Python<'_>,
@@ -745,13 +747,15 @@ impl Core {
         index: Option<DimId>,
         value: &str,
         names: Vec<String>,
+        value_dim: Option<DimId>,
     ) -> PyResult<StoreHandle> {
         let value = pq::Value::parse(value).map_err(err)?;
         self.dims(&dims)?;
+        self.dims(value_dim.as_slice())?;
         let cat = self.cat.clone();
         let store = py
             .detach(move || {
-                let sizes: Vec<u32> = dims.iter().map(|d| cat.dims[*d].size).collect();
+                let sizes: Vec<u32> = dims.iter().chain(&value_dim).map(|d| cat.dims[*d].size).collect();
                 let (cols, values) = pq::read(Bytes::from_owner(data), &names, value, &sizes)?;
                 let cols: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
                 Store::new(&dims, index, kind_of(value == pq::Value::Bool), &cat)?.with_rows(&cols, &values)
@@ -1492,7 +1496,8 @@ fn write_parquet<'py>(
     Ok(PyBytes::new(py, &buf))
 }
 
-/// write_parquet で書いたバイト列を (列の並び, 値の並び) に戻す。sizes は軸ごとのメンバー数。
+/// Read bytes that write_parquet wrote back into (columns, values). sizes is the member count of each dimension,
+/// and for a member value also of the value dimension at the end.
 #[pyfunction]
 fn read_parquet(
     py: Python<'_>,

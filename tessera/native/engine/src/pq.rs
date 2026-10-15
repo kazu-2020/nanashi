@@ -111,9 +111,25 @@ fn project(builder: ParquetRecordBatchReaderBuilder<Bytes>, expected: &[(&str, D
     Ok((builder.with_projection(mask), at))
 }
 
-/// Parquet のバイト列を列に戻す。列は名前で選ぶ（並び順は問わず、ほかの列は読まない）。
-/// 列の型が names と value に合い、メンバー番号が軸の大きさ（sizes）未満でなければエラーにする。
+/// The row count in the footer. A changed file can give any number, so use it only through `column`.
+fn rows(builder: &ParquetRecordBatchReaderBuilder<Bytes>) -> usize {
+    builder.metadata().file_metadata().num_rows().max(0) as usize
+}
+
+/// An empty column with space for rows. If the memory is not available, give an error, not an abort.
+fn column<T>(rows: usize) -> Result<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(rows).map_err(|_| format!("Parquet の行数 {rows} の分のメモリを確保できない"))?;
+    Ok(v)
+}
+
+/// Read Parquet bytes back into columns. The columns are selected by name (in any order; other columns are not read).
+/// sizes has the member count of each dimension in names, and for a member value also of the value dimension at the end.
+/// If a column type does not agree with names and value, or a member number is not less than its size, give an error.
 pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Result<(Vec<Vec<u32>>, Vec<f64>)> {
+    if sizes.len() != names.len() + usize::from(value == Value::Member) {
+        return Err(format!("軸の大きさの数 {} が列の数と合わない", sizes.len()));
+    }
     let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(pq_err)?;
     let expected: Vec<(&str, DataType)> = names
         .iter()
@@ -121,9 +137,9 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
         .chain(std::iter::once((VALUE, value.data_type(DataType::UInt32))))
         .collect();
     let (builder, at) = project(builder, &expected)?;
-    let rows = builder.metadata().file_metadata().num_rows() as usize;
-    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| Vec::with_capacity(rows)).collect();
-    let mut values = Vec::with_capacity(rows);
+    let rows = rows(&builder);
+    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| column(rows)).collect::<Result<_>>()?;
+    let mut values = column(rows)?;
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
         if batch.columns().iter().any(|c| c.null_count() > 0) {
@@ -145,6 +161,10 @@ pub fn read(data: Bytes, names: &[String], value: Value, sizes: &[u32]) -> Resul
             }
             Value::Member => {
                 let u = v.as_any().downcast_ref::<UInt32Array>().unwrap();
+                let size = sizes[names.len()];
+                if let Some(&x) = u.values().iter().find(|&&x| x >= size) {
+                    return Err(format!("値のメンバー番号 {x} が値の軸の大きさ {size} を超える"));
+                }
                 values.extend(u.values().iter().map(|&x| x as f64));
             }
         }
@@ -262,11 +282,11 @@ pub fn read_changes(data: Bytes) -> Result<(Vec<String>, Changes)> {
     expected.push(("new", new_t.clone()));
     let (builder, at) = project(builder, &expected)?;
     let n = names.len();
-    let rows = builder.metadata().file_metadata().num_rows() as usize;
-    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| Vec::with_capacity(rows)).collect();
+    let rows = rows(&builder);
+    let mut cols: Vec<Vec<u32>> = names.iter().map(|_| column(rows)).collect::<Result<_>>()?;
     let mut tables: Vec<Interner> = names.iter().map(|_| Interner::default()).collect();
     let mut values = Interner::default();
-    let (mut old, mut new) = (Vec::with_capacity(rows), Vec::with_capacity(rows));
+    let (mut old, mut new) = (column(rows)?, column(rows)?);
     for batch in builder.build().map_err(pq_err)? {
         let batch = batch.map_err(pq_err)?;
         for j in 0..n {
@@ -316,7 +336,8 @@ mod tests {
         ] {
             let meta = vec![("k".to_string(), "値".to_string())];
             let buf = write(&names(2), cols.clone(), vals.clone(), value, &meta).unwrap();
-            let (c, v) = read(Bytes::from(buf.clone()), &names(2), value, &[3, 4]).unwrap();
+            let sizes: &[u32] = if value == Value::Member { &[3, 4, 5] } else { &[3, 4] };
+            let (c, v) = read(Bytes::from(buf.clone()), &names(2), value, sizes).unwrap();
             assert_eq!((c, v), (cols.clone(), vals));
             assert_eq!(metadata(Bytes::from(buf)).unwrap(), meta);
         }
@@ -386,5 +407,47 @@ mod tests {
         let e = read(buf, &names(2), Value::Num, &[1, 5]).unwrap_err();
         assert!(e.contains("メンバー番号 5"), "{e}");
         assert!(read(Bytes::from_static(b"broken"), &names(2), Value::Num, &[1, 9]).is_err());
+    }
+
+    /// The bytes of buf with a false row count in each row group, and so also in the file footer.
+    fn false_row_count(buf: Vec<u8>, rows: i64) -> Bytes {
+        use parquet::file::metadata::{ParquetMetaDataReader, ParquetMetaDataWriter};
+        let buf = Bytes::from(buf);
+        let md = ParquetMetaDataReader::new().parse_and_finish(&buf).unwrap();
+        let groups = md.row_groups().iter().map(|g| g.clone().into_builder().set_num_rows(rows).build().unwrap()).collect();
+        let md = md.into_builder().set_row_groups(groups).build();
+        let footer = u32::from_le_bytes(buf[buf.len() - 8..buf.len() - 4].try_into().unwrap()) as usize;
+        let mut out = buf[..buf.len() - 8 - footer].to_vec();
+        ParquetMetaDataWriter::new(&mut out, &md).finish().unwrap();
+        assert_eq!(ParquetMetaDataReader::new().parse_and_finish(&Bytes::from(out.clone())).unwrap().file_metadata().num_rows(), rows);
+        Bytes::from(out)
+    }
+
+    #[test]
+    fn false_row_count_gives_an_error() {
+        // So large that the old Vec::with_capacity panicked with a capacity overflow, which does not abort the test run.
+        let rows = 1 << 62;
+        let buf = write(&names(2), vec![vec![0, 1], vec![2, 3]], vec![1.5, 2.5], Value::Num, &[]).unwrap();
+        let e = read(false_row_count(buf, rows), &names(2), Value::Num, &[3, 4]).unwrap_err();
+        assert!(e.contains("行数 4611686018427387904"), "{e}");
+        let c = Changes { cols: vec![vec![0, 1]], ids: vec![strs(&["a", "b"])], old: vec![None, None], new: vec![Some(1.0), Some(2.0)], value_ids: vec![], kind: Value::Num };
+        let e = read_changes(false_row_count(write_changes(&["d0".into()], &c, &[]).unwrap(), rows)).unwrap_err();
+        assert!(e.contains("行数 4611686018427387904"), "{e}");
+    }
+
+    #[test]
+    fn rejects_member_value_out_of_value_dimension() {
+        let buf = Bytes::from(write(&names(1), vec![vec![0, 1]], vec![0.0, 5.0], Value::Member, &[]).unwrap());
+        let e = read(buf, &names(1), Value::Member, &[2, 5]).unwrap_err();
+        assert!(e.contains("値のメンバー番号 5"), "{e}");
+    }
+
+    #[test]
+    fn rejects_sizes_that_do_not_match_names() {
+        let buf = Bytes::from(write(&names(2), vec![vec![0], vec![1]], vec![1.0], Value::Member, &[]).unwrap());
+        for sizes in [&[3][..], &[3, 4], &[3, 4, 5, 6]] {
+            let e = read(buf.clone(), &names(2), Value::Member, sizes).unwrap_err();
+            assert!(e.contains("軸の大きさの数"), "{e}");
+        }
     }
 }

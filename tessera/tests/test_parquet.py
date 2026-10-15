@@ -109,6 +109,12 @@ class ParquetRoundTrip(unittest.TestCase):
                 m.remove_member("Month", "m12")
                 with self.assertRaisesRegex(ValueError, "メンバー番号 11"):
                     m.engine.from_parquet(data, ("Employee", "Month"), "number", m)
+            with self.subTest(engine=engine.name, case="値のメンバー番号が値の軸の外"):
+                kind = m._name_of(m.metric("DeptOf").kind)
+                data = m.engine.to_parquet(m._values[m.metric("DeptOf").id], ("Employee", "Month"), kind, m, {})
+                m.remove_member("Department", "管理")
+                with self.assertRaisesRegex(ValueError, "値のメンバー番号 2"):
+                    m.engine.from_parquet(data, ("Employee", "Month"), kind, m)
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
