@@ -37,11 +37,16 @@ def residual(vs) -> float:
     return float(r) if Fraction(float(r)) == r else math.nan
 
 
+def _extreme(pick):
+    """Python min and max give a result that depends on the order if a NaN, or both -0.0 and 0.0, are in the values."""
+    return lambda vs: math.nan if any(map(math.isnan, vs)) else pick(vs, key=lambda v: (v, math.copysign(1.0, v)))
+
+
 AGGREGATIONS: dict[str, Aggregation] = {a.name: a for a in [
     Aggregation("sum", exact_sum, True, True),
     Aggregation("avg", lambda vs: exact_sum(vs) / len(vs), True, True),
-    Aggregation("min", min, True, True),
-    Aggregation("max", max, True, True),
+    Aggregation("min", _extreme(min), True, True),
+    Aggregation("max", _extreme(max), True, True),
     Aggregation("count", lambda vs: float(len(vs)), True, False),
     # 値が 1 つしかないグループ用。Metric を使った BY の引き下ろしを書き換えた式の内部でだけ使う
     Aggregation("first", lambda vs: vs[0], False, False, None),
@@ -162,6 +167,16 @@ def _children(e: Expr):
         v = getattr(e, f.name)
         if isinstance(v, Expr):
             yield f.name, v
+
+
+def depth(e: Expr) -> int:
+    """Return the number of node levels in the tree. A leaf has depth 1. A deep tree does not cause a RecursionError."""
+    deepest, stack = 0, [(e, 1)]
+    while stack:
+        x, d = stack.pop()
+        deepest = max(deepest, d)
+        stack.extend((c, d + 1) for _, c in _children(x))
+    return deepest
 
 
 def mentions_member(e: Expr, dim: str, member: str) -> bool:

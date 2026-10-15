@@ -10,14 +10,33 @@ use super::exact::ExactSum;
 pub(crate) struct Acc {
     pub(crate) sum: ExactSum,
     pub(crate) cnt: u64,
-    pub(crate) min: f64,
-    pub(crate) max: f64,
+    pub(crate) min: i64, // a key of min_key, not a value
+    pub(crate) max: i64, // a key of max_key, not a value
     pub(crate) first: f64,
+}
+
+/// A NaN is the least key, so that MIN gives NaN as SUM does. f64::min ignores a NaN and can give either zero, so its
+/// result depends on the order of the values.
+fn min_key(v: f64) -> i64 {
+    if v.is_nan() { i64::MIN } else { order(v.to_bits() as i64) }
+}
+
+fn max_key(v: f64) -> i64 {
+    if v.is_nan() { i64::MAX } else { order(v.to_bits() as i64) }
+}
+
+/// The same map as f64::total_cmp. It is its own inverse, so from_key uses it too.
+fn order(b: i64) -> i64 {
+    b ^ (((b >> 63) as u64) >> 1) as i64
+}
+
+fn from_key(k: i64) -> f64 {
+    if k == i64::MIN || k == i64::MAX { f64::NAN } else { f64::from_bits(order(k) as u64) }
 }
 
 impl Acc {
     pub(crate) fn new() -> Acc {
-        Acc { sum: ExactSum::default(), cnt: 0, min: f64::INFINITY, max: f64::NEG_INFINITY, first: 0.0 }
+        Acc { sum: ExactSum::default(), cnt: 0, min: i64::MAX, max: i64::MIN, first: 0.0 }
     }
     pub(crate) fn add(&mut self, v: f64) {
         if self.cnt == 0 {
@@ -25,16 +44,16 @@ impl Acc {
         }
         self.sum.add(v);
         self.cnt += 1;
-        self.min = self.min.min(v);
-        self.max = self.max.max(v);
+        self.min = self.min.min(min_key(v));
+        self.max = self.max.max(max_key(v));
     }
     pub(crate) fn finish(&self, agg: Agg) -> f64 {
         match agg {
             Agg::Sum => self.sum.finish(),
             Agg::Avg => self.sum.finish() / self.cnt as f64,
             Agg::Low => self.sum.residual(),
-            Agg::Min => self.min,
-            Agg::Max => self.max,
+            Agg::Min => from_key(self.min),
+            Agg::Max => from_key(self.max),
             Agg::Count => self.cnt as f64,
             Agg::First => self.first,
         }
@@ -355,8 +374,8 @@ pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catal
     let d = Dense { cfg, rows, out, cat, aggs, key };
     match aggs {
         [Agg::First] => None,
-        [Agg::Min] => d.fold(f64::INFINITY, |x, v| *x = x.min(v), |x, o| *x = x.min(*o), |x, _, _| *x, 8),
-        [Agg::Max] => d.fold(f64::NEG_INFINITY, |x, v| *x = x.max(v), |x, o| *x = x.max(*o), |x, _, _| *x, 8),
+        [Agg::Min] => d.fold(i64::MAX, |x, v| *x = (*x).min(min_key(v)), |x, o| *x = (*x).min(*o), |x, _, _| from_key(*x), 8),
+        [Agg::Max] => d.fold(i64::MIN, |x, v| *x = (*x).max(max_key(v)), |x, o| *x = (*x).max(*o), |x, _, _| from_key(*x), 8),
         [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64, 8),
         _ => d.fold(
             ExactSum::default(),

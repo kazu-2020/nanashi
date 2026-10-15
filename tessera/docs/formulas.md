@@ -21,6 +21,20 @@ For the property of `BY`, you can specify a fixed property of a dimension. You c
 `Salary[BY SUM: Employee.DeptOf]` aggregates by department. It uses the department of each employee for each month (`DeptOf[Employee, Month]`).
 Thus, a hierarchy that changes over time, for example a transfer, is an input change.
 
+`MIN` and `MAX` do not depend on the order of the values. If a value in the group is NaN, the result is NaN, as for `SUM`.
+`-0.0` is less than `0.0`. Thus, `MIN` of `0.0` and `-0.0` is `-0.0`, and `MAX` is `0.0`.
+
+## Size limits
+
+The parser rejects a formula that is too large for the engine. It gives an error message that shows the limit.
+
+- Parentheses, function arguments, `FILTER`, `ON`, `NOT` and unary `-` nest up to 50 levels. The parser counts the levels of all these kinds together. Thus `-(` uses two levels.
+- The tree of the formula has a maximum depth of 200. Each operator in a chain adds one to the depth. Thus `X + X + ...` can have up to 200 terms, and `X[REMOVE: A][REMOVE: B]...` up to 199 modifiers.
+- The integer n in `SELECT: Month + n`, `SELECT: Month - n` and `PREVIOUS(Month, n)` is at most 2,147,483,647.
+- A number must be finite. `1e400` is an error.
+
+These limits apply to the formula text. A saved model keeps a formula as an AST, so a load does not parse it again.
+
 ## Type check
 
 The engine checks the dimensions and the value kind of each formula before it runs the formula.
@@ -41,7 +55,7 @@ Thus, after you register a formula and before the first calculation, the engine 
 Filled: 結果のセル数が最大 2,000,000,000 と見積もられ、上限 1,000,000,000 を超える。密になる演算: IFBLANK が ['Customer', 'SKU'] の全組み合わせに展開される（密化）。値のあるセルだけに絞るなら [ON: 相手] か FILTER を使う。上限は Model(max_cells=...) で変えられる
 ```
 
-The engine calculates the estimate from the current cell counts of the inputs. It goes through the formulas in the order of the plan.
+The engine calculates the estimate from the current cell counts of the inputs. An empty input counts as 1 cell, because it gets values later and a write does not make a new estimate. It goes through the formulas in the order of the plan.
 These are the rules for the estimate:
 
 - For an operation that keeps only cells with values on both sides, for example `*` or comparisons, the estimate is the smaller side.
@@ -63,7 +77,7 @@ A recalculation holds all the stored data of the model: the values, the counts a
 A query holds only the stored data that its formula reads. If two references read the same stored data, the engine counts it one time.
 If the stored data alone is more than the budget, a recalculation that calculates a Metric gives an error. Increase `max_bytes` or make the model smaller.
 A write checks the budget with an incremental recalculation, but a server start, a reload and a replica do a full recalculation. The full recalculation holds all stores, so it can need more than the writes did. If the server cannot open the model, increase `--max-bytes`.
-For an operation that makes all combinations (`EXPAND`, `ISBLANK`, `IFBLANK`), the engine checks the necessary size first. If the size is more than the budget, the engine gives an error before it allocates memory.
+The engine counts the necessary size first for three types of operation. These are an operation that makes all combinations (`EXPAND`, `ISBLANK`, `IFBLANK`), a join (`*`, `/`, comparisons, `ON`, `FILTER`, the branches of `IF`), and a `BY` mapping. If the size is more than the budget, the engine gives an error before it makes the result.
 A fused formula ([Engine](engine.md)) does not make intermediate results. Thus, the engine counts only the size of the result array against the budget, before it allocates the array.
 The engine does not fuse a formula if the intermediate results that the evaluation of one operation at a time must make are more than the budget. It evaluates one operation at a time and gives an error as above.
 When the engine calculates the Metrics of one stage in parallel, it divides the budget that is left after the held data into equal parts. It calculates together only the Metrics with an estimate in one part. Each other Metric gets the full budget, and the engine calculates these Metrics one at a time.

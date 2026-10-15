@@ -1,8 +1,10 @@
 """HTTP サーバー（Workspace を JSON の API で公開する）。"""
 import contextlib
+import functools
 import http.client
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -45,7 +47,10 @@ class Client:
         return self._call(urllib.request.Request(self.url + path, headers=self.headers))
 
     def post(self, path: str, body: dict) -> tuple[int, dict]:
-        req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), method="POST",
+        return self.post_raw(path, json.dumps(body).encode())
+
+    def post_raw(self, path: str, data: bytes) -> tuple[int, dict]:
+        req = urllib.request.Request(self.url + path, data=data, method="POST",
                                      headers={"Content-Type": "application/json", **self.headers})
         return self._call(req)
 
@@ -356,6 +361,42 @@ class Api:
         status, err = self.c.post("/writes", big)
         self.assertEqual((status, err["error"]), (413, "too_large"))
         self.assertEqual(self.c.get("/health")[1]["seq"], 0)
+
+    def test_bad_bodies_are_400_and_later_writes_still_work(self):
+        ws, product = self.ws, did(self.ws, "Product")
+        good = write(ws, "Stock", 7, Product="p0", Month="Jan")
+        bodies = {
+            "name-int": {"ops": [{"op": "add_input", "id": "i-1", "name": 5, "dims": [product]}]},
+            "name-empty": {"ops": [{"op": "add_formula", "id": "f-1", "name": "", "dims": [], "formula": "1"}]},
+            "member-int": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": 5}]},
+            "nan": {"ops": [write(ws, "Stock", math.nan, Product="p0", Month="Jan")]},
+            "inf": {"ops": [write(ws, "Stock", math.inf, Product="p0", Month="Jan")]},
+            "spread-nan": {"ops": [{"op": "spread", "metric": mid(ws, "Stock"), "total": math.nan}]},
+            "expect-str": {"ops": [good], "expect": "5"},
+            "expect-bool": {"ops": [good], "expect": True},
+            "reason-dict": {"ops": [good], "reason": {"a": 1}},
+            "reason-nul": {"ops": [good], "reason": "a\x00b"},
+            "member-nul": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": "p\x00"}]},
+            "member-surrogate": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": "p\ud800"}]},
+            "member-list": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": [1]}]},
+            "formula-int": {"ops": [{"op": "add_formula", "id": "f-1", "name": "F", "dims": [], "formula": 5}]},
+            "a" * 201: {"ops": [good]},
+            "op\x00id": {"ops": [good]},
+            "deep-ops": {"ops": [good, functools.reduce(lambda x, _: [x], range(40), [])]},
+        }
+        for client_op_id, body in bodies.items():
+            with self.subTest(case=client_op_id[:12]):
+                status, err = self.c.post("/writes", {"client_op_id": client_op_id, **body})
+                self.assertEqual((status, err["error"]), (400, "bad_request"), err)
+        deep = b'{"client_op_id": "deep", "ops": [' + b"[" * 100_000 + b"]" * 100_000 + b"]}"
+        status, err = self.c.post_raw("/writes", deep)
+        self.assertEqual((status, err["error"]), (400, "bad_request"), err)
+        huge = {"client_op_id": "huge", "ops": [{"op": "add_dimension", "id": "d-9", "name": "D", "ordered": 1234.5}]}
+        status, err = self.c.post_raw("/writes", json.dumps(huge).replace("1234.5", "1e999").encode())
+        self.assertEqual((status, err["error"]), (400, "bad_request"), err)  # 1e999 parses to inf, and jsonb refuses it
+        self.assertEqual(self.c.get("/")[0], 200)
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "after", "ops": [good]}), (200, {"seq": 1}))
+        self.assertEqual(self.c.get(path(ws, "Stock", "cell", Product="p0", Month="Jan"))[1]["value"], 7.0)
 
     def test_argument_errors_are_400_and_internal_errors_hide_details(self):
         ws = self.ws
@@ -889,11 +930,11 @@ class PgObservability(Observability):
             def execute(self, *a, **k):
                 raise OSError("接続が切れた")
         with self.assertLogs("sparse_engine.pg_journal", "WARNING") as logs:
-            j.conn = Broken()
+            j._conn = Broken()
             deadline = time.monotonic() + 5
             while j.lease()["error"] is None and time.monotonic() < deadline:
                 time.sleep(0.02)
-            j.conn = real
+            j._conn = real
         self.assertIn("延長できなかった", logs.output[0])
         status, body = self.c.get("/ready")
         self.assertEqual(status, 503)

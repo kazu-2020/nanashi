@@ -162,8 +162,8 @@ def _operation(fn):
 
 
 class _CellCounts(dict):
-    """見積もりに使う Metric ごとのセル数。計算 Metric は known（見積もり）から、入力は今の行数から、
-    初めて読まれたときに取る。読まれた名前を read に記録する。"""
+    """The cell count of each Metric for the estimate, taken when a name is read first.
+    A formula Metric uses known (its estimate). An input uses its current row count, at least 1. read records the names."""
 
     def __init__(self, model: Model, known: dict[str, float]):
         super().__init__()
@@ -176,8 +176,8 @@ class _CellCounts(dict):
     def __missing__(self, name: str) -> float:
         if name in self.known:
             n = self.known[name]
-        else:
-            n = float(self.model.engine.size_hint(self.model._values[name]))
+        else:  # an empty input counts as 1 cell: it gets values later, and a write does not estimate again
+            n = float(max(1, self.model.engine.size_hint(self.model._values[name])))
         self[name] = n
         return n
 
@@ -645,8 +645,15 @@ class Model:
         of all cells incrementally (a formula Metric can become an input Metric).
         """
         self._check_name(name)
+        return self._add_input(name, dims, cells, kind=kind, storage=storage, partition=partition, id=id)
+
+    def _add_input(self, name: str, dims: Iterable[str], cells: Mapping[Key, float | bool | str] | None = None,
+                   *, kind: Kind = "number", storage: Any = None, partition: str | None = None,
+                   id: str | None = None) -> str:
+        """add_input without the name check: add_formula makes the hidden override input with it."""
         kind = self._check_kind(name, kind)
         dims = tuple(self.dimension(d).id for d in dims)
+        self._check_repeated(name, dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
         new = Metric(name, dims, kind, partition=self._check_partition(name, dims, partition), id=id,
@@ -692,24 +699,36 @@ class Model:
         id is the UUID of the Metric. If it is the UUID of a Metric, this definition replaces the old one
         (the name can change). If the dimensions and the kind are the same, the engine calculates the Metric
         again and sends only the changed cells downstream (an input Metric can become a formula Metric).
+        If the dimensions or the kind change, the engine removes all overrides of the Metric.
         """
         self._check_name(name)
         kind = self._check_kind(name, kind)
         if isinstance(formula, str):
             formula = parse(formula, self_name=name)
+        elif not isinstance(formula, Expr):
+            raise ValueError(f"{name}: 式は文字列か AST: {formula!r}")
         dims = tuple(self.dimension(d).id for d in dims)
+        self._check_repeated(name, dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
         formula = bind(formula, self, {name: id})  # the formula can refer to the Metric that it defines
         m = Metric(name, dims, kind, formula, self._check_partition(name, dims, partition), formula, overridable,
                    id=id, override=None if old is None else old.override)  # also kept while not overridable
+        if overridable and m.override is None and m.override_name in self._metric_ids:
+            # a model from before the name rule can hold a user Metric with the hidden name
+            raise ValueError(f"{m.override_name}: 同じ名前の Metric があるので、{name} を上書き可能にできない")
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
+        if m.override is not None and not (self._same_type(self.metrics[m.override], m)
+                                           and (old is None or self._same_type(old, m))):
+            # The dimensions or kind changed, so this removes all overrides
+            self._add_input(m.override_name, dims, kind=kind, partition=m.partition, id=m.override)
+        if old is not None and not self._same_type(old, m):
+            # _apply_layout compares only the partition dimension, so a store with the old dims or kind stays
+            self._values[id] = self.engine.empty(dims, kind, m.partition, cat=self)
         if overridable and m.override is None:
-            if m.override_name not in self._metric_ids:  # a load reads the override values first
-                self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
-            m.override = self._metric_ids[m.override_name]
+            m.override = self._add_input(m.override_name, dims, kind=kind, partition=m.partition)
         self._redefine(id, old)
         return id
 
@@ -745,11 +764,9 @@ class Model:
         m = self._own_metric(id)
         if new == m.name:
             return
-        if not isinstance(new, str) or not new or new.startswith("__"):
-            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {new!r}")
+        self._check_name(new)
         if new in self._metric_ids:
             raise ValueError(f"{new}: 同じ名前の Metric がある")
-        self._check_name(new)
         renamed = [(m, new)]
         if m.override is not None:
             renamed.append((self.metrics[m.override], f"__override__{new}"))
@@ -782,6 +799,8 @@ class Model:
         self._pending.dirty.add(id)
 
     def _check_name(self, name: str) -> None:
+        if not isinstance(name, str) or not name or name.startswith("__"):
+            raise ValueError(f"Metric の名前は空でない文字列で、__ で始まらない: {name!r}")
         if name in self._dim_ids:
             raise ValueError(f"{name}: 同じ名前の軸がある（式の中で軸と区別できなくなる）")
 
@@ -803,6 +822,13 @@ class Model:
 
     def _dim_names(self, dims) -> tuple[str, ...]:
         return tuple(self.dimensions[d].name for d in dims)
+
+    def _check_repeated(self, name: str, dims: tuple[str, ...]) -> None:
+        """Reject a repeated dimension, because formulas and set_cell find a dimension by its name."""
+        repeated = sorted({self.dimension(d).name for d in dims if dims.count(d) > 1})
+        if repeated:
+            raise ValueError(f"{name}: 軸 {', '.join(repeated)} を 2 回以上持てない。"
+                             "同じメンバーの軸をもう 1 つ作る")
 
     def _check_key_width(self, name: str, dims: tuple[str, ...]) -> None:
         """If the engine holds the key of a cell in a fixed-width integer, make sure that the dimensions fit
@@ -838,6 +864,7 @@ class Model:
             raise ValueError(f"{name}: 按分できるのは number の入力 Metric だけ")
         if isinstance(total, bool) or not isinstance(total, (int, float)):
             raise ValueError(f"{name}: 按分する合計は数値（{total!r}）")
+        total = _finite(name, total)
         if how not in ("proportional", "even"):
             raise ValueError(f"how は proportional か even（{how!r}）")
         region: Restrict = {}
@@ -854,19 +881,25 @@ class Model:
         self.recalc()
         # Spread over the member number columns (one for each dimension) and write them at one time, not cell by cell
         cols, values = self.engine.columns(self._values[m.id], region or None, self)
-        weight = math.fsum(values)  # the order of the sum (different for each engine) must not change the result
+        try:
+            weight = math.fsum(values)  # the order of the sum (different for each engine) must not change the result
+        except OverflowError:
+            raise ValueError(f"{name}: 今の値の合計が有限の数ではない") from None
         if values and how == "proportional" and weight != 0:
-            new = [float(total * v / weight) for v in values]
+            new = [_finite(name, total * v / weight) for v in values]
         else:
             n = len(values)
             if not values:  # no cell has a value: all combinations in the range
                 index = [self.dimension(d)._by_id for d in m.dims]
                 picks = [sorted(ix[x] for x in region[d]) if d in region else range(len(ix))
                          for d, ix in zip(m.dims, index)]
-                combos = list(itertools.product(*picks))
-                if not combos:
+                n = math.prod(len(p) for p in picks)
+                if n == 0:
                     raise ValueError(f"{name}: 按分先のセルがない")
-                cols, n = [list(c) for c in zip(*combos)], len(combos)
+                if self.max_cells is not None and n > self.max_cells:
+                    raise ValueError(f"{name}: 按分先のセル数 {n:,} が上限 {self.max_cells:,} を超える。"
+                                     "coords か where で範囲を絞るか、Model(max_cells=...) で上限を変える")
+                cols = [list(c) for c in zip(*itertools.product(*picks))]
             new = [float(total / n)] * n
         self._write_many(m.id, cols, new)
         return len(new)
@@ -894,6 +927,9 @@ class Model:
         so the next recalculation calculates that range.
         """
         d = self.dimension(dim)
+        # Checked here, not in Dimension: an old journal can hold a member with a bad name, and a replay must open it
+        if not isinstance(member, str) or not member:
+            raise ValueError(f"{d.name}: メンバー名は空でない文字列: {member!r}")
         props = {}
         for pid, value in (properties or {}).items():
             self._prop(d, pid)
@@ -1121,7 +1157,7 @@ class Model:
             return value
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{m.name} は number の Metric: {value!r}")
-        return float(value)
+        return _finite(m.name, value)
 
     # ------------------------------------------------ 参照
 
@@ -1612,6 +1648,16 @@ def _regions_by_metric(samples: Mapping[str, dict[str, Restrict]]) -> dict[str, 
 def _bits(size: int) -> int:
     """size 個のメンバーの番号に要るビット数（Rust の key.rs の bits_for と同じ）。"""
     return max(1, (size - 1).bit_length())
+
+
+def _finite(name: str, value: int | float) -> float:
+    try:
+        number = float(value)
+    except OverflowError:
+        number = math.inf
+    if not math.isfinite(number):
+        raise ValueError(f"{name}: 値は有限の数（{value!r}）")
+    return number
 
 
 _KEPT_ON_RESTORE = frozenset({"eval_log", "slice_log", "delta_log", "journal", "last_record"})

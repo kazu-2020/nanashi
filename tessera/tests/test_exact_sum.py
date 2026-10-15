@@ -104,6 +104,53 @@ class OneRoundingForRemoveRun(unittest.TestCase):
                 self.assertIn("T", m.delta_log)
 
 
+class MinMaxSpecialValues(unittest.TestCase):
+    def test_functions_do_not_depend_on_the_order(self):
+        mn, mx = AGGREGATORS["min"], AGGREGATORS["max"]
+        for vs in [[1.0, math.nan, 2.0], [math.nan, 1.0, 2.0], [1.0, 2.0, math.nan]]:
+            self.assertTrue(math.isnan(mn(vs)), vs)
+            self.assertTrue(math.isnan(mx(vs)), vs)
+        for vs in [[0.0, -0.0], [-0.0, 0.0]]:
+            self.assertEqual((repr(mn(vs)), repr(mx(vs))), ("-0.0", "0.0"), vs)
+
+    def test_engines_and_paths_give_the_same_result(self):
+        engines = [ReferenceEngine] + ([] if RustEngine is None else [
+            RustEngine, lambda: RustEngine(par_min=0, dense_always=True), lambda: RustEngine(stream_always=True)])
+        groups = {"nan": [2.0, 2.0], "nan1": [2.0, 1.0], "nan2": [1.0, 2.0],
+                  "zero1": [0.0, -0.0], "zero2": [-0.0, 0.0]}
+        for engine in engines:
+            m = Named(Model(engine=engine()))
+            m.add_dimension("E", ["a", "b"])
+            m.add_dimension("G", list(groups))
+            m.add_input("X", ["G", "E"], {(g, e): v for g, vs in groups.items() for e, v in zip("ab", vs)})
+            m.add_formula("Y", ["G", "E"], "IF(X > 1, X * 1e308 - X * 1e308, X)")  # an input must be finite, so make inf - inf (NaN) here
+            m.add_formula("Mn", ["G"], "Y[REMOVE MIN: E]")
+            m.add_formula("Mx", ["G"], "Y[REMOVE MAX: E]")
+            got = {f: {g: repr(v) for (g,), v in sorted(cells(m, f).items())} for f in ["Mn", "Mx"]}
+            self.assertEqual(got, {
+                "Mn": {"nan": "nan", "nan1": "nan", "nan2": "nan", "zero1": "-0.0", "zero2": "-0.0"},
+                "Mx": {"nan": "nan", "nan1": "nan", "nan2": "nan", "zero1": "0.0", "zero2": "0.0"}}, engine)
+
+    def test_incremental_recalc_sees_the_sign_of_zero(self):
+        engines = [ReferenceEngine] + ([] if RustEngine is None else [
+            RustEngine, lambda: RustEngine(par_min=0, dense_always=True), lambda: RustEngine(stream_always=True)])
+        for engine in engines:
+            m = Named(Model(engine=engine()))
+            m.add_dimension("E", ["a", "b"])
+            m.add_dimension("G", ["g"])
+            m.add_input("X", ["G", "E"], {("g", "a"): 0.0, ("g", "b"): 1.0})
+            m.add_formula("Mn", ["G"], "X[REMOVE MIN: E]")
+            m.add_formula("Top", [], "Mn[REMOVE MAX: G]")
+            m.recalc()
+            m.set_cell("X", -0.0, G="g", E="b")
+            m.recalc()
+            full = Named(m.fork())
+            full._invalidate()
+            got = [repr(cells(x, f)[k]) for x in (m, full) for f, k in [("Mn", ("g",)), ("Top", ())]]
+            with self.subTest(engine=m.engine.name):
+                self.assertEqual(got, ["-0.0", "-0.0", "-0.0", "-0.0"])
+
+
 def lows(m: Model, name: str) -> dict:
     """The residual store of an incremental SUM, with member ids as keys."""
     mid = Named(m).metric(name).id

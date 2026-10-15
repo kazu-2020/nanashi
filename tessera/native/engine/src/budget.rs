@@ -27,11 +27,12 @@ impl Budget {
 
     /// Err if `cells` new cells do not fit with the held bytes and the intermediate results.
     pub fn need(&self, cells: usize, what: &str) -> Result<()> {
-        let bytes = cells.saturating_mul(CELL_BYTES);
-        if self.held.saturating_add(self.used.get()).saturating_add(bytes) > self.limit {
-            return Err(self.over(bytes, what));
+        // A byte count that overflows usize never fits, also when the limit is usize::MAX (no limit).
+        let total = cells.checked_mul(CELL_BYTES).and_then(|b| self.held.checked_add(self.used.get())?.checked_add(b));
+        match total {
+            Some(t) if t <= self.limit => Ok(()),
+            _ => Err(self.over(cells.saturating_mul(CELL_BYTES), what)),
         }
-        Ok(())
     }
 
     /// The evaluation of a node ended. Set the used bytes back to start (this drops the child results counted
