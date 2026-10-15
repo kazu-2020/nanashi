@@ -364,6 +364,8 @@ def bind(expr: Expr, cat, names: Mapping[str, str] | None = None) -> Expr:
     def id_of(name: str) -> str | None:
         if names and name in names:
             return names[name]
+        if name.startswith("__override__"):  # a formula cannot refer to a hidden override input: it goes away with its owner
+            return None
         return cat._metric_ids.get(name)
 
     def dim(name: str) -> str:

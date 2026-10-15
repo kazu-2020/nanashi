@@ -206,7 +206,7 @@ class ReferenceEngine:
 
     def replace(self, storage: Cube, region, new: Cube, cat):
         if not region:
-            return new
+            return Cube(new.dims, dict(new.cells))  # new can be a view of another Metric: do not share its cells
         cells = storage.cells
         for k in [k for k in cells if inside(k, storage.dims, region)]:
             del cells[k]
@@ -256,8 +256,9 @@ class ReferenceEngine:
         nanashi_core = native()
         dims = tuple(cat.dimension(d).id for d in dims)
         members = [cat.dimension(d).ids for d in dims]
+        value_dim = [cat.dimension(kind.removeprefix("member:")).ids] if kind.startswith("member:") else []
         cols, values = nanashi_core.read_parquet(data, parquet_columns(dims, cat), parquet_value(kind),
-                                                 [len(ms) for ms in members])
+                                                 [len(ms) for ms in members + value_dim])
         if kind == "boolean":
             values = [v != 0.0 for v in values]
         return Cube(dims, {tuple(members[j][c[r]] for j, c in enumerate(cols)): values[r]

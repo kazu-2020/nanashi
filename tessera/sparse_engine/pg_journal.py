@@ -176,8 +176,7 @@ class PgJournal(Journal):
         self.endpoint = endpoint
         self.objects = open_objects(objects)
         self.bulk_cells = bulk_cells
-        # 接続はスレッドをまたいで使われうる（ライターと読み出し）。トランザクションの途中に別の文が
-        # 割り込まないよう、接続を使う処理はロックで順に並べる。後からの反映は別の接続で行う
+        # The writer, heartbeat, watcher and readers share one connection.
         self._lock = threading.RLock()
         self._index_conn = None
         self._index_lock = threading.Lock()
@@ -193,10 +192,10 @@ class PgJournal(Journal):
         self.lease_error: BaseException | None = None  # 最後に延長できなかった理由（延長できたら None）
         # Put a group of statements in transaction(). prepare_threshold=None: in transaction pooling mode,
         # PgBouncer can send a statement to a server connection that does not have the prepared statement.
-        self.conn = psycopg.connect(dsn, autocommit=True, prepare_threshold=None)
+        self._conn = psycopg.connect(dsn, autocommit=True, prepare_threshold=None)
         version = schema_version(self.conn)
         if version != SCHEMA_VERSION:
-            self.conn.close()
+            self._conn.close()
             raise SchemaError(f"データベースのスキーマの版が {version} で、このプログラムは {SCHEMA_VERSION} を使う。"
                               f"python -m sparse_engine.pg_journal migrate <DSN> で最新にする")
         self.conn.execute("insert into nanashi_model (model_id) values (%s) on conflict do nothing", (model_id,))
@@ -208,15 +207,21 @@ class PgJournal(Journal):
             self._heartbeat = threading.Thread(target=self._beat, name="nanashi-lease", daemon=True)
             self._heartbeat.start()
 
+    @property
+    def conn(self):
+        """The connection. If the server closed it, connect again."""
+        if self._conn.closed:
+            self._conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
+        return self._conn
+
     def close(self) -> None:
-        """リースを手放してから閉じる（次に書くプロセスが期限を待たずに済む）。"""
         self._stop.set()
         if self._heartbeat is not None:
             self._heartbeat.join()
         try:
             self.release()
         finally:
-            self.conn.close()
+            self._conn.close()
             if self._index_conn is not None:
                 self._index_conn.close()
 
@@ -224,12 +229,12 @@ class PgJournal(Journal):
         """Release the lease if this process has it. A standby in wait sees the release at its next poll,
         so it does not wait for lease_ttl."""
         with self._lock:
-            if self.epoch is None or self.conn.closed:
+            epoch, self.epoch = self.epoch, None
+            if epoch is None or self._conn.closed:
                 return
-            self.conn.execute("update nanashi_model set lease_expires = now()"
-                              " where model_id = %s and writer_epoch = %s and lease_holder = %s",
-                              (self.model_id, self.epoch, self.holder))
-            self.epoch = None
+            self._conn.execute("update nanashi_model set lease_expires = now()"
+                               " where model_id = %s and writer_epoch = %s and lease_holder = %s",
+                               (self.model_id, epoch, self.holder))
 
     def open(self, engine=None):
         """記録先の最新の状態を開く（手元の通し番号が古くても、表の通し番号から開き直す）。"""
@@ -280,6 +285,7 @@ class PgJournal(Journal):
         wait = self.acquire_wait if wait is None else wait
         deadline = time.monotonic() + wait
         while True:
+            started = time.monotonic()
             with self._lock, self.conn.transaction():
                 row = self._take_row()
                 if row is None:
@@ -296,7 +302,7 @@ class PgJournal(Journal):
                 raise Fenced(f"{self.model_id}: 別のプロセス（{holder}）が書き込み中（リースの期限内）")
             time.sleep(min(remaining, max(0.05, min(float(left or 0) + 0.05, 1.0))))
         epoch, head = row
-        self.lease_until = time.monotonic() + self.lease_ttl
+        self.lease_until = started + self.lease_ttl
         if head != self.head:
             raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
         self.epoch, self.lost = epoch, False
@@ -317,10 +323,11 @@ class PgJournal(Journal):
         手元の通し番号は確かめない（呼ぶ側はリースを取ってから記録に追いつく。持っている間はほかの
         プロセスは確定できない）。"""
         with self._lock:
+            started = time.monotonic()
             row = self._take_row()
             if row is None:
                 return False
-            self.epoch, self.lease_until, self.lease_error = row[0], time.monotonic() + self.lease_ttl, None
+            self.epoch, self.lease_until, self.lease_error = row[0], started + self.lease_ttl, None
             self.lost = False
             return True
 
@@ -361,9 +368,10 @@ class PgJournal(Journal):
             self.lease_error = e
 
     def lease(self) -> dict:
-        """書き込みの権利の状態（held、残りの秒数、最後に延長できなかった理由）。"""
+        """The state of the write right: held (the lease is taken and not expired), the seconds left, and the
+        last reason the heartbeat could not extend it."""
         left = None if self.lease_until is None else self.lease_until - time.monotonic()
-        return {"held": self.epoch is not None, "expires_in": left,
+        return {"held": self.epoch is not None and left is not None and left > 0, "expires_in": left,
                 "error": None if self.lease_error is None else repr(self.lease_error)}
 
     # ------------------------------------------------ 記録
@@ -382,6 +390,7 @@ class PgJournal(Journal):
             seqs = list(range(self.head + 1, self.head + 1 + len(records)))
             # 大量のセルは、確定の前にファイルを置いておく（確定に失敗したら参照されないファイルが残るだけ）
             blobs = [self._write_blob(r) if cell_count(r) > self.bulk_cells else None for r in records]
+            started = time.monotonic()
             with self.conn.transaction():
                 cur = self.conn.execute(
                     "update nanashi_model set head_seq = %s, lease_expires = now() + make_interval(secs => %s)"
@@ -405,7 +414,7 @@ class PgJournal(Journal):
                     for rec, seq, blob in zip(records, seqs, blobs):
                         if blob is None:
                             _copy_cells(copy, self.model_id, seq, rec["changes"].get("cells", []))
-            self.head = seqs[-1]
+            self.head, self.lease_until = seqs[-1], started + self.lease_ttl
             return seqs
 
     # ------------------------------------------------ 大量のセル
@@ -424,7 +433,7 @@ class PgJournal(Journal):
         connection, so that writes do not stop. Return the number of journal entries that it wrote.
         If many processes call it at the same time, each entry is written 1 time."""
         with self._index_lock:
-            if self._index_conn is None:
+            if self._index_conn is None or self._index_conn.closed:
                 self._index_conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
             return self._index_entries(self._index_conn)
 
@@ -536,11 +545,14 @@ class PgJournal(Journal):
         return [(seq, Snapshot(uri, meta["files"])) for seq, uri, meta in rows]
 
     def prune(self, keep: int = 2, op_window: int = 100_000) -> dict:
-        """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットを消す。残す一番古い
-        スナップショットより前の記録の、大量の変更のファイルも消す（セルの履歴の表に反映してから消すので、
-        記録の再生とセルの履歴はその表から読める）。最後の op_window 件より古い記録の client_op_id は忘れる
-        （再送しても二重に確定しないと保証する範囲を決める）。消した数を返す。"""
-        self.index_pending()  # 消すファイルの分は、先にセルの履歴に反映しておく
+        """Keep the `keep` newest snapshots and delete the older snapshots. Also delete the files of large
+        changes of the records before the oldest kept snapshot. The cell history table gets them first, so
+        replay and the cell history read that table. Forget the client_op_ids of the records before the last
+        op_window records. This sets the range where a resend does not commit two times. Return the counts.
+        Raise ValueError if keep is less than 1."""
+        if keep < 1:
+            raise ValueError(f"keep は 1 以上（{keep}）。スナップショットがなくなると開けない")
+        self.index_pending()
         out = {"snapshots": 0, "cells": 0, "client_op_ids": 0}
         snaps = self.snapshots()
         if len(snaps) > keep:

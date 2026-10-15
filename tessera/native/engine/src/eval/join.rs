@@ -98,8 +98,15 @@ pub(crate) fn in_order<'a>(cfg: &Config, cells: &'a [(u64, f64)]) -> Cow<'a, [(u
     }
 }
 
-/// INNER JOIN。両側に値があるセルだけ結果を持つ。f が None を返したセルは空。
-pub(crate) fn intersect(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, f: impl Fn(f64, f64) -> Option<f64> + Sync) -> Result<Cube> {
+/// INNER JOIN. Only the cells with a value on both sides are in the result. A cell is empty if `f` gives None.
+pub(crate) fn intersect(
+    a: &Cube,
+    b: &Cube,
+    kind: Kind,
+    cat: &Catalog,
+    bud: &Budget,
+    f: impl Fn(f64, f64) -> Option<f64> + Sync,
+) -> Result<Cube> {
     let cfg = &cat.cfg;
     // 片側が定数（軸なし）なら、結合せずに 1 回の走査で済む
     if b.dims().is_empty() {
@@ -150,10 +157,25 @@ pub(crate) fn intersect(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, f: impl F
     }
 
     let (index, entries, f) = (&index, &entries, &f);
+    let range = |k: u64| index.get(&a_sk.apply(&a.pack, &sk, k)).copied().unwrap_or((0, 0));
+    const WHAT: &str = "軸の違う式の結合";
+    // If each key of b has one entry, |a| is an upper bound of the pairs. Count them exactly only when it does not fit.
+    if !(index.len() == entries.len() && bud.need(a.cells.len(), WHAT).is_ok()) {
+        let pairs = |&(k, _): &(u64, f64)| {
+            let (i, j) = range(k);
+            j - i
+        };
+        let n = if cfg.par(a.cells.len()) {
+            a.cells.par_iter().map(pairs).reduce(|| 0, usize::saturating_add)
+        } else {
+            a.cells.iter().map(pairs).fold(0, usize::saturating_add)
+        };
+        bud.need(n, WHAT)?;
+    }
     let cells = flat_map_cells(cfg, &a.cells, |k, v| {
-        let range = index.get(&a_sk.apply(&a.pack, &sk, k)).copied().unwrap_or((0, 0));
+        let (i, j) = range(k);
         let base = a_out.apply(&a.pack, &out, k);
-        entries[range.0..range.1].iter().filter_map(move |&(_, bk, bv)| f(v, bv).map(|x| (base | bk, x)))
+        entries[i..j].iter().filter_map(move |&(_, bk, bv)| f(v, bv).map(|x| (base | bk, x)))
     });
     Ok(Cube { pack: out, kind, cells })
 }
@@ -172,7 +194,7 @@ pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &
         .filter(|(_, d)| !c.dims().contains(d))
         .map(|(i, &d)| (i, members(cat, d, r)))
         .collect();
-    let n: usize = missing.iter().map(|(_, ms)| ms.len()).product();
+    let n = combos(&missing);
     b.need(n.saturating_mul(c.cells.len().max(1)).saturating_add(n), "EXPAND（軸の全メンバーへの展開）")?;
     let combos = product(&out, &missing);
     let combos = &combos;
@@ -181,6 +203,11 @@ pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &
         combos.iter().map(move |&extra| (base | extra, v))
     });
     Ok(Cube { pack: out, kind: c.kind, cells })
+}
+
+/// Gives the number of combinations of the members in `spans`. Stops at `usize::MAX` and does not wrap.
+pub(crate) fn combos(spans: &[(usize, Vec<u32>)]) -> usize {
+    spans.iter().fold(1, |n, (_, ms)| n.saturating_mul(ms.len()))
 }
 
 /// 与えた軸（位置, メンバー一覧）の全組み合わせを、pack の詰め方のキーの部分として列挙する。
@@ -229,7 +256,21 @@ pub(crate) fn replace_dim(dims: &[DimId], old: DimId, new: DimId) -> Vec<DimId> 
 
 pub(crate) fn dense(c: &Cube, cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Vec<u64>> {
     let spans: Vec<(usize, Vec<u32>)> = c.dims().iter().enumerate().map(|(i, &d)| (i, members(cat, d, r))).collect();
-    let n: usize = spans.iter().map(|(_, ms)| ms.len()).product();
+    let n = combos(&spans);
     b.need(n.saturating_mul(2), "ISBLANK / IFBLANK（軸の全組み合わせ）")?;
     Ok(product(&c.pack, &spans))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combos;
+
+    #[test]
+    fn combos_saturates_instead_of_wrapping_to_zero() {
+        let members = 1usize << 16;
+        let spans: Vec<(usize, Vec<u32>)> = (0..4).map(|i| (i, (0..members as u32).collect())).collect();
+        assert_eq!(combos(&spans), usize::MAX);
+        assert_eq!(combos(&spans[..3]), members.pow(3));
+        assert_eq!(combos(&[]), 1);
+    }
 }
