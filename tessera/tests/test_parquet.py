@@ -157,7 +157,7 @@ class CellBlocks(unittest.TestCase):
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class ApplyBlock(unittest.TestCase):
-    """記録の再生で、変更の塊をまとめて書き込む（Rust）。1 セルずつ書いた結果と同じになる。"""
+    """Journal replay writes a block of changes at one time (Rust). The result is the same as writing cell by cell."""
 
     def model(self, engine=None):
         m = Named(Model(engine=engine or RustEngine()))
@@ -203,20 +203,26 @@ class ApplyBlock(unittest.TestCase):
                     self.assertEqual(cells(a, name), cells(b, name))
 
     def test_value_kind_differs_from_metric(self):
-        """A member id into a number Metric, or a number into a member-type Metric, is an error in both engines."""
         for engine in (ReferenceEngine, RustEngine):
             m = self.model(engine())
-            k, d = m.dimension("K").ids, m.dimension("D").ids
-            for name, new in (("M", 5.0), ("V", d[1])):
-                rows = [[[k[1]] + ([m.dimension("T").ids[0]] if name == "V" else []), None, new]]
+            k, t, d = m.dimension("K").ids, m.dimension("T").ids, m.dimension("D").ids
+            for name, key, new in (("M", [k[1]], 5.0), ("V", [k[1], t[0]], d[1])):
                 record = {"changes": {"cells": [{"metric": m.metric(name).id,
-                                                 "rows": nanashi_core.CellBlock.from_rows(rows)}]}}
+                                                 "rows": nanashi_core.CellBlock.from_rows([[key, None, new]])}]}}
                 with self.subTest(engine=engine.__name__, metric=name), \
                         self.assertRaisesRegex(ValueError, "値の種類"):
                     journal.apply(m, record)
 
+    def test_value_member_not_in_the_dimension(self):
+        for engine in (ReferenceEngine, RustEngine):
+            m = self.model(engine())
+            rows = nanashi_core.CellBlock.from_rows([[[m.dimension("K").ids[1]], None, "nope"]])
+            record = {"changes": {"cells": [{"metric": m.metric("M").id, "rows": rows}]}}
+            with self.subTest(engine=engine.__name__), \
+                    self.assertRaisesRegex(ValueError, "^値のメンバーの ID nope が軸にない$"):
+                journal.apply(m, record)
+
     def test_position_beyond_the_dimension(self):
-        """A table of ids longer than the dimension gives positions out of range: an error, not a broken key."""
         m = self.model()
         k = m.dimension("K").ids
         store = m._values[m.metric("M").id]

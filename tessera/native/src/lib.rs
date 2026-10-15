@@ -795,7 +795,8 @@ impl Core {
     /// Write a block of changes to the stored data at one time (journal replay). dim_ids is the table of
     /// position -> member id of each dimension, in the declared order of the dimensions. value_ids is the same
     /// table of the dimension of a member-type value (None for the other kinds). A cell of an id that is not in
-    /// the dimension now (a member that the transaction removed) is skipped.
+    /// the dimension now (a member that the transaction removed) is skipped. A block whose number of dimensions
+    /// differs from the Metric is skipped.
     #[pyo3(signature = (store, block, dim_ids, value_ids))]
     fn apply_block(
         &self,
@@ -805,14 +806,21 @@ impl Core {
         dim_ids: Vec<Vec<String>>,
         value_ids: Option<Vec<String>>,
     ) -> PyResult<()> {
+        let mut s = read(store)?;
         let c = &block.c;
-        if c.cols.len() != read(store)?.metric_dims.len() || dim_ids.len() != c.cols.len() {
-            return Ok(()); // The Metric was defined again with other dimensions. Skip it, as the path that compares by id does
+        if c.cols.len() != s.metric_dims.len() || dim_ids.len() != c.cols.len() {
+            return Ok(());
+        }
+        for (&d, table) in s.metric_dims.iter().zip(&dim_ids) {
+            let dim = &self.cat.dims[d];
+            if table.len() > dim.size as usize {
+                return Err(err(format!("軸 {} の ID の表の長さ {} が軸の大きさ {} を超える", dim.name, table.len(), dim.size)));
+            }
         }
         if (c.kind == pq::Value::Member) != value_ids.is_some() && c.new.iter().any(Option::is_some) {
             return Err(err("変更の塊の値の種類が Metric の値の種類と合わない".into()));
         }
-        let (cols, values) = py.detach(move || {
+        let s = py.detach(move || -> Result<Arc<Store>, String> {
             let maps: Vec<Vec<Option<u32>>> = c.ids.iter().zip(&dim_ids).map(|(used, table)| positions(used, table)).collect();
             let vmap = value_ids.as_deref().map(|table| positions(&c.value_ids, table));
             let mut cols: Vec<Vec<u32>> = vec![Vec::with_capacity(c.len()); maps.len()];
@@ -834,11 +842,11 @@ impl Core {
                 }
                 values.push(v);
             }
-            Ok::<_, String>((cols, values))
-        })
-        .map_err(err)?;
-        // dim_ids comes from the caller, so a position can be out of the dimension. write_many checks the range
-        self.write_many(py, store, cols, values)
+            let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
+            Arc::make_mut(&mut s).write_many(&slices, &values);
+            Ok(s)
+        });
+        put(store, s.map_err(err)?)
     }
 
     fn size(&self, store: &Bound<'_, StoreHandle>) -> PyResult<usize> {

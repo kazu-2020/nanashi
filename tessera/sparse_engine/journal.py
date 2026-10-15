@@ -222,14 +222,15 @@ def _value_dim(model, m):
     return model.dimension(m.kind.removeprefix("member:")) if m.kind.startswith("member:") else None
 
 
-def _stored(m, vdim, new):
-    """The value of a record row as the engine stores it. vdim is the dimension of a member-type value."""
+def _engine_value(m, value_dim, new):
     if new is None:
         return None
-    if isinstance(new, str) != (vdim is not None):
+    if isinstance(new, str) != (value_dim is not None):
         raise ValueError(f"Metric {m.name} の値の種類が記録の値の種類と合わない")
-    if vdim is not None:
-        return float(vdim._by_id[new])
+    if value_dim is not None:
+        if new not in value_dim._by_id:
+            raise ValueError(f"値のメンバーの ID {new} が軸にない")
+        return float(value_dim._by_id[new])
     return bool(new) if m.kind == "boolean" else new
 
 
@@ -361,7 +362,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             key = tuple(key)
             if len(key) != len(dims) or not all(u in d._by_id for d, u in zip(dims, key)):
                 continue  # a cell of a member that this transaction removed (it went with the member)
-            store = model.engine.write(store, key, _stored(m, vdim, new), model)
+            store = model.engine.write(store, key, _engine_value(m, vdim, new), model)
         model._values[m.id] = store
 
     model._invalidate()
@@ -376,7 +377,7 @@ def _apply_cells(model, cells: list[dict]) -> None:
         rows = c["rows"]
         if not isinstance(rows, list):
             if model._plan is not None and m.id in model._delta_sources():
-                model._keep_old(m.id)  # 差分集計には変更前の値が要る
+                model._keep_old(m.id)  # The delta aggregation needs the old values
             written = model.engine.apply_block(model._values[m.id], rows, [d.ids for d in dims],
                                                None if vdim is None else vdim.ids)
             if written is not None:
@@ -390,7 +391,7 @@ def _apply_cells(model, cells: list[dict]) -> None:
                 continue
             for col, d, u in zip(cols, dims, key):
                 col.append(d._by_id[u])
-            values.append(_stored(m, vdim, new))
+            values.append(_engine_value(m, vdim, new))
         if values:
             model._write_many(m.id, cols, values)
 
