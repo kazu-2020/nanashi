@@ -207,7 +207,6 @@ class Redefine(unittest.TestCase):
         check_full(self, self.m)
 
     def test_formula_dims_change_with_same_partition(self):
-        # The partition dimension stays Product, so the stored data of the old dimensions must not stay
         self.m.add_formula("Plus1", ["Product", "Month"], "Cost + 10", partition="Product", id=self.m.metric("Plus1").id)
         self.m.recalc()
         self.assertEqual(self.m.get("Plus1", Product="A", Month="Jan"), 17)
