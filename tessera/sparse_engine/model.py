@@ -706,10 +706,12 @@ class Model:
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
-        if overridable and m.override is None:
-            if m.override_name not in self._metric_ids:  # a load reads the override values first
-                self.add_input(m.override_name, dims, kind=kind, partition=m.partition)
-            m.override = self._metric_ids[m.override_name]
+        if overridable and m.override is None:  # the hidden name is reserved, so add_input cannot make it
+            hidden = Metric(m.override_name, dims, kind, partition=m.partition, id=uuid7())
+            self.metrics[hidden.id] = hidden
+            self._metric_ids[hidden.name] = hidden.id
+            self._values[hidden.id] = self.engine.from_cells(dims, kind, (), self, m.partition)
+            m.override = hidden.id
         self._redefine(id, old)
         return id
 
@@ -745,8 +747,6 @@ class Model:
         m = self._own_metric(id)
         if new == m.name:
             return
-        if not isinstance(new, str) or not new or new.startswith("__"):
-            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {new!r}")
         if new in self._metric_ids:
             raise ValueError(f"{new}: 同じ名前の Metric がある")
         self._check_name(new)
@@ -782,6 +782,9 @@ class Model:
         self._pending.dirty.add(id)
 
     def _check_name(self, name: str) -> None:
+        """Names that start with "__" are internal (the hidden override input), so a user cannot make one."""
+        if not isinstance(name, str) or not name or name.startswith("__"):
+            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {name!r}")
         if name in self._dim_ids:
             raise ValueError(f"{name}: 同じ名前の軸がある（式の中で軸と区別できなくなる）")
 
