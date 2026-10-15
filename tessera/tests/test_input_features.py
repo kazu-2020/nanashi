@@ -198,6 +198,34 @@ class BadCells(unittest.TestCase):
                 m.add_input("Salary", ["Employee"], {("e1",): "a"}, id=m.metric("Salary").id)
             self.assertEqual(m.metric("Salary").dims, m.metric("Budget").dims)
             self.assertEqual(m.get("Total"), 120.0)
+
+    def test_names_must_be_non_empty_strings(self):
+        for engine in engines():
+            m = model(engine)
+            metrics = sorted(x.name for x in m.metrics.values())
+            for name in [5, None, "", True]:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_input(name, ["Employee"])
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_formula(name, ["Employee"], "Salary * 2")
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_member("Employee", name)
+            self.assertEqual(sorted(x.name for x in m.metrics.values()), metrics)
+            self.assertEqual(m.dimension("Employee").members, ["e1", "e2", "e3"])
+
+    def test_values_must_be_finite(self):
+        for engine in engines():
+            m = model(engine)
+            for value in [math.nan, math.inf, -math.inf, 10 ** 400]:
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "^Salary: 値は有限の数"):
+                        m.set_cell("Salary", value, Employee="e1", Month="Jan")
+                    with self.assertRaisesRegex(ValueError, "^X: 値は有限の数"):
+                        m.add_input("X", ["Employee"], {("e1",): value})
+                    with self.assertRaisesRegex(ValueError, "^Budget: 値は有限の数"):
+                        m.spread("Budget", value, Month="Jan")
+            self.assertEqual(m.get("Total"), 120.0)
             e1 = m.dimension("Employee").ids[0]
             with self.assertRaisesRegex(ValueError, "^同じセルが 2 回ある$"):
                 m.add_input("Y", ["Employee"], {("e1",): 1.0, (e1,): 2.0})

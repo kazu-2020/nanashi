@@ -3,6 +3,7 @@ import contextlib
 import http.client
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -45,7 +46,10 @@ class Client:
         return self._call(urllib.request.Request(self.url + path, headers=self.headers))
 
     def post(self, path: str, body: dict) -> tuple[int, dict]:
-        req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), method="POST",
+        return self.post_raw(path, json.dumps(body).encode())
+
+    def post_raw(self, path: str, data: bytes) -> tuple[int, dict]:
+        req = urllib.request.Request(self.url + path, data=data, method="POST",
                                      headers={"Content-Type": "application/json", **self.headers})
         return self._call(req)
 
@@ -356,6 +360,35 @@ class Api:
         status, err = self.c.post("/writes", big)
         self.assertEqual((status, err["error"]), (413, "too_large"))
         self.assertEqual(self.c.get("/health")[1]["seq"], 0)
+
+    def test_bad_bodies_are_400_and_later_writes_still_work(self):
+        ws, product = self.ws, did(self.ws, "Product")
+        good = write(ws, "Stock", 7, Product="p0", Month="Jan")
+        bodies = {
+            "name-int": {"ops": [{"op": "add_input", "id": "i-1", "name": 5, "dims": [product]}]},
+            "name-empty": {"ops": [{"op": "add_formula", "id": "f-1", "name": "", "dims": [], "formula": "1"}]},
+            "member-int": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": 5}]},
+            "nan": {"ops": [write(ws, "Stock", math.nan, Product="p0", Month="Jan")]},
+            "inf": {"ops": [write(ws, "Stock", math.inf, Product="p0", Month="Jan")]},
+            "spread-nan": {"ops": [{"op": "spread", "metric": mid(ws, "Stock"), "total": math.nan}]},
+            "expect-str": {"ops": [good], "expect": "5"},
+            "expect-bool": {"ops": [good], "expect": True},
+            "reason-dict": {"ops": [good], "reason": {"a": 1}},
+            "reason-nul": {"ops": [good], "reason": "a\x00b"},
+            "member-nul": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": "p\x00"}]},
+            "a" * 201: {"ops": [good]},
+            "op\x00id": {"ops": [good]},
+        }
+        for client_op_id, body in bodies.items():
+            with self.subTest(case=client_op_id[:12]):
+                status, err = self.c.post("/writes", {"client_op_id": client_op_id, **body})
+                self.assertEqual((status, err["error"]), (400, "bad_request"), err)
+        deep = b'{"client_op_id": "deep", "ops": [' + b"[" * 100_000 + b"]" * 100_000 + b"]}"
+        status, err = self.c.post_raw("/writes", deep)
+        self.assertEqual((status, err["error"]), (400, "bad_request"), err)
+        self.assertEqual(self.c.get("/")[0], 200)
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "after", "ops": [good]}), (200, {"seq": 1}))
+        self.assertEqual(self.c.get(path(ws, "Stock", "cell", Product="p0", Month="Jan"))[1]["value"], 7.0)
 
     def test_argument_errors_are_400_and_internal_errors_hide_details(self):
         ws = self.ws
