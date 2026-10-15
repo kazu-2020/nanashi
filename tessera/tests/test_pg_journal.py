@@ -221,6 +221,33 @@ class PgJournalTests(unittest.TestCase):
         m.set_cell("Price", 14, Product="A")  # after the caller knows of the loss, a new commit takes the lease
         self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
 
+    def test_reconnects_after_the_server_closed_the_connection(self):
+        # A PostgreSQL restart or an idle kill closes the connection. The next operation connects again.
+        # The lease is in the table, so the commit after the reconnect still checks the epoch
+        import psycopg
+        m = build_with(ReferenceEngine())
+        j = self.journal(heartbeat=False)
+        j.start(m.model)
+        m.set_cell("Price", 12, Product="A")  # m takes the lease
+        with self.assertRaises(psycopg.OperationalError):
+            j.conn.execute("select pg_terminate_backend(pg_backend_pid())")
+        m.set_cell("Price", 14, Product="A")
+        self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
+        self.assertTrue(j.lease()["held"])
+        self.journal().conn.execute("update nanashi_model set writer_epoch = writer_epoch + 1,"
+                                    " lease_holder = 'intruder' where model_id = %s", (self.model_id,))
+        with self.assertRaises(Fenced):  # the reconnect did not keep a lease that another process took
+            m.set_cell("Price", 15, Product="A")
+
+    def test_lease_is_not_held_after_it_expired(self):
+        m = build_with(ReferenceEngine())
+        j = self.journal(lease_ttl=0.5, heartbeat=False)
+        j.start(m.model)
+        m.set_cell("Price", 12, Product="A")
+        self.assertTrue(j.lease()["held"])
+        time.sleep(0.7)
+        self.assertFalse(j.lease()["held"])  # a standby Workspace demotes on this
+
     def test_prune_removes_old_snapshots_and_bulk_files(self):
         m = build_with(ReferenceEngine())
         j = self.journal(bulk_cells=3)
