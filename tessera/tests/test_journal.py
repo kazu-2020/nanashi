@@ -467,6 +467,23 @@ class Journal(JournalCase, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 5"):
             self.reopen()
 
+    def test_a_broken_last_line_before_an_empty_segment_is_an_error(self):
+        self.file_only()
+        self.m.set_cell("Price", 11, Product="A")
+        self.m.set_cell("Price", 12, Product="A")
+        with self.m.transaction(client_op_id="req-3"):
+            self.m.set_cell("Price", 13, Product="A")
+        old = self.m.journal.log_path
+        self.m.checkpoint()
+        lines = old.read_text().splitlines(keepends=True)
+        old.write_text(lines[0] + "{broken\n" + lines[2])
+        (old.parent / f"{4:020d}.jsonl").touch()  # A failed append after the rotation leaves an empty segment
+        self.m.journal.release()
+        with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 4"):
+            self.reopen()
+        with self.assertRaisesRegex(ValueError, "通し番号が 1 の次でなく 4"):
+            list(self.journals.journal(op_window=0).records())
+
     def test_cell_history(self):
         with self.m.transaction(user="alice", reason="見直し"):
             self.m.set_cell("Price", 12, Product="A")

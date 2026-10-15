@@ -700,6 +700,8 @@ class FileJournal(Journal):
         (a broken line stops the read of its segment), so raise ValueError."""
         expected = segs[0][0]
         for first, path in segs:
+            if first != expected:  # An empty segment yields no records, so check its first seq too
+                raise ValueError(f"{path}: 通し番号が {expected - 1} の次でなく {first}")
             for rec, _ in self._read_segment(first, path):
                 if rec["seq"] != expected:
                     raise ValueError(f"{path}: 通し番号が {expected - 1} の次でなく {rec['seq']}")
