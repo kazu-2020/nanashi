@@ -439,7 +439,7 @@ class RustPlanner:
     """Planner（planner.py）を Rust で行う。式の変換と軸の番号は RustEngine のものを使う。"""
 
     def __init__(self, engine: RustEngine):
-        self.e = engine
+        self.e = weakref.proxy(engine)  # the engine owns the planner: a strong reference makes a cycle
         self._plan: tuple[Any, Any, list[str]] | None = None  # (Model の計算計画, Rust の計算計画, Metric 名)
         self._prop_plan: tuple[Any, Any, list[str]] | None = None  # 影響範囲の伝搬だけに使う、式だけの計画
 

@@ -91,11 +91,11 @@ class Fork(unittest.TestCase):
         fork = original.fork()
         fork.set_cell("Salary", 1.0, Employee=fork.dimension("Employee").members[0], Version="予算")
         fork.recalc()
-        ref = weakref.ref(fork.model)  # the Model behind the Named facade
+        refs = weakref.ref(fork.model), weakref.ref(fork.model.engine)  # the Model behind the Named facade
         gc.disable()
         try:
             del fork
-            self.assertIsNone(ref(), "the fork is still alive")
+            self.assertEqual([r() for r in refs], [None, None], "the fork is still alive")
         finally:
             gc.enable()
 

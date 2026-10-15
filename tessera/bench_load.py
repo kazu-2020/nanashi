@@ -231,7 +231,7 @@ def run_engines(args) -> None:
             ports = [port for _, port, _ in engines]
             paths = {port: info["paths"] for _, port, info in engines}
             rate = args.rate / args.procs
-            w0 = cpu_seconds(engines[0][0].pid)
+            w0, t0 = cpu_seconds(engines[0][0].pid), time.perf_counter()
             with multiprocessing.Pool(args.procs + 1) as pool:
                 writes = None
                 if args.writer:
@@ -241,10 +241,11 @@ def run_engines(args) -> None:
                 res = pool.map(_open_worker, [(others, paths, rate, args.seconds, i) for i in range(args.procs)])
                 writes = writes.get() if writes else []
             r = summarize(res, args.seconds * MEASURED_SHARE)
-            w = {"writes": len(writes), **{"write_" + k: round(v, 1) for k, v in percentiles(writes).items()}}
+            cores0 = (cpu_seconds(engines[0][0].pid) - w0) / (time.perf_counter() - t0)  # the last write can end after the reads
+            w = {"writes": len(writes), **({"write_" + k: round(v, 1) for k, v in percentiles(writes).items()} if writes else {})}
             print(json.dumps({"engines": n, "rss_mb_each": round(sum(rss) / n), "rss_gb_total": round(sum(rss) / 1024, 2),
                               "idle_cores": round(idle, 3), "rate": args.rate, **w,
-                              "engine0_cores": round((cpu_seconds(engines[0][0].pid) - w0) / args.seconds, 2),
+                              "engine0_cores": round(cores0, 2),
                               "engine0_rss_mb": round(rss_mb(engines[0][0].pid)), **r}, ensure_ascii=False), flush=True)
         finally:
             for p, _, _ in engines:
