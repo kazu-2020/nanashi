@@ -698,6 +698,7 @@ class Model:
         id is the UUID of the Metric. If it is the UUID of a Metric, this definition replaces the old one
         (the name can change). If the dimensions and the kind are the same, the engine calculates the Metric
         again and sends only the changed cells downstream (an input Metric can become a formula Metric).
+        If the dimensions or the kind change, the engine removes all overrides of the Metric.
         """
         self._check_name(name)
         kind = self._check_kind(name, kind)
@@ -717,6 +718,10 @@ class Model:
         if old is not None and old.formula is None and id in self._pending.changed:
             self._invalidate()  # an input with pending changes becomes a formula: calculate everything again
         self._register(m, old)
+        if m.override is not None and not (self._same_type(self.metrics[m.override], m)
+                                           and (old is None or self._same_type(old, m))):
+            # The dimensions or kind changed, so this removes all overrides
+            self._add_input(m.override_name, dims, kind=kind, partition=m.partition, id=m.override)
         if overridable and m.override is None:
             m.override = self._add_input(m.override_name, dims, kind=kind, partition=m.partition)
         self._redefine(id, old)

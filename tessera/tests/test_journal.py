@@ -140,6 +140,39 @@ class Journal(JournalCase, unittest.TestCase):
         if self.store is not FileStore:
             self.skipTest("ファイルの記録先の形式を調べるテスト")
 
+    def test_replay_of_an_override_shape_change(self):
+        m = self.m
+        plus1 = m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=m.metric("Plus1").id)
+        m.set_cell("Plus1", 50, Product="A")
+        m.add_formula("Plus1", ["Product", "Month"], "Cost + 10", overridable=True, id=plus1)
+        m.set_cell("Plus1", 60, Product="A", Month="Feb")
+        m.recalc()
+        loaded = self.reopen()
+        check_same_state(self, m, loaded)
+        self.assertEqual(loaded.get("Plus1", Product="A", Month="Feb"), 60)
+        self.assertEqual(loaded.get("Plus1", Product="A", Month="Jan"), 17)
+
+    def test_replay_of_a_kind_change_and_an_override_in_one_transaction(self):
+        m = self.m
+        plus1 = m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=m.metric("Plus1").id)
+        m.set_cell("Plus1", 1, Product="A")
+        with m.transaction():
+            m.add_formula("Plus1", ["Product"], "Price > 100", kind="boolean", overridable=True, id=plus1)
+            m.set_cell("Plus1", True, Product="A")
+        loaded = self.reopen()
+        check_same_state(self, m, loaded)
+        self.assertIs(loaded.get("Plus1", Product="A"), True)
+
+    def test_replay_of_a_kind_change_and_an_equal_value_in_one_transaction(self):
+        m = self.m
+        x = m.add_input("X", ["Product"], {("A",): 1})
+        with m.transaction():
+            m.add_input("X", ["Product"], kind="boolean", id=x)
+            m.set_cell("X", True, Product="A")
+        loaded = self.reopen()
+        check_same_state(self, m, loaded)
+        self.assertIs(loaded.get("X", Product="A"), True)
+
     def test_each_call_is_recorded(self):
         self.m.set_cell("Price", 12, Product="A")
         self.m.add_member("Product", "E", Category="Y")
@@ -671,6 +704,25 @@ def many_cells(engine, n: int = 1500) -> Model:
     return m
 
 
+def check_kind_change_in_files(test, engine, make) -> None:
+    """Redefine an input from number to member kind (same dims) as a large change, then reopen.
+    make() gives a new journal object on the same location."""
+    m = Named(Model(engine=engine()))
+    m.add_dimension("K", ["k0", "k1", "k2", "k3"])
+    m.add_dimension("E", ["e0", "e1"])
+    m.add_input("V", ["K"], {("k0",): 1.0, ("k1",): 2.0, ("k2",): 3.0, ("k3",): 4.0})
+    make().start(m.model)
+    cells = {("k0",): "e0", ("k1",): "e1", ("k2",): "e0", ("k3",): "e1"}
+    m.add_input("V", ["K"], cells, kind="member:E", id=m.metric("V").id)
+    for reopen in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
+        r = Named(make().open(reopen()))
+        test.assertEqual(r.metric("V").kind, "member:" + r.dimension("E").id)
+        test.assertEqual(r.value("V").cells, cells)
+    # A number is not a value of the new kind, so the history keeps no old value
+    history = m.cell_history(make(), "V", K="k1")
+    test.assertEqual([(h["old"], h["new"]) for h in history], [(None, "e1")])
+
+
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class Blocks(unittest.TestCase):
     """Rust のエンジンで多くのセルを書き換えた記録は、行の列でなく変更の塊で持つ。"""
@@ -748,6 +800,11 @@ class CellFiles(unittest.TestCase):
             f.write_bytes(f.read_bytes()[:-10])
             with self.assertRaisesRegex(ValueError, "壊れている"):
                 Named(FileJournal(tmp).open(RustEngine()))
+
+    def test_kind_change_goes_to_parquet(self):
+        for e in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
+            with tempfile.TemporaryDirectory() as tmp:
+                check_kind_change_in_files(self, e, lambda: FileJournal(tmp, fsync=False, bulk_cells=3))
 
     def test_moved_directory_still_opens(self):
         with tempfile.TemporaryDirectory() as tmp:
