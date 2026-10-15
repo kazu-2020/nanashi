@@ -260,8 +260,9 @@ class RustEngine:
         return self.core.store_to_parquet(store, parquet_columns(dims, cat), parquet_value(kind), list(meta.items()))
 
     def from_parquet(self, data, dims, kind, cat, partition=None):
+        value_dim = self._dim(cat, kind.removeprefix("member:")) if kind.startswith("member:") else None
         return self.core.store_from_parquet(data, [self._dim(cat, d) for d in dims], self._index(cat, dims, partition),
-                                            parquet_value(kind), parquet_columns(dims, cat))
+                                            parquet_value(kind), parquet_columns(dims, cat), value_dim)
 
     def partition_of(self, store):
         i = self.core.index_dim(store)

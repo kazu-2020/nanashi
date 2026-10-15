@@ -3,7 +3,7 @@ import random
 import unittest
 
 from sparse_engine import Model, Named, journal
-from sparse_engine.engine import ReferenceEngine
+from sparse_engine.engine import ReferenceEngine, parquet_columns
 
 try:
     import nanashi_core
@@ -109,6 +109,20 @@ class ParquetRoundTrip(unittest.TestCase):
                 m.remove_member("Month", "m12")
                 with self.assertRaisesRegex(ValueError, "メンバー番号 11"):
                     m.engine.from_parquet(data, ("Employee", "Month"), "number", m)
+            with self.subTest(engine=engine.name, case="値のメンバー番号が値の軸の外"):
+                kind = m._name_of(m.metric("DeptOf").kind)
+                data = m.engine.to_parquet(m._values[m.metric("DeptOf").id], ("Employee", "Month"), kind, m, {})
+                m.remove_member("Department", "管理")
+                with self.assertRaisesRegex(ValueError, "値のメンバー番号 2"):
+                    m.engine.from_parquet(data, ("Employee", "Month"), kind, m)
+
+    def test_member_value_needs_value_dim(self):
+        m = model(RustEngine())
+        dims = ("Employee", "Month")
+        data = m.engine.to_parquet(m._values[m.metric("DeptOf").id], dims, m._name_of(m.metric("DeptOf").kind), m, {})
+        with self.assertRaisesRegex(ValueError, "値の軸 \\(value_dim\\) が必要"):
+            m.engine.core.store_from_parquet(data, [m.engine._dim(m, d) for d in dims], None, "member",
+                                             parquet_columns(dims, m))
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
