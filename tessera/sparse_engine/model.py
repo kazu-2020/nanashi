@@ -697,6 +697,8 @@ class Model:
         kind = self._check_kind(name, kind)
         if isinstance(formula, str):
             formula = parse(formula, self_name=name)
+        elif not isinstance(formula, Expr):
+            raise ValueError(f"{name}: 式は文字列か AST: {formula!r}")
         dims = tuple(self.dimension(d).id for d in dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
@@ -857,9 +859,12 @@ class Model:
         self.recalc()
         # Spread over the member number columns (one for each dimension) and write them at one time, not cell by cell
         cols, values = self.engine.columns(self._values[m.id], region or None, self)
-        weight = math.fsum(values)  # the order of the sum (different for each engine) must not change the result
+        try:
+            weight = math.fsum(values)  # the order of the sum (different for each engine) must not change the result
+        except OverflowError:
+            raise ValueError(f"{name}: 今の値の合計が有限の数ではない") from None
         if values and how == "proportional" and weight != 0:
-            new = [float(total * v / weight) for v in values]
+            new = [_finite(name, total * v / weight) for v in values]
         else:
             n = len(values)
             if not values:  # no cell has a value: all combinations in the range
@@ -897,6 +902,9 @@ class Model:
         so the next recalculation calculates that range.
         """
         d = self.dimension(dim)
+        # Checked here, not in Dimension: an old journal can hold a member with a bad name, and a replay must open it
+        if not isinstance(member, str) or not member:
+            raise ValueError(f"{d.name}: メンバー名は空でない文字列: {member!r}")
         props = {}
         for pid, value in (properties or {}).items():
             self._prop(d, pid)
@@ -1618,8 +1626,6 @@ def _bits(size: int) -> int:
 
 
 def _finite(name: str, value: int | float) -> float:
-    """The value as a float. NaN, infinity and an int outside the float range are a ValueError: a cell cannot
-    hold them, and the PostgreSQL journal (jsonb) refuses NaN."""
     try:
         number = float(value)
     except OverflowError:

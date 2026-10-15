@@ -77,7 +77,9 @@ import inspect
 import ipaddress
 import json
 import logging
+import math
 import os
+import re
 import signal
 import sys
 import threading
@@ -104,7 +106,8 @@ WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "move_member", "renam
                        "add_input", "add_property", "set_property_values", "add_dimension", "remove_metric",
                        "rename_metric", "rename_dimension", "rename_property"})
 READ_PARAMS = frozenset({"offset", "limit", "keep", "agg"})
-MAX_CLIENT_OP_ID = 200  # characters. The journal indexes it (PostgreSQL refuses a long index row with 500)
+MAX_CLIENT_OP_ID = 200  # characters. PostgreSQL refuses an index row that is too large, and the journal indexes it
+MAX_BODY_DEPTH = 32
 # The router gives an attempt 70 s: a slot wait of 5 s + the write queue 30 s + the commit 30 s stays below it.
 SLOT_WAIT = 5.0
 
@@ -355,25 +358,32 @@ def is_probe(path: str) -> bool:
     return path.split("?", 1)[0].strip("/") in PROBES
 
 
-def _no_constant(text: str):
-    """json.loads parse_constant: refuse NaN, Infinity and -Infinity (not JSON, and jsonb refuses NaN)."""
-    raise ValueError(text)
+def _finite_number(text: str) -> float:
+    """json.loads hook for parse_float and parse_constant. Python json accepts NaN, Infinity and 1e999, but
+    they are not JSON, and jsonb refuses NaN."""
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(text)
+    return number
 
 
-def _has_nul(body) -> bool:
-    """Return True if a string in the parsed JSON body holds a NUL character. PostgreSQL text and jsonb
-    refuse it, so it must not reach the journal."""
-    stack = [body]
+_BAD_CHAR = re.compile("[\x00\ud800-\udfff]")  # PostgreSQL refuses a NUL, and UTF-8 cannot encode a lone surrogate
+
+
+def _body_problem(body) -> str | None:
+    """A deeply nested body makes later code recurse past the stack of a server thread."""
+    stack = [(body, 0)]
     while stack:
-        x = stack.pop()
-        if isinstance(x, str) and "\x00" in x:
-            return True
+        x, depth = stack.pop()
+        if depth > MAX_BODY_DEPTH:
+            return f"本文の入れ子は {MAX_BODY_DEPTH} 段まで"
+        if isinstance(x, str) and _BAD_CHAR.search(x):
+            return "文字列に NUL 文字や単独のサロゲート文字は使えない"
         if isinstance(x, dict):
-            stack.extend(x.keys())
-            stack.extend(x.values())
+            stack.extend((y, depth + 1) for y in (*x.keys(), *x.values()))
         elif isinstance(x, list):
-            stack.extend(x)
-    return False
+            stack.extend((y, depth + 1) for y in x)
+    return None
 
 
 def misdirected(header: str | None, model_id: str | None) -> bool:
@@ -586,7 +596,7 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         self.unread_body = False
         try:
-            body = json.loads(raw or b"{}", parse_constant=_no_constant)
+            body = json.loads(raw or b"{}", parse_float=_finite_number, parse_constant=_finite_number)
         except (ValueError, RecursionError):
             raise ApiError(400, "bad_request", "本文が JSON ではない（NaN や Infinity、深すぎる入れ子は使えない）") from None
         if not isinstance(body, dict) or not isinstance(body.get("ops"), list) or not body["ops"]:
@@ -601,8 +611,8 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "bad_request", "expect は読んだ版の通し番号（整数）")
         if body.get("reason") is not None and not isinstance(body["reason"], str):
             raise ApiError(400, "bad_request", "reason は文字列")
-        if _has_nul(body):
-            raise ApiError(400, "bad_request", "文字列に NUL 文字は使えない")
+        if (problem := _body_problem(body)) is not None:
+            raise ApiError(400, "bad_request", problem)
         ops, client_op_id = body["ops"], body["client_op_id"]
         try:
             seq = self.server.workspace.write(

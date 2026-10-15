@@ -117,8 +117,6 @@ class Dimension:
     def add_member(self, member: str, id: str | None = None, at: int | None = None) -> None:
         """Add the member. Its number is always the last. With at, put it at position at (from 0) of the order
         (the default is the end. An ordered dimension accepts only the end). Without id, make a UUID."""
-        if not isinstance(member, str) or not member:
-            raise ValueError(f"{self.name}: メンバー名は空でない文字列: {member!r}")
         if member in self._index:
             raise ValueError(f"{self.name}: メンバー {member!r} はすでにある")
         n = len(self.members)

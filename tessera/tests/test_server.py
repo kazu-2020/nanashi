@@ -1,5 +1,6 @@
 """HTTP サーバー（Workspace を JSON の API で公開する）。"""
 import contextlib
+import functools
 import http.client
 import io
 import json
@@ -376,8 +377,12 @@ class Api:
             "reason-dict": {"ops": [good], "reason": {"a": 1}},
             "reason-nul": {"ops": [good], "reason": "a\x00b"},
             "member-nul": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": "p\x00"}]},
+            "member-surrogate": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": "p\ud800"}]},
+            "member-list": {"ops": [{"op": "add_member", "dim": product, "id": "p-9", "name": [1]}]},
+            "formula-int": {"ops": [{"op": "add_formula", "id": "f-1", "name": "F", "dims": [], "formula": 5}]},
             "a" * 201: {"ops": [good]},
             "op\x00id": {"ops": [good]},
+            "deep-ops": {"ops": [good, functools.reduce(lambda x, _: [x], range(40), [])]},
         }
         for client_op_id, body in bodies.items():
             with self.subTest(case=client_op_id[:12]):
@@ -386,6 +391,9 @@ class Api:
         deep = b'{"client_op_id": "deep", "ops": [' + b"[" * 100_000 + b"]" * 100_000 + b"]}"
         status, err = self.c.post_raw("/writes", deep)
         self.assertEqual((status, err["error"]), (400, "bad_request"), err)
+        huge = {"client_op_id": "huge", "ops": [{"op": "add_dimension", "id": "d-9", "name": "D", "ordered": 1234.5}]}
+        status, err = self.c.post_raw("/writes", json.dumps(huge).replace("1234.5", "1e999").encode())
+        self.assertEqual((status, err["error"]), (400, "bad_request"), err)  # 1e999 parses to inf, and jsonb refuses it
         self.assertEqual(self.c.get("/")[0], 200)
         self.assertEqual(self.c.post("/writes", {"client_op_id": "after", "ops": [good]}), (200, {"seq": 1}))
         self.assertEqual(self.c.get(path(ws, "Stock", "cell", Product="p0", Month="Jan"))[1]["value"], 7.0)

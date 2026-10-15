@@ -93,7 +93,7 @@ If many clients ask for the same summary at the same time, the server calculates
 
 Each write is 1 request and 1 transaction, and `client_op_id` is necessary.
 `client_op_id` has a maximum of 200 characters, `expect` is an integer, and `reason` is a string.
-The body must not contain `NaN`, `Infinity`, or a NUL character in a string. A cell value must be a finite number.
+The body must not contain `NaN`, `Infinity`, a number outside the float range (`1e999`), a NUL character or a lone surrogate in a string. A cell value must be a finite number.
 The server refuses a body that breaks these rules with 400 before it applies the write.
 If a client sends a write again, the server does not commit it twice. This is also true after a restart.
 If `expect` has the sequence number of the version that the client read, and a later write changed the same cells, the server refuses the write with 409.
@@ -107,7 +107,8 @@ The server returns these status codes, each with `{"error", "message"}`:
 - 401: an authentication error.
 - 413: the request is too large.
 
-The server records each rejected write (400, and 409 `duplicate_id`) with its `client_op_id` for the `op_window` of the journal.
+The server records a write that the model rejects (400 `formula`, 400 `bad_request` from an argument, and 409 `duplicate_id`) with its `client_op_id` for the `op_window` of the journal.
+A write that the server refuses before it applies it (the rules of the body above) is not recorded: `GET /operations/<client_op_id>` gives 404 for it.
 If a client sends the same `client_op_id` again, the server returns the same status and body, and does not apply the write.
 A conflict is not recorded: the client reads the new version, plans again, and sends the write again.
 `GET /operations/<client_op_id>` gives the result of a committed or rejected write.
