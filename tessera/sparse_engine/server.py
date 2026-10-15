@@ -104,6 +104,7 @@ WRITE_OPS = frozenset({"set_cell", "spread", "add_member", "move_member", "renam
                        "add_input", "add_property", "set_property_values", "add_dimension", "remove_metric",
                        "rename_metric", "rename_dimension", "rename_property"})
 READ_PARAMS = frozenset({"offset", "limit", "keep", "agg"})
+MAX_CLIENT_OP_ID = 200  # characters. The journal indexes it (PostgreSQL refuses a long index row with 500)
 # The router gives an attempt 70 s: a slot wait of 5 s + the write queue 30 s + the commit 30 s stays below it.
 SLOT_WAIT = 5.0
 
@@ -354,6 +355,27 @@ def is_probe(path: str) -> bool:
     return path.split("?", 1)[0].strip("/") in PROBES
 
 
+def _no_constant(text: str):
+    """json.loads parse_constant: refuse NaN, Infinity and -Infinity (not JSON, and jsonb refuses NaN)."""
+    raise ValueError(text)
+
+
+def _has_nul(body) -> bool:
+    """Return True if a string in the parsed JSON body holds a NUL character. PostgreSQL text and jsonb
+    refuse it, so it must not reach the journal."""
+    stack = [body]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, str) and "\x00" in x:
+            return True
+        if isinstance(x, dict):
+            stack.extend(x.keys())
+            stack.extend(x.values())
+        elif isinstance(x, list):
+            stack.extend(x)
+    return False
+
+
 def misdirected(header: str | None, model_id: str | None) -> bool:
     """Return True if the router sent the request for a different model (X-Nanashi-Model)."""
     return header is not None and model_id is not None and header != model_id
@@ -564,15 +586,23 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         self.unread_body = False
         try:
-            body = json.loads(raw or b"{}")
-        except ValueError:
-            raise ApiError(400, "bad_request", "本文が JSON ではない") from None
+            body = json.loads(raw or b"{}", parse_constant=_no_constant)
+        except (ValueError, RecursionError):
+            raise ApiError(400, "bad_request", "本文が JSON ではない（NaN や Infinity、深すぎる入れ子は使えない）") from None
         if not isinstance(body, dict) or not isinstance(body.get("ops"), list) or not body["ops"]:
             raise ApiError(400, "bad_request", "ops（操作の列）が要る")
         if "user" in body:
             raise ApiError(400, "bad_request", "user は認証で決まる（本文では指定しない）")
         if not isinstance(body.get("client_op_id"), str) or not body["client_op_id"]:
             raise ApiError(400, "bad_request", "client_op_id（再送しても二重に確定しないための ID）が要る")
+        if len(body["client_op_id"]) > MAX_CLIENT_OP_ID:
+            raise ApiError(400, "bad_request", f"client_op_id は {MAX_CLIENT_OP_ID} 文字まで")
+        if body.get("expect") is not None and (isinstance(body["expect"], bool) or not isinstance(body["expect"], int)):
+            raise ApiError(400, "bad_request", "expect は読んだ版の通し番号（整数）")
+        if body.get("reason") is not None and not isinstance(body["reason"], str):
+            raise ApiError(400, "bad_request", "reason は文字列")
+        if _has_nul(body):
+            raise ApiError(400, "bad_request", "文字列に NUL 文字は使えない")
         ops, client_op_id = body["ops"], body["client_op_id"]
         try:
             seq = self.server.workspace.write(

@@ -782,6 +782,8 @@ class Model:
         self._pending.dirty.add(id)
 
     def _check_name(self, name: str) -> None:
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"Metric の名前は空でない文字列: {name!r}")
         if name in self._dim_ids:
             raise ValueError(f"{name}: 同じ名前の軸がある（式の中で軸と区別できなくなる）")
 
@@ -838,6 +840,7 @@ class Model:
             raise ValueError(f"{name}: 按分できるのは number の入力 Metric だけ")
         if isinstance(total, bool) or not isinstance(total, (int, float)):
             raise ValueError(f"{name}: 按分する合計は数値（{total!r}）")
+        total = _finite(name, total)
         if how not in ("proportional", "even"):
             raise ValueError(f"how は proportional か even（{how!r}）")
         region: Restrict = {}
@@ -1121,7 +1124,7 @@ class Model:
             return value
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{m.name} は number の Metric: {value!r}")
-        return float(value)
+        return _finite(m.name, value)
 
     # ------------------------------------------------ 参照
 
@@ -1612,6 +1615,18 @@ def _regions_by_metric(samples: Mapping[str, dict[str, Restrict]]) -> dict[str, 
 def _bits(size: int) -> int:
     """size 個のメンバーの番号に要るビット数（Rust の key.rs の bits_for と同じ）。"""
     return max(1, (size - 1).bit_length())
+
+
+def _finite(name: str, value: int | float) -> float:
+    """The value as a float. NaN, infinity and an int outside the float range are a ValueError: a cell cannot
+    hold them, and the PostgreSQL journal (jsonb) refuses NaN."""
+    try:
+        number = float(value)
+    except OverflowError:
+        number = math.inf
+    if not math.isfinite(number):
+        raise ValueError(f"{name}: 値は有限の数（{value!r}）")
+    return number
 
 
 _KEPT_ON_RESTORE = frozenset({"eval_log", "slice_log", "delta_log", "journal", "last_record"})

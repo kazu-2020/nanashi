@@ -92,6 +92,9 @@ When a summary read sees a newer published version (after a write, or after a st
 If many clients ask for the same summary at the same time, the server calculates it 1 time.
 
 Each write is 1 request and 1 transaction, and `client_op_id` is necessary.
+`client_op_id` has a maximum of 200 characters, `expect` is an integer, and `reason` is a string.
+The body must not contain `NaN`, `Infinity`, or a NUL character in a string. A cell value must be a finite number.
+The server refuses a body that breaks these rules with 400 before it applies the write.
 If a client sends a write again, the server does not commit it twice. This is also true after a restart.
 If `expect` has the sequence number of the version that the client read, and a later write changed the same cells, the server refuses the write with 409.
 The server returns these status codes, each with `{"error", "message"}`:
