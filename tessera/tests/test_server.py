@@ -725,6 +725,16 @@ class KeepAlive(unittest.TestCase):
         self.assertEqual(s.recv(100), b"")
         self.assertEqual(self.ws.seq, 1)
 
+    def test_a_content_length_that_is_not_plain_digits_is_refused(self):
+        server = self.serve()
+        body = json.dumps({"client_op_id": "c", "ops": [write(self.ws, "Stock", 1, Product="p0", Month="Jan")]}).encode()
+        for length in (f"+{len(body)}", f"0{len(body)}", f"{len(body)} "):  # Python strips the spaces before a value
+            s = self.connect(server)
+            status, headers, answer = exchange(s, f"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t-alice\r\n"
+                                                  f"Content-Length: {length}\r\n\r\n".encode() + body)
+            self.assertEqual((status, headers.get("connection"), json.loads(answer).get("error")), (400, "close", "bad_request"), length)
+        self.assertEqual(self.ws.seq, 0)
+
     def test_transfer_encoding_is_refused(self):
         server = self.serve()
         s = self.connect(server)
