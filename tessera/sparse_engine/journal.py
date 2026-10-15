@@ -850,14 +850,18 @@ class FileJournal(Journal):
 
     def records(self, after: int = 0) -> Iterator[dict]:
         segs = self._list_segments()
+        expected = None  # The next seq. A gap means a broken line in an older segment.
         for i, (first, path) in enumerate(segs):
             if i + 1 < len(segs) and segs[i + 1][0] <= after + 1:
-                continue  # この区切りの記録は、すべて after 以前
+                continue  # All the records of this segment are at or before after
             if first > after + 1 and i == 0 and first > 1:
                 raise ValueError(f"{self.path}: 通し番号 {after + 1} からの記録は prune で消した")
             for rec, _ in self._read_segment(first, path):
+                if expected is not None and rec["seq"] != expected:
+                    raise ValueError(f"{path}: 通し番号が {expected - 1} の次でなく {rec['seq']}")
+                expected = rec["seq"] + 1
                 if rec["seq"] > self.head:
-                    return  # 読み込んだあとに別のプロセスが書いた記録（開き直すまで見ない）
+                    return  # Another process wrote this record after the read (ignore it until a reopen)
                 if rec["seq"] > after:
                     if "cells_blob" in rec:  # 大量のセルはファイルから、変更の塊として読む
                         rec["changes"]["cells"] = read_cell_files(rec.pop("cells_blob")["files"],
@@ -865,14 +869,16 @@ class FileJournal(Journal):
                     yield rec
 
     def prune(self, keep: int = 2) -> dict:
-        """新しいほうから keep 個のスナップショットを残し、それより古いスナップショットと、残す一番古い
-        スナップショットより前の記録の区切りと、その記録の大量の変更のファイルを消す。消した数を返す。
-        記録を消すので、残すスナップショットより前へは戻れなくなる（セルの履歴もそこから後だけになる）。"""
+        """Keep the keep newest snapshots (keep >= 1). Delete the older snapshots. Also delete the segments
+        before the oldest kept snapshot and before the last op_window entries, and their files of large changes.
+        Return the counts. After prune, you cannot go back before the oldest kept segment (the cell history too)."""
+        if keep < 1:
+            raise ValueError(f"keep は 1 以上（{keep}）。スナップショットがなくなると開けない")
         self.acquire()
         snaps = self.snapshots()
         if len(snaps) <= keep:
             return {"snapshots": 0, "segments": 0, "cells": 0}
-        oldest = snaps[keep - 1][0]
+        oldest = min(snaps[keep - 1][0], self.head - self.op_window)  # Keep the client_op_ids in the op_window
         out = {"snapshots": 0, "segments": 0, "cells": 0}
         for _, place in snaps[keep:]:
             for key in self.objects.list(place.uri + "/"):
@@ -881,7 +887,7 @@ class FileJournal(Journal):
         segs = self._list_segments()
         for i, (first, path) in enumerate(segs[:-1]):
             if segs[i + 1][0] > oldest + 1:
-                break  # この区切りには、残すスナップショットより後の記録がある
+                break  # This segment has a record after oldest
             for rec, _ in self._read_segment(first, path):
                 for f in rec.get("cells_blob", {}).get("files", []):
                     self.objects.delete(f["uri"])
