@@ -161,9 +161,6 @@ class Errors(unittest.TestCase):
 
 
 class Limits(unittest.TestCase):
-    """The parser rejects text that would later exhaust the stack (bind, recalc, to_formula recurse over the
-    tree) or overflow an integer in the Rust engine. A text in the limits parses, calculates and round-trips."""
-
     def test_deep_nesting_is_a_parse_error(self):
         for text in ["(" * 5000 + "X" + ")" * 5000, "-" * 5000 + "X", "NOT " * 5000 + "P",
                      "IF(P, 1, " * 5000 + "0" + ")" * 5000, "X" + "[FILTER: X" * 5000 + "]" * 5000]:
@@ -192,6 +189,8 @@ class Limits(unittest.TestCase):
             parse("X[SELECT: Month - 2147483648]")
         with self.assertRaisesRegex(ParseError, "以下"):
             parse("PREVIOUS(Month, 99999999999999999999)", self_name="S")
+        with self.assertRaisesRegex(ParseError, "以下"):
+            parse("X[SELECT: Month + " + "9" * 5000 + "]")
         m = model()
         m.add_formula("R", ["Product", "Month"], "Z[SELECT: Month - 2147483647]")
         self.assertIsNone(m.get("R", Product="A", Month="Jan"))

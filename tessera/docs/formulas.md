@@ -23,11 +23,11 @@ Thus, a hierarchy that changes over time, for example a transfer, is an input ch
 
 ## Size limits
 
-The parser rejects a formula that is too large for the engine. It gives a syntax error with the limit.
+The parser rejects a formula that is too large for the engine. It gives an error message that shows the limit.
 
-- Parentheses, function arguments, `FILTER`, `ON`, `NOT` and unary `-` nest up to 50 levels.
-- The tree of the formula has up to 200 levels. A chain of operators adds one level for each operator. Thus `X + X + ...` can have up to 200 terms, and `X[REMOVE: A][REMOVE: B]...` up to 199 modifiers.
-- The integer of `SELECT: Month - n` and `PREVIOUS(Month, n)` is at most 2,147,483,647.
+- Parentheses, function arguments, `FILTER`, `ON`, `NOT` and unary `-` nest up to 50 levels. The parser counts the levels of all these kinds together. Thus `-(` uses two levels.
+- The tree of the formula has a maximum depth of 200. Each operator in a chain adds one to the depth. Thus `X + X + ...` can have up to 200 terms, and `X[REMOVE: A][REMOVE: B]...` up to 199 modifiers.
+- The integer n in `SELECT: Month + n`, `SELECT: Month - n` and `PREVIOUS(Month, n)` is at most 2,147,483,647.
 - A number must be finite. `1e400` is an error.
 
 These limits apply to the formula text. A saved model keeps a formula as an AST, so a load does not parse it again.

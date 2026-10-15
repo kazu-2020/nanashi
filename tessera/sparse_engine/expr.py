@@ -165,7 +165,7 @@ def _children(e: Expr):
 
 
 def depth(e: Expr) -> int:
-    """The number of node levels. Not recursive, so a tree deeper than the Python stack also gets a number."""
+    """Return the number of node levels in the tree. A leaf has depth 1. A deep tree does not cause a RecursionError."""
     deepest, stack = 0, [(e, 1)]
     while stack:
         x, d = stack.pop()
