@@ -215,6 +215,30 @@ class CellEstimates(unittest.TestCase):
                     full.recalc()
                     self.assertEqual(m.cell_estimates, full.cell_estimates)
 
+    def test_empty_input_is_estimated_as_one_cell(self):
+        """An empty input gets values later, and the engine does not estimate again on a write. Thus the
+        estimate must not be 0 for an operation that expands the input."""
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__):
+                m = big(engine())
+                m.add_input("Empty", ["Customer"])
+                m.add_formula("Wide", ["Customer", "SKU"], "Empty[EXPAND: SKU]")  # 1 × 100
+                m.recalc()
+                self.assertEqual(m.cell_estimates[m.metric("Wide").id], 100.0)
+                m.add_formula("Wide", ["Customer", "SKU"], "IFBLANK(Empty[EXPAND: SKU], 0)", id=m.metric("Wide").id)
+                with self.assertRaisesRegex(FormulaError, "Wide: .*最大 20,000 "):
+                    m.recalc()
+
+    def test_spread_over_an_empty_range_is_checked_against_the_limit(self):
+        for engine in ENGINES:
+            with self.subTest(engine=engine.__name__):
+                m = big(engine())
+                m.add_input("Budget", ["Customer", "SKU"])
+                with self.assertRaisesRegex(ValueError, "Budget: .*20,000 .*上限 10,000"):
+                    m.spread("Budget", 100.0)  # no cell has a value: all 20,000 combinations
+                self.assertEqual(m.value("Budget").cells, {})
+                self.assertEqual(m.spread("Budget", 100.0, Customer="c1"), 100)  # 100 cells are in the limit
+
     def test_limit_is_saved(self):
         for engine in ENGINES:
             with self.subTest(engine=engine.__name__), tempfile.TemporaryDirectory() as d:
