@@ -151,6 +151,15 @@ class RustReads(Reads, unittest.TestCase):
         self.assertEqual(m.summarize("X").cells, {(): 200_000.0})
         self.assertLess(nanashi_core.heap()[1] - before, budget)
 
+    def test_a_summary_after_an_edit_stays_in_the_budget(self):
+        m = Named(Model(engine=self.engine(max_bytes=3 << 20)))
+        m.add_dimension("A", [f"a{i}" for i in range(400)])
+        m.add_dimension("B", [f"b{i}" for i in range(500)])
+        m.add_input("X", ["A", "B"], {(f"a{i}", f"b{j}"): 1.0 for i in range(400) for j in range(500)})
+        m.set_cell("X", 2.0, A="a0", B="b0")
+        m.recalc()
+        self.assertEqual(m.summarize("X").cells, {(): 200_001.0})
+
 
 class VersionView(unittest.TestCase):
     def test_version_reads_and_rejects_writes(self):

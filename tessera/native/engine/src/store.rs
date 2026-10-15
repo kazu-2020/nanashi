@@ -352,8 +352,9 @@ impl Store {
 
     /// A Store with only the rows in r (the same dimensions and partition dimension).
     pub fn slice(&self, r: &Restrict) -> Store {
-        if r.is_all() {
-            return self.clone(); // O(1): the base and the delta are shared
+        // A Store with a delta must compact here: aggregation streams only a Store without a delta.
+        if r.is_all() && self.delta.is_empty() {
+            return self.clone();
         }
         let mut out = self.empty_like();
         out.set_sorted(self.read(r).cells);
