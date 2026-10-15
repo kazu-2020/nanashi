@@ -8,9 +8,10 @@ from sparse_engine.journal import FileJournal, apply
 from sparse_engine.server import apply_ops
 
 try:
+    import nanashi_core
     from sparse_engine.rust_engine import RustEngine
 except ImportError:
-    RustEngine = None
+    nanashi_core = RustEngine = None
 
 ENGINES = [ReferenceEngine] + ([RustEngine] if RustEngine is not None else [])
 REPEATED = "X: 軸 A を 2 回以上持てない。同じメンバーの軸をもう 1 つ作る"
@@ -67,6 +68,36 @@ class RepeatedDimension(unittest.TestCase):
                     m.remove_metric("X")
                     self.assertNotIn("X", m._metric_ids)
 
+    def test_removed_member_replays_to_live_state(self):
+        for engine in ENGINES:
+            for dims in (("A", "A"), ("A", "B", "A")):
+                for bulk in (None, 0):
+                    if bulk == 0 and nanashi_core is None:
+                        continue  # a bulk record needs nanashi_core
+                    with self.subTest(engine.__name__, dims=dims, bulk=bulk), tempfile.TemporaryDirectory() as path:
+                        kw = {} if bulk is None else {"bulk_cells": bulk}
+                        m = Named(Model(engine=engine()))
+                        m.add_dimension("A", ["a1", "a2", "a3"])
+                        m.add_dimension("B", ["b1"])
+                        j = FileJournal(path, fsync=False, **kw)
+                        j.start(m.model)
+                        keys = [("a1", "a3"), ("a1", "a2"), ("a3", "a1"), ("a2", "a2")]
+                        if dims == ("A", "B", "A"):
+                            keys = [(x, "b1", y) for x, y in keys]
+                        spec = {"id": "x", "name": "X", "dims": [m.dimension_id(d) for d in dims], "kind": "number",
+                                "formula": None, "partition": None, "overridable": False}
+                        rows = [[[m.member_id(d, x) for d, x in zip(dims, k)], None, float(n)]
+                                for n, k in enumerate(keys, 5)]
+                        j.append({"changes": {"metrics": [spec], "cells": [{"metric": "x", "rows": rows}]}})
+                        j.release()
+                        m = Named(FileJournal(path, fsync=False, **kw).open(engine()))
+                        m.remove_member("A", "a2")
+                        survivors = {k: float(n) for n, k in enumerate(keys, 5) if "a2" not in k}
+                        self.assertEqual(dict(m.value("X").cells), survivors)
+                        m.model.journal.release()
+                        self.assertEqual(dict(Named(FileJournal(path).open(engine())).value("X").cells), survivors)
+
+    @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
     def test_old_record_survives_snapshot_and_bulk_replay(self):
         for engine in ENGINES:
             for dims, cells in ((("A", "B", "A"), {("a1", "b1", "a2"): 1.0, ("a2", "b1", "a1"): 2.0}),
