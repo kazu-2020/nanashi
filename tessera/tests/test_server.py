@@ -725,6 +725,18 @@ class KeepAlive(unittest.TestCase):
         self.assertEqual(s.recv(100), b"")
         self.assertEqual(self.ws.seq, 1)
 
+    @mock.patch("sparse_engine.server.SLOT_WAIT", 0.5)
+    def test_a_slow_body_does_not_hold_a_slot(self):
+        server = self.serve(max_threads=1)
+        body = json.dumps({"client_op_id": "s", "ops": [write(self.ws, "Stock", 1, Product="p0", Month="Jan")]}).encode()
+        s = self.connect(server)
+        s.sendall(f"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t-alice\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+                  + body[:1])
+        time.sleep(0.2)  # the server reads the first byte of the body and waits for the rest
+        self.assertEqual(Client(server.url).get("/health"), (200, {"seq": 0, "role": "leader"}))
+        status, _, answer = exchange(s, body[1:])
+        self.assertEqual((status, json.loads(answer)), (200, {"seq": 1}))
+
     def test_transfer_encoding_is_refused(self):
         server = self.serve()
         s = self.connect(server)
