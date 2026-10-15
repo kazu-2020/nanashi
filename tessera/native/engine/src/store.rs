@@ -572,11 +572,10 @@ impl Store {
         self.value_at(self.encode(key))
     }
 
-    /// Give the rows in r from row offset, and at most limit rows (the member number columns in the declared dimension
-    /// order, the values, and the number of rows in r). The rows sort by the declared dimensions, and in each dimension
+    /// Give at most limit rows in r, from row offset. The rows sort by the declared dimensions, and in each dimension
     /// by the member order. ranks gives the position of each member number for each declared dimension. A dimension
-    /// with None sorts by member number. If all dimensions sort by number and the partition dimension is first in the
-    /// declaration, the key order is the row order and the read does not sort.
+    /// with None sorts by member number. The result has the member number columns in the declared dimension order,
+    /// the values, and the number of rows in r.
     pub fn rows_in(&self, r: &Restrict, ranks: &[Option<Vec<u32>>], offset: usize, limit: Option<usize>) -> (Vec<Vec<u32>>, Vec<f64>, usize) {
         let pos: Vec<usize> = self.metric_dims.iter().map(|d| self.pack.pos(*d).unwrap()).collect();
         let want = limit.map_or(usize::MAX, |l| offset.saturating_add(l));
@@ -586,7 +585,7 @@ impl Store {
             let order = |a: &(u64, f64), b: &(u64, f64)| {
                 pos.iter().enumerate().map(|(i, &p)| rank(i, self.pack.get(a.0, p)).cmp(&rank(i, self.pack.get(b.0, p)))).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal)
             };
-            // Keep only the first `want` rows: a short page must not copy and sort the whole range
+            // Keep only the first `want` rows, so that a short page does not copy and sort the whole range.
             self.for_each_in(r, |k, v| {
                 total += 1;
                 if want > 0 {

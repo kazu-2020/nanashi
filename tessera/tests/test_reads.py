@@ -140,15 +140,16 @@ class RustReads(Reads, unittest.TestCase):
         m.add_input("X", ["A", "B"], {(f"a{i}", f"b{j}"): 1.0 for i in range(400) for j in range(500)})
         m.move_member("B", "b499", 0)
         m.recalc()
+        budget = 64 << 10  # the range has 200,000 cells (3.2 MB as key and value)
         for offset in [0, 100]:
             nanashi_core.reset_heap_peak()
             before = nanashi_core.heap()[0]
             self.assertEqual(m.rows("X", offset=offset, limit=1), ([(("a0", f"b{offset - 1 if offset else 499}"), 1.0)], 200_000))
-            self.assertLess(nanashi_core.heap()[1] - before, 64 << 10)  # the range is 200,000 cells (3.2 MB as key and value)
+            self.assertLess(nanashi_core.heap()[1] - before, budget)
         nanashi_core.reset_heap_peak()
         before = nanashi_core.heap()[0]
         self.assertEqual(m.summarize("X").cells, {(): 200_000.0})
-        self.assertLess(nanashi_core.heap()[1] - before, 64 << 10)
+        self.assertLess(nanashi_core.heap()[1] - before, budget)
 
 
 class VersionView(unittest.TestCase):
