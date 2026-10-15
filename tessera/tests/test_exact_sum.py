@@ -131,6 +131,25 @@ class MinMaxSpecialValues(unittest.TestCase):
                 "Mn": {"nan": "nan", "nan1": "nan", "nan2": "nan", "zero1": "-0.0", "zero2": "-0.0"},
                 "Mx": {"nan": "nan", "nan1": "nan", "nan2": "nan", "zero1": "0.0", "zero2": "0.0"}}, engine)
 
+    def test_incremental_recalc_sees_the_sign_of_zero(self):
+        engines = [ReferenceEngine] + ([] if RustEngine is None else [
+            RustEngine, lambda: RustEngine(par_min=0, dense_always=True), lambda: RustEngine(stream_always=True)])
+        for engine in engines:
+            m = Named(Model(engine=engine()))
+            m.add_dimension("E", ["a", "b"])
+            m.add_dimension("G", ["g"])
+            m.add_input("X", ["G", "E"], {("g", "a"): 0.0, ("g", "b"): 1.0})
+            m.add_formula("Mn", ["G"], "X[REMOVE MIN: E]")
+            m.add_formula("Top", [], "Mn[REMOVE MAX: G]")
+            m.recalc()
+            m.set_cell("X", -0.0, G="g", E="b")
+            m.recalc()
+            full = Named(m.fork())
+            full._invalidate()
+            got = [repr(cells(x, f)[k]) for x in (m, full) for f, k in [("Mn", ("g",)), ("Top", ())]]
+            with self.subTest(engine=m.engine.name):
+                self.assertEqual(got, ["-0.0", "-0.0", "-0.0", "-0.0"])
+
 
 def lows(m: Model, name: str) -> dict:
     """The residual store of an incremental SUM, with member ids as keys."""

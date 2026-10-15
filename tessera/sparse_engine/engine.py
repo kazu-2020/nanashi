@@ -219,7 +219,7 @@ class ReferenceEngine:
         dims = storage.dims
         old = {k: v for k, v in storage.cells.items() if not region or inside(k, dims, region)}
         cells = new.reorder(dims).cells
-        changed = [k for k in old.keys() | cells.keys() if old.get(k) != cells.get(k)]
+        changed = [k for k in old.keys() | cells.keys() if not same_value(old.get(k), cells.get(k))]
         storage = self.replace(storage, region, new, cat)
         if not changed:
             return storage, None
@@ -280,6 +280,13 @@ class ReferenceEngine:
 
     def apply_block(self, storage, block, dim_ids, value_ids):
         return None
+
+
+def same_value(a, b) -> bool:
+    """Like ==, but -0.0 is not 0.0 and NaN is NaN, as the Rust engine compares the bits."""
+    if isinstance(a, float) and isinstance(b, float):
+        return a.hex() == b.hex()
+    return a == b
 
 
 def _rank_of(d) -> dict[str, int]:

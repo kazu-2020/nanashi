@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 from .core import Dimension
-from .engine import native, parquet_value
+from .engine import native, parquet_value, same_value
 
 BLOCK_MIN = 1000  # 書き換えたセルがこれ以上なら、行の列でなく変更の塊で持つ（Rust のエンジン）
 from .expr import Expr, from_json, to_json
@@ -250,7 +250,7 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
     # Compare by id (a member was removed, or the engine cannot compare by position)
     new = _by_id(after, m, new_store)
     old = {} if old_store is None else _by_id(before, o, old_store)
-    return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
+    return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if not same_value(old.get(k), new.get(k))]
 
 
 def _by_id(model, m, store) -> dict:
