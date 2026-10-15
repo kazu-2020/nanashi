@@ -190,6 +190,11 @@ class Journal(JournalCase, unittest.TestCase):
             self.m.model._member_added(d.id)
         self.assertEqual(self.reopen().dimension("Product").members, d.members)
 
+    def test_a_change_to_negative_zero_replays(self):
+        self.m.set_cell("Price", 0.0, Product="A")
+        self.m.set_cell("Price", -0.0, Product="A")
+        self.assertEqual(repr(self.reopen().get("Price", Product="A")), "-0.0")
+
     def test_member_renames_replay(self):
         """A rename of a member in a formula, of a property target, and renames that change places."""
         m = self.m

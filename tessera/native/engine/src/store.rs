@@ -21,8 +21,19 @@ pub struct Store {
     pub pack: Packing,           // 分割軸が先頭
     pub kind: Kind,
     pub(crate) base: Arc<Base>,
-    pub(crate) delta: OrdMap<u64, Option<f64>>, // 差分（Some = 値を置く、None = 消す）
-    pub(crate) cfg: Config,                      // 作ったときの Catalog の調整値
+    pub(crate) delta: OrdMap<u64, Slot>, // The delta (Some sets a value, None removes the cell)
+    pub(crate) cfg: Config,               // 作ったときの Catalog の調整値
+}
+
+/// A value in the delta tree. The tree diff compares values with `==`, so equality is by bits:
+/// a change from 0.0 to -0.0 is then a change.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Slot(pub(crate) Option<f64>);
+
+impl PartialEq for Slot {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.map(f64::to_bits) == other.0.map(f64::to_bits)
+    }
 }
 
 /// 全体を置き換えるための、キー順のセルと、値が変わったセルを囲む範囲（宣言した軸の順の、軸ごとの
@@ -128,7 +139,7 @@ impl Store {
         let mut base = self.base.range(start..end).peekable();
         while let Some(&(bk, bv)) = base.peek() {
             match delta.peek() {
-                Some(&(&dk, &dv)) if dk <= bk => {
+                Some(&(&dk, &Slot(dv))) if dk <= bk => {
                     delta.next();
                     if dk == bk {
                         base.next();
@@ -143,7 +154,7 @@ impl Store {
                 }
             }
         }
-        for (&dk, &dv) in delta {
+        for (&dk, &Slot(dv)) in delta {
             if let Some(v) = dv {
                 f(dk, v);
             }
@@ -177,7 +188,7 @@ impl Store {
                     }
                 }
             }
-            for (&k, &v) in &self.delta {
+            for (&k, &Slot(v)) in &self.delta {
                 if let Some(v) = v {
                     if pass(&self.pack, k, &cs) {
                         cells.push((k, v));
@@ -438,10 +449,10 @@ impl Store {
             return;
         }
         for &k in old {
-            self.delta.insert(k, None);
+            self.delta.insert(k, Slot(None));
         }
         for (k, v) in new {
-            self.delta.insert(k, Some(v));
+            self.delta.insert(k, Slot(Some(v)));
         }
     }
 
@@ -504,9 +515,9 @@ impl Store {
         Arc::ptr_eq(&self.base, &other.base) && self.delta.ptr_eq(&other.delta)
     }
 
-    /// self（変更前）と other（変更後）で値が違うセルの (キー, 変更前, 変更後)。空のセルは None。
-    /// キーの詰め方が違えば比べられないので None を返す（呼び出し側が別の方法で比べる）。
-    /// 本体を共有していれば差分の木どうしだけを比べ、木の共有している部分も飛ばす。
+    /// The cells with different bits in self (before) and other (after), as (key, before, after). A blank cell is None.
+    /// If the key packings are different, it returns None (the caller compares in a different way).
+    /// If the two share the base, it compares only the delta trees and skips their shared parts.
     #[allow(clippy::type_complexity)]
     pub fn diff_cells(&self, other: &Store) -> Option<Vec<(u64, Option<f64>, Option<f64>)>> {
         if self.pack != other.pack {
@@ -519,7 +530,7 @@ impl Store {
                     DiffItem::Add(k, _) | DiffItem::Remove(k, _) | DiffItem::Update { new: (k, _), .. } => k,
                 };
                 let (a, b) = (self.value_at(k), other.value_at(k));
-                if a != b {
+                if a.map(f64::to_bits) != b.map(f64::to_bits) {
                     out.push((k, a, b));
                 }
             }
@@ -534,7 +545,7 @@ impl Store {
             let kb = b.get(j).map(|c| c.0);
             match (ka, kb) {
                 (Some(x), Some(y)) if x == y => {
-                    if a[i].1 != b[j].1 {
+                    if a[i].1.to_bits() != b[j].1.to_bits() {
                         out.push((x, Some(a[i].1), Some(b[j].1)));
                     }
                     i += 1;
@@ -561,7 +572,7 @@ impl Store {
     /// キー k のセルの値（空なら None）。
     pub(crate) fn value_at(&self, k: u64) -> Option<f64> {
         match self.delta.get(&k) {
-            Some(v) => *v,
+            Some(v) => v.0,
             None => self.base.keys.find(k).map(|i| self.base.vals[i]),
         }
     }
@@ -635,7 +646,7 @@ impl Store {
 
     pub fn write(&mut self, key: &[u32], value: Option<f64>) {
         let k = self.encode(key);
-        self.delta.insert(k, value);
+        self.delta.insert(k, Slot(value));
         self.after_delta();
     }
 
@@ -789,9 +800,9 @@ fn keys_in_place(cells: Vec<(u64, f64)>) -> Vec<u64> {
     cells.into_iter().map(|c| c.0).collect()
 }
 
-/// 並んだ 2 つのセル列で、値が違うか片側にしかないキー。
+/// The keys that are in one sorted cell list only, or that have different bits (-0.0 is not 0.0).
 fn changed_keys<A: Cells + ?Sized>(old: &A, new: &[(u64, f64)]) -> Vec<u64> {
-    merge_sorted(old, new, true, |a, b| (a != b).then_some(0.0)).into_iter().map(|(k, _)| k).collect()
+    merge_sorted(old, new, true, |a, b| (a.map(f64::to_bits) != b.map(f64::to_bits)).then_some(0.0)).into_iter().map(|(k, _)| k).collect()
 }
 
 #[cfg(test)]
