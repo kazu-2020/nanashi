@@ -222,13 +222,11 @@ class PgJournalTests(unittest.TestCase):
         self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
 
     def test_reconnects_after_the_server_closed_the_connection(self):
-        # A PostgreSQL restart or an idle kill closes the connection. The next operation connects again.
-        # The lease is in the table, so the commit after the reconnect still checks the epoch
         import psycopg
         m = build_with(ReferenceEngine())
         j = self.journal(heartbeat=False)
         j.start(m.model)
-        m.set_cell("Price", 12, Product="A")  # m takes the lease
+        m.set_cell("Price", 12, Product="A")
         with self.assertRaises(psycopg.OperationalError):
             j.conn.execute("select pg_terminate_backend(pg_backend_pid())")
         m.set_cell("Price", 14, Product="A")
@@ -236,17 +234,33 @@ class PgJournalTests(unittest.TestCase):
         self.assertTrue(j.lease()["held"])
         self.journal().conn.execute("update nanashi_model set writer_epoch = writer_epoch + 1,"
                                     " lease_holder = 'intruder' where model_id = %s", (self.model_id,))
-        with self.assertRaises(Fenced):  # the reconnect did not keep a lease that another process took
+        with self.assertRaises(Fenced):
             m.set_cell("Price", 15, Product="A")
+
+    def test_release_on_a_closed_connection_stops_the_heartbeat(self):
+        import psycopg
+        a = self.journal(lease_ttl=1.5)
+        b = self.journal(heartbeat=False)
+        self.assertTrue(a.take())
+        with self.assertRaises(psycopg.OperationalError):
+            a.conn.execute("select pg_terminate_backend(pg_backend_pid())")
+        a.release()
+        deadline = time.monotonic() + 4
+        while not (taken := b.take()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(taken)
 
     def test_lease_is_not_held_after_it_expired(self):
         m = build_with(ReferenceEngine())
-        j = self.journal(lease_ttl=0.5, heartbeat=False)
+        j = self.journal(lease_ttl=1, heartbeat=False)
         j.start(m.model)
         m.set_cell("Price", 12, Product="A")
+        time.sleep(0.6)
+        m.set_cell("Price", 13, Product="A")
+        time.sleep(0.6)
         self.assertTrue(j.lease()["held"])
-        time.sleep(0.7)
-        self.assertFalse(j.lease()["held"])  # a standby Workspace demotes on this
+        time.sleep(0.6)
+        self.assertFalse(j.lease()["held"])
 
     def test_prune_removes_old_snapshots_and_bulk_files(self):
         m = build_with(ReferenceEngine())

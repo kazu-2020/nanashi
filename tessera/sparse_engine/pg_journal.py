@@ -176,9 +176,7 @@ class PgJournal(Journal):
         self.endpoint = endpoint
         self.objects = open_objects(objects)
         self.bulk_cells = bulk_cells
-        # More than one thread uses the connection (the writer, the heartbeat, the watcher, the readers).
-        # The lock puts the statements in sequence, so that no statement interrupts a transaction.
-        # The lock also covers the reconnect in conn. index_pending uses a separate connection
+        # The writer, heartbeat, watcher and readers share one connection.
         self._lock = threading.RLock()
         self._index_conn = None
         self._index_lock = threading.Lock()
@@ -211,18 +209,12 @@ class PgJournal(Journal):
 
     @property
     def conn(self):
-        """The connection. If the server closed it (a restart, an idle kill), connect again. The lease is in
-        the table, not in the session, so the next commit and heartbeat still check the epoch and the holder."""
+        """The connection. If the server closed it, connect again."""
         if self._conn.closed:
             self._conn = psycopg.connect(self.dsn, autocommit=True, prepare_threshold=None)
         return self._conn
 
-    @conn.setter
-    def conn(self, value) -> None:
-        self._conn = value
-
     def close(self) -> None:
-        """Release the lease, then close (the next writer does not wait for the expiry)."""
         self._stop.set()
         if self._heartbeat is not None:
             self._heartbeat.join()
@@ -235,14 +227,14 @@ class PgJournal(Journal):
 
     def release(self) -> None:
         """Release the lease if this process has it. A standby in wait sees the release at its next poll,
-        so it does not wait for lease_ttl. If the connection is closed, do not connect again for it."""
+        so it does not wait for lease_ttl."""
         with self._lock:
-            if self.epoch is None or self._conn.closed:
+            epoch, self.epoch = self.epoch, None
+            if epoch is None or self._conn.closed:
                 return
-            self.conn.execute("update nanashi_model set lease_expires = now()"
-                              " where model_id = %s and writer_epoch = %s and lease_holder = %s",
-                              (self.model_id, self.epoch, self.holder))
-            self.epoch = None
+            self._conn.execute("update nanashi_model set lease_expires = now()"
+                               " where model_id = %s and writer_epoch = %s and lease_holder = %s",
+                               (self.model_id, epoch, self.holder))
 
     def open(self, engine=None):
         """記録先の最新の状態を開く（手元の通し番号が古くても、表の通し番号から開き直す）。"""
@@ -396,6 +388,7 @@ class PgJournal(Journal):
             seqs = list(range(self.head + 1, self.head + 1 + len(records)))
             # 大量のセルは、確定の前にファイルを置いておく（確定に失敗したら参照されないファイルが残るだけ）
             blobs = [self._write_blob(r) if cell_count(r) > self.bulk_cells else None for r in records]
+            started = time.monotonic()
             with self.conn.transaction():
                 cur = self.conn.execute(
                     "update nanashi_model set head_seq = %s, lease_expires = now() + make_interval(secs => %s)"
@@ -419,7 +412,7 @@ class PgJournal(Journal):
                     for rec, seq, blob in zip(records, seqs, blobs):
                         if blob is None:
                             _copy_cells(copy, self.model_id, seq, rec["changes"].get("cells", []))
-            self.head = seqs[-1]
+            self.head, self.lease_until = seqs[-1], started + self.lease_ttl
             return seqs
 
     # ------------------------------------------------ 大量のセル

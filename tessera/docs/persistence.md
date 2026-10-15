@@ -178,9 +178,9 @@ Unlike `acquire`, it does not check the local sequence number. Thus the process 
 It returns when `head_seq` changes, or when the lease is released or expires. Thus the standby can try to get the lease without a wait for the interval.
 
 `PgJournal` does not use session state (`LISTEN`/`NOTIFY`, session advisory locks, prepared statements). Thus it works through PgBouncer in transaction pooling mode.
-If the server closes the connection (a restart of PostgreSQL or PgBouncer, an idle kill), the operation that finds the closed connection fails, and the next operation connects again.
-The lease is in the table, not in the session. Thus the next commit and the next heartbeat still check the generation number and the owner, and a lease that a different process took in the meantime fences the commit.
-`journal.lease()["held"]` is false after the lease expired, also when the process did not find the loss yet. A standby `Workspace` returns to standby on this.
+If the server closes the connection (a restart or an idle kill), the next operation fails. The operation after it connects again.
+The lease is in the table, not in the session. Thus the next commit still checks the epoch and the holder. If a different process took the lease, the commit raises `Fenced`.
+`journal.lease()["held"]` is false after the lease expires, also before the heartbeat finds the loss. A standby `Workspace` returns to standby on this.
 The router uses pgx, and pgx uses prepared statements by default. If the router connects through PgBouncer, add `default_query_exec_mode=exec` to the router DSN.
 PgBouncer 1.21 or later with `max_prepared_statements` more than 0 also works.
 
