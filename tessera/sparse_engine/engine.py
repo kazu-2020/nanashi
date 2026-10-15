@@ -144,10 +144,8 @@ class ReferenceEngine:
         return Cube(storage.dims, {k: v for k, v in storage.cells.items() if v != value})
 
     def remove_member(self, storage: Cube, dim, index, member, values, cat):
-        cells = storage.cells
-        if dim in storage.dims:
-            i = storage.dims.index(dim)
-            cells = {k: v for k, v in cells.items() if k[i] != member}
+        at = [i for i, d in enumerate(storage.dims) if d == dim]  # a Metric from an old journal can repeat dim
+        cells = {k: v for k, v in storage.cells.items() if all(k[i] != member for i in at)}
         if values:
             cells = {k: v - 1.0 if v > index else v for k, v in cells.items() if v != index}
         return Cube(storage.dims, dict(cells))

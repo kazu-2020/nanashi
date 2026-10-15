@@ -810,7 +810,8 @@ class Model:
         """Make sure that no dimension occurs two times in dims. Else the keys overlap."""
         repeated = sorted({self.dimension(d).name for d in dims if dims.count(d) > 1})
         if repeated:
-            raise ValueError(f"{name}: 軸 {', '.join(repeated)} を 2 回以上持てない")
+            raise ValueError(f"{name}: 軸 {', '.join(repeated)} を 2 回以上持てない。"
+                             "同じメンバーの軸をもう 1 つ作る")
 
     def _check_key_width(self, name: str, dims: tuple[str, ...]) -> None:
         """If the engine holds the key of a cell in a fixed-width integer, make sure that the dimensions fit

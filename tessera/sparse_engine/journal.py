@@ -401,7 +401,6 @@ def _define(model, specs: list[dict]) -> None:
         kind = spec["kind"]
         if isinstance(kind, dict):
             kind = "member:" + kind["member"]
-        model._check_repeated(spec["name"], tuple(spec["dims"]))
         olds[spec["id"]] = model.metrics.get(spec["id"])
         model.metrics[spec["id"]] = Metric(spec["name"], tuple(spec["dims"]), kind, partition=spec["partition"],
                                            overridable=spec["overridable"], id=spec["id"])
