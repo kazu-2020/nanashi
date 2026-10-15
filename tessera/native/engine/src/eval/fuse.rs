@@ -761,7 +761,7 @@ struct Space<'s, 'a> {
 
 impl<'a> Space<'_, 'a> {
     fn combos(&self) -> usize {
-        self.fill.iter().map(|(_, ms)| ms.len()).product()
+        combos(self.fill)
     }
 
     fn len(&self) -> usize {

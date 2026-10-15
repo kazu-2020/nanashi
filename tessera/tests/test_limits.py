@@ -1,4 +1,7 @@
 """エンジンの上限の検査、セル数の見積もりの上限、観察用の記録の上限、メモリの内訳。"""
+import resource
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -222,6 +225,63 @@ class CellEstimates(unittest.TestCase):
                 m.add_dimension("P", ["a"])
                 m.save(d)
                 self.assertEqual(Named.load(d, engine()).max_cells, 123)
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class BudgetBeforeAllocation(unittest.TestCase):
+    """The evaluator checks the budget before it makes a large intermediate result. If the check is late or
+    wrong, one formula can end the process. The sizes stay small when the check does not work."""
+
+    def test_many_to_many_results_are_checked_before_they_are_made(self):
+        import nanashi_core
+        n = 1000  # each result is n x n = 10^6 cells (16 MB), far over the 1 MiB budget
+        m = Named(Model(engine=RustEngine(max_bytes=1 << 20)))
+        m.add_dimension("X", [f"x{i}" for i in range(n)])
+        m.add_dimension("Y", [f"y{i}" for i in range(n)])
+        m.add_dimension("Grp", ["g0"])
+        m.add_property("X", "Grp", "Grp", {f"x{i}": "g0" for i in range(n)})
+        m.add_input("A", ["X"], {(f"x{i}",): 1.0 for i in range(n)})
+        m.add_input("B", ["Y"], {(f"y{i}",): 1.0 for i in range(n)})
+        m.add_input("R", ["Grp", "Y"], {("g0", f"y{i}"): 1.0 for i in range(n)})
+        for formula in ["(A * B)[REMOVE SUM: Y]", "IF(B > 0, A)[REMOVE SUM: Y]", "R[BY: X.Grp][REMOVE SUM: Y]"]:
+            with self.subTest(formula=formula):
+                m.add_formula("Z", ["X"], formula)
+                try:
+                    nanashi_core.reset_heap_peak()
+                    before = nanashi_core.heap()[0]
+                    with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+                        m.recalc()
+                    self.assertLess(nanashi_core.heap()[1] - before, 4 << 20, "the result was made before the check")
+                finally:
+                    m.remove_metric("Z")
+
+    def test_combinations_past_2_to_the_64_do_not_pass_the_check(self):
+        # 4 dimensions of 65536 members are 2^64 combinations. If the count wraps to 0, the engine tries to
+        # make 2^32 keys (32 GiB). A child process with a 4 GiB address limit keeps that from this process
+        script = """
+from sparse_engine import Model, Named
+from sparse_engine.rust_engine import RustEngine
+m = Named(Model(engine=RustEngine(max_bytes=64 << 20)))
+dims = [f"D{i}" for i in range(4)]
+for d in dims:
+    m.add_dimension(d, [f"m{j}" for j in range(65536)])
+m.add_input("X", dims, {("m1",) * 4: 1.0})
+m.add_input("S", [], {(): 1.0})
+m.add_formula("Z", [], "IFBLANK(X, 0)[REMOVE SUM: D0, D1, D2, D3]")
+m.add_formula("W", [], "S[EXPAND: D0, D1, D2, D3][REMOVE SUM: D0, D1, D2, D3]")
+for name in "ZW":
+    try:
+        m.recalc()
+    except ValueError as e:
+        assert "メモリの予算を超える" in str(e), e
+        m.remove_metric(name)
+    else:
+        raise AssertionError(name + " was evaluated")
+"""
+        limit = 4 << 30
+        run = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=300,
+                             preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_AS, (limit, limit)))
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
 
 
 class Memory(unittest.TestCase):

@@ -172,7 +172,7 @@ pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &
         .filter(|(_, d)| !c.dims().contains(d))
         .map(|(i, &d)| (i, members(cat, d, r)))
         .collect();
-    let n: usize = missing.iter().map(|(_, ms)| ms.len()).product();
+    let n = combos(&missing);
     b.need(n.saturating_mul(c.cells.len().max(1)).saturating_add(n), "EXPAND（軸の全メンバーへの展開）")?;
     let combos = product(&out, &missing);
     let combos = &combos;
@@ -181,6 +181,11 @@ pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &
         combos.iter().map(move |&extra| (base | extra, v))
     });
     Ok(Cube { pack: out, kind: c.kind, cells })
+}
+
+/// The number of combinations of the given dimensions (position, members).
+pub(crate) fn combos(spans: &[(usize, Vec<u32>)]) -> usize {
+    spans.iter().map(|(_, ms)| ms.len()).product()
 }
 
 /// 与えた軸（位置, メンバー一覧）の全組み合わせを、pack の詰め方のキーの部分として列挙する。
@@ -229,7 +234,21 @@ pub(crate) fn replace_dim(dims: &[DimId], old: DimId, new: DimId) -> Vec<DimId> 
 
 pub(crate) fn dense(c: &Cube, cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Vec<u64>> {
     let spans: Vec<(usize, Vec<u32>)> = c.dims().iter().enumerate().map(|(i, &d)| (i, members(cat, d, r))).collect();
-    let n: usize = spans.iter().map(|(_, ms)| ms.len()).product();
+    let n = combos(&spans);
     b.need(n.saturating_mul(2), "ISBLANK / IFBLANK（軸の全組み合わせ）")?;
     Ok(product(&c.pack, &spans))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combos;
+
+    #[test]
+    fn combos_saturates_instead_of_wrapping_to_zero() {
+        // 4 dimensions of 65536 members are 2^64 combinations. A wrap to 0 passes the budget check.
+        let spans: Vec<(usize, Vec<u32>)> = (0..4).map(|i| (i, (0..65536).collect())).collect();
+        assert_eq!(combos(&spans), usize::MAX);
+        assert_eq!(combos(&spans[..3]), 1 << 48);
+        assert_eq!(combos(&[]), 1);
+    }
 }
