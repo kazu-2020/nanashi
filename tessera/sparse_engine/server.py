@@ -589,11 +589,11 @@ class Handler(BaseHTTPRequestHandler):
         length = self.headers.get("Content-Length")
         if length is None:
             raise ApiError(411, "length_required", "Content-Length が要る")
-        try:
-            length = int(length)
-        except ValueError:
-            raise ApiError(400, "bad_request", "Content-Length は整数") from None
-        if length < 0 or length > self.server.max_body:
+        # int() also takes "+5", " 5" and "05". A proxy that reads such a value in a different way frames a different body.
+        if not re.fullmatch("0|[1-9][0-9]*", length):
+            raise ApiError(400, "bad_request", "Content-Length は 0 以上の整数（符号、空白、先頭の 0 なし）")
+        length = int(length)
+        if length > self.server.max_body:
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
         raw = self.rfile.read(length)
         self.unread_body = False
