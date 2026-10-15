@@ -141,7 +141,6 @@ class Journal(JournalCase, unittest.TestCase):
             self.skipTest("ファイルの記録先の形式を調べるテスト")
 
     def test_replay_of_an_override_shape_change(self):
-        """A replay gives the same overrides as the model after the dimensions of an overridable Metric change."""
         m = self.m
         plus1 = m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=m.metric("Plus1").id)
         m.set_cell("Plus1", 50, Product="A")

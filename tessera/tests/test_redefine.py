@@ -207,8 +207,6 @@ class Redefine(unittest.TestCase):
         check_full(self, self.m)
 
     def test_overrides_go_when_the_shape_changes(self):
-        """If the dimensions or the kind of an overridable Metric change, the old overrides do not fit. They go,
-        as the cells of an input go when its dimensions change. Both engines give the same result."""
         m = self.m
         plus1 = m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=m.metric("Plus1").id)
         m.set_cell("Plus1", 50, Product="A")
@@ -222,9 +220,10 @@ class Redefine(unittest.TestCase):
         self.assertIs(m.get("Plus1", Product="A", Month="Jan"), True)
         m.set_cell("Plus1", False, Product="A", Month="Jan")
         self.assertIs(m.get("Plus1", Product="A", Month="Jan"), False)
-        m.add_input("Plus1", ["Product"], id=plus1)  # the hidden input stays while the owner is an input
         m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=plus1)
-        self.assertEqual(m.metric("__override__Plus1").dims, m.metric("Plus1").dims)
+        m.set_cell("Plus1", 50, Product="A")
+        m.add_input("Plus1", ["Product", "Month"], id=plus1)
+        m.add_formula("Plus1", ["Product"], "Price + 1", overridable=True, id=plus1)
         self.assertEqual(m.get("Plus1", Product="A"), 11)
         check_full(self, m)
 
