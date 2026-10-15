@@ -246,6 +246,36 @@ class CellEstimates(unittest.TestCase):
                 self.assertEqual(Named.load(d, engine()).max_cells, 123)
 
 
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class BudgetBeforeAllocation(unittest.TestCase):
+    """The evaluator checks the budget before it makes a large intermediate result. If the check is late or
+    wrong, one formula can stop the process. The tests use small sizes, so a failed check does not stop the test
+    process."""
+
+    def test_many_to_many_results_are_checked_before_they_are_made(self):
+        import nanashi_core
+        n = 1000
+        m = Named(Model(engine=RustEngine(max_bytes=1 << 20)))
+        m.add_dimension("X", [f"x{i}" for i in range(n)])
+        m.add_dimension("Y", [f"y{i}" for i in range(n)])
+        m.add_dimension("Grp", ["g0"])
+        m.add_property("X", "Grp", "Grp", {f"x{i}": "g0" for i in range(n)})
+        m.add_input("A", ["X"], {(f"x{i}",): 1.0 for i in range(n)})
+        m.add_input("B", ["Y"], {(f"y{i}",): 1.0 for i in range(n)})
+        m.add_input("R", ["Grp", "Y"], {("g0", f"y{i}"): 1.0 for i in range(n)})
+        for formula in ["(A * B)[REMOVE SUM: Y]", "IF(B > 0, A)[REMOVE SUM: Y]", "R[BY: X.Grp][REMOVE SUM: Y]"]:
+            with self.subTest(formula=formula):
+                m.add_formula("Z", ["X"], formula)
+                try:
+                    nanashi_core.reset_heap_peak()
+                    before = nanashi_core.heap()[0]
+                    with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+                        m.recalc()
+                    self.assertLess(nanashi_core.heap()[1] - before, 4 << 20, "the result was made before the check")
+                finally:
+                    m.remove_metric("Z")
+
+
 class Memory(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_rust_reports_storage_bytes(self):
