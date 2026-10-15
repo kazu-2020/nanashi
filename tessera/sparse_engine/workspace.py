@@ -411,8 +411,13 @@ class Workspace:
                     req.future.set_exception(err)
             return
         if self._unsure:  # Catch up before the lookup of _outcomes acknowledges a resend of those entries
-            self._reload()
-            self._unsure = self._degraded is not None
+            if not self._reload():  # A resend or a new write on the old version would use a stale model
+                err = RuntimeError(self._degraded)
+                for req in batch:
+                    if req.future.set_running_or_notify_cancel():
+                        req.future.set_exception(err)
+                return
+            self._unsure = False
         working = self._version.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
         refused: list[tuple[_Request, Exception]] = []
@@ -526,13 +531,15 @@ class Workspace:
         while len(self._rejected) > self._recent.maxlen:
             self._rejected.popitem(last=False)
 
-    def _reload(self) -> None:
-        """記録先の最新の版に追いつく（手元の版が古いと言われたとき）。公開中の版の複製に、ほかのプロセスが
-        確定した記録を書き込み、影響範囲だけを計算し直す。追いつけなければ、記録先から開き直す。"""
+    def _reload(self) -> bool:
+        """Catch up with the latest version in the journal. Apply the entries that other processes committed
+        to a copy of the published version, and calculate again only the affected cells. If the catch-up
+        fails, open the model again from the journal. Return False if that also fails (then _degraded is set)."""
         try:
             model = self._version.fork()
             if not self.journal.catch_up(model):
-                return
+                self._degraded = None
+                return True
         except Exception:
             log.warning("記録先の記録に追いつけなかったので、開き直す", exc_info=True)
             try:
@@ -541,12 +548,13 @@ class Workspace:
                 log.exception("記録先からの開き直しに失敗した")
                 self.stats.add(reopen_failures=1)
                 self._degraded = f"記録先からの開き直しに失敗した: {type(e).__name__}: {e}"
-                return
+                return False
         self.stats.add(catch_ups=1)
         self._degraded = None
         self._publish(model)
         self._recent.clear()
         self._ops.clear()
+        return True
 
     def _check(self, req: _Request, record: dict, pending: list[Written]) -> None:
         """読んだ版（req.expect）より後に、同じセルを変えた書き込みがあれば Conflict。"""

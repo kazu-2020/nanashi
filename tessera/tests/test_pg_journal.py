@@ -261,6 +261,66 @@ class PgJournalTests(unittest.TestCase):
         self.assertEqual(ws.write(move("p4", "p5", "Jan", 2), client_op_id="r3"), 3)
         ws.close()
 
+    def _fail_recovery_once(self, j):
+        import psycopg
+
+        def down(name):
+            def fail(*args):
+                delattr(j, name)  # only this recovery fails
+                raise psycopg.OperationalError("bulk storage is not available")
+            return fail
+        j.catch_up, j.open = down("catch_up"), down("open")
+
+    def test_resend_fails_while_the_recovery_after_a_lost_commit_response_fails(self):
+        import contextlib
+        import psycopg
+        m = stock_model(ReferenceEngine())
+        self.journal().start(m.model)
+        j = self.journal(heartbeat=False)
+        ws = Workspace(m.model, j)
+        ws.write(move("p0", "p1", "Jan", 1), client_op_id="r1")
+        real = j.conn.transaction
+
+        @contextlib.contextmanager
+        def lost_commit_response():
+            with real():
+                yield
+            j.conn.close()
+            raise psycopg.OperationalError("the connection closed before the COMMIT response")
+        j.conn.transaction = lost_commit_response
+        with self.assertRaises(psycopg.OperationalError):
+            ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2")
+        self._fail_recovery_once(j)
+        with self.assertRaisesRegex(RuntimeError, "開き直しに失敗した"):
+            ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2")
+        self.assertEqual(Named(ws.version).get("Stock", Product="p3", Month="Jan"), 100)
+        self.assertEqual(ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2"), 2)  # the resend
+        self.assertEqual(Named(ws.version).get("Stock", Product="p3", Month="Jan"), 105)
+        self.assertEqual(ws.ready(), [])
+        ws.close()
+
+    def test_no_op_catch_up_clears_a_failed_recovery(self):
+        import psycopg
+        m = stock_model(ReferenceEngine())
+        self.journal().start(m.model)
+        j = self.journal(heartbeat=False)
+        ws = Workspace(m.model, j)
+        ws.write(move("p0", "p1", "Jan", 1), client_op_id="r1")
+
+        def lost_connection():
+            del j.conn.transaction
+            raise psycopg.OperationalError("the connection closed before the commit")
+        j.conn.transaction = lost_connection
+        with self.assertRaises(psycopg.OperationalError):
+            ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2")
+        self._fail_recovery_once(j)
+        with self.assertRaises(RuntimeError):
+            ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2")
+        self.assertNotEqual(ws.ready(), [])
+        self.assertEqual(ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2"), 2)
+        self.assertEqual(ws.ready(), [])
+        ws.close()
+
     def test_release_on_a_closed_connection_stops_the_heartbeat(self):
         import psycopg
         a = self.journal(lease_ttl=1.5)

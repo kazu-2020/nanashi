@@ -180,6 +180,7 @@ It returns when `head_seq` changes, or when the lease is released or expires. Th
 `PgJournal` does not use session state (`LISTEN`/`NOTIFY`, session advisory locks, prepared statements). Thus it works through PgBouncer in transaction pooling mode.
 If the server closes the connection (a restart or an idle kill), the next operation fails. The operation after it connects again.
 A closed connection can lose the answer to a commit that PostgreSQL did. Thus after an append fails, the next batch of `Workspace` catches up from the journal before it looks up the `client_op_id` values.
+If the catch-up and the reopen both fail, the batch fails with 503 `closed`, and the next batch tries again. Thus a resend is not acknowledged against an old model.
 The lease is in the table, not in the session. Thus the next commit still checks the epoch and the holder. If a different process took the lease, the commit raises `Fenced`.
 `journal.lease()["held"]` is false after the lease expires, also before the heartbeat finds the loss. A standby `Workspace` returns to standby on this.
 The router uses pgx, and pgx uses prepared statements by default. If the router connects through PgBouncer, add `default_query_exec_mode=exec` to the router DSN.
