@@ -130,3 +130,24 @@ fn held_counts_a_shared_source_once() {
     let other = source(&cat);
     assert_eq!(held([&src[0], &other[0]]), 2 * held(&src[..1]));
 }
+
+#[test]
+fn need_refuses_a_byte_count_that_overflows_with_no_limit() {
+    let b = Budget::new(usize::MAX, 0);
+    assert!(b.need(usize::MAX / 16, "x").is_ok());
+    assert!(b.need(usize::MAX / 16 + 1, "x").unwrap_err().contains("メモリの予算を超える"));
+    assert!(b.need(usize::MAX, "x").is_err());
+}
+
+#[test]
+fn join_against_few_cells_fits_a_tight_budget() {
+    let cat = catalog(usize::MAX);
+    for rows in [0, 1] {
+        let src = [column(&cat, &[0, 1], 100_000), column(&cat, &[1, 2], rows)];
+        // Fusion off, so that intersect makes the join. Reading a needs |a| cells. The bound |a| for the pairs
+        // does not fit a second time, but the exact count does.
+        let tight = catalog_with(Config { max_bytes: held(&src) + 100_000 * 16 * 3 / 2, fuse: false, ..Config::default() });
+        let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Ref(1)), vec![]);
+        assert_eq!(eval(&node, &tight, &src, &Restrict::all(3)).unwrap().cells.len(), rows as usize);
+    }
+}

@@ -158,17 +158,20 @@ pub(crate) fn intersect(
 
     let (index, entries, f) = (&index, &entries, &f);
     let range = |k: u64| index.get(&a_sk.apply(&a.pack, &sk, k)).copied().unwrap_or((0, 0));
-    // If each key of b has one entry, each cell of a has a maximum of one pair.
-    let n: usize = if index.len() == entries.len() {
-        a.cells.len()
-    } else {
+    const WHAT: &str = "軸の違う式の結合";
+    // If each key of b has one entry, |a| is an upper bound of the pairs. Count them exactly only when it does not fit.
+    if !(index.len() == entries.len() && bud.need(a.cells.len(), WHAT).is_ok()) {
         let pairs = |&(k, _): &(u64, f64)| {
             let (i, j) = range(k);
             j - i
         };
-        if cfg.par(a.cells.len()) { a.cells.par_iter().map(pairs).sum() } else { a.cells.iter().map(pairs).sum() }
-    };
-    bud.need(n, "軸の違う式の結合")?;
+        let n = if cfg.par(a.cells.len()) {
+            a.cells.par_iter().map(pairs).reduce(|| 0, usize::saturating_add)
+        } else {
+            a.cells.iter().map(pairs).fold(0, usize::saturating_add)
+        };
+        bud.need(n, WHAT)?;
+    }
     let cells = flat_map_cells(cfg, &a.cells, |k, v| {
         let (i, j) = range(k);
         let base = a_out.apply(&a.pack, &out, k);
