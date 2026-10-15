@@ -222,6 +222,17 @@ def _value_dim(model, m):
     return model.dimension(m.kind.removeprefix("member:")) if m.kind.startswith("member:") else None
 
 
+def _stored(m, vdim, new):
+    """The value of a record row as the engine stores it. vdim is the dimension of a member-type value."""
+    if new is None:
+        return None
+    if isinstance(new, str) != (vdim is not None):
+        raise ValueError(f"Metric {m.name} の値の種類が記録の値の種類と合わない")
+    if vdim is not None:
+        return float(vdim._by_id[new])
+    return bool(new) if m.kind == "boolean" else new
+
+
 def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
     """The changed cells of the input Metric m as [the member ids of the coordinates, the old value, the new
     value] (a block of changes if there are many). A member-type value is a member id."""
@@ -350,11 +361,7 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             key = tuple(key)
             if len(key) != len(dims) or not all(u in d._by_id for d, u in zip(dims, key)):
                 continue  # a cell of a member that this transaction removed (it went with the member)
-            if new is not None and vdim is not None:
-                new = float(vdim._by_id[new])
-            elif new is not None and m.kind == "boolean":
-                new = bool(new)
-            store = model.engine.write(store, key, new, model)
+            store = model.engine.write(store, key, _stored(m, vdim, new), model)
         model._values[m.id] = store
 
     model._invalidate()
@@ -383,11 +390,7 @@ def _apply_cells(model, cells: list[dict]) -> None:
                 continue
             for col, d, u in zip(cols, dims, key):
                 col.append(d._by_id[u])
-            if new is not None and vdim is not None:
-                new = float(vdim._by_id[new])
-            elif new is not None and m.kind == "boolean":
-                new = bool(new)
-            values.append(new)
+            values.append(_stored(m, vdim, new))
         if values:
             model._write_many(m.id, cols, values)
 
