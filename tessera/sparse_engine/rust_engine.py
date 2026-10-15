@@ -10,6 +10,7 @@ Metric の格納データと評価の途中結果は Rust 側に置き、Python 
 from __future__ import annotations
 
 from array import array
+import weakref
 from typing import Any
 
 import nanashi_core
@@ -494,8 +495,12 @@ class RustPlanner:
             [(index[n], h) for n, h in olds.items()],
             [(index[n], region(r)) for n, r in forced.items()], full)
 
+        # Weak: a strong reference makes a cycle through Model.slice_log. Only the model reads its log, so
+        # the model is alive when named runs.
+        cat_ref = weakref.ref(cat)
+
         def named(entries):
-            return [(names[i], self.e._to_ids(cat, r)) for i, _, r in entries]
+            return [(names[i], self.e._to_ids(cat_ref(), r)) for i, _, r in entries]
         return [(names[i], delta) for i, delta, _ in log], lambda: named(log)
 
     # ------------------------------------------------ 計算計画

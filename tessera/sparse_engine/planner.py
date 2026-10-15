@@ -202,7 +202,8 @@ class PyPlanner:
             run.all()
         else:
             run.changes(dict(changed), added, dict(olds), forced)
-        return run.done, lambda: run.named
+        named = run.named  # not run itself: run holds cat, and that makes a cycle through Model.slice_log
+        return run.done, lambda: named
 
     def delta_exprs(self, name: str, formula: Expr, plan: DeltaPlan) -> tuple[Expr, tuple[Expr, ...]]:
         """The formula for the change of the counts, and for a SUM the formula and the residual formula on the new
