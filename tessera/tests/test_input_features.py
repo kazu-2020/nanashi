@@ -6,6 +6,7 @@ import unittest
 
 from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
+from sparse_engine.evaluate import FormulaError
 
 from .test_incremental import same, snapshot
 
@@ -75,6 +76,23 @@ class Overrides(unittest.TestCase):
     def test_override_value_is_checked(self):
         with self.assertRaisesRegex(ValueError, "number"):
             model().set_cell("Bonus", True, Employee="e1", Month="Jan")
+
+    def test_formula_cannot_reference_the_hidden_input(self):
+        m = model()
+        with self.assertRaisesRegex(FormulaError, "未知の Metric __override__Bonus"):
+            m.add_formula("Leak", ["Employee", "Month"], "'__override__Bonus' + 0")
+        for name in ("Total", "DeptBonus", "Bonus"):  # nothing refers to the hidden input, so the owner can go
+            m.remove_metric(name)
+        m.set_cell("Salary", 1, Employee="e1", Month="Jan")
+        self.assertEqual(m.get("Salary", Employee="e1", Month="Jan"), 1)
+
+    def test_hidden_names_are_reserved(self):
+        m = model()
+        with self.assertRaisesRegex(ValueError, "__ で始まらない"):
+            m.add_input("__override__Z", ["Employee", "Month"], {("e1", "Jan"): 99})
+        with self.assertRaisesRegex(ValueError, "__ で始まらない"):
+            m.add_formula("__x", ["Employee", "Month"], "Salary")
+        self.assertNotIn("__override__Z", m.model._metric_ids)
 
     @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")
     def test_overrides_are_saved(self):
