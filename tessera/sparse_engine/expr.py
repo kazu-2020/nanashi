@@ -37,11 +37,16 @@ def residual(vs) -> float:
     return float(r) if Fraction(float(r)) == r else math.nan
 
 
+def _extreme(pick):
+    """MIN or MAX that does not depend on the order: a NaN gives nan (as for SUM), and -0.0 is less than 0.0."""
+    return lambda vs: math.nan if any(map(math.isnan, vs)) else pick(vs, key=lambda v: (v, math.copysign(1.0, v)))
+
+
 AGGREGATIONS: dict[str, Aggregation] = {a.name: a for a in [
     Aggregation("sum", exact_sum, True, True),
     Aggregation("avg", lambda vs: exact_sum(vs) / len(vs), True, True),
-    Aggregation("min", min, True, True),
-    Aggregation("max", max, True, True),
+    Aggregation("min", _extreme(min), True, True),
+    Aggregation("max", _extreme(max), True, True),
     Aggregation("count", lambda vs: float(len(vs)), True, False),
     # 値が 1 つしかないグループ用。Metric を使った BY の引き下ろしを書き換えた式の内部でだけ使う
     Aggregation("first", lambda vs: vs[0], False, False, None),

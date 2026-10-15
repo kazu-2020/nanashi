@@ -21,6 +21,9 @@ For the property of `BY`, you can specify a fixed property of a dimension. You c
 `Salary[BY SUM: Employee.DeptOf]` aggregates by department. It uses the department of each employee for each month (`DeptOf[Employee, Month]`).
 Thus, a hierarchy that changes over time, for example a transfer, is an input change.
 
+`MIN` and `MAX` do not depend on the order of the values. If a value in the group is NaN, the result is NaN, as for `SUM`.
+`-0.0` is less than `0.0`. Thus, `MIN` of `0.0` and `-0.0` is `-0.0`, and `MAX` is `0.0`.
+
 ## Type check
 
 The engine checks the dimensions and the value kind of each formula before it runs the formula.
