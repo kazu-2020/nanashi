@@ -703,6 +703,8 @@ class Model:
         kind = self._check_kind(name, kind)
         if isinstance(formula, str):
             formula = parse(formula, self_name=name)
+        elif not isinstance(formula, Expr):
+            raise ValueError(f"{name}: 式は文字列か AST: {formula!r}")
         dims = tuple(self.dimension(d).id for d in dims)
         self._check_key_width(name, dims)
         id, old = self._same_object(" Metric ", name, id, self.metrics, self._metric_ids)
@@ -788,7 +790,7 @@ class Model:
 
     def _check_name(self, name: str) -> None:
         if not isinstance(name, str) or not name or name.startswith("__"):
-            raise ValueError(f"Metric の名前は空でなく、__ で始まらない文字列: {name!r}")
+            raise ValueError(f"Metric の名前は空でない文字列で、__ で始まらない: {name!r}")
         if name in self._dim_ids:
             raise ValueError(f"{name}: 同じ名前の軸がある（式の中で軸と区別できなくなる）")
 
@@ -845,6 +847,7 @@ class Model:
             raise ValueError(f"{name}: 按分できるのは number の入力 Metric だけ")
         if isinstance(total, bool) or not isinstance(total, (int, float)):
             raise ValueError(f"{name}: 按分する合計は数値（{total!r}）")
+        total = _finite(name, total)
         if how not in ("proportional", "even"):
             raise ValueError(f"how は proportional か even（{how!r}）")
         region: Restrict = {}
@@ -861,9 +864,12 @@ class Model:
         self.recalc()
         # Spread over the member number columns (one for each dimension) and write them at one time, not cell by cell
         cols, values = self.engine.columns(self._values[m.id], region or None, self)
-        weight = math.fsum(values)  # the order of the sum (different for each engine) must not change the result
+        try:
+            weight = math.fsum(values)  # the order of the sum (different for each engine) must not change the result
+        except OverflowError:
+            raise ValueError(f"{name}: 今の値の合計が有限の数ではない") from None
         if values and how == "proportional" and weight != 0:
-            new = [float(total * v / weight) for v in values]
+            new = [_finite(name, total * v / weight) for v in values]
         else:
             n = len(values)
             if not values:  # no cell has a value: all combinations in the range
@@ -904,6 +910,9 @@ class Model:
         so the next recalculation calculates that range.
         """
         d = self.dimension(dim)
+        # Checked here, not in Dimension: an old journal can hold a member with a bad name, and a replay must open it
+        if not isinstance(member, str) or not member:
+            raise ValueError(f"{d.name}: メンバー名は空でない文字列: {member!r}")
         props = {}
         for pid, value in (properties or {}).items():
             self._prop(d, pid)
@@ -1131,7 +1140,7 @@ class Model:
             return value
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{m.name} は number の Metric: {value!r}")
-        return float(value)
+        return _finite(m.name, value)
 
     # ------------------------------------------------ 参照
 
@@ -1622,6 +1631,16 @@ def _regions_by_metric(samples: Mapping[str, dict[str, Restrict]]) -> dict[str, 
 def _bits(size: int) -> int:
     """size 個のメンバーの番号に要るビット数（Rust の key.rs の bits_for と同じ）。"""
     return max(1, (size - 1).bit_length())
+
+
+def _finite(name: str, value: int | float) -> float:
+    try:
+        number = float(value)
+    except OverflowError:
+        number = math.inf
+    if not math.isfinite(number):
+        raise ValueError(f"{name}: 値は有限の数（{value!r}）")
+    return number
 
 
 _KEPT_ON_RESTORE = frozenset({"eval_log", "slice_log", "delta_log", "journal", "last_record"})

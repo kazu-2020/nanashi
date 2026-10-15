@@ -256,6 +256,41 @@ class BadCells(unittest.TestCase):
             self.assertNotIn("Y", [x.name for x in m.metrics.values()])
             m.recalc()
 
+    def test_names_must_be_non_empty_strings(self):
+        for engine in engines():
+            m = model(engine)
+            metrics = sorted(x.name for x in m.metrics.values())
+            for name in [5, None, "", True, [1]]:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_input(name, ["Employee"])
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_formula(name, ["Employee"], "Salary * 2")
+                    with self.assertRaisesRegex(ValueError, "空でない文字列"):
+                        m.add_member("Employee", name)
+            self.assertEqual(sorted(x.name for x in m.metrics.values()), metrics)
+            self.assertEqual(m.dimension("Employee").members, ["e1", "e2", "e3"])
+
+    def test_values_must_be_finite(self):
+        for engine in engines():
+            m = model(engine)
+            for value in [math.nan, math.inf, -math.inf, 10 ** 400]:
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "^Salary: 値は有限の数"):
+                        m.set_cell("Salary", value, Employee="e1", Month="Jan")
+                    with self.assertRaisesRegex(ValueError, "^X: 値は有限の数"):
+                        m.add_input("X", ["Employee"], {("e1",): value})
+                    with self.assertRaisesRegex(ValueError, "^Budget: 値は有限の数"):
+                        m.spread("Budget", value, Month="Jan")
+            self.assertEqual(m.get("Total"), 120.0)
+            m.spread("Budget", 1e10, Month="Jan")
+            with self.assertRaisesRegex(ValueError, "^Budget: 値は有限の数"):
+                m.spread("Budget", 1e300, Month="Jan")  # proportional: total * value overflows
+            m.set_cell("Budget", 1e308, Employee="e1", Month="Jan")
+            m.set_cell("Budget", 1e308, Employee="e2", Month="Jan")
+            with self.assertRaisesRegex(ValueError, "^Budget: 今の値の合計"):
+                m.spread("Budget", 1, Month="Jan")  # the sum of the current values overflows
+
 
 class MatchesFullRecalc(unittest.TestCase):
     def test_random_edits(self):
