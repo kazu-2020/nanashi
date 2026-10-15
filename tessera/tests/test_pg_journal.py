@@ -17,7 +17,7 @@ from sparse_engine.workspace import Workspace
 
 from .journals import DSN, PG_AVAILABLE
 from .test_engines import build_with
-from .test_journal import check_same_state, run_random
+from .test_journal import check_kind_change_in_files, check_same_state, run_random
 from .test_workspace import model as stock_model, move
 
 try:
@@ -100,6 +100,14 @@ class PgJournalTests(unittest.TestCase):
         self.addCleanup(setattr, journal, "BLOCK_MIN", saved)
         run_random(self, seed=71, rounds=60, engine=RustEngine, reopen_engines=[ReferenceEngine, RustEngine],
                    make=lambda tmp: self.journal(bulk_cells=3))
+
+    def test_kind_change_goes_to_parquet(self):
+        for e in [ReferenceEngine] + ([RustEngine] if RustEngine is not None else []):
+            with self.subTest(engine=e.name):
+                try:
+                    check_kind_change_in_files(self, e, lambda: self.journal(bulk_cells=3))
+                finally:
+                    self.journal().drop()
 
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_large_write_goes_to_parquet(self):
