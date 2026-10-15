@@ -237,6 +237,30 @@ class PgJournalTests(unittest.TestCase):
         with self.assertRaises(Fenced):
             m.set_cell("Price", 15, Product="A")
 
+    def test_workspace_reloads_after_a_lost_commit_response(self):
+        import contextlib
+        import psycopg
+        m = stock_model(ReferenceEngine())
+        self.journal().start(m.model)
+        j = self.journal(heartbeat=False)
+        ws = Workspace(m.model, j)
+        ws.write(move("p0", "p1", "Jan", 1), client_op_id="r1")
+        real = j.conn.transaction
+
+        @contextlib.contextmanager
+        def lost_commit_response():
+            with real():
+                yield
+            j.conn.close()
+            raise psycopg.OperationalError("the connection closed before the COMMIT response")
+        j.conn.transaction = lost_commit_response
+        with self.assertRaises(psycopg.OperationalError):
+            ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2")
+        self.assertEqual(ws.write(move("p2", "p3", "Jan", 5), client_op_id="r2"), 2)  # the resend
+        self.assertEqual(Named(ws.version).get("Stock", Product="p3", Month="Jan"), 105)
+        self.assertEqual(ws.write(move("p4", "p5", "Jan", 2), client_op_id="r3"), 3)
+        ws.close()
+
     def test_release_on_a_closed_connection_stops_the_heartbeat(self):
         import psycopg
         a = self.journal(lease_ttl=1.5)
@@ -249,6 +273,21 @@ class PgJournalTests(unittest.TestCase):
         while not (taken := b.take()) and time.monotonic() < deadline:
             time.sleep(0.1)
         self.assertTrue(taken)
+
+    def test_lease_deadline_starts_before_the_statement(self):
+        j = self.journal(lease_ttl=2, heartbeat=False)
+        real = j._take_row
+
+        def slow_answer():
+            row = real()
+            time.sleep(0.5)
+            return row
+        j._take_row = slow_answer
+        self.assertTrue(j.take())
+        self.assertLess(j.lease()["expires_in"], 1.5)
+        j.release()
+        self.assertEqual(j.acquire(), 2)
+        self.assertLess(j.lease()["expires_in"], 1.5)
 
     def test_lease_is_not_held_after_it_expired(self):
         m = build_with(ReferenceEngine())

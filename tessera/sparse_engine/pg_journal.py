@@ -285,6 +285,7 @@ class PgJournal(Journal):
         wait = self.acquire_wait if wait is None else wait
         deadline = time.monotonic() + wait
         while True:
+            started = time.monotonic()
             with self._lock, self.conn.transaction():
                 row = self._take_row()
                 if row is None:
@@ -301,7 +302,7 @@ class PgJournal(Journal):
                 raise Fenced(f"{self.model_id}: 別のプロセス（{holder}）が書き込み中（リースの期限内）")
             time.sleep(min(remaining, max(0.05, min(float(left or 0) + 0.05, 1.0))))
         epoch, head = row
-        self.lease_until = time.monotonic() + self.lease_ttl
+        self.lease_until = started + self.lease_ttl
         if head != self.head:
             raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
         self.epoch, self.lost = epoch, False
@@ -322,10 +323,11 @@ class PgJournal(Journal):
         手元の通し番号は確かめない（呼ぶ側はリースを取ってから記録に追いつく。持っている間はほかの
         プロセスは確定できない）。"""
         with self._lock:
+            started = time.monotonic()
             row = self._take_row()
             if row is None:
                 return False
-            self.epoch, self.lease_until, self.lease_error = row[0], time.monotonic() + self.lease_ttl, None
+            self.epoch, self.lease_until, self.lease_error = row[0], started + self.lease_ttl, None
             self.lost = False
             return True
 

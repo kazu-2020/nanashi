@@ -227,6 +227,7 @@ class Workspace:
         self._checkpointing: threading.Thread | None = None
         self.stats = Stats()
         self._degraded: str | None = None  # 記録先に追いつけず、開き直しにも失敗した（古い版を公開している）
+        self._unsure = False  # The last append failed with no answer, so the journal can have its entries
         self._role = Role.LEADER
         self._role_lock = threading.RLock()  # 役割の変更と、まとまりの処理を順に並べる
         self._stop = threading.Event()
@@ -409,6 +410,9 @@ class Workspace:
                 if req.future.set_running_or_notify_cancel():
                     req.future.set_exception(err)
             return
+        if self._unsure:  # Catch up before the lookup of _outcomes acknowledges a resend of those entries
+            self._reload()
+            self._unsure = self._degraded is not None
         working = self._version.fork()  # 公開中の版は変えない
         applied: list[tuple[_Request, dict]] = []
         refused: list[tuple[_Request, Exception]] = []
@@ -463,6 +467,8 @@ class Workspace:
                 self._demote()
             elif isinstance(e, Stale):
                 self._reload()  # 別のプロセスが書き込んでいた。知らせる前に、記録先から最新の版を開き直す
+            elif self.journal is not None:
+                self._unsure = True  # A lost connection can lose the COMMIT response after the commit
             # An earlier request of the batch can cause a refusal. Thus do not record the refusals.
             for req, _ in applied + refused:
                 req.future.set_exception(e)
