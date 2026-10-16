@@ -434,8 +434,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json(e.status, e.body)
 
     def _run(self, fn) -> None:
+        """Answer the (status, body) that fn returns. If fn returns None, it answered in a request slot."""
         try:
-            status, body = fn()
+            answer = fn()
         except ApiError as e:
             self._fail(e)
         except (DuplicateId, FormulaError, ValueError) as e:  # A bad request (Model raises ValueError for a user error)
@@ -445,7 +446,8 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("要求の処理に失敗した（error_id=%s）", error_id)
             self._fail(ApiError(500, "internal", "内部エラー", error_id=error_id))
         else:
-            self._json(status, body)
+            if answer is not None:
+                self._json(*answer)
 
     # ------------------------------------------------ 読み出し
 
@@ -459,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:
-        self._serve(lambda: self._in_slot(self._get))
+        self._serve(lambda: self._in_slot(self._get, SLOT_WAIT))
 
     def do_POST(self) -> None:
         self._serve(self._post)
@@ -479,15 +481,16 @@ class Handler(BaseHTTPRequestHandler):
         if not self._misdirected():
             self._run(fn)
 
-    def _in_slot(self, fn) -> tuple[int, Any]:
-        """Run fn in a request slot (503 busy if no slot frees up in time)."""
-        if not self.server.begin_request():
+    def _in_slot(self, fn, wait: float) -> None:
+        """Run and answer fn in a request slot (503 busy if no slot frees up in wait seconds).
+        The answer is written in the slot, so responses in memory also stay below max_threads."""
+        if not self.server.begin_request(wait):
             if self.server.stopping:
                 self.close_connection = True
                 raise ApiError(503, "closed", "サーバーは止まるところ")
             raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
         try:
-            return fn()
+            self._run(fn)
         finally:
             self.server.end_request(probe=is_probe(self.path))
 
@@ -581,7 +584,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 書き込み
 
-    def _post(self) -> tuple[int, Any]:
+    def _post(self) -> None:
         url = urllib.parse.urlsplit(self.path)
         if [p for p in url.path.split("/") if p] != ["writes"]:
             raise ApiError(404, "not_found", f"{url.path} はない")
@@ -599,12 +602,15 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
         # The body is read before the slot, so a slow client holds a body permit but no request slot.
         # The write keeps the permit until it ends: bodies in memory stay below max_threads x max_body.
+        # The permit wait and the slot wait share 1 SLOT_WAIT, so the router attempt timeout stays valid.
+        start = time.monotonic()
         if not self.server.bodies.acquire(timeout=SLOT_WAIT):
             raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
+        left = SLOT_WAIT - (time.monotonic() - start)
         try:
             raw = self.rfile.read(length)
             self.unread_body = False
-            return self._in_slot(lambda: self._write(user, raw))
+            self._in_slot(lambda: self._write(user, raw), left)
         finally:
             self.server.bodies.release()
 
@@ -860,10 +866,10 @@ class Server(ThreadingHTTPServer):
             self._connections.release()
             self.shutdown_request(request)
 
-    def begin_request(self) -> bool:
-        """Take a request slot. Return False if no slot frees up in SLOT_WAIT seconds, or if the server stops."""
+    def begin_request(self, wait: float) -> bool:
+        """Take a request slot. Return False if no slot frees up in wait seconds, or if the server stops."""
         with self._use:
-            if not self._use.wait_for(lambda: self.stopping or self._active < self.max_threads, SLOT_WAIT) \
+            if not self._use.wait_for(lambda: self.stopping or self._active < self.max_threads, wait) \
                     or self.stopping:
                 return False
             self._active += 1
