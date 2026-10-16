@@ -1,6 +1,6 @@
 //! Memory budget tests. An operation that can make a large result checks the budget before it makes the result.
 
-use nanashi_engine::{eval, eval_columns, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store, CELL_BYTES};
+use nanashi_engine::{eval, eval_columns, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store, Whole, CELL_BYTES};
 use std::sync::Arc;
 
 fn catalog(max_bytes: usize) -> Catalog {
@@ -104,11 +104,16 @@ fn a_streamed_result_is_budgeted_by_its_columns() {
     let held = held(&src);
     let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
     let store = Store::new(&[0], None, Kind::Num, &cat).unwrap();
-    // The scan checks CELL_BYTES for each driver row before it starts. The columns are smaller, and only they stay counted.
+    // The scan checks CELL_BYTES for each driver row before it starts. The columns also need room for the part
+    // buffers (here one part of all rows). Without that room, the result is a Cube.
     let b = Budget::new(held + rows * CELL_BYTES, held);
-    let c = eval_columns(&node, &cat, &src, &b, &store, false).unwrap().expect("streams");
+    assert!(matches!(eval_columns(&node, &cat, &src, &b, &store, false).unwrap(), Some(Whole::Cube(c)) if c.cells.len() == rows));
+    let limit = 2 * rows * CELL_BYTES;
+    let b = Budget::new(held + limit, held);
+    let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &b, &store, false).unwrap() else { panic!("streams") };
+    // Only the columns stay counted, and they are smaller than the cells
     assert!(c.bytes() < rows * CELL_BYTES, "{}", c.bytes());
-    let room = (rows * CELL_BYTES - c.bytes()) / CELL_BYTES;
+    let room = (limit - c.bytes()) / CELL_BYTES;
     assert!(b.need(room, "x").is_ok());
     assert!(b.need(room + 1, "x").is_err());
     assert_eq!(store.with_columns(c).0.as_cube().cells.len(), rows);

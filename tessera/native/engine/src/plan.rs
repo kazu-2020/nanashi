@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{chain, chain_scan, eval_columns, eval_sums, eval_with, held, remove_run, Agg, Budget, Catalog, Columns, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{chain, chain_scan, eval_columns, eval_sums, eval_with, held, remove_run, Agg, Budget, Catalog, Columns, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store, Whole};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -759,12 +759,15 @@ impl<'a> Run<'a> {
                     }
                     _ => {
                         let f = self.formula(t.m);
-                        if t.region.is_all() {
-                            if let Some(c) = eval_columns(&f.node, self.cat, &self.srcs(f, None), &b, &self.stores[t.m], !self.full)? {
+                        let fused = if t.region.is_all() { eval_columns(&f.node, self.cat, &self.srcs(f, None), &b, &self.stores[t.m], !self.full)? } else { None };
+                        let value = match fused {
+                            Some(Whole::Columns(c)) => {
                                 return Ok(Done { m: t.m, region: t.region.clone(), delta: false, value: Write::Columns(c), count: None, low: None, old });
                             }
-                        }
-                        (self.eval(f, None, &r, &b)?, None, None)
+                            Some(Whole::Cube(c)) => c,
+                            None => self.eval(f, None, &r, &b)?,
+                        };
+                        (value, None, None)
                     }
                 }
             }
