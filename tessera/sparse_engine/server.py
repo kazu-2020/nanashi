@@ -459,14 +459,13 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:
-        self._serve(self._get)
+        self._serve(lambda: self._in_slot(self._get))
 
     def do_POST(self) -> None:
-        self._serve(self._post, self._read_write)
+        self._serve(self._post)
 
-    def _serve(self, fn, read=None) -> None:
-        """Answer 1 request on this connection in a request slot (503 busy if no slot frees up in time).
-        read gets the body before the slot, so a client that sends its body slowly does not hold a slot."""
+    def _serve(self, fn) -> None:
+        """Answer 1 request on this connection."""
         self.unread_body = "Transfer-Encoding" in self.headers or self.headers.get("Content-Length", "0") != "0"
         if self.server.stopping:
             self.close_connection = True
@@ -477,24 +476,18 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._fail(ApiError(400, "bad_request", "Transfer-Encoding と、値の違う Content-Length には対応しない"))
             return
-        if self._misdirected():
-            return
-        args = ()
-        if read is not None:
-            try:
-                args = read()
-            except ApiError as e:
-                self._fail(e)
-                return
+        if not self._misdirected():
+            self._run(fn)
+
+    def _in_slot(self, fn) -> tuple[int, Any]:
+        """Run fn in a request slot (503 busy if no slot frees up in time)."""
         if not self.server.begin_request():
             if self.server.stopping:
                 self.close_connection = True
-                self._fail(ApiError(503, "closed", "サーバーは止まるところ"))
-            else:
-                self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
-            return
+                raise ApiError(503, "closed", "サーバーは止まるところ")
+            raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
         try:
-            self._run(lambda: fn(*args))
+            return fn()
         finally:
             self.server.end_request(probe=is_probe(self.path))
 
@@ -588,8 +581,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 書き込み
 
-    def _read_write(self) -> tuple[str | None, bytes]:
-        """Check a write request before its body, then read the body. Return the user and the body."""
+    def _post(self) -> tuple[int, Any]:
         url = urllib.parse.urlsplit(self.path)
         if [p for p in url.path.split("/") if p] != ["writes"]:
             raise ApiError(404, "not_found", f"{url.path} はない")
@@ -605,11 +597,18 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "bad_request", "Content-Length は整数") from None
         if length < 0 or length > self.server.max_body:
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
-        raw = self.rfile.read(length)
-        self.unread_body = False
-        return user, raw
+        # The body is read before the slot, so a slow client holds a body permit but no request slot.
+        # The write keeps the permit until it ends: bodies in memory stay below max_threads x max_body.
+        if not self.server.bodies.acquire(timeout=SLOT_WAIT):
+            raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
+        try:
+            raw = self.rfile.read(length)
+            self.unread_body = False
+            return self._in_slot(lambda: self._write(user, raw))
+        finally:
+            self.server.bodies.release()
 
-    def _post(self, user: str | None, raw: bytes) -> tuple[int, Any]:
+    def _write(self, user: str | None, raw: bytes) -> tuple[int, Any]:
         try:
             body = json.loads(raw or b"{}", parse_float=_finite_number, parse_constant=_finite_number)
         except (ValueError, RecursionError):
@@ -809,6 +808,7 @@ class Server(ThreadingHTTPServer):
         self.model_id = model_id  # with a PgJournal: refuse requests that X-Nanashi-Model sends for another model
         self.max_threads = max_threads
         self._connections = threading.BoundedSemaphore(max_connections)  # each open connection holds a thread
+        self.bodies = threading.BoundedSemaphore(max_threads)  # write bodies that the server reads or holds
         self.summaries = SummaryCache(max_cells)
         self._thread: threading.Thread | None = None
         self.stopping = False

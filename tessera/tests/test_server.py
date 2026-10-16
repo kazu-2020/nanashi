@@ -732,8 +732,12 @@ class KeepAlive(unittest.TestCase):
         s = self.connect(server)
         s.sendall(f"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t-alice\r\nContent-Length: {len(body)}\r\n\r\n".encode()
                   + body[:1])
-        time.sleep(0.2)  # the server reads the first byte of the body and waits for the rest
+        while server.bodies.acquire(blocking=False):  # until the server holds the only body permit
+            server.bodies.release()
+            time.sleep(0.01)
         self.assertEqual(Client(server.url).get("/health"), (200, {"seq": 0, "role": "leader"}))
+        status, answer = Client(server.url).post("/writes", {"client_op_id": "t", "ops": [write(self.ws, "Stock", 2, Product="p0", Month="Jan")]})
+        self.assertEqual((status, answer["error"]), (503, "busy"))
         status, _, answer = exchange(s, body[1:])
         self.assertEqual((status, json.loads(answer)), (200, {"seq": 1}))
 
