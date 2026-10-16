@@ -227,7 +227,7 @@ func (rt *Router) upstreamHeader(in http.Header, user, model string) http.Header
 func rebinding(r *http.Request) *apiError {
 	// On a non-loopback address (--insecure), clients can use any host name, so do not check the Host.
 	if local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr); local != nil {
-		if ip, _, _ := net.SplitHostPort(local.String()); !Loopback(ip) {
+		if ip, _, err := net.SplitHostPort(local.String()); err == nil && !Loopback(ip) {
 			return nil
 		}
 	}
