@@ -51,7 +51,7 @@ To give more than 1 network, use the option again (`--trusted-proxy 10.0.1.0/24 
 The server examines the address of the TCP connection, not a header such as `X-Forwarded-For`.
 If the connection does not come from a trusted network, the server returns 401. It does not use the header in this case.
 If the connection comes from a trusted network but the header is missing, the server also returns 401.
-`GET /health` and `GET /ready` need no authentication, as before.
+`GET /health` and `GET /ready` need no authentication.
 
 The server does not trust 127.0.0.1 or `::1` automatically.
 If the proxy runs on the same host, give `--trusted-proxy 127.0.0.1`.
@@ -80,7 +80,7 @@ These are the limits:
 
 - The request body can be up to 16 MiB (`--max-body`).
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`).
-- The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`). The default of `socketserver` is 5. With 5, about 64 clients that connect at the same time made some of them wait 1 s for a second SYN.
+- The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`).
 - The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 5 seconds, it gets 503 `busy`. The short wait keeps a write below the 70 seconds that the router gives an attempt.
 - The server keeps up to 1024 connections open at the same time (`--max-connections`). Each open connection holds a thread. A connection above this gets 503 `busy`, and the server closes it.
 - If the read or write of a request stops for 30 seconds, the server closes the connection. The same limit closes a keep-alive connection that is idle.

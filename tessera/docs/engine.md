@@ -31,11 +31,11 @@ It merges the cells directly into the value array and the packed keys of the new
 The engine does not change a base after it makes it, and versions share the base. The delta is a persistent tree (`OrdMap` of `imbl`), so a change does not break old versions.
 Thus, a writer can write while a reader keeps a published version. The engine does not copy all of the base or the delta.
 The values of the base are an immutable array with no extra capacity (`Box<[f64]>`). Its layout is the same as the buffer of an Arrow Float64 array.
-The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed.rs`). A block keeps its first key and the offset of each key from it, with the bit width of the largest offset (frame of reference). In the retail model the width is 14 to 19 bits, so the keys use about 2 B for each cell in place of 8 B ([Performance](performance.md)).
+The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed.rs`). A block keeps its first key and the offset of each key from it, with the bit width of the largest offset (frame of reference). In the retail model the width is 14 to 19 bits, so the keys use about 2 B for each cell in place of 8 B.
 A scan decodes one block at a time into a buffer of 1,024 keys and then reads a plain array. A binary search decodes one key at a time. The cursor of the fused evaluation (`Cursor`) decodes the block of a row near its last row, and reads a far row one key at a time. The `base` value of `Model.memory()` is equal to the size of the packed keys and the value array.
 The high bits of the key contain the **partition dimension**. Thus, a binary search can read and write a range that a filter on the partition dimension selects.
 For a filter on a different dimension, the engine uses an inverted index. The engine makes the index when it is necessary.
-The index packs the row numbers in blocks of 1,024 (`PackedKeys`). In the P&L plan, this is about 2 to 4 B for each cell of the base. It stays in memory while a version uses that base.
+The index packs the row numbers in blocks of 1,024 (`PackedKeys`). In the P&L plan, this is about 2 to 4 B for each cell of the base. It stays in memory while a version uses that base. The build holds the row numbers as `u32` (4 B for each row of the base). It packs the entries as it makes them, so it does not hold a `u64` array of all entries.
 
 The engine selects the partition dimension for each Metric automatically.
 For each input, the engine propagates the affected range of a change to one cell. Then it selects the dimension that gives the smallest part of the cells that a change writes.
@@ -45,7 +45,7 @@ A join (`*`, comparisons, `ON`, `FILTER`, the branches of `IF`) evaluates one si
 For a join of two operands with the same dimensions, the engine matches cells in key order without a sort and without a copy. An example of such cells is cells read from stored data.
 For a join of two stored data with no delta (for example, `A * B` or `A > B` in a full recalculation), the engine matches the two bases directly. It does not copy them to a Cube.
 In a full recalculation, the engine evaluates independent Metrics in parallel.
-The engine keeps the calculated values in key order. When it writes them back, it moves the values one at a time into the format of stored data (two arrays: keys and values). Thus, in one stage, only one Metric at a time has two copies of its values during the move.
+The engine keeps the calculated values in key order. When it writes them back, it moves the values one at a time into the format of stored data (packed keys and a value column). Thus, in one stage, only one Metric at a time has two copies of its values during the move.
 
 In a full evaluation, the engine fuses a formula that is a chain of element-wise operations. It evaluates the fused formula and does not make an intermediate result (Cube) for each operation (`eval/fuse.rs`).
 Fusion applies to these operations: the four arithmetic operations, comparisons, `AND` / `OR` / `NOT`, `IF`, `FILTER`, `ON`, `EXPAND`, `ISBLANK`, `IFBLANK`, dimension values (`Month`), `SELECT`, time shifts (`[SELECT: Month - 1]`), the BY mapping (`BY`), and manual overrides of formula Metrics.
@@ -65,7 +65,7 @@ The engine continues to evaluate one operation at a time for these: an increment
 For an aggregation (`REMOVE`, `BY`) on the array path or the hash map path, the engine does not copy the aggregation source. It reads the source and adds each value to the intermediate value of its target.
 If the aggregation source is stored data, the engine reads the base directly by row number.
 The type check rewrites a `BY` aggregation with a Metric into a join with `On` and `AsAxis` and an aggregation. In a full evaluation, the engine puts the mapping table (for example, employee and month → department) into an array of all combinations. It looks up the targets in this array and does not make the join result. This path uses only the hash map, and only if the targets are few.
-The engine tries 3 paths in this order: an array of all target combinations, a hash map, and a sort. The array path is 2 to 3 times faster than the hash map for the same rows ([Performance](performance.md)). If an incremental recalculation narrows the range of the targets, the engine tries the hash map first, because the array ignores the range.
+The engine tries 3 paths in this order: an array of all target combinations, a hash map, and a sort. If an incremental recalculation narrows the range of the targets, the engine tries the hash map first, because the array ignores the range.
 If all combinations of the aggregation targets are few, the engine adds the values into an array of all combinations. For a SUM, "few" means that the arrays (32 B for each combination and array) are not larger than the (target, value) pairs (16 B a row). For `MIN`, `MAX` and `COUNT`, the limit is half of the pairs (16 B or 4 B for each combination and array).
 If the slot of each row follows the order of the rows, the engine divides the rows into one part for each thread, and each part has its own array. At the end, the engine adds the arrays in order.
 If the first 2^16 rows touch more than 4 MiB of the array (`scatter_bytes`), each row goes to a different cache line. Then the engine uses one array and fills it in rounds. In each round, each thread puts its rows into buckets of 2^14 combinations. Then each bucket adds its rows into its part of the array, which stays in the cache. The buffers of a round have a fixed size of about 1.25 arrays (a 16 B pair and a 4 B slot number for each row), so this fill counts as 3 arrays.
@@ -87,9 +87,11 @@ If the range is the full Metric, the parallel step also makes the new stored dat
 If the work of a stage is small (the estimate of recalculated rows is less than 16,384), the cost of the parallel handoff is larger. Thus, the engine calculates the stage in sequence.
 A scan writes to its own stored data for each time period. Thus, the engine calculates scans in sequence at the end of the stage.
 Some scans do not need an evaluation for each period (`eval/scan.rs`). This applies if only one Metric of the scan changes.
-The formula of that Metric must be a chain of `+`, `-`, `*`, `/` and `COALESCE` around `PREVIOUS`, for example `PREVIOUS(Month) * 0.9 + Margin`.
-`COALESCE` is the override of an overridable Metric.
-It evaluates each operand one time for all periods in the range. Then it calculates the chain for each key along the time dimension and writes all periods back one time.
+The formula of that Metric must be a tree of `+`, `-`, `*`, `/`, `IF` and `COALESCE` over `PREVIOUS(dim, n)` (n >= 1). An example is `IF(IsActual, Actual, PREVIOUS(Month) * 0.9 + PREVIOUS(Month, 2) * 0.1 + Margin)`.
+The condition of `IF` must not read the Metric. `COALESCE` is the override of an overridable Metric.
+An operand is a part of the formula that does not read the Metric. The engine evaluates each operand one time for all periods in the range.
+A row is a key without the time dimension. The value of a row at a period reads only earlier periods of the same row and the operands.
+Thus, the engine sorts each operand by row and then by period, and calculates the rows in parallel. For each row, it calculates the tree for the periods in ascending order. Then it writes all periods back one time.
 Each cell gets the same operations in the same order as in the evaluation for each period. Thus, the result is the same bit for bit.
 The engine does not use this path if an operand has an aggregation, because an aggregation of all periods can add the values in a different order.
 If the operands of all periods do not fit in the memory budget (`max_bytes`, stored data and intermediate results), the engine evaluates one period at a time.

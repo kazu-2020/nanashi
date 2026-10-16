@@ -53,8 +53,7 @@ print(m.value("Cost").format(m.dimensions))
 
 Use `add_input` to add an input Metric.
 Use `add_formula` to add a Metric that a formula calculates.
-You set the dimensions and the value kind of a Metric when you add it.
-You cannot change them later.
+To change the dimensions or the value kind of a Metric, define the Metric again with its id.
 When you read a value, the engine calculates again only the range that changed.
 
 `Model` takes and gives ids (UUIDs) for a Metric, a dimension, a member and a property. Coordinates are a mapping
@@ -83,9 +82,7 @@ model.get(cost, {dept: m.member_id("Department", "開発"), m.dimension_id("Mont
 | [docs/performance.md](docs/performance.md) | Performance measurements (recalculation, reads, free-threaded Python, memory, journals, save formats) |
 | [docs/development.md](docs/development.md) | The development environment, the test policy, the source structure, and the locations to change when you add an expression node |
 | [docs/limitations.md](docs/limitations.md) | Limitations and future work |
-| [docs/member-numbering.md](docs/member-numbering.md) | Design note: member names, IDs, numbers, ranks, tombstones for deleted members, wider keys, reorganization of Views (the first stage of the separation of numbers and ranks is implemented) |
-| [docs/out-of-core.md](docs/out-of-core.md) | Design note: a plan to keep stored data on NVMe (SSD), and measurements of pread, mmap and heap (not implemented) |
-| [docs/scale-out.md](docs/scale-out.md) | Design note: separate storage from calculation, workers for heavy recalculations, readers for simulations (not implemented) |
+| [docs/member-numbering.md](docs/member-numbering.md) | Design note: member names, IDs, numbers, ranks, tombstones for deleted members, wider keys (the first stage of the separation of numbers and ranks is implemented) |
 
 ## License
 

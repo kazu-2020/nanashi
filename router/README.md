@@ -72,7 +72,6 @@ The count starts when the router first sees the engine without a lease. The kill
 On SIGTERM and SIGINT, the router sends SIGTERM to its engines after it stops, and kills them after 15 seconds.
 
 Without `--tessera`, the router only finds engines that something else started.
-[engine-lifecycle.md](../docs/engine-lifecycle.md) gives the design.
 
 With `--tokens`, the router finds the user from `Authorization: Bearer <token>`.
 It adds the user to `X-Forwarded-User` and sends it to the engine.

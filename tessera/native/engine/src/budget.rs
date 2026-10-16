@@ -41,6 +41,11 @@ impl Budget {
         Ok(())
     }
 
+    /// The number of new cells that `need` permits now. Parallel code uses it because a Budget is not Sync.
+    pub(crate) fn room(&self) -> usize {
+        self.limit.saturating_sub(self.held.saturating_add(self.used.get())) / CELL_BYTES
+    }
+
     /// The evaluation of a node ended. Set the used bytes back to start (this drops the child results counted
     /// after it), and count the node result out.
     pub(crate) fn settle(&self, start: Mark, out: &Cube) -> Result<()> {
