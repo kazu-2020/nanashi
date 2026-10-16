@@ -566,8 +566,8 @@ class Limits(unittest.TestCase):
             with socket.create_connection(server.server_address[:2], timeout=10) as s:
                 return exchange(s, f"POST /writes HTTP/1.1\r\nHost: {host}\r\nContent-Type: {kind}\r\n"
                                    f"Content-Length: {len(body)}\r\n\r\n".encode() + body)[0]
-        self.assertEqual(post(f"evil.example:{port}", "application/json"), 403)  # DNS rebinding
-        self.assertEqual(post(f"127.0.0.1:{port}", "text/plain"), 415)  # a cross-site form or fetch
+        self.assertEqual(post(f"evil.example:{port}", "application/json"), 403)
+        self.assertEqual(post(f"127.0.0.1:{port}", "text/plain"), 415)
         self.assertEqual(Client(server.url, token=None, headers={"Host": "evil.example"}).get("/")[0], 403)
         self.assertEqual(post(f"localhost:{port}", "application/json; charset=utf-8"), 200)
         self.assertEqual(self.ws.seq, 1)

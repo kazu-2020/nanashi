@@ -508,7 +508,6 @@ class Handler(BaseHTTPRequestHandler):
                     if hmac.compare_digest(known.encode(), token.strip().encode()):
                         return user
             raise ApiError(401, "unauthorized", "Authorization: Bearer <トークン> が要る")
-        # Without authentication, refuse what a web page on another site can make a browser send.
         # A Host that is not loopback can be a DNS rebinding. With --insecure, the server can have other names.
         host = self.headers.get("Host")
         if host is not None and _loopback(srv.server_address[0]) and not _loopback_host(host):
@@ -1078,7 +1077,6 @@ def _loopback(host: str) -> bool:
 
 
 def _loopback_host(host: str) -> bool:
-    """Return True if a Host header ("127.0.0.1:8080", "[::1]", "localhost") names a loopback address."""
     try:
         return _loopback(urllib.parse.urlsplit("//" + host).hostname or "")
     except ValueError:  # for example "[::1"

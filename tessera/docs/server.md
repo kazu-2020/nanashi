@@ -40,7 +40,7 @@ You cannot use `--tokens` and `--user-header` together.
 If neither option is given, the server does no authentication (the user is blank). Then it refuses to listen on an address other than 127.0.0.1 (`--insecure` removes this limit).
 Without authentication, the server also refuses requests that a web page on another site can make a browser send:
 
-- If the server listens on a loopback address and the `Host` header is not `127.0.0.1`, `localhost` or `[::1]`, the server returns 403 `forbidden`. This stops DNS rebinding.
+- If the server listens on a loopback address and the `Host` header is not `127.0.0.1`, `localhost` or `[::1]`, the server returns 403 `forbidden`. This stops DNS rebinding to the port of the engine. It does not stop DNS rebinding to a router without authentication in front of the engine (for example, the router of `dev.sh` on 127.0.0.1:8090). That router sends `Host: 127.0.0.1` to the engine.
 - If a write does not have `Content-Type: application/json`, the server returns 415 `unsupported_media_type`. A cross-site form or `fetch` without a preflight cannot send this type.
 
 ### Authentication through a proxy
