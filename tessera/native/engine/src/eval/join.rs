@@ -99,6 +99,7 @@ pub(crate) fn in_order<'a>(cfg: &Config, cells: &'a [(u64, f64)]) -> Cow<'a, [(u
 }
 
 /// INNER JOIN. Only the cells with a value on both sides are in the result. A cell is empty if `f` gives None.
+/// The result counts as used in `bud`. The buffers of the join count only while the join makes the result.
 pub(crate) fn intersect(
     a: &Cube,
     b: &Cube,
@@ -107,6 +108,13 @@ pub(crate) fn intersect(
     bud: &Budget,
     f: impl Fn(f64, f64) -> Option<f64> + Sync,
 ) -> Result<Cube> {
+    let start = bud.mark();
+    let out = join(a, b, kind, cat, bud, f)?;
+    bud.settle(start, &out)?;
+    Ok(out)
+}
+
+fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(f64, f64) -> Option<f64> + Sync) -> Result<Cube> {
     let cfg = &cat.cfg;
     // 片側が定数（軸なし）なら、結合せずに 1 回の走査で済む
     if b.dims().is_empty() {
@@ -134,7 +142,9 @@ pub(crate) fn intersect(
     let (a_sk, b_sk) = (Proj::new(&a.pack, &sk), Proj::new(&b.pack, &sk));
     let (a_out, b_out) = (Proj::new(&a.pack, &out), Proj::new(&b.pack, &out));
 
-    // b を共有する軸のキーで並べ、キーごとの区間を引けるようにする
+    const WHAT: &str = "軸の違う式の結合";
+    // Sort b by the key of the shared dimensions, and index the run of each key. An entry has 24 bytes.
+    bud.take(b.cells.len().saturating_mul(3).div_ceil(2), WHAT)?;
     let entry = |&(k, v): &(u64, f64)| (b_sk.apply(&b.pack, &sk, k), b_out.apply(&b.pack, &out, k), v);
     let entries: Vec<(u64, u64, f64)> = if cfg.par(b.cells.len()) {
         let mut e: Vec<_> = b.cells.par_iter().map(entry).collect();
@@ -145,7 +155,10 @@ pub(crate) fn intersect(
         e.sort_unstable_by_key(|e| e.0);
         e
     };
-    let mut index: FxHashMap<u64, (usize, usize)> = FxHashMap::default();
+    let keys = entries.chunk_by(|x, y| x.0 == y.0).count();
+    // A hash table has a power of 2 of slots, at least 8/7 of the keys. A slot has 24 bytes and 1 control byte.
+    bud.take(((keys.saturating_mul(8) / 7).max(4).next_power_of_two().saturating_mul(25)).div_ceil(CELL_BYTES), WHAT)?;
+    let mut index: FxHashMap<u64, (usize, usize)> = FxHashMap::with_capacity_and_hasher(keys, Default::default());
     let mut i = 0;
     while i < entries.len() {
         let mut j = i;
@@ -158,7 +171,6 @@ pub(crate) fn intersect(
 
     let (index, entries, f) = (&index, &entries, &f);
     let range = |k: u64| index.get(&a_sk.apply(&a.pack, &sk, k)).copied().unwrap_or((0, 0));
-    const WHAT: &str = "軸の違う式の結合";
     // If each key of b has one entry, |a| is an upper bound of the pairs. Count them exactly only when it does not fit.
     if !(index.len() == entries.len() && bud.need(a.cells.len(), WHAT).is_ok()) {
         let pairs = |&(k, _): &(u64, f64)| {
@@ -180,12 +192,12 @@ pub(crate) fn intersect(
     Ok(Cube { pack: out, kind, cells })
 }
 
-/// 足りない軸の全メンバー（restrict の範囲）へ値を複製する。
-pub(crate) fn expand(c: &Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Cube> {
+/// Copies the values to all members (in the restrict) of the dimensions that `c` does not have.
+pub(crate) fn expand(c: Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let out = Packing::new(dims, cat)?;
     if out == c.pack {
-        return Ok(c.clone());
+        return Ok(c);
     }
     let proj = Proj::new(&c.pack, &out);
     let missing: Vec<(usize, Vec<u32>)> = dims
@@ -225,10 +237,11 @@ pub(crate) fn product(pack: &Packing, spans: &[(usize, Vec<u32>)]) -> Vec<u64> {
     out
 }
 
-/// FULL OUTER JOIN（両側とも同じ詰め方）。片側だけのセルは f に None を渡す。
-pub(crate) fn union(cfg: &Config, a: Cube, b: Cube, kind: Kind, f: impl Fn(Option<f64>, Option<f64>) -> Option<f64>) -> Cube {
+/// FULL OUTER JOIN. Both sides have the same packing. If a cell is on one side only, f gets None for the other side.
+pub(crate) fn union(cfg: &Config, bud: &Budget, a: Cube, b: Cube, kind: Kind, f: impl Fn(Option<f64>, Option<f64>) -> Option<f64>) -> Result<Cube> {
+    bud.need(a.cells.len().saturating_add(b.cells.len()), "和の結合")?;
     let (x, y) = (sorted(cfg, a.cells), sorted(cfg, b.cells));
-    Cube { pack: a.pack, kind, cells: merge_sorted(&x[..], &y[..], true, f) }
+    Ok(Cube { pack: a.pack, kind, cells: merge_sorted(&x[..], &y[..], true, f) })
 }
 
 /// If the left side of an INNER JOIN has this number of cells or fewer, evaluate the right side only for the members of the left side.

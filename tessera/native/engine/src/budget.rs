@@ -35,6 +35,14 @@ impl Budget {
         }
     }
 
+    /// Count `cells` more cells as used, or Err if they do not fit. Use it for a buffer that lives while the node
+    /// makes more cells. The next settle counts the buffer out.
+    pub(crate) fn take(&self, cells: usize, what: &str) -> Result<()> {
+        self.need(cells, what)?;
+        self.used.set(self.used.get() + cells * CELL_BYTES);
+        Ok(())
+    }
+
     /// The evaluation of a node ended. Set the used bytes back to start (this drops the child results counted
     /// after it), and count the node result out.
     pub(crate) fn settle(&self, start: Mark, out: &Cube) -> Result<()> {

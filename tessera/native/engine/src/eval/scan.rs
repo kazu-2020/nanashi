@@ -104,7 +104,7 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
                 Lookup(c.cells.into_iter().collect(), c.pack, proj)
             }
             _ => {
-                let e = expand(&c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
+                let e = expand(c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
                 held += e.cells.len();
                 b.need(held, "scan の加数")?;
                 ByPeriod(by_period(&e.cells))
