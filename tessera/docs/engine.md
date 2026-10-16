@@ -35,7 +35,7 @@ The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed
 A scan decodes one block at a time into a buffer of 1,024 keys and then reads a plain array. A binary search decodes one key at a time. The cursor of the fused evaluation (`Cursor`) decodes the block of a row near its last row, and reads a far row one key at a time. The `base` value of `Model.memory()` is equal to the size of the packed keys and the value array.
 The high bits of the key contain the **partition dimension**. Thus, a binary search can read and write a range that a filter on the partition dimension selects.
 For a filter on a different dimension, the engine uses an inverted index. The engine makes the index when it is necessary.
-The index packs the row numbers in blocks of 1,024 (`PackedKeys`). In the P&L plan, this is about 2 to 4 B for each cell of the base. It stays in memory while a version uses that base.
+The index packs the row numbers in blocks of 1,024 (`PackedKeys`). In the P&L plan, this is about 2 to 4 B for each cell of the base. It stays in memory while a version uses that base. The build holds the row numbers as `u32` (4 B for each row of the base). It packs the entries as it makes them, so it does not hold a `u64` array of all entries.
 
 The engine selects the partition dimension for each Metric automatically.
 For each input, the engine propagates the affected range of a change to one cell. Then it selects the dimension that gives the smallest part of the cells that a change writes.
