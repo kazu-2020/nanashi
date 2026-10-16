@@ -375,9 +375,9 @@ class RustMatchesReference(unittest.TestCase):
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class EagerHeuristics(unittest.TestCase):
-    """The rules that work only on large models (widen a changed region that is most of the cells to the whole,
-    calculate the Metrics of one level in parallel, stream the fused scan in parallel batches of 3-key parts)
-    always work here on small models, and the results stay the same."""
+    """Some rules for speed work only on large models: widen a changed region that is most of the cells to the
+    whole, calculate the Metrics of one level in parallel, and stream the fused scan in parallel batches of
+    3-key parts. Here they always work, on small models, and the results stay the same."""
 
     engine = staticmethod(lambda: RustEngine(widen_min_rows=0, par_min=0, chunk=3))
 

@@ -46,7 +46,7 @@ For a join of two operands with the same dimensions, the engine matches cells in
 For a join of two stored data with no delta (for example, `A * B` or `A > B` in a full recalculation), the engine matches the two bases directly. It does not copy them to a Cube.
 In a full recalculation, the engine evaluates independent Metrics in parallel.
 The engine keeps the calculated values in key order. When it writes them back, it moves the values one at a time into the format of stored data (packed keys and a value column). Thus, in one stage, only one Metric at a time has two copies of its values during the move.
-A fused formula that calculates the whole Metric again does not make this copy: its scan writes directly into the format of stored data (see below).
+A fused formula that calculates the whole Metric again does not make this copy. Its scan writes directly into the format of stored data (see "Fusion" below).
 
 In a full evaluation, the engine fuses a formula that is a chain of element-wise operations. It evaluates the fused formula and does not make an intermediate result (Cube) for each operation (`eval/fuse.rs`).
 Fusion applies to these operations: the four arithmetic operations, comparisons, `AND` / `OR` / `NOT`, `IF`, `FILTER`, `ON`, `EXPAND`, `ISBLANK`, `IFBLANK`, dimension values (`Month`), `SELECT`, time shifts (`[SELECT: Month - 1]`), the BY mapping (`BY`), and manual overrides of formula Metrics.
@@ -62,7 +62,9 @@ The expression tree sets the keys that the engine scans:
 
 If a source is stored data with a delta (the usual state of an input after edits), the engine first merges the base and the delta into one array in key order. This copy counts against the memory budget. Then the fused scan reads the copy.
 
-If the fused formula is the whole formula of the Metric, the whole Metric is calculated again, and the scan gives the keys in the key layout of the stored data, the scan writes each part in key order directly into the packed keys and the value column of the new base (`eval_columns` in `eval/mod.rs`, `StoreSink` in `store.rs`). The engine does not make the array of keys and values (16 B for each cell) for this result. The parts are calculated in parallel in batches of 2 parts for each thread: one batch goes into the new base while the next batch is calculated, so at most 2 batches of results exist at one time. The new base refuses a key that is not above the last key. In an incremental recalculation, the new base also finds the cells whose value changed, against the old stored data, in the same pass.
+The scan can write its result directly into the new base. This applies when the fused formula is the whole formula of the Metric, the recalculation makes the whole Metric again, and the scan gives the keys in the layout of the stored data. Then each part goes in key order into the packed keys and the value column (`eval_columns` in `eval/mod.rs`, `StoreSink` in `store.rs`). The engine does not make the array of keys and values (16 B for each cell) for this result.
+
+The engine calculates the parts in parallel, in batches of 2 parts for each thread. One batch goes into the new base while the threads calculate the next batch, so at most 2 batches of results exist at one time. The new base refuses a key that is not above the last key. In an incremental recalculation, the new base also finds the cells whose value changed. It compares the new cells with the old stored data in the same pass.
 The engine continues to evaluate one operation at a time for these: an incremental recalculation on a limited range, and an aggregation. For an aggregation, the engine fuses the expression inside the aggregation and makes it one time.
 
 For an aggregation (`REMOVE`, `BY`) on the array path or the hash map path, the engine does not copy the aggregation source. It reads the source and adds each value to the intermediate value of its target.

@@ -457,12 +457,13 @@ struct Task {
     weight: usize, // 計算し直す行数の見積もり（並列にするかの判断に使う）
 }
 
-/// 計算し終えて、書き戻しを待つ値。範囲が全体なら、新しい格納データの本体になるキー順のセルまで作っておく
-/// （置き換える前の格納データを読むだけで作れるので、同じ段の Metric と並列に作れる）。格納データの形
-/// （キーと値の 2 列）に移すのは書き戻すときで、移す間だけ値が 2 つ分になるのを、段の中で 1 つずつに抑える。
+/// A calculated value that waits for the write-back. If the region is the whole, the cells of the new base
+/// are already in key order. They only read the old stored data, so the Metrics of one level make them in
+/// parallel. The move into the two columns of the stored data (keys and values) is the write-back. Only one
+/// Metric of a level moves at a time, so only one Metric holds its values two times.
 enum Write {
-    Whole(Vec<(u64, f64)>, Option<Vec<Vec<u32>>>), // 新しい本体のセルと、値が変わったセルの範囲
-    Part(Cube),                          // 範囲の中の新しい値
+    Whole(Vec<(u64, f64)>, Option<Vec<Vec<u32>>>), // the cells of the new base, and the region of the cells whose value changed
+    Part(Cube),                          // the new values in the region
     Columns(Columns),                    // the new base, filled in key order by the fused scan (`eval_columns`)
 }
 
@@ -759,7 +760,6 @@ impl<'a> Run<'a> {
                     _ => {
                         let f = self.formula(t.m);
                         if t.region.is_all() {
-                            // The fused scan fills the new base in key order, so the 16 B cells never exist
                             if let Some(c) = eval_columns(&f.node, self.cat, &self.srcs(f, None), &b, &self.stores[t.m], !self.full)? {
                                 return Ok(Done { m: t.m, region: t.region.clone(), delta: false, value: Write::Columns(c), count: None, low: None, old });
                             }
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(done(part).bytes(), bytes);
         // A streamed result counts the bytes of its columns, with the room that the sink reserved
         let mut sink = store.sink(4, false);
-        crate::Sink::part(&mut sink, vec![(1, 1.0), (2, 2.0)]).unwrap();
+        crate::Sink::part(&mut sink, vec![(1, 1.0), (2, 2.0), (3, 3.0)]).unwrap();
         let c = sink.finish();
         let bytes = c.keys.bytes() + 4 * 8;
         let done = Done { m: 0, region: Reg::new(vec![]), delta: false, value: Write::Columns(c), count: None, low: None, old: None };

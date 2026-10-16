@@ -98,7 +98,7 @@ pub fn eval_with(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budg
 /// Evaluate a formula whose result replaces the whole stored data of `store`. If the top node fuses in the
 /// packing of `store`, the cells go in key order into the new base, and the 16 B cells never exist.
 /// With `diff`, the result also has the region of the cells whose value changed (as `replaced_all`).
-/// Gives Ok(None) if the formula does not fuse in that packing: then the caller evaluates as before.
+/// Gives Ok(None) if the formula does not fuse in that packing. Then the caller uses `eval`.
 pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: &Store, diff: bool) -> Result<Option<Columns>> {
     if !cat.cfg.fuse {
         return Ok(None);

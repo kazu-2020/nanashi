@@ -116,7 +116,7 @@ impl Iterator for Merged<'_> {
 
 /// The new base of a whole-region write while it fills in key order (`Store::sink`). With a diff, it finds
 /// the changed keys against the old store while the new cells arrive, as `replaced_all` does.
-pub struct StoreSink<'a> {
+pub(crate) struct StoreSink<'a> {
     old: &'a Store,
     keys: packed::Builder,
     vals: Vec<f64>,
@@ -183,11 +183,15 @@ impl Sink for StoreSink<'_> {
 }
 
 impl StoreSink<'_> {
-    pub(crate) fn finish(self) -> Columns {
+    pub(crate) fn finish(mut self) -> Columns {
         let changed = self.diff.map(|mut d| {
             d.changed.extend(d.old.map(|(k, _)| k));
             self.old.region_of(&d.changed)
         });
+        // The reservation is an upper bound (the rows of the drivers). Give the unused part back if it is large.
+        if self.vals.len() < self.vals.capacity() / 4 * 3 {
+            self.vals.shrink_to_fit();
+        }
         Columns { keys: self.keys.finish(), vals: self.vals, changed: changed.flatten() }
     }
 }
@@ -1003,7 +1007,7 @@ mod tests {
         Catalog { dims, maps: Vec::new(), cfg: Config::default() }
     }
 
-    /// `n` distinct keys below `2^20` in ascending order, with a value for each.
+    /// At most `n` distinct keys below `2^20` in ascending order, with a value for each.
     fn random_cells(n: usize, seed: u64) -> Vec<(u64, f64)> {
         let mut x = seed;
         let mut keys: Vec<u64> = (0..n)
@@ -1043,16 +1047,16 @@ mod tests {
         let cat = two_dims(64);
         let mut old = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
         old.set_sorted(random_cells(300, 3));
-        old.write(&[5, 5], Some(1.0)); // a delta that sets a cell,
-        old.write(&[6, 6], Some(0.0)); // overwrites or sets another,
-        old.write(&[7, 7], None); // and removes one
+        old.write(&[5, 5], Some(1.0));
+        old.write(&[6, 6], Some(0.0));
+        old.write(&[7, 7], None);
         let mut new: Vec<(u64, f64)> = Vec::new();
         old.merged(0, None, |k, v| new.push((k, v)));
         assert!(new.len() > 200);
-        new[10].1 += 1.0; // changed
+        new[10].1 += 1.0;
         let zero = old.encode(&[6, 6]);
-        new.iter_mut().find(|c| c.0 == zero).unwrap().1 = -0.0; // changed by bits (0.0 to -0.0)
-        new.remove(30); // removed
+        new.iter_mut().find(|c| c.0 == zero).unwrap().1 = -0.0;
+        new.remove(30);
         let added = (0..1u64 << 12).find(|k| new.binary_search_by_key(k, |c| c.0).is_err()).unwrap();
         new.push((added, 9.0));
         new.sort_unstable_by_key(|c| c.0);
@@ -1066,7 +1070,6 @@ mod tests {
         let (got, changed) = old.with_columns(sink.finish());
         assert_eq!(changed, want);
         assert_eq!(got.as_cube().cells, new);
-        // Without changes, the region is None on both paths
         let same = Cube { pack: old.pack.clone(), kind: Kind::Num, cells: got.as_cube().cells };
         assert_eq!(got.replaced_all(same).unwrap().1, None);
         let mut sink = got.sink(new.len(), true);

@@ -610,6 +610,19 @@ const SPAN_RATIO: f64 = 4.0;
 /// Where a fused scan puts its cells: one part at a time, parts in key order, cells of a part in key order.
 pub(crate) trait Sink: Send {
     fn part(&mut self, cells: Vec<(u64, f64)>) -> Result<()>;
+
+    /// A sink that is one array gives it with room for `sizes[i]` cells of part i. Then all parts write
+    /// in parallel, each at its own offset, and `compact` removes the gaps. `StoreSink` gives None.
+    fn presized(&mut self, sizes: &[usize]) -> Option<&mut Vec<(u64, f64)>> {
+        let _ = sizes;
+        None
+    }
+
+    /// After `run_space`: an array sink sorts its cells if they are not in key order. `StoreSink` refuses
+    /// a key out of order as it arrives, so it does nothing here.
+    fn sort_if_unsorted(&mut self, cfg: &Config) {
+        let _ = cfg;
+    }
 }
 
 impl Sink for Vec<(u64, f64)> {
@@ -617,19 +630,23 @@ impl Sink for Vec<(u64, f64)> {
         self.extend(cells);
         Ok(())
     }
+
+    fn presized(&mut self, sizes: &[usize]) -> Option<&mut Vec<(u64, f64)>> {
+        *self = vec![(0u64, 0f64); sizes.iter().sum()];
+        Some(self)
+    }
+
+    fn sort_if_unsorted(&mut self, cfg: &Config) {
+        if !self.windows(2).all(|w| w[0].0 < w[1].0) {
+            sort_cells(cfg, self);
+        }
+    }
 }
 
 /// Evaluates `node` as one fused loop. Gives Ok(None) if the engine cannot fuse it.
 /// Gives Err if the result does not fit in `bud`.
 pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Option<Cube>> {
-    let Some((pack, kind, mut cells)) = fused_into(node, cat, src, r, bud, None, Vec::with_capacity)? else { return Ok(None) };
-    // The reservation is an upper bound (the rows of the drivers). Give the unused part back if it is large.
-    if cells.len() < cells.capacity() / 4 * 3 {
-        cells.shrink_to_fit();
-    }
-    if !cells.windows(2).all(|w| w[0].0 < w[1].0) {
-        sort_cells(&cat.cfg, &mut cells);
-    }
+    let Some((pack, kind, cells)) = fused_into(node, cat, src, r, bud, None, |_| Vec::new())? else { return Ok(None) };
     Ok(Some(Cube { pack, kind, cells }))
 }
 
@@ -665,7 +682,7 @@ fn fits(mat: f64, copied: usize, bud: &Budget) -> bool {
 fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, pack: Option<&Packing>, make: impl FnOnce(usize) -> S) -> Result<Option<(Packing, Kind, S)>> {
     let cat = fu.cat;
     let cfg = &cat.cfg;
-    // 式の軸をすべて持つ読み出し元の和を、キー順に走査する（同じ詰め方であること）
+    // Scan the union of the sources that have all dimensions of the formula, in key order (same packing)
     if let Cover::Exact(ls) = &info.cover {
         let out = fu.leaves[ls[0]].pack;
         if same_set(&out.dims, &info.dims) && ls.iter().all(|&l| fu.leaves[l].pack == out) {
@@ -680,7 +697,7 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, pac
             return Ok(Some((out.clone(), info.kind, sink)));
         }
     }
-    // 1 つの読み出し元 × 足りない軸の全メンバー、または全組み合わせを走査する
+    // Scan one source x all members of the missing dimensions, or all combinations
     let cover = match info.cover {
         Cover::Exact(ls) if ls.len() == 1 => Cover::Part(ls[0]),
         Cover::Exact(_) => Cover::All,
@@ -689,8 +706,9 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, pac
     if fu.cost(&cover, &info.dims) > SPAN_RATIO * info.mat {
         return Ok(None);
     }
-    // 走査は、結果のキーの昇順に進む（base の行の順 × fill の軸の組み合わせの順）。結果のキーの軸の順を、
-    // 最も大きい読み出し元の軸の順に合わせると、その読み出し元を引くキーもほぼ昇順に進み、近くから探せる
+    // The scan goes in ascending order of the result keys (the rows of base x the combinations of fill).
+    // If the dimensions of the result key follow the order of the largest source, the lookup keys of that
+    // source also go up, and each lookup can start near the last one
     let order: Vec<DimId> = match &cover {
         Cover::Part(l) => {
             let head = &fu.leaves[*l].pack.dims;
@@ -719,23 +737,51 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, pac
         .map(|(i, &d)| (i, (0..cat.dims[d].size).collect()))
         .collect();
     let space = Space { base: base.as_ref().map(|(c, p, pk)| (*c, p, *pk)), out: &out, fill: &fill };
-    let sink = run_space(cfg, &space, &access, &compile(&f, &access), bud, fu.copied, make)?;
+    let mut sink = run_space(cfg, &space, &access, &compile(&f, &access), bud, fu.copied, make)?;
+    sink.sort_if_unsorted(cfg);
     Ok(Some((out, info.kind, sink)))
 }
 
-/// Runs `work` on the parts and gives the results to `sink` in the order of the parts. In parallel, the parts
-/// go in batches of 2 parts for each thread: `rayon::join` gives batch i to the sink while batch i + 1
-/// computes, so at most 2 batches of results are in flight (2 x 8 x 64 K cells x 16 B = 16 MB on 4 threads).
-fn stream<T: Sync>(par: bool, parts: &[T], work: impl Fn(&T) -> Vec<(u64, f64)> + Sync, sink: &mut impl Sink) -> Result<()> {
-    if !par {
-        return parts.iter().try_for_each(|p| sink.part(work(p)));
+/// Runs `work` on the parts, part i with room for `sizes[i]` cells, and gives the cells to `sink`. A sink
+/// that is one array (`presized`) takes all parts in parallel at their offsets. Another sink takes the parts
+/// in their order. In parallel, the parts go in batches of 2 parts for each thread. `rayon::join` gives
+/// batch i to the sink while batch i + 1 computes. So at most 2 batches of results are in flight. A part of
+/// `run_space` has at most `chunk` cells (2 x 4 threads x 64 K cells x 16 B = 16 MB). A part of `run_sorted`
+/// holds the rows of all drivers in its range. The largest driver splits the ranges at every `chunk`-th key,
+/// so a smaller driver with many rows in one range makes a part above `chunk` cells.
+fn stream<T: Sync>(par: bool, parts: &[T], sizes: &[usize], work: impl Fn(&T, &mut [(u64, f64)]) -> usize + Sync, sink: &mut impl Sink) -> Result<()> {
+    if let Some(cells) = sink.presized(sizes) {
+        let mut slices = Vec::with_capacity(parts.len());
+        let mut rest = &mut cells[..];
+        for &n in sizes {
+            let (head, tail) = rest.split_at_mut(n);
+            slices.push(head);
+            rest = tail;
+        }
+        let written: Vec<usize> = if par {
+            parts.par_iter().zip(slices).map(|(p, s)| work(p, s)).collect()
+        } else {
+            parts.iter().zip(slices).map(|(p, s)| work(p, s)).collect()
+        };
+        compact(cells, sizes, &written);
+        return Ok(());
     }
-    let run = |ps: &[T]| -> Vec<Vec<(u64, f64)>> { ps.par_iter().map(&work).collect() };
-    let mut batches = parts.chunks(2 * rayon::current_num_threads().max(1));
-    let Some(first) = batches.next() else { return Ok(()) };
-    let mut ready = run(first);
-    for next in batches {
-        let (given, computed) = rayon::join(|| ready.into_iter().try_for_each(|c| sink.part(c)), || run(next));
+    let one = |(p, &n): (&T, &usize)| {
+        let mut out = vec![(0u64, 0f64); n];
+        let w = work(p, &mut out);
+        out.truncate(w);
+        out
+    };
+    if !par {
+        return parts.iter().zip(sizes).try_for_each(|x| sink.part(one(x)));
+    }
+    let run = |ps: &[T], ns: &[usize]| -> Vec<Vec<(u64, f64)>> { ps.par_iter().zip(ns).map(one).collect() };
+    let batch = 2 * rayon::current_num_threads().max(1);
+    let mut batches = parts.chunks(batch).zip(sizes.chunks(batch));
+    let Some((ps, ns)) = batches.next() else { return Ok(()) };
+    let mut ready = run(ps, ns);
+    for (ps, ns) in batches {
+        let (given, computed) = rayon::join(|| ready.into_iter().try_for_each(|c| sink.part(c)), || run(ps, ns));
         given?;
         ready = computed;
     }
@@ -759,14 +805,14 @@ fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev,
         lo = hi;
     }
     ranges.push((lo, starts(None)));
-    let total: usize = drivers.iter().map(Col::n).sum();
+    let sizes: Vec<usize> = ranges.iter().map(|(lo, hi)| lo.iter().zip(hi).map(|(a, b)| b - a).sum()).collect();
+    let total: usize = sizes.iter().sum();
 
-    let work = |(lo, hi): &Span| -> Vec<(u64, f64)> {
-        let mut out = Vec::with_capacity(lo.iter().zip(hi).map(|(a, b)| b - a).sum());
+    let work = |(lo, hi): &Span, out: &mut [(u64, f64)]| -> usize {
         let mut readers = readers(access);
         // Each Aligned access starts to read at the first key of the range
         let first = lo.iter().zip(hi).zip(drivers).filter(|((a, b), _)| a < b).map(|((a, _), d)| d.key(*a)).min();
-        let Some(first) = first else { return out };
+        let Some(first) = first else { return 0 };
         for (l, a) in access.iter().enumerate() {
             if let Access::Aligned(col) = a {
                 readers[l].pos = col.lower_bound(first);
@@ -776,6 +822,7 @@ fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev,
         let mut rds: Vec<Cursor> = drivers.iter().map(Col::cursor).collect();
         // The key at `at[j]` while `at[j] < hi[j]`. A packed key read is not free, so read it once.
         let mut next: Vec<u64> = rds.iter_mut().zip(&at).zip(hi).map(|((d, &a), &h)| if a < h { d.key(a) } else { 0 }).collect();
+        let mut w = 0;
         while let Some(key) = (0..drivers.len()).filter(|&j| at[j] < hi[j]).map(|j| next[j]).min() {
             for (j, d) in rds.iter_mut().enumerate() {
                 if at[j] < hi[j] && next[j] == key {
@@ -786,13 +833,14 @@ fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev,
                 }
             }
             if let Some(v) = f(&mut readers, key) {
-                out.push((key, v));
+                out[w] = (key, v);
+                w += 1;
             }
         }
-        out
+        w
     };
     let mut sink = make(total);
-    stream(cfg.par(total), &ranges, work, &mut sink)?;
+    stream(cfg.par(total), &ranges, &sizes, work, &mut sink)?;
     Ok(sink)
 }
 
@@ -837,7 +885,7 @@ impl<'a> Space<'_, 'a> {
 }
 
 /// Scan the keys of space, and get the value of f at each key. It counts the values before it makes the
-/// sink with `make`, so the sink is only as large as the result (f runs two times at each key).
+/// sink with `make`. So the sink is only as large as the result, and f runs two times at each key.
 /// If the dimensions of the base source come first in the result key, the result is in key order.
 fn run_space<S: Sink>(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budget, copied: usize, make: impl FnOnce(usize) -> S) -> Result<S> {
     let (n, combos) = (space.len(), space.combos());
@@ -845,8 +893,7 @@ fn run_space<S: Sink>(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bu
         return Ok(make(0));
     }
     let chunk = cfg.chunk.max(1);
-    // parts, sizes and the parts zipped with their sizes use 48 bytes for each part, which is 3 cells. Check them
-    // before they exist.
+    // parts, sizes and slices use 40 bytes for each part, which is less than 3 cells. Check them before they exist.
     let lists = n.div_ceil(chunk).saturating_mul(3).saturating_add(copied);
     bud.need(lists, "式の結果")?;
     let parts: Vec<(usize, usize)> = (0..n).step_by(chunk).map(|lo| (lo, (lo + chunk).min(n))).collect();
@@ -857,20 +904,20 @@ fn run_space<S: Sink>(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bu
     let sizes: Vec<usize> = if cfg.par(n) { parts.par_iter().map(count).collect() } else { parts.iter().map(count).collect() };
     let total: usize = sizes.iter().sum();
     bud.need(total.saturating_add(lists), "式の結果")?;
-    let parts: Vec<((usize, usize), usize)> = parts.into_iter().zip(sizes).collect();
-    let write = |&((lo, hi), m): &((usize, usize), usize)| {
+    let write = |&(lo, hi): &(usize, usize), out: &mut [(u64, f64)]| -> usize {
         let (mut readers, mut rd) = (readers(access), space.cursor());
-        let mut out = Vec::with_capacity(m);
+        let mut w = 0;
         for i in lo..hi {
             let key = space.key(i, combos, &mut rd);
             if let Some(v) = f(&mut readers, key) {
-                out.push((key, v));
+                out[w] = (key, v);
+                w += 1;
             }
         }
-        out
+        w
     };
     let mut sink = make(total);
-    stream(cfg.par(n), &parts, write, &mut sink)?;
+    stream(cfg.par(n), &parts, &sizes, write, &mut sink)?;
     Ok(sink)
 }
 
@@ -896,8 +943,8 @@ mod tests {
     use super::fits;
     use crate::*;
 
-    /// A model on d0 (10 members) x d1 (20 members): Volume on both (dense) and Start on d0 (3 members, so
-    /// that the scan of Start x d1 stays below `SPAN_RATIO` x the 20 values of `d1`).
+    /// A model on d0 (10 members) x d1 (20 members): Volume on both (dense) and Start on d0 with 3 members.
+    /// With 3 members, the scan of Start x d1 stays below `SPAN_RATIO` x the 20 values of `d1`.
     fn part_cover(cfg: Config) -> (Catalog, Vec<Src>) {
         let dims = [10, 20].iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
         let cat = Catalog { dims, maps: Vec::new(), cfg };
@@ -915,14 +962,13 @@ mod tests {
         if volume { Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(cond), vec![]) } else { cond }
     }
 
-    /// The cells of `node` by the old path, in the packing of `store`.
+    /// The cells of `node` by `eval` and `with_sorted`, in the packing of `store`.
     fn cells_of(store: &Store, cat: &Catalog, src: &[Src], node: &Node) -> Vec<(u64, f64)> {
         store.with_sorted(store.sorted_cells(eval(node, cat, src, &Restrict::all(2)).unwrap()).unwrap()).as_cube().cells
     }
 
     #[test]
     fn streamed_parts_arrive_in_key_order() {
-        // With chunk 1, the scan has 200 (or 60) parts in parallel batches
         let (cat, src) = part_cover(Config { par_min: 0, chunk: 1, ..Config::default() });
         let (plain_cat, plain_src) = part_cover(Config { fuse: false, ..Config::default() });
         let store = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
@@ -938,7 +984,6 @@ mod tests {
     #[test]
     fn a_formula_in_another_packing_does_not_stream() {
         let (cat, src) = part_cover(Config { par_min: 0, chunk: 1, ..Config::default() });
-        // The partition dimension d1 goes first in the key; the scan is in the order of Volume or Start (d0 first)
         let store = Store::new(&[0, 1], Some(1), Kind::Num, &cat).unwrap();
         for node in [ge_start(true), ge_start(false)] {
             assert!(eval_columns(&node, &cat, &src, &Budget::new(usize::MAX, 0), &store, false).unwrap().is_none());
