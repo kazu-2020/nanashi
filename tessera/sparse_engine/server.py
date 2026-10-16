@@ -508,16 +508,24 @@ class Handler(BaseHTTPRequestHandler):
                     if hmac.compare_digest(known.encode(), token.strip().encode()):
                         return user
             raise ApiError(401, "unauthorized", "Authorization: Bearer <トークン> が要る")
-        # A Host that is not loopback can be a DNS rebinding. With --insecure, the server can have other names.
-        host = self.headers.get("Host")
-        if host is not None and _loopback(srv.server_address[0]) and not _loopback_host(host):
-            raise ApiError(403, "forbidden", "認証なしのサーバーには 127.0.0.1 か localhost の名前でつなぐ（Host）")
+        self._check_host()
         # A cross-site form or fetch without a preflight cannot send application/json.
         if self.command == "POST" and self.headers.get_content_type() != "application/json":
             raise ApiError(415, "unsupported_media_type", "認証なしのサーバーへの書き込みは Content-Type: application/json で送る")
         return None
 
+    def _check_host(self) -> None:
+        """Without authentication, raise 403 for a Host that is not loopback. Also for /health and /ready."""
+        srv = self.server
+        if srv.user_header is not None or srv.tokens is not None:
+            return
+        # A Host that is not loopback can be a DNS rebinding. With --insecure, the server can have other names.
+        host = self.headers.get("Host")
+        if host is not None and _loopback(srv.server_address[0]) and not _loopback_host(host):
+            raise ApiError(403, "forbidden", "認証なしのサーバーには 127.0.0.1 か localhost の名前でつなぐ（Host）")
+
     def _get(self) -> tuple[int, Any]:
+        self._check_host()
         url = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
         parts = [p for p in url.path.split("/") if p]

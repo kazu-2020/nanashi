@@ -568,7 +568,8 @@ class Limits(unittest.TestCase):
                                    f"Content-Length: {len(body)}\r\n\r\n".encode() + body)[0]
         self.assertEqual(post(f"evil.example:{port}", "application/json"), 403)
         self.assertEqual(post(f"127.0.0.1:{port}", "text/plain"), 415)
-        self.assertEqual(Client(server.url, token=None, headers={"Host": "evil.example"}).get("/")[0], 403)
+        for path in ("/", "/health", "/ready"):
+            self.assertEqual(Client(server.url, token=None, headers={"Host": "evil.example"}).get(path)[0], 403)
         self.assertEqual(post(f"localhost:{port}", "application/json; charset=utf-8"), 200)
         self.assertEqual(self.ws.seq, 1)
 
