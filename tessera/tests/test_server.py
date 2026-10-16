@@ -737,6 +737,7 @@ class KeepAlive(unittest.TestCase):
             server.bodies.release()
             self.assertLess(time.monotonic(), deadline, "the server did not take the body permit")
             time.sleep(0.01)
+        self.assertEqual(server.idle(), 0.0)  # --idle-exit does not stop the server during the upload
         self.assertEqual(Client(server.url).get("/health"), (200, {"seq": 0, "role": "leader"}))
         status, answer = Client(server.url).post("/writes", {"client_op_id": "t", "ops": [write(self.ws, "Stock", 2, Product="p0", Month="Jan")]})
         self.assertEqual((status, answer["error"]), (503, "busy"))

@@ -604,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
         # The write keeps the permit until it ends: bodies in memory stay below max_threads x max_body.
         # The permit wait and the slot wait share 1 SLOT_WAIT, so the router attempt timeout stays valid.
         start = time.monotonic()
-        if not self.server.bodies.acquire(timeout=SLOT_WAIT):
+        if not self.server.begin_body(SLOT_WAIT):
             raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
         left = SLOT_WAIT - (time.monotonic() - start)
         try:
@@ -612,7 +612,7 @@ class Handler(BaseHTTPRequestHandler):
             self.unread_body = False
             self._in_slot(lambda: self._write(user, raw), left)
         finally:
-            self.server.bodies.release()
+            self.server.end_body()
 
     def _write(self, user: str | None, raw: bytes) -> tuple[int, Any]:
         try:
@@ -819,7 +819,7 @@ class Server(ThreadingHTTPServer):
         self._thread: threading.Thread | None = None
         self.stopping = False
         # Requests in progress (probes too) and the monotonic time of the last use (probes not).
-        self._active, self._last, self._use = 0, time.monotonic(), threading.Condition()
+        self._active, self._reading, self._last, self._use = 0, 0, time.monotonic(), threading.Condition()
 
     def trusted(self, host: str) -> bool:
         """Return True if host is in one of the trusted_proxies."""
@@ -890,13 +890,27 @@ class Server(ThreadingHTTPServer):
             self._use.notify_all()  # a request that waits for a slot gets 503 closed
         super().shutdown()
 
+    def begin_body(self, wait: float) -> bool:
+        """Take a body permit. Return False if no permit frees up in wait seconds. A held permit counts as use."""
+        if not self.bodies.acquire(timeout=wait):
+            return False
+        with self._use:
+            self._reading += 1
+        return True
+
+    def end_body(self) -> None:
+        with self._use:
+            self._reading -= 1
+            self._last = time.monotonic()
+        self.bodies.release()
+
     def touch(self) -> None:
         with self._use:
             self._last = time.monotonic()
 
     def idle(self) -> float:
         with self._use:
-            return idle_for(self._active, self._last, time.monotonic())
+            return idle_for(self._active + self._reading, self._last, time.monotonic())
 
     @property
     def url(self) -> str:

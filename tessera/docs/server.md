@@ -129,7 +129,7 @@ On SIGTERM and SIGINT, the server completes the received requests, commits the w
 The standby sees the release at its next poll (0.2 seconds), gets the right, and becomes the writer.
 If the server crashes (SIGKILL), the failover occurs at the next poll after the lease expires.
 
-With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress, the count does not start. An open keep-alive connection with no request in progress does not keep the server alive. If the value is 0 (the default), the server does not stop for this reason.
+With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress or the server reads the body of a write, the count does not start. An open keep-alive connection with no request in progress does not keep the server alive. If the value is 0 (the default), the server does not stop for this reason.
 
 In the profit and loss plan (large), a read of 1 cell through HTTP takes 0.24 ms. A write that changes the salary of 1 employee takes 0.9 ms.
 A write while 8 readers read continuously takes 2.2 ms (`bench_http.py`, local loopback, about 2,800 reads per second).
