@@ -93,6 +93,11 @@ impl PackedKeys {
     /// or 8 B for each key if `like` is empty, so the byte buffer does not grow by doubling.
     pub(crate) fn builder(capacity: usize, like: &PackedKeys) -> Builder {
         let bytes = if like.len == 0 { capacity * 8 } else { (like.bytes.len() * capacity).div_ceil(like.len).min(capacity * 8) };
+        PackedKeys::builder_with_bytes(capacity, bytes)
+    }
+
+    /// A builder for about `capacity` keys that reserves `bytes` for the packed offsets (see `packed_bytes`).
+    pub(crate) fn builder_with_bytes(capacity: usize, bytes: usize) -> Builder {
         Builder {
             len: 0,
             blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
@@ -185,8 +190,32 @@ impl PackedKeys {
 
 /// The header of the block of `chunk` that starts at word `start`, and its number of words.
 fn block_of(chunk: &[u64], start: usize) -> (Block, usize) {
-    let width = 64 - (chunk[chunk.len() - 1] - chunk[0]).leading_zeros() as usize;
+    let width = width_of(chunk[0], chunk[chunk.len() - 1]);
     (Block { base: chunk[0], start: u32::try_from(start).expect("too many words"), width: width as u8 }, (chunk.len() * width).div_ceil(64))
+}
+
+/// The bits per offset of a block whose first and last keys are `first` and `last`.
+fn width_of(first: u64, last: u64) -> usize {
+    64 - (last - first).leading_zeros() as usize
+}
+
+/// The bytes of the packed offsets of the sorted `keys`, without the 16 spare bytes. A caller that can
+/// iterate the keys twice reserves this in `builder_with_bytes`, so the builder never grows.
+pub(crate) fn packed_bytes(keys: impl Iterator<Item = u64>) -> usize {
+    let (mut words, mut first, mut last, mut len) = (0, 0, 0, 0);
+    for k in keys {
+        if len == BLOCK {
+            words += (len * width_of(first, last)).div_ceil(64);
+            len = 0;
+        }
+        if len == 0 {
+            first = k;
+        }
+        last = k;
+        len += 1;
+    }
+    words += (len * width_of(first, last)).div_ceil(64);
+    words * 8
 }
 
 /// Packs keys pushed one at a time, in sorted order and with no duplicates. It keeps only one block of
@@ -500,6 +529,7 @@ mod tests {
         cases.push(random);
         for keys in cases {
             let want = PackedKeys::new(&keys, false);
+            assert_eq!(packed_bytes(keys.iter().copied()), want.bytes.len() - 16, "n={}", keys.len());
             let mut b = PackedKeys::builder(keys.len(), &want);
             keys.iter().for_each(|&k| b.push(k));
             let got = b.finish();

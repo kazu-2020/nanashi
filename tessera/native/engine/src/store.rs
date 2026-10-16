@@ -329,14 +329,22 @@ impl Store {
                 offsets[i] += offsets[i - 1];
             }
             let mut fill = offsets.clone();
-            let n = self.base.keys.len() as u64;
-            let mut entries = vec![0u64; self.base.keys.len()];
+            let n = u32::try_from(self.base.keys.len()).expect("too many rows for the index") as u64;
+            // The rows are scattered as u32, and the u64 entries are packed as they are made, so the
+            // build holds 4 B for each row instead of 8 B.
+            let mut rows = vec![0u32; n as usize];
             for (row, k) in self.base.keys.iter().enumerate() {
                 let m = self.pack.get(k, pos) as usize;
-                entries[fill[m] as usize] = m as u64 * n + row as u64;
+                rows[fill[m] as usize] = row as u32;
                 fill[m] += 1;
             }
-            Arc::new(Postings { offsets, entries: PackedKeys::new(&entries, false), n })
+            let entries = || {
+                offsets.windows(2).enumerate().flat_map(|(m, w)| rows[w[0] as usize..w[1] as usize].iter().map(move |&row| m as u64 * n + row as u64))
+            };
+            let mut packed = PackedKeys::builder_with_bytes(n as usize, packed::packed_bytes(entries()));
+            entries().for_each(|e| packed.push(e));
+            drop(rows);
+            Arc::new(Postings { offsets, entries: packed.finish(), n })
         })
     }
 
@@ -840,6 +848,21 @@ mod tests {
         let keys = keys_in_place(cells);
         assert_eq!(keys.as_ptr(), ptr);
         assert_eq!(keys, (0..1000).collect::<Vec<u64>>());
+    }
+
+    #[test]
+    fn postings_give_the_rows_of_each_member() {
+        let dims = (0..2).map(|i| DimInfo { size: 64, ordered: false, name: format!("d{i}") }).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        // 3 blocks of rows, so the packed entries cross block boundaries inside and between members.
+        let cells: Vec<(u64, f64)> = (0..64u64 * 50).map(|k| (k * 7 % 4096, k as f64)).filter(|c| c.0 % 3 != 0).collect();
+        s.set_sorted(sorted(&cat.cfg, cells));
+        let keys: Vec<u64> = s.base.keys.iter().collect();
+        for m in 0..64 {
+            let want: Vec<u32> = keys.iter().enumerate().filter(|(_, &k)| s.pack.get(k, 1) == m).map(|(row, _)| row as u32).collect();
+            assert_eq!(s.postings(1).of(m).collect::<Vec<u32>>(), want, "m={m}");
+        }
     }
 
     #[test]
