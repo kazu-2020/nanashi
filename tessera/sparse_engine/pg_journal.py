@@ -288,6 +288,9 @@ class PgJournal(Journal):
             started = time.monotonic()
             with self._lock, self.conn.transaction():
                 row = self._take_row()
+                if row is not None and row[1] != self.head:
+                    # Raise in the transaction, so that the rollback leaves the lease free for the real writer
+                    raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {row[1]}）。開き直す")
                 if row is None:
                     other = self.conn.execute(
                         "select lease_holder, head_seq, extract(epoch from lease_expires - now())"
@@ -301,10 +304,8 @@ class PgJournal(Journal):
             if remaining <= 0:
                 raise Fenced(f"{self.model_id}: 別のプロセス（{holder}）が書き込み中（リースの期限内）")
             time.sleep(min(remaining, max(0.05, min(float(left or 0) + 0.05, 1.0))))
-        epoch, head = row
+        epoch = row[0]
         self.lease_until = started + self.lease_ttl
-        if head != self.head:
-            raise Fenced(f"{self.model_id}: 読み込んだあとに別のプロセスが書き込んだ（{self.head} → {head}）。開き直す")
         self.epoch, self.lost = epoch, False
         return epoch
 
