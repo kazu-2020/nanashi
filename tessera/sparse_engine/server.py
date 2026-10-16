@@ -369,21 +369,21 @@ def _finite_number(text: str) -> float:
 
 
 def _dumps(body) -> str:
-    """JSON text of a response. A formula can make a non-finite number (1e308 * 2), but JSON has no
-    Infinity or NaN, so it becomes null, as in JavaScript JSON.stringify."""
+    """A formula can make a non-finite number (1e308 * 2), but JSON has no Infinity or NaN,
+    so it becomes null, as in JavaScript JSON.stringify."""
     try:
         return json.dumps(body, ensure_ascii=False, allow_nan=False)
     except ValueError:
-        return json.dumps(_finite(body), ensure_ascii=False)
+        return json.dumps(_nan_to_null(body), ensure_ascii=False)
 
 
-def _finite(x):
+def _nan_to_null(x):
     if isinstance(x, float):
         return x if math.isfinite(x) else None
     if isinstance(x, dict):
-        return {k: _finite(v) for k, v in x.items()}
+        return {k: _nan_to_null(v) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
-        return [_finite(v) for v in x]
+        return [_nan_to_null(v) for v in x]
     return x
 
 

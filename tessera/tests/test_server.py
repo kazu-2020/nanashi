@@ -523,7 +523,6 @@ class Api:
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][2], "p_renamed")
 
     def test_a_non_finite_result_is_null(self):
-        # JSON has no Infinity, and strict parsers (Go encoding/json) refuse it.
         op = write(self.ws, "Stock", 1e308, Product="p0", Month="Jan")
         self.assertEqual(self.c.post("/writes", {"client_op_id": "big", "ops": [op]}), (200, {"seq": 1}))
         self.assertEqual(self.c.get(path(self.ws, "Double", "cell", Product="p0", Month="Jan")), (200, {"seq": 1, "value": None}))
