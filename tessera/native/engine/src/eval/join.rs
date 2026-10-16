@@ -161,9 +161,7 @@ fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(
         e
     };
     let keys = entries.chunk_by(|x, y| x.0 == y.0).count();
-    // The bucket count of hashbrown. A bucket has 1 control byte.
-    let slots = if keys < 8 { if keys < 4 { 4 } else { 8 } } else { (keys * 8 / 7).next_power_of_two() };
-    bud.take((slots * (size_of::<(u64, (usize, usize))>() + 1)).div_ceil(CELL_BYTES), WHAT)?;
+    bud.take(table_cells(keys, size_of::<(u64, (usize, usize))>()), WHAT)?;
     let mut index: FxHashMap<u64, (usize, usize)> = FxHashMap::with_capacity_and_hasher(keys, Default::default());
     let mut i = 0;
     index.extend(entries.chunk_by(|x, y| x.0 == y.0).map(|run| {
@@ -211,10 +209,16 @@ pub(crate) fn expand(c: Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &B
         .map(|(i, &d)| (i, members(cat, d, r)))
         .collect();
     let n = combos(&missing);
+    if n == 0 || c.cells.is_empty() {
+        return Ok(Cube { pack: out, kind: c.kind, cells: Vec::new() });
+    }
     const WHAT: &str = "EXPAND（軸の全メンバーへの展開）";
     let cells_out = n.saturating_mul(c.cells.len());
-    // The combos (8 bytes each) are freed when expand returns, so only the output stays counted.
-    b.need(cells_out.saturating_add(n.div_ceil(2)), WHAT)?;
+    // The members (4 bytes each) and the last two combo buffers of product (8 bytes each) are freed when expand
+    // returns, so only the output stays counted.
+    let members = missing.iter().map(|(_, ms)| ms.len()).sum::<usize>().div_ceil(4);
+    let last = missing.last().map_or(1, |(_, ms)| ms.len());
+    b.need(cells_out.saturating_add(n.saturating_add(n / last).div_ceil(2)).saturating_add(members), WHAT)?;
     b.take(cells_out, WHAT)?;
     let combos = product(&out, &missing);
     let combos = &combos;

@@ -78,12 +78,18 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
     let cfg = &cat.cfg;
     let p = pack.pos(dim).expect("scan の軸");
     let size = cat.dims[dim].size as usize;
-    let by_period = |cells: &[(u64, f64)]| {
-        let mut out: Vec<FxHashMap<u64, f64>> = vec![FxHashMap::default(); size];
+    const ENTRY: usize = size_of::<(u64, f64)>();
+    let by_period = |cells: &[(u64, f64)]| -> Result<Vec<FxHashMap<u64, f64>>> {
+        let mut count = vec![0usize; size];
+        for &(k, _) in cells {
+            count[pack.get(k, p) as usize] += 1;
+        }
+        b.take(count.iter().map(|&n| table_cells(n, ENTRY)).sum(), "scan の加数")?;
+        let mut out: Vec<FxHashMap<u64, f64>> = count.iter().map(|&n| FxHashMap::with_capacity_and_hasher(n, Default::default())).collect();
         for &(k, v) in cells {
             out[pack.get(k, p) as usize].insert(pack.clear(k, p), v);
         }
-        out
+        Ok(out)
     };
     let mut operands = Vec::with_capacity(links.len());
     b.take(before.cells.len(), "scan の加数")?;
@@ -100,6 +106,7 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
         operands.push(match l.op {
             Some(Op::Mul | Op::Div) => {
                 let proj = Proj::new(pack, &c.pack);
+                b.take(table_cells(c.cells.len(), ENTRY), "scan の加数")?;
                 Lookup(c.cells.into_iter().collect(), c.pack, proj)
             }
             _ => {
@@ -107,11 +114,11 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
                 if &e.pack != pack {
                     b.take(e.cells.len(), "scan の加数")?;
                 }
-                ByPeriod(by_period(&e.into_repacked(cfg, pack).cells))
+                ByPeriod(by_period(&e.into_repacked(cfg, pack).cells)?)
             }
         });
     }
-    let mut before = by_period(&before.repack(cfg, pack).cells);
+    let mut before = by_period(&before.repack(cfg, pack).cells)?;
     let mut acc: FxHashMap<u64, f64> = FxHashMap::default();
     let mut out = Vec::new();
     let mut last = None;
@@ -122,6 +129,11 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
             acc = std::mem::take(&mut before[t as usize - 1]);
         }
         last = Some(t);
+        // The accumulator gets at most the operand cells at t. Grow it before the merge, while the old and the new table both live.
+        let new: usize = operands.iter().map(|o| if let ByPeriod(cells) = o { cells[t as usize].len() } else { 0 }).sum();
+        let grown = if acc.len() + new > acc.capacity() { table_cells(acc.len() + new, ENTRY) } else { 0 };
+        b.need(out.len() + acc.len() + new + table_cells(acc.capacity(), ENTRY) + grown, "scan の結果")?;
+        acc.reserve(new);
         for (l, operand) in links.iter().zip(&operands) {
             match operand {
                 ByPeriod(cells) => {
@@ -151,7 +163,6 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
                 }),
             }
         }
-        b.need(out.len() + acc.len(), "scan の結果")?;
         out.extend(acc.iter().map(|(&k, &v)| (k | pack.put(p, t), v)));
     }
     Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells: out })
