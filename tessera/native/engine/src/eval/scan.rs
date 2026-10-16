@@ -1,38 +1,84 @@
-//! A scan whose formula is a chain of +, -, *, / and COALESCE around PREVIOUS, for example `PREVIOUS(Month) * 0.9 + Margin`.
-//! The engine evaluates each operand one time for all periods, then runs the chain along the time dimension.
+//! A scan whose formula is a tree of +, -, *, /, IF and COALESCE over PREVIOUS(dim, n), for example
+//! `IF(IsActual, Actual, PREVIOUS(Month) * 0.9 + PREVIOUS(Month, 2) * 0.1 + Margin)`.
+//! The engine evaluates each operand one time for all periods, then runs the tree along the time dimension.
 //! Each cell gets the same operations in the same order as one evaluation for each period, thus the values agree bit for bit.
 
 #[allow(unused_imports)]
 use crate::*;
 
-/// One operation on the path from PREVIOUS to the root: `acc op operand`, or `operand op acc` if `acc_left` is false.
-/// `op` None is COALESCE (an override of an overridable Metric).
-pub(crate) struct Link<'n> {
-    op: Option<Op>,
-    acc_left: bool,
-    operand: &'n Node,
+/// One node of the formula tree for one cell.
+enum Step {
+    /// The value of the Metric n periods before (n >= 1).
+    Prev(u32),
+    /// An index into the operands.
+    Operand(usize),
+    Bin(Op, Box<Step>, Box<Step>),
+    /// The condition is an operand (a lookup).
+    If(usize, Box<Step>, Option<Box<Step>>),
+    Coalesce(Box<Step>, Box<Step>),
 }
 
-/// The links from `PREVIOUS(dim)` of the Metric to the root, or None if the formula has a different shape.
+/// How the tree reads an operand. This follows `eval_with`.
+#[derive(Clone, Copy)]
+enum Use {
+    /// + and - and the branches of IF: the operand is expanded to the dimensions of the Metric and adds keys.
+    Union,
+    /// COALESCE: the same as Union, but `eval_with` does not expand the operand, thus it needs all dimensions of the Metric.
+    Coalesce,
+    /// * and / and the condition of IF: an intersection through a projection. It adds no keys.
+    Lookup,
+}
+
+/// The formula of a scan Metric as a tree over its operands.
+pub(crate) struct Tree<'n> {
+    root: Step,
+    operands: Vec<(&'n Node, Use)>,
+    /// The n of each PREVIOUS(dim, n), ascending, without duplicates.
+    pub(crate) lags: Vec<u32>,
+}
+
+/// The tree of the formula, or None if the formula has a different shape.
 /// `me(i)` is true if the Ref number i reads the Metric itself.
-pub(crate) fn chain<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool) -> Option<Vec<Link<'n>>> {
+pub(crate) fn tree<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool) -> Option<Tree<'n>> {
+    if plain(node, me) {
+        return None;
+    }
+    let mut t = Tree { root: Step::Prev(0), operands: Vec::new(), lags: Vec::new() };
+    t.root = step(node, dim, me, &mut t)?;
+    t.lags.sort_unstable();
+    t.lags.dedup();
+    Some(t)
+}
+
+fn step<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool, t: &mut Tree<'n>) -> Option<Step> {
+    let side = |n: &'n Node, u: Use, t: &mut Tree<'n>| -> Option<Box<Step>> {
+        if plain(n, me) {
+            t.operands.push((n, u));
+            Some(Box::new(Step::Operand(t.operands.len() - 1)))
+        } else {
+            step(n, dim, me, t).map(Box::new)
+        }
+    };
     match node {
-        Node::Shift { child, dim: d, n: 1 } if *d == dim && matches!(**child, Node::Ref(i) if me(i)) => Some(Vec::new()),
-        Node::Bin(Op::Add | Op::Sub | Op::Mul | Op::Div, l, r, _) | Node::Coalesce(l, r) => {
-            let op = match node {
-                Node::Bin(op, ..) => Some(*op),
-                _ => None,
+        Node::Shift { child, dim: d, n } if *d == dim && *n >= 1 && matches!(**child, Node::Ref(i) if me(i)) => {
+            let n = u32::try_from(*n).ok()?;
+            t.lags.push(n);
+            Some(Step::Prev(n))
+        }
+        Node::Bin(op @ (Op::Add | Op::Sub | Op::Mul | Op::Div), l, r, _) => {
+            let u = if matches!(op, Op::Mul | Op::Div) { Use::Lookup } else { Use::Union };
+            Some(Step::Bin(*op, side(l, u, t)?, side(r, u, t)?))
+        }
+        Node::Coalesce(l, r) => Some(Step::Coalesce(side(l, Use::Coalesce, t)?, side(r, Use::Coalesce, t)?)),
+        Node::If(c, then, else_, _) if plain(c, me) => {
+            t.operands.push((c, Use::Lookup));
+            let c = t.operands.len() - 1;
+            let then = side(then, Use::Union, t)?;
+            let else_ = match else_ {
+                Some(e) => Some(side(e, Use::Union, t)?),
+                None => None,
             };
-            let (spine, operand, acc_left) = if plain(r, me) {
-                (l, r, true)
-            } else if plain(l, me) {
-                (r, l, false)
-            } else {
-                return None;
-            };
-            let mut links = chain(spine, dim, me)?;
-            links.push(Link { op, acc_left, operand });
-            Some(links)
+            Some(Step::If(c, then, else_))
         }
         _ => None,
     }
@@ -54,27 +100,61 @@ fn plain(node: &Node, me: &dyn Fn(usize) -> bool) -> bool {
     }
 }
 
-/// An operand of a link, evaluated for all periods.
+/// An operand, evaluated for all periods.
 enum Operand {
-    /// For +, - and COALESCE: the cells of each period (by the key without the time dimension), in the dimensions of the Metric.
+    /// The cells of each period (by the key without the time dimension), in the dimensions of the Metric.
     ByPeriod(Vec<FxHashMap<u64, f64>>),
-    /// For * and /: the cells by their own key, and the projection from the key of the Metric.
+    /// The cells by their own key, and the projection from the key of the Metric.
     Lookup(FxHashMap<u64, f64>, Packing, Proj),
 }
 
-/// A union of two values: + and - count a blank side as 0, COALESCE takes the left value if it is not blank.
-fn outer(op: Option<Op>, l: Option<f64>, r: Option<f64>) -> Option<f64> {
-    match op {
-        Some(op) => scalar(op, l.unwrap_or(0.0), r.unwrap_or(0.0)),
-        None => l.or(r),
+/// The inputs of the tree for one period t.
+struct At<'a> {
+    t: u32,
+    operands: &'a [Operand],
+    pack: &'a Packing,
+    p: usize,
+    /// The results of the Metric at t - n (index n), empty if t - n < 0.
+    prev: &'a [Option<&'a FxHashMap<u64, f64>>],
+}
+
+impl At<'_> {
+    fn operand(&self, i: usize, k: u64) -> Option<f64> {
+        match &self.operands[i] {
+            Operand::ByPeriod(cells) => cells[self.t as usize].get(&k).copied(),
+            Operand::Lookup(cells, cp, proj) => cells.get(&proj.apply(self.pack, cp, k | self.pack.put(self.p, self.t))).copied(),
+        }
+    }
+
+    /// The value of the cell k, with the semantics of `eval_with`.
+    fn value(&self, s: &Step, k: u64) -> Option<f64> {
+        match s {
+            Step::Prev(n) => self.prev[*n as usize]?.get(&k).copied(),
+            Step::Operand(i) => self.operand(*i, k),
+            // A union: a blank side counts as 0
+            Step::Bin(op @ (Op::Add | Op::Sub), l, r) => match (self.value(l, k), self.value(r, k)) {
+                (None, None) => None,
+                (a, b) => scalar(*op, a.unwrap_or(0.0), b.unwrap_or(0.0)),
+            },
+            // An intersection: a division by 0 is blank
+            Step::Bin(op, l, r) => scalar(*op, self.value(l, k)?, self.value(r, k)?),
+            // A blank condition goes to neither branch
+            Step::If(c, then, else_) => {
+                if self.operand(*c, k)? != 0.0 {
+                    self.value(then, k)
+                } else {
+                    self.value(else_.as_deref()?, k)
+                }
+            }
+            Step::Coalesce(l, r) => self.value(l, k).or_else(|| self.value(r, k)),
+        }
     }
 }
 
 /// Calculate the scan for the periods `ts` (ascending) in the range r (r limits the time dimension to ts).
-/// `before` has the values of the Metric at each period t - 1 that is not in ts. The result is in the packing `pack`.
+/// `before` has the values of the Metric at each period t - n (n in `tree.lags`) that is not in ts. The result is in the packing `pack`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
-    use Operand::*;
+pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let p = pack.pos(dim).expect("scan の軸");
     let size = cat.dims[dim].size as usize;
@@ -85,74 +165,66 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
         }
         out
     };
-    let mut operands = Vec::with_capacity(links.len());
-    // eval_with already counts each operand. The budget must also count the expanded operands and `before`
+    let mut operands = Vec::with_capacity(tree.operands.len());
+    // eval_with already counts each operand. The budget must also count the expanded operands, `before` and the kept results
     let mut held = before.cells.len();
-    for l in links {
-        let c = eval_with(l.operand, cat, src, r, b)?;
-        // COALESCE does not expand its operand, thus it needs all dimensions of the Metric
-        let fits = match l.op {
-            None => same_set(c.dims(), &pack.dims),
-            Some(_) => c.dims().iter().all(|d| pack.dims.contains(d)),
+    for &(node, u) in &tree.operands {
+        let c = eval_with(node, cat, src, r, b)?;
+        let fits = match u {
+            Use::Coalesce => same_set(c.dims(), &pack.dims),
+            Use::Union | Use::Lookup => c.dims().iter().all(|d| pack.dims.contains(d)),
         };
         if !fits {
             return Err("scan の式の軸が Metric の軸と一致しない".into());
         }
-        operands.push(match l.op {
-            Some(Op::Mul | Op::Div) => {
+        operands.push(match u {
+            Use::Lookup => {
                 let proj = Proj::new(pack, &c.pack);
-                Lookup(c.cells.into_iter().collect(), c.pack, proj)
+                Operand::Lookup(c.cells.into_iter().collect(), c.pack, proj)
             }
-            _ => {
+            Use::Union | Use::Coalesce => {
                 let e = expand(&c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
                 held += e.cells.len();
                 b.need(held, "scan の加数")?;
-                ByPeriod(by_period(&e.cells))
+                Operand::ByPeriod(by_period(&e.cells))
             }
         });
     }
-    let mut before = by_period(&before.repack(cfg, pack).cells);
-    let mut acc: FxHashMap<u64, f64> = FxHashMap::default();
+    let before = by_period(&before.repack(cfg, pack).cells);
+    let max_lag = *tree.lags.last().expect("a tree has PREVIOUS") as usize;
+    // The results of the last max_lag periods in ts. PREVIOUS reads them, and they leave when no later period can read them
+    let mut done: Vec<FxHashMap<u64, f64>> = vec![FxHashMap::default(); size];
+    let mut kept = 0;
     let mut out = Vec::new();
-    let mut last = None;
-    for &t in ts {
-        if t == 0 {
-            acc.clear();
-        } else if last != Some(t - 1) {
-            acc = std::mem::take(&mut before[t as usize - 1]);
-        }
-        last = Some(t);
-        for (l, operand) in links.iter().zip(&operands) {
-            match operand {
-                ByPeriod(cells) => {
-                    let f = |a: Option<f64>, x: Option<f64>| {
-                        let v = if l.acc_left { outer(l.op, a, x) } else { outer(l.op, x, a) };
-                        v.expect("一方に値があれば和集合は値を返す")
-                    };
-                    let cells = &cells[t as usize];
-                    for (k, a) in acc.iter_mut() {
-                        *a = f(Some(*a), cells.get(k).copied());
-                    }
-                    for (&k, &x) in cells {
-                        acc.entry(k).or_insert_with(|| f(None, Some(x)));
-                    }
+    let mut seen = FxHashSet::default();
+    for (i, &t) in ts.iter().enumerate() {
+        let in_ts = |s: u32| ts[..i].binary_search(&s).is_ok();
+        let prev: Vec<Option<&FxHashMap<u64, f64>>> = (0..=max_lag as u32)
+            .map(|n| t.checked_sub(n).filter(|_| n > 0).map(|s| if in_ts(s) { &done[s as usize] } else { &before[s as usize] }))
+            .collect();
+        let at = At { t, operands: &operands, pack, p, prev: &prev };
+        // A cell can have a value only if an operand that adds keys or a PREVIOUS has a value there
+        let mut keys: Vec<&FxHashMap<u64, f64>> = tree.lags.iter().filter_map(|&n| prev[n as usize]).collect();
+        keys.extend(operands.iter().filter_map(|o| match o {
+            Operand::ByPeriod(cells) => Some(&cells[t as usize]),
+            Operand::Lookup(..) => None,
+        }));
+        let mut cur = FxHashMap::default();
+        seen.clear();
+        for &k in keys.iter().flat_map(|m| m.keys()) {
+            if seen.insert(k) {
+                if let Some(v) = at.value(&tree.root, k) {
+                    cur.insert(k, v);
                 }
-                // An intersection: a cell stays only if the operand has a value, and a division by 0 is blank
-                Lookup(cells, cp, proj) => acc.retain(|&k, a| {
-                    let op = l.op.expect("* と /");
-                    let f = |x: f64| if l.acc_left { scalar(op, *a, x) } else { scalar(op, x, *a) };
-                    match cells.get(&proj.apply(pack, cp, k | pack.put(p, t))).and_then(|&x| f(x)) {
-                        Some(v) => {
-                            *a = v;
-                            true
-                        }
-                        None => false,
-                    }
-                }),
             }
         }
-        b.need(held + out.len() + acc.len(), "scan の結果")?;
-        out.extend(acc.iter().map(|(&k, &v)| (k | pack.put(p, t), v)));
+        b.need(held + kept + out.len() + cur.len(), "scan の結果")?;
+        out.extend(cur.iter().map(|(&k, &v)| (k | pack.put(p, t), v)));
+        kept += cur.len();
+        done[t as usize] = cur;
+        if let Some(old) = (t as usize).checked_sub(max_lag) {
+            kept -= std::mem::take(&mut done[old]).len();
+        }
     }
     Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells: out })
 }
@@ -170,12 +242,23 @@ mod tests {
     }
 
     #[test]
-    fn chain_finds_only_the_supported_shapes() {
+    fn tree_finds_only_the_supported_shapes() {
         let me = |i: usize| i == 0;
+        let ok = |n: &Node| tree(n, 0, &me).is_some();
         let affine = bin(Op::Add, Box::new(bin(Op::Mul, prev(1), Node::Const(0.9, Kind::Num))), Node::Ref(1));
-        assert_eq!(chain(&affine, 0, &me).map(|l| l.len()), Some(2));
-        assert!(chain(&bin(Op::Add, prev(2), Node::Ref(1)), 0, &me).is_none(), "PREVIOUS(dim, 2)");
+        assert_eq!(tree(&affine, 0, &me).map(|t| t.operands.len()), Some(2));
+        assert!(ok(&bin(Op::Add, prev(2), Node::Ref(1))), "PREVIOUS(dim, 2)");
+        let sum = bin(Op::Add, Box::new(bin(Op::Add, prev(1), *prev(2))), *prev(3));
+        assert_eq!(tree(&sum, 0, &me).map(|t| t.lags), Some(vec![1, 2, 3]));
+        let turnover = Node::If(Box::new(Node::Ref(1)), Box::new(Node::Ref(2)), Some(Box::new(bin(Op::Mul, Box::new(Node::Ref(3)), sum))), vec![]);
+        assert!(ok(&turnover), "IF at the root with a plain condition");
         let agg = Node::Remove { child: Box::new(Node::Ref(1)), dim: 1, agg: Agg::Sum };
-        assert!(chain(&bin(Op::Add, prev(1), agg), 0, &me).is_none(), "an aggregation in an operand");
+        assert!(!ok(&bin(Op::Add, prev(1), agg)), "an aggregation in an operand");
+        assert!(!ok(&bin(Op::Add, prev(1), Node::Not(prev(1)))), "PREVIOUS under NOT");
+        assert!(!ok(&bin(Op::Add, prev(0), Node::Ref(1))), "PREVIOUS(dim, 0)");
+        let other = Node::Shift { child: Box::new(Node::Ref(0)), dim: 1, n: 1 };
+        assert!(!ok(&bin(Op::Add, Box::new(other), Node::Ref(1))), "PREVIOUS of another dimension");
+        let cond = Node::If(Box::new(bin(Op::Gt, prev(1), Node::Const(0.0, Kind::Num))), Box::new(Node::Ref(1)), None, vec![]);
+        assert!(!ok(&cond), "PREVIOUS in the condition of IF");
     }
 }
