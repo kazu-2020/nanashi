@@ -11,8 +11,10 @@ import (
 	"io"
 	"log"
 	"math/rand/v2"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -67,6 +69,12 @@ type Router struct {
 }
 
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if rt.Auth == nil {
+		if fail := rebinding(r); fail != nil {
+			fail.write(w)
+			return
+		}
+	}
 	if r.URL.Path == "/healthz" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
@@ -213,6 +221,37 @@ func (rt *Router) upstreamHeader(in http.Header, user, model string) http.Header
 		h.Set(name, user)
 	}
 	return h
+}
+
+// rebinding refuses a request without authentication that a DNS rebinding page can send.
+// The engine (tessera/sparse_engine/server.py _check_host) uses the same rule.
+func rebinding(r *http.Request) *apiError {
+	local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if local == nil {
+		return nil
+	}
+	// With --insecure, other clients connect to other addresses and can use other names.
+	if ip, _, _ := net.SplitHostPort(local.String()); !Loopback(ip) {
+		return nil
+	}
+	if !Loopback((&url.URL{Host: r.Host}).Hostname()) {
+		return &apiError{http.StatusForbidden, "forbidden", "認証なしのサーバーには 127.0.0.1 か localhost の名前でつなぐ（Host）"}
+	}
+	// A cross-site form or fetch without a preflight cannot send application/json.
+	if typ, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); r.Method == http.MethodPost && typ != "application/json" {
+		return &apiError{http.StatusUnsupportedMediaType, "unsupported_media_type",
+			"認証なしのサーバーへの書き込みは Content-Type: application/json で送る"}
+	}
+	return nil
+}
+
+// Loopback reports whether host is "localhost" or a loopback IP address.
+func Loopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // route splits "/models/{id}/rest?query" into the model id and the engine-relative remainder,
