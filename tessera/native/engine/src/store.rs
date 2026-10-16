@@ -515,6 +515,7 @@ impl Store {
                 let mut ms: Vec<u32> = keys.iter().map(|&k| self.pack.get(k, p)).collect();
                 ms.sort_unstable();
                 ms.dedup();
+                ms.shrink_to_fit(); // the sets wait in plan::Done until the write, so do not keep room for all keys
                 ms
             })
             .collect();

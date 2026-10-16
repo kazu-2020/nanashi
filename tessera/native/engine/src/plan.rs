@@ -475,6 +475,17 @@ impl Write {
     }
 }
 
+/// The cells that the write of whole results needs at its peak, with the results. The write puts the cells in the
+/// order of the store (a copy if the packing is different) and then makes the new columns (about 1 cell for each
+/// row). With `diff`, Store::replaced_all also merges the old and the new cells: 1.5 cells for each row of both,
+/// and a copy of the old cells if the store has a delta.
+fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usize {
+    let (n, old) = (value.cells.len(), store.rows_hint());
+    let merge = if diff { (old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 } } else { 0 };
+    let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
+    sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak
+}
+
 struct Done {
     m: usize,
     region: Reg,
@@ -759,6 +770,10 @@ impl<'a> Run<'a> {
                 }
             }
         };
+        if t.region.is_all() {
+            let sides: Vec<&Cube> = count.iter().chain(&low).collect();
+            Budget::new(limit, held).need(whole_write(&self.stores[t.m], &value, &sides, !self.full), "結果の書き込み")?;
+        }
         let (value, count, low) = if t.region.is_all() {
             let (cells, sets) = if self.full {
                 // 全体の再計算では下流も全体を計算し直すので、値が変わった範囲は求めない
@@ -1026,20 +1041,21 @@ mod tests {
     #[test]
     fn each_wave_fits_in_the_room_that_the_earlier_waves_leave() {
         // The rows of a stored result set the estimate of its task. Metric 1 runs alone. Metrics 2 and 3 fit
-        // together at the start of the level, but not after metric 1 keeps 16,000 bytes for apply
+        // together at the start of the level, but not after metric 1 keeps 16,000 bytes for apply. The write of a
+        // copy of 1,000 rows needs 32,000 bytes (the result and the new columns)
         let dims = vec![crate::DimInfo { size: 1000, ordered: false, name: "d0".into() }];
         let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg: crate::Config::default() };
         let store = |n: u32| {
             let keys: Vec<u32> = (0..n).collect();
             Arc::new(Store::new(&[0], None, Kind::Num, &start).unwrap().with_rows(&[&keys], &vec![1.0; n as usize]).unwrap())
         };
-        let mut stores = vec![store(1000), store(1000), store(250), store(250), store(1)];
+        let mut stores = vec![store(1000), store(1000), store(300), store(250), store(1)];
         let input = || Metric { formula: None, delta: None, source: false };
         let copy = |i| Metric { formula: Some(Formula { node: Arc::new(Node::Ref(0)), refs: vec![i] }), delta: None, source: false };
         let plan = Plan { metrics: vec![input(), copy(0), copy(0), copy(4), input()], levels: vec![vec![Step::One(1), Step::One(2), Step::One(3)]] };
         let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
         let held = held(&src);
-        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held + 40_000, ..crate::Config::default() } };
+        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held + 48_000, ..crate::Config::default() } };
         let all = || Reg::new(vec![]);
         let changed = vec![(0, all()), (4, all())];
         recalc(&cat, &plan, &mut stores, &mut vec![None; 5], &mut vec![None; 5], changed, &[], vec![], vec![], true).unwrap();
