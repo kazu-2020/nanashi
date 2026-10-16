@@ -95,6 +95,22 @@ pub fn eval_with(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budg
     Ok(out)
 }
 
+/// Evaluate a formula whose result replaces the whole stored data of `store`. If the top node fuses in the
+/// packing of `store`, the cells go in key order into the new base, and the 16 B cells never exist.
+/// With `diff`, the result also has the region of the cells whose value changed (as `replaced_all`).
+/// Gives Ok(None) if the formula does not fuse in that packing: then the caller evaluates as before.
+pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: &Store, diff: bool) -> Result<Option<Columns>> {
+    if !cat.cfg.fuse {
+        return Ok(None);
+    }
+    let mark = b.mark();
+    let r = Restrict::all(cat.dims.len());
+    let Some((_, _, sink)) = fused_into(node, cat, src, &r, b, Some(&store.pack), |n| store.sink(n, diff))? else { return Ok(None) };
+    let c = sink.finish();
+    b.settle_bytes(mark, c.bytes())?;
+    Ok(Some(c))
+}
+
 fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let ev = |n: &Node| eval_with(n, cat, src, r, bud);

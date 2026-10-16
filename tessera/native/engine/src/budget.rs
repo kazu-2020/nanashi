@@ -38,7 +38,11 @@ impl Budget {
     /// The evaluation of a node ended. Set the used bytes back to start (this drops the child results counted
     /// after it), and count the node result out.
     pub(crate) fn settle(&self, start: Mark, out: &Cube) -> Result<()> {
-        let bytes = out.cells.capacity().saturating_mul(CELL_BYTES);
+        self.settle_bytes(start, out.cells.capacity().saturating_mul(CELL_BYTES))
+    }
+
+    /// As `settle`, for a result of `bytes` bytes.
+    pub(crate) fn settle_bytes(&self, start: Mark, bytes: usize) -> Result<()> {
         self.used.set(start.0.saturating_add(bytes));
         if self.held.saturating_add(self.used.get()) > self.limit {
             return Err(self.over(bytes, "途中結果"));

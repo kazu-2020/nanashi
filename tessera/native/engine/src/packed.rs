@@ -89,10 +89,11 @@ impl PackedKeys {
         self.len
     }
 
-    /// A builder for about `capacity` keys. It reserves the bytes at the density of `like`,
-    /// or 8 B for each key if `like` is empty, so the byte buffer does not grow by doubling.
+    /// A builder for about `capacity` keys. It reserves the bytes at the density of `like`, so the byte
+    /// buffer does not grow by doubling. If `like` is empty, it reserves 2 B for each key (the density of
+    /// the large models, `docs/performance.md`), and the buffer grows if the keys pack worse.
     pub(crate) fn builder(capacity: usize, like: &PackedKeys) -> Builder {
-        let bytes = if like.len == 0 { capacity * 8 } else { (like.bytes.len() * capacity).div_ceil(like.len).min(capacity * 8) };
+        let bytes = if like.len == 0 { capacity * 2 } else { (like.bytes.len() * capacity).div_ceil(like.len).min(capacity * 8) };
         PackedKeys::builder_with_bytes(capacity, bytes)
     }
 

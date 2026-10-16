@@ -127,6 +127,8 @@ We measured this table on a cloud Linux VM (Intel Xeon 2.1 GHz, 4 vCPUs, 15 GB o
 | RSS (after recalculation) | 23.0 B |
 
 After recalculation, the stored data is the only data that Rust keeps. The table counts 16 B (key and value) for each cell. Packed keys decrease this to about 10 B (see "Packed keys" below).
+A fused formula that calculates the whole Metric again writes its result directly into the packed keys and the value column ("Fusion" in [Engine](engine.md)). Such a result uses about 10 B for each cell from the start, and the write-back does not copy it.
+With `examples/fpa.py` at 32 times its large size (157 M cells, 4 threads), the maximum Rust heap of the full recalculation went from 2,112 MB to 1,727 MB (13.4 to 11.0 B for each cell). The maximum is now in the last level with large aggregations: the stored data, the columns of one streamed result, and the buffers of two `BY` aggregations that read the largest Metric.
 The increase during recalculation (312 MB) is only about 1.25 times the new values of the formula Metrics (249 MB).
 Fused formulas do not do reads with a limited range.
 Thus a full recalculation does not make indexes for dimensions other than the partition dimension. (The engine makes these indexes when incremental recalculation reads a limited range.)
