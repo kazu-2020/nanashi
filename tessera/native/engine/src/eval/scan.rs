@@ -80,6 +80,7 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
     let size = cat.dims[dim].size as usize;
     const ENTRY: usize = size_of::<(u64, f64)>();
     let by_period = |cells: &[(u64, f64)]| -> Result<Vec<FxHashMap<u64, f64>>> {
+        b.take((size * (size_of::<usize>() + size_of::<FxHashMap<u64, f64>>())).div_ceil(CELL_BYTES), "scan の加数")?;
         let mut count = vec![0usize; size];
         for &(k, _) in cells {
             count[pack.get(k, p) as usize] += 1;
@@ -163,6 +164,8 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
                 }),
             }
         }
+        // Grow out to the length that need() counted, not to the next power of two
+        out.reserve_exact(acc.len());
         out.extend(acc.iter().map(|(&k, &v)| (k | pack.put(p, t), v)));
     }
     Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells: out })
