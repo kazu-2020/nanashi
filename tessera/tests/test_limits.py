@@ -331,5 +331,57 @@ class Logs(unittest.TestCase):
         self.assertEqual(m.eval_log[-1], "Y")
 
 
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class WriteBudget(unittest.TestCase):
+    """The write of a result into the store and the lookup arrays of a fused formula count against the budget."""
+
+    def test_write_and_lookup_arrays_stay_in_the_budget(self):
+        import gc
+
+        import nanashi_core
+        n, k = 20_000, 20
+        mib = 1 << 20
+        # (formula, dimensions, fuse, a budget that refuses it, a budget that fits it)
+        # A fits budget is about 1.1x the smallest budget that works.
+        cases = [
+            ("A + 0", ["X", "Y"], True, 1.5, 2.3),  # the lookup array of A
+            ("A * B + 0", ["X", "Y"], True, 1.5, 2.3),
+            ("R * P", ["X", "Q"], False, 15, 19.5),  # the write of the result
+        ]
+
+        def build(engine):
+            m = Named(Model(engine=engine))
+            m.add_dimension("X", [f"x{i}" for i in range(n)])
+            m.add_dimension("Y", ["y0", "y1"])
+            m.add_dimension("Q", [f"q{i}" for i in range(k)])
+            for name in "AB":
+                m.add_input(name, ["X", "Y"], {(f"x{i}", "y0"): 1.0 if i % 2 else -1.0 for i in range(n)})
+            m.add_input("P", ["X"], {(f"x{i}",): 1.0 if i % 2 else -1.0 for i in range(n)})
+            m.add_input("R", ["Q"], {(f"q{i}",): 1.0 for i in range(k)})
+            return m
+
+        for formula, dims, fuse, refused, fits in cases:
+            with self.subTest(formula=formula):
+                gc.collect()
+                m = build(RustEngine(max_bytes=int(refused * mib), fuse=fuse, par_min=1 << 40))
+                m.recalc()
+                gc.collect()
+                base = nanashi_core.heap()[0]
+                m.add_formula("Z", dims, formula)
+                nanashi_core.reset_heap_peak()
+                with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+                    m.recalc()
+                self.assertLessEqual(nanashi_core.heap()[1] - base, refused * mib, "the refused work went over max_bytes")
+                m.engine.core.configure(max_bytes=int(fits * mib))
+                nanashi_core.reset_heap_peak()
+                m.recalc()
+                self.assertLessEqual(nanashi_core.heap()[1] - base, fits * mib, "the work went over max_bytes")
+                ref = build(ReferenceEngine())
+                ref.add_formula("Z", dims, formula)
+                ref.recalc()
+                self.assertEqual(sorted(m.rows("Z")[0]), sorted(ref.rows("Z")[0]))
+                del m
+
+
 if __name__ == "__main__":
     unittest.main()
