@@ -571,7 +571,7 @@ class PgJournalTests(unittest.TestCase):
         first.release()
         with self.assertRaisesRegex(Fenced, "開き直す"):
             stale.set_cell("Price", 13, Product="A")
-        writer = Named(self.journal(acquire_wait=0.0).open(ReferenceEngine()))  # Fails if the stale process holds the lease
+        writer = Named(self.journal(acquire_wait=0.0).open(ReferenceEngine()))
         writer.set_cell("Price", 14, Product="A")
         self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
 

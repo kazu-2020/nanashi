@@ -279,9 +279,10 @@ class PgJournal(Journal):
     # ------------------------------------------------ リース
 
     def acquire(self, wait: float | None = None) -> int:
-        """書き込むためのリースを取り、世代番号を返す。別のプロセスが期限内のリースを持っていれば、
-        期限が切れるまで wait 秒（既定は acquire_wait）まで待ってから取り、それでも取れなければ Fenced。
-        手元のモデルを読み込んだあとに別のプロセスが書き込んでいたら、手元が古いのですぐ Fenced。"""
+        """Take the lease for writes and return the generation number.
+        If a different process holds a lease that did not expire, wait up to wait seconds (the default is
+        acquire_wait) for it to expire. If the lease is still not free, raise Fenced.
+        If a different process wrote after the load, the local model is old. Then raise Fenced at once."""
         wait = self.acquire_wait if wait is None else wait
         deadline = time.monotonic() + wait
         while True:
