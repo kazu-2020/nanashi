@@ -86,8 +86,7 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
         out
     };
     let mut operands = Vec::with_capacity(links.len());
-    // eval_with already counts each operand. The budget must also count the expanded operands and `before`
-    let mut held = before.cells.len();
+    b.take(before.cells.len(), "scan の加数")?;
     for l in links {
         let c = eval_with(l.operand, cat, src, r, b)?;
         // COALESCE does not expand its operand, thus it needs all dimensions of the Metric
@@ -104,10 +103,11 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
                 Lookup(c.cells.into_iter().collect(), c.pack, proj)
             }
             _ => {
-                let e = expand(c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
-                held += e.cells.len();
-                b.need(held, "scan の加数")?;
-                ByPeriod(by_period(&e.cells))
+                let e = expand(c, &pack.dims, cat, r, b)?;
+                if &e.pack != pack {
+                    b.take(e.cells.len(), "scan の加数")?;
+                }
+                ByPeriod(by_period(&e.into_repacked(cfg, pack).cells))
             }
         });
     }
@@ -151,7 +151,7 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
                 }),
             }
         }
-        b.need(held + out.len() + acc.len(), "scan の結果")?;
+        b.need(out.len() + acc.len(), "scan の結果")?;
         out.extend(acc.iter().map(|(&k, &v)| (k | pack.put(p, t), v)));
     }
     Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells: out })

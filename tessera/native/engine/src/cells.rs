@@ -23,8 +23,8 @@ where
     }
 }
 
-/// 各セルを複数のセルへ写す（件数が多ければ並列に）。
-pub(crate) fn flat_map_cells<F, I>(cfg: &Config, cells: &[(u64, f64)], f: F) -> Vec<(u64, f64)>
+/// Maps each cell to some cells (in parallel if there are many). `cap` is an upper bound of the result cells.
+pub(crate) fn flat_map_cells<F, I>(cfg: &Config, cells: &[(u64, f64)], cap: usize, f: F) -> Vec<(u64, f64)>
 where
     F: Fn(u64, f64) -> I + Sync + Send,
     I: Iterator<Item = (u64, f64)>,
@@ -32,6 +32,8 @@ where
     if cfg.par(cells.len()) {
         cells.par_iter().flat_map_iter(|&(k, v)| f(k, v)).collect()
     } else {
-        cells.iter().flat_map(|&(k, v)| f(k, v)).collect()
+        let mut out = Vec::with_capacity(cap);
+        out.extend(cells.iter().flat_map(|&(k, v)| f(k, v)));
+        out
     }
 }

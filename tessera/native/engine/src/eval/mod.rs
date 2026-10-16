@@ -159,16 +159,13 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         }
 
         Node::If(cond, then, else_, _) => {
-            // A TRUE cell joins THEN and a FALSE cell joins ELSE (INNER JOIN). An empty condition joins neither
             let c = ev(cond)?;
-            // The cells of the condition go to yes or to no
             bud.take(c.cells.len(), "IF の条件")?;
             let pick = |want: bool| Cube {
                 pack: c.pack.clone(),
                 kind: Kind::Bool,
                 cells: map_cells(cfg, &c.cells, |k, v| ((v != 0.0) == want).then_some((k, v))),
             };
-            // 各分岐は、条件がその値になるセルのメンバーに絞って評価する
             let branch = |n: &Node, part: &Cube| match semi(r, part, cat) {
                 Some(r2) => eval_with(n, cat, src, &r2, bud),
                 None => eval_with(n, cat, src, r, bud),
@@ -183,7 +180,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
             let dims = parts.iter().fold(Vec::new(), |acc, p| merge(&acc, p.dims()));
             let parts = parts.into_iter().map(|p| expand(p, &dims, cat, r, bud)).collect::<Result<Vec<_>>>()?;
             let cells: Vec<&[(u64, f64)]> = parts.iter().map(|p| &p.cells[..]).collect();
-            bud.need(cells.iter().map(|c| c.len()).sum(), "IF の結果")?;
+            bud.need(cells.iter().map(|p| p.len()).sum(), "IF の結果")?;
             Ok(Cube { pack: Packing::new(&dims, cat)?, kind, cells: cells.concat() })
         }
 
@@ -199,7 +196,11 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
 
         Node::Coalesce(first, second) => {
             let s = ev(second)?;
-            let f = ev(first)?.repack(cfg, &s.pack);
+            let f = ev(first)?;
+            if f.pack != s.pack {
+                bud.take(f.cells.len(), "COALESCE")?;
+            }
+            let f = f.into_repacked(cfg, &s.pack);
             let kind = s.kind;
             union(cfg, bud, f, s, kind, |a, b| a.or(b))
         }

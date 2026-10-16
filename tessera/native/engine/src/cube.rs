@@ -37,7 +37,9 @@ impl Cube {
             return self.clone();
         }
         let proj = Proj::new(&self.pack, pack);
-        let cells = map_cells(cfg, &self.cells, |k, v| Some((proj.apply(&self.pack, pack, k), v)));
+        // Use an exact-size map, not map_cells. A filter_map collect can make the Vec 2 times larger than necessary.
+        let f = |&(k, v): &(u64, f64)| (proj.apply(&self.pack, pack, k), v);
+        let cells = if cfg.par(self.cells.len()) { self.cells.par_iter().map(f).collect() } else { self.cells.iter().map(f).collect() };
         Cube { pack: pack.clone(), kind: self.kind, cells }
     }
 }

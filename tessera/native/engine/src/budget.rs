@@ -35,8 +35,6 @@ impl Budget {
         }
     }
 
-    /// Count `cells` more cells as used, or Err if they do not fit. Use it for a buffer that lives while the node
-    /// makes more cells. The next settle counts the buffer out.
     pub(crate) fn take(&self, cells: usize, what: &str) -> Result<()> {
         self.need(cells, what)?;
         self.used.set(self.used.get() + cells * CELL_BYTES);

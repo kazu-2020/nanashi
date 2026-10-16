@@ -89,17 +89,18 @@ pub(crate) fn sorted(cfg: &Config, mut cells: Vec<(u64, f64)>) -> Vec<(u64, f64)
     cells
 }
 
-/// セルをキーの昇順に。すでに並んでいれば（格納データから読んだセルなど）写さずに借りる。
-pub(crate) fn in_order<'a>(cfg: &Config, cells: &'a [(u64, f64)]) -> Cow<'a, [(u64, f64)]> {
+/// Cells in ascending key order. If they are in order already (for example cells of stored data), borrow them.
+fn in_order<'a>(cfg: &Config, bud: &Budget, cells: &'a [(u64, f64)]) -> Result<Cow<'a, [(u64, f64)]>> {
     if cells.windows(2).all(|w| w[0].0 < w[1].0) {
-        Cow::Borrowed(cells)
-    } else {
-        Cow::Owned(sorted(cfg, cells.to_vec()))
+        return Ok(Cow::Borrowed(cells));
     }
+    bud.take(cells.len(), SAME)?;
+    Ok(Cow::Owned(sorted(cfg, cells.to_vec())))
 }
 
+const SAME: &str = "同じ軸の式の結合";
+
 /// INNER JOIN. Only the cells with a value on both sides are in the result. A cell is empty if `f` gives None.
-/// The result counts as used in `bud`. The buffers of the join count only while the join makes the result.
 pub(crate) fn intersect(
     a: &Cube,
     b: &Cube,
@@ -129,8 +130,14 @@ fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(
     }
     // 同じ軸どうしなら、並べて突き合わせる
     if same_set(a.dims(), b.dims()) {
-        let x = in_order(cfg, &a.cells);
-        let y = if b.pack == a.pack { in_order(cfg, &b.cells) } else { Cow::Owned(sorted(cfg, b.repack(cfg, &a.pack).cells)) };
+        let x = in_order(cfg, bud, &a.cells)?;
+        let y = if b.pack == a.pack {
+            in_order(cfg, bud, &b.cells)?
+        } else {
+            bud.take(b.cells.len(), SAME)?;
+            Cow::Owned(sorted(cfg, b.repack(cfg, &a.pack).cells))
+        };
+        bud.need(x.len().min(y.len()), SAME)?;
         let cells = merge_sorted(&*x, &*y, false, |p, q| f(p.unwrap(), q.unwrap()));
         return Ok(Cube { pack: a.pack.clone(), kind, cells });
     }
@@ -143,8 +150,7 @@ fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(
     let (a_out, b_out) = (Proj::new(&a.pack, &out), Proj::new(&b.pack, &out));
 
     const WHAT: &str = "軸の違う式の結合";
-    // Sort b by the key of the shared dimensions, and index the run of each key. An entry has 24 bytes.
-    bud.take(b.cells.len().saturating_mul(3).div_ceil(2), WHAT)?;
+    bud.take((b.cells.len() * size_of::<(u64, u64, f64)>()).div_ceil(CELL_BYTES), WHAT)?;
     let entry = |&(k, v): &(u64, f64)| (b_sk.apply(&b.pack, &sk, k), b_out.apply(&b.pack, &out, k), v);
     let entries: Vec<(u64, u64, f64)> = if cfg.par(b.cells.len()) {
         let mut e: Vec<_> = b.cells.par_iter().map(entry).collect();
@@ -156,23 +162,22 @@ fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(
         e
     };
     let keys = entries.chunk_by(|x, y| x.0 == y.0).count();
-    // A hash table has a power of 2 of slots, at least 8/7 of the keys. A slot has 24 bytes and 1 control byte.
-    bud.take(((keys.saturating_mul(8) / 7).max(4).next_power_of_two().saturating_mul(25)).div_ceil(CELL_BYTES), WHAT)?;
+    // The bucket count of hashbrown. A bucket has 1 control byte.
+    let slots = if keys < 8 { if keys < 4 { 4 } else { 8 } } else { (keys * 8 / 7).next_power_of_two() };
+    bud.take((slots * (size_of::<(u64, (usize, usize))>() + 1)).div_ceil(CELL_BYTES), WHAT)?;
     let mut index: FxHashMap<u64, (usize, usize)> = FxHashMap::with_capacity_and_hasher(keys, Default::default());
     let mut i = 0;
-    while i < entries.len() {
-        let mut j = i;
-        while j < entries.len() && entries[j].0 == entries[i].0 {
-            j += 1;
-        }
-        index.insert(entries[i].0, (i, j));
-        i = j;
-    }
+    index.extend(entries.chunk_by(|x, y| x.0 == y.0).map(|run| {
+        i += run.len();
+        (run[0].0, (i - run.len(), i))
+    }));
 
     let (index, entries, f) = (&index, &entries, &f);
     let range = |k: u64| index.get(&a_sk.apply(&a.pack, &sk, k)).copied().unwrap_or((0, 0));
     // If each key of b has one entry, |a| is an upper bound of the pairs. Count them exactly only when it does not fit.
-    if !(index.len() == entries.len() && bud.need(a.cells.len(), WHAT).is_ok()) {
+    let n = if index.len() == entries.len() && bud.need(a.cells.len(), WHAT).is_ok() {
+        a.cells.len()
+    } else {
         let pairs = |&(k, _): &(u64, f64)| {
             let (i, j) = range(k);
             j - i
@@ -183,8 +188,9 @@ fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(
             a.cells.iter().map(pairs).fold(0, usize::saturating_add)
         };
         bud.need(n, WHAT)?;
-    }
-    let cells = flat_map_cells(cfg, &a.cells, |k, v| {
+        n
+    };
+    let cells = flat_map_cells(cfg, &a.cells, n, |k, v| {
         let (i, j) = range(k);
         let base = a_out.apply(&a.pack, &out, k);
         entries[i..j].iter().filter_map(move |&(_, bk, bv)| f(v, bv).map(|x| (base | bk, x)))
@@ -192,7 +198,6 @@ fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(
     Ok(Cube { pack: out, kind, cells })
 }
 
-/// Copies the values to all members (in the restrict) of the dimensions that `c` does not have.
 pub(crate) fn expand(c: Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let out = Packing::new(dims, cat)?;
@@ -207,10 +212,10 @@ pub(crate) fn expand(c: Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &B
         .map(|(i, &d)| (i, members(cat, d, r)))
         .collect();
     let n = combos(&missing);
-    b.need(n.saturating_mul(c.cells.len().max(1)).saturating_add(n), "EXPAND（軸の全メンバーへの展開）")?;
+    b.take(n.saturating_mul(c.cells.len().max(1)).saturating_add(n), "EXPAND（軸の全メンバーへの展開）")?;
     let combos = product(&out, &missing);
     let combos = &combos;
-    let cells = flat_map_cells(cfg, &c.cells, |k, v| {
+    let cells = flat_map_cells(cfg, &c.cells, n * c.cells.len(), |k, v| {
         let base = proj.apply(&c.pack, &out, k);
         combos.iter().map(move |&extra| (base | extra, v))
     });
@@ -237,8 +242,8 @@ pub(crate) fn product(pack: &Packing, spans: &[(usize, Vec<u32>)]) -> Vec<u64> {
     out
 }
 
-/// FULL OUTER JOIN. Both sides have the same packing. If a cell is on one side only, f gets None for the other side.
 pub(crate) fn union(cfg: &Config, bud: &Budget, a: Cube, b: Cube, kind: Kind, f: impl Fn(Option<f64>, Option<f64>) -> Option<f64>) -> Result<Cube> {
+    debug_assert!(a.pack == b.pack);
     bud.need(a.cells.len().saturating_add(b.cells.len()), "和の結合")?;
     let (x, y) = (sorted(cfg, a.cells), sorted(cfg, b.cells));
     Ok(Cube { pack: a.pack, kind, cells: merge_sorted(&x[..], &y[..], true, f) })
