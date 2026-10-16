@@ -2,8 +2,7 @@
 
 These are measurements of the Rust engine on an Apple M4 (10 cores, 16 GB of memory). Each value is the median of 5 runs.
 The data comes from random numbers, and the values vary by about 20% from run to run.
-The M4 tables show the values from before we added the fusion of operations ([Engine](engine.md)).
-We measured the values before and after fusion again in a different environment (see "Before and after the fusion of operations" below).
+The M4 tables come from an early version of the engine. Later changes decreased the time and the memory use.
 
 Profit and loss plan and headcount plan (`examples/fpa.py`, 18 formula Metrics):
 
@@ -32,10 +31,7 @@ A model with more formula Metrics (`bench_metrics.py`):
 | 300 | 25.22 million | 516 ms | 1.4 ms (95) |
 | 1000 | 76.99 million | 1,150 ms | 4.6 ms (394) |
 
-The one-pass scan (67 of the 1000 Metrics are scans) made the full recalculation 44% faster: 5.0 s before and 2.8 s after (median of 9 runs each, `bench_metrics.py --metrics 1000` compared with `bench_ab.py` from PR #88, a cloud machine with 4 cores, so the values are different from the table).
-The change to 1 Volume cell went from 17 ms to 11 ms, but the ranges of the runs overlap. In the profit and loss plan (`bench.py --size large`, one scan), the full recalculation did not change.
-
-The same model (1000 Metrics), when you change definitions. Before this work, each of these changes took a full recalculation of about 1,350 ms:
+The same model (1000 Metrics), when you change definitions:
 
 | Definition change | Time |
 |---|---|
@@ -60,8 +56,6 @@ It is the same flow as when you open a model from the journal, or when you chang
 | 20,000 chains | 0.83 s | 0.48 s |
 | 2,500 inputs + 2,500 formulas | 0.26 s | 0.57 s |
 
-Before, each selection of the partition dimension went through the state of all Metrics 1 time.
-Thus the time increased with the square of the number of Metrics (with 20,000 chains, 60 seconds to add and 32 seconds to rebuild).
 Now the engine uses the affected range of a change to 1 cell of each input ([how to select the partition dimension](engine.md)).
 It converts these ranges 1 time into a list for each Metric.
 In the rebuild of a model with many inputs, most of the remaining time is the cost to propagate the affected range of each input.
@@ -81,8 +75,6 @@ This flow is for a single writer that receives writes from many users at the sam
 | 1000 Metrics, 1 cell | 6.2 ms | 7.5 ms (1.0 ms of this is the copy) |
 | Profit and loss plan (4.9 million cells), change the salary of 1 employee | 0.4 ms | 0.6 ms (0.2 ms of this is the copy) |
 
-Before the copies shared the base of the stored data, the first write after a copy copied all stored data of each recalculated Metric.
-Thus a change to 1 cell of the 1000 Metrics model took 342 ms.
 The remaining time of the copy is the time for Python to copy the Metric definitions. It is proportional to the number of Metrics (about 1 ms for 1000 Metrics).
 The cost of a transaction (`transaction`) is also this copy plus the time to find the difference between the two states.
 With a transaction, a change to 1 cell of the 1000 Metrics model increases from 6.2 ms to 7.7 ms. The salary change in the profit and loss plan increases from 0.4 ms to 0.7 ms.
@@ -101,10 +93,6 @@ Reads (`bench_reads.py`, profit and loss plan (large), PayrollByEmployee has 1.3
 | `rows`: the first 50 rows of 1 department (Payroll) | 0.02 ms |
 | `summarize`: the monthly totals of sales (all products) | 2.2 ms |
 | `save` (snapshot, 1.02 million input cells) | 33 ms |
-
-Before `get` became a read API, a read of 1 cell took about 500 ms, the same as `value`. During that time, it held the GIL.
-`save` also went through all cells in Python and took about 500 ms.
-After `save` changed to Parquet, its time increased from 11 ms to 33 ms, but the size decreased from 17.9 MB to 1.4 MB ([Save and journal formats](#save-and-journal-formats)).
 
 Write while 8 readers read continuously (change the salary of 1 employee, 0.6 ms when it is the only operation).
 In standard Python, this write takes 84 ms (median), also when the readers use `get`.
@@ -128,96 +116,25 @@ With many readers, the number of reads increases by more than 4 times, and write
 
 Memory usage (`bench_memory.py`). The model is the profit and loss plan (large) multiplied by 4, with 19.65 million cells.
 The engine opens it from a snapshot and does a full recalculation.
-We measured this table on a cloud Linux VM (Intel Xeon 2.1 GHz, 4 vCPUs, 15 GB of memory) when we added the fusion of operations.
-The Rust heap does not change with the machine. The values from before fusion were the same as the values measured on the M4.
 
-| Measurement | Per cell | Before fusion |
-|---|---|---|
-| Stored data | 16.0 B | 17.6 B (base 16.0 B, indexes for dimensions other than the partition dimension 1.6 B) |
-| Rust heap (after recalculation) | 16.0 B | 17.6 B |
-| Maximum Rust heap (during recalculation) | 19.2 B | 28.6 B |
-| Increase of this from the time when the model was opened | 15.9 B | 25.2 B |
-| Same as above, calculated on 1 thread | 15.9 B | 25.2 B |
-| RSS (after recalculation) | 23.0 B | 58 B (M4) |
+| Measurement | Per cell |
+|---|---|
+| Stored data | 16.0 B |
+| Rust heap (after recalculation) | 16.0 B |
+| Maximum Rust heap (during recalculation) | 19.2 B |
+| Increase of this from the time when the model was opened | 15.9 B |
+| Same as above, calculated on 1 thread | 15.9 B |
+| RSS (after recalculation) | 23.0 B |
 
 The stored data was equal to the 16 B of the key and the value. After recalculation, the stored data is the only data that Rust keeps. The keys are now packed, and the stored data is about 10 B for each cell (see "Packed keys" below).
 The increase during recalculation (312 MB) is only about 1.25 times the new values of the formula Metrics (249 MB).
 Fused formulas do not do reads with a limited range.
 Thus a full recalculation does not make indexes for dimensions other than the partition dimension. (The engine makes these indexes when incremental recalculation reads a limited range.)
 You cannot compare RSS between Linux (glibc) and macOS, because the allocators are different.
-Before the engine aggregated while it read, the maximum was 98.6 B per cell (about 5.6 times the stored data).
-The cause was 1 formula that aggregates payroll by employee × month (5.51 million cells) to departments.
-It copied all entries at each step: the read, the mapping, the result of the join, and the sort before the aggregation. It used 531 MB (now 12 MB, for the array of the mapping).
-With the same change, the full recalculation decreased from 577–615 ms to 393–419 ms.
-In the retail model (17.56 million cells), the maximum increase of the heap during recalculation was still 5.2–6.6 GB after that change.
-This was more than 6 times the stored data (879 MB).
-Most of it was not aggregation. It was the intermediate results of 17.56 million cells that each operation made.
-
-### Before and after operation fusion
-
-The engine now evaluates a formula that connects element-wise operations without intermediate results ([Engine](engine.md)).
-We measured before and after on the same VM as above. Full recalculation shows the median of 3 runs, and the minimum–maximum in parentheses.
-
-| Model | Measurement | Before fusion | After fusion |
-|---|---|---|---|
-| Retail (xlarge of `bench.py`, 17.56 million cells) | Full recalculation | 8,877 ms (8,332–9,060) | 2,687 ms (2,437–2,876) |
-| | Maximum increase of the heap | 4,275 MB | 1,194 MB |
-| Profit and loss plan (large) × 4 (19.65 million cells) | Full recalculation | 2,485 ms (2,380–2,520) | 1,476 ms (1,419–1,478) |
-| | Same as above, 1 thread | 5,083 ms | 5,024 ms |
-| | Maximum increase of the heap | 496 MB | 312 MB |
-| Profit and loss plan (large) (4.9 million cells) | Full recalculation (1 run) | 538 ms | 363 ms |
-
-The increase in the retail model (1,194 MB) is now about 1.4 times the new values of the formula Metrics (878 MB). Before, it was about 4.9 times.
-When the engine evaluates each formula separately, the maximum heap compared to the size of the result is as follows.
-(The source is the table for each formula in `bench_memory.py`, and the same measurement method for the retail model.)
-
-| Formula | Result cells | Before fusion | After fusion |
-|---|---|---|---|
-| Retail `IF(Revenue > 1000, Revenue * 0.1, 0)` | 17.56 million | 1,661 MB (5.9 times) | 281 MB (1.0 times) |
-| Retail `Volume * Price` | 17.56 million | 1,100 MB (3.9 times) | 281 MB (1.0 times) |
-| Retail `Revenue[FILTER: Active]` | 14.06 million | 777 MB (3.5 times) | 281 MB (1.3 times) |
-| Retail `Revenue[REMOVE SUM: Store]` | 360 thousand | 1,099 MB | 17 MB |
-| Retail `Revenue[BY SUM: Product.Category]` | 1.8 million | 1,099 MB | 86 MB |
-| Profit and loss plan `IF(Version = Version."見込み", IF(IsActual, ...), PayrollRaw)` | 5.51 million | 329 MB (3.7 times) | 89 MB (1.0 times) |
-| Profit and loss plan `Salary * (1 + BenefitRate) * IF(Employed, 1) * InPeriod` | 3.05 million | 317 MB (6.5 times) | 49 MB (1.0 times) |
-| Profit and loss plan `Month >= HireMonth AND (... ISBLANK(LeaveMonth)[EXPAND: Month])` | 2.88 million | 302 MB (6.6 times) | 53 MB (1.2 times) |
-
-On 1 thread, the time of the profit and loss plan is almost the same before and after fusion.
-
-At first, fusion rejected stored data with a delta. After an edit, an input has a delta, so `Volume * Price` fell back to one operation at a time.
-Now the engine merges the base and the delta into one array and fuses ([Engine](engine.md)).
-We measured a full recalculation after the edits of `bench.py`, when Volume, Price, Cost and Target have a delta (`full_after_edit` of `bench.py`, retail xlarge, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
-
-| Measurement | Before | After |
-|---|---|---|
-| Full recalculation after the edits | 2,213 ms (1,945–2,784) | 1,948 ms (1,820–2,177) |
-| Maximum increase of the heap during it | 1,356 MB | 1,120 MB |
-
-The heap decrease is the same in each run. The time ranges overlap, so the time difference is inside the noise of this VM.
-Most of the time after the edit is the write-back and the aggregations, not `Volume * Price`. The maximum heap is now lower than for the first full recalculation (1,194 MB).
-
-### Write-back without a second copy of the keys
-
-At the write-back of a full result, the engine changed the sorted cells into the 2 columns of the base with an unzip.
-For a short time, the cells and both new columns existed together (32 bytes for each cell).
-Now only the values get a new column. The keys go into the buffer of the cells (24 bytes for each cell).
-We measured the retail model (xlarge of `bench.py`, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
-
-| Measurement | Before | After |
-|---|---|---|
-| Maximum increase of the heap, full recalculation | 1,194 MB | 1,070 MB (1,063–1,101) |
-| Maximum increase of the heap, full recalculation after the edits | 1,120 MB | 1,070 MB (1,063–1,094) |
-| Full recalculation | 2,183 ms (1,972–2,418) | 1,997 ms (1,804–2,579) |
-
-The time ranges overlap, so the time difference is inside the noise of this VM.
-The maximum is now at a different point of the recalculation. A trial version without any copy of the cells also gave 1,063 MB.
 
 RSS is larger than the Rust heap because the standard macOS allocator keeps large released blocks for reuse (MALLOC_LARGE (empty) in `vmmap`).
-In the version from before the engine aggregated while it read, RSS increased with each recalculation (1,919 MB the first time, 2,559 MB the fourth time).
-When we started the process with the environment variable `MallocLargeCache=0`, RSS stopped at 791–812 MB. The recalculation time did not change.
 RSS varies much from run to run. Thus, to compare memory usage, compare the Rust heap.
 To read the Rust heap, use `nanashi_core.heap()`. The count is always on, so subtract a value that you read before the model exists. To read the stored data of each Metric, use `m.memory()`.
-Each thread counts in its own slot. The earlier shared counter made parallel recalculation a few percent slower. With the slots, `bench.py --size xlarge` showed no difference in recalculation time between the count on and off. "Off" is the old implementation with the count stopped (`track_heap(False)`), before the count was always on. We did 5 runs for each side, and the run-to-run variation was about 20%.
 
 A comparison of journals (`bench_journal.py`, profit and loss plan, PostgreSQL in local Docker):
 
@@ -236,131 +153,51 @@ PostgreSQL in Docker Desktop writes inside a virtual machine, and each write tak
 This speed shows that the data does not get to the physical device. Thus, in this environment, a PostgreSQL commit is not safe from a power failure.
 In a production environment (with writes to the disk and network round trips), we expect commit times to increase by a few ms. You must measure again.
 
-### Before and after the closure chain
-
-The engine now compiles a fused formula into a chain of closures before the scan ([Engine](engine.md)). Before, the scan went through the expression tree at each key.
-We measured the evaluation of each fused formula alone (retail xlarge, after a full recalculation, the same VM, median of 5 alternating runs with `bench_ab.py`, minimum–maximum in parentheses):
-
-| Formula | 4 threads, before | 4 threads, after | 1 thread, before | 1 thread, after |
-|---|---|---|---|---|
-| `Volume * Price` | 216 ms (209–243) | 177 ms (170–187) | 861 ms (756–995) | 693 ms (631–878) |
-| `IF(Revenue > 1000, Revenue * 0.1, 0)` | 283 ms (271–304) | 203 ms (186–206) | 1,234 ms (1,045–2,135) | 830 ms (703–1,003) |
-| `Revenue[FILTER: Active]` | 310 ms (295–325) | 262 ms (244–267) | 988 ms (826–1,523) | 789 ms (698–841) |
-
-The full recalculation on 1 thread went from 8,051 ms (7,758–8,281) to 7,453 ms (6,963–8,139). On 4 threads, it did not change (2,472 ms and 2,501 ms). The ranges overlap in both cases.
-The results of all 11 formula Metrics are bit-identical before and after (SHA-256 of the keys and values). The heap does not change.
-Each operator (`*`, `/`, comparisons) has its own closure, so the operator is a constant in the compiled code. One shared closure that reads the operator at each key made `IF(Revenue > 1000, Revenue * 0.1, 0)` 18% slower on 4 threads (134 ms and 158 ms, the ranges do not overlap).
-
-### Aggregation into an array before the hash map
-
-Before this change, the engine tried the hash map path first and the array path second. In the retail model, `StoreRev = Revenue[REMOVE SUM: Product]` has 36,000 targets, which is few for 17.56 million rows, so it used the hash map. The array for 36,000 targets is 1 MB a thread. Now the engine tries the array first ([Engine](engine.md)). An incremental recalculation on a narrowed range keeps the old order, because the array ignores the range.
-We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.80 GHz) with `bench_ab.py` and retail xlarge. Each value is the median of 5 alternating runs, with the minimum–maximum in parentheses. The result `Total` is bit-identical on both sides, because both paths use the exact sum.
-
-| Measurement | Before | After |
-|---|---|---|
-| Full recalculation | 1,790 ms (1,718–2,359) | 1,709 ms (1,541–2,427) |
-| Full recalculation after the edits | 3,083 ms (2,780–3,443) | 2,968 ms (2,838–3,221) |
-| Maximum increase of the heap | 1,194 MB | 1,194 MB |
-
-The ranges of the full recalculation overlap, so the change is inside the noise of this VM. The evaluation of one Metric shows the change. Each value is the median of 5 evaluations after a full recalculation. We did 2 runs for each side with 4 threads and 1 run with 1 thread.
-
-| Formula | Path before → after | 4 threads, before | 4 threads, after | 1 thread, before | 1 thread, after |
-|---|---|---|---|---|---|
-| `Revenue[REMOVE SUM: Product]` (36 thousand targets) | hash map → array | 255–278 ms | 87–110 ms | 597 ms | 320 ms |
-| `Revenue[REMOVE SUM: Store]` (360 thousand targets) | array (1 thread: hash map → array) | 99–114 ms | 85–102 ms | 578 ms | 270 ms |
-| `Revenue[BY SUM: Product.Category]` (1.8 million targets) | array | 578–580 ms | 564–566 ms | 1,473 ms | 1,537 ms |
-
-With 1 thread, the full recalculation went from 6,550 ms to 6,001 ms (1 run each). Before the change, the hash map path (`fold_groups`) was 22% of the 1-thread time. Thus 22% is the upper limit of the gain.
-
-### Bucket buffers for a scattered array aggregation
-
-`CatRev = Revenue[BY SUM: Product.Category]` adds 17.56 million rows into 1.8 million combinations. Product → Category sends consecutive rows to different parts of the array, so each row missed the cache. Each of the 4 threads had its own 50 MB array, and the merge at the end took 82–100 ms on one thread. Thus CatRev was the last Metric of level 2 on 4 threads.
-Now, if the first 2^16 rows touch more than 4 MiB of the array, the engine puts the rows into buckets of 2^14 combinations and adds each bucket in the cache ([Engine](engine.md)). There is one array and no merge. `ProdRev` and `StoreRev` keep one array for each thread, because their access follows the row order. Bucket buffers for all aggregations made `ProdRev` slower (77 ms → 104–133 ms).
-We measured on a cloud VM (4 cores, 15 GB, Intel Xeon 2.10 GHz) with `bench_ab.py` and retail xlarge, 7 alternating runs for each side. The results `Total` and the CatRev cells are bit-identical on both sides.
-
-| Measurement | Before | After |
-|---|---|---|
-| Full recalculation | 1,660 ms (1,548–2,027) | 1,070 ms (998–1,401) |
-| Full recalculation after the edits | 2,835 ms (2,619–3,839) | 2,512 ms (2,014–2,959) |
-| Maximum increase of the heap | 1,064 MB | 1,054 MB |
-| Maximum increase of the heap after the edits | 1,064 MB | 997 MB |
-
-The evaluation of `CatRev` alone on 4 threads (the minimum of 5 evaluations, 2 or 3 runs) went from 496–537 ms to 152–159 ms. In a later VM session, it went from 571–637 ms to 231–242 ms.
-
 ### Packed keys
 
-The keys of a base were a `Box<[u64]>` (8 B for each cell). Now they are frame-of-reference blocks of 1,024 keys (`PackedKeys`, [Engine](engine.md)). In the retail model the offsets are 14 to 19 bits wide, so the keys use about 2 B for each cell.
-A read of one key decodes it from its block, which is slower than an array read. Thus every scan (the fused evaluation, the merge of the base and the delta, the aggregation source, and the joins) decodes one block at a time into a buffer and reads the buffer.
-We measured on a cloud VM (4 cores, Intel Xeon 2.80 GHz) with `bench_ab.py` and retail xlarge (`bench.py --engine rust --size xlarge --repeats 3`, 5 alternating runs for each side, median with minimum–maximum in parentheses). The results `total` are bit-identical on both sides.
-
-| Measurement | Before | After |
-|---|---|---|
-| Rust heap after the full recalculation | 1,162 MB (all 5 runs equal) | 738 MB (all 5 runs equal) |
-| Maximum increase of the heap, full recalculation | 1,064 MB (1,064–1,089) | 963 MB (all 5 runs equal) |
-| Maximum RSS | 2,329 MB (2,303–2,340) | 1,750 MB (1,720–1,803) |
-| Full recalculation | 2,772 ms (2,546–2,888) | 2,938 ms (2,546–2,975) |
-| Full recalculation after the edits | 5,199 ms (4,913–6,220) | 3,641 ms (3,498–3,845) |
-| Edit of 1 Volume cell | 2.79 ms (2.13–4.13) | 1.77 ms (1.67–4.89) |
-
-The heap after the recalculation is the stored data, so the stored data went from 16 B to about 10 B for each cell. The time ranges of the full recalculation and of the edits overlap, so these differences are inside the noise of this VM. The full recalculation after the edits is faster. We do not know the cause. A likely cause is the smaller base, but we did not measure it.
-A random read with `PackedKeys::get` (a binary search, `value_at`) is about 1.6 times slower than a `Vec` read in a micro-benchmark of 10 million reads (`bench_reads` in `packed.rs`, run with `--ignored`).
+The keys of a base are frame-of-reference blocks of 1,024 keys (`PackedKeys`, [Engine](engine.md)). In the retail model, the keys use about 2 B for each cell.
+A random read with `PackedKeys::get` is about 1.6 times slower than a `Vec` read (`bench_reads` in `packed.rs`, run with `--ignored`).
 
 ## Save and journal formats
 
-This is a comparison before and after two changes. Snapshots and files for large changes changed from npz to Parquet. Large changes now move as change blocks.
+These are the current values.
 (Profit and loss plan (large), PostgreSQL in local Docker, Python 3.14.)
 "Register bonuses by employee × month" is a write that adds an input Metric of 720 thousand cells.
 "Spread sales volume" is a write that changes 225 thousand cells. Both times are through `Workspace`.
 
-| Measurement | Before | After |
-|---|---:|---:|
-| Save a snapshot | 11 ms | 33 ms |
-| Size of a snapshot | 17.9 MB | 1.4 MB |
-| Load a snapshot | 14 ms | 15 ms |
-| Register bonuses by employee × month (PostgreSQL) | 2,023 ms | 485 ms |
-| Register bonuses by employee × month (file) | 1,976 ms | 762 ms |
-| Spread sales volume (PostgreSQL) | 4,152 ms | 88 ms |
-| Write 1 cell (PostgreSQL, median) | 3.3 ms | 3.1 ms |
-| Size of the files for large changes (PostgreSQL) | 33.9 MB | 0.8 MB |
-| Update of the history table after the commit (PostgreSQL) | 4,027 ms | 2,925 ms |
-| After the writes above, open from a snapshot and the journal (PostgreSQL) | 1,943 ms | 115 ms |
-| Same as above (file) | 1,873 ms | 1,793 ms |
-| Get the history of 1 bonus cell (PostgreSQL) | 22.5 ms | 8.1 ms |
+| Measurement | Time or size |
+|---|---:|
+| Save a snapshot | 33 ms |
+| Size of a snapshot | 1.4 MB |
+| Load a snapshot | 15 ms |
+| Register bonuses by employee × month (PostgreSQL) | 485 ms |
+| Spread sales volume (PostgreSQL) | 88 ms |
+| Write 1 cell (PostgreSQL, median) | 3.1 ms |
+| Size of the files for large changes (PostgreSQL) | 0.8 MB |
+| Update of the history table after the commit (PostgreSQL) | 2,925 ms |
+| After the writes above, open from a snapshot and the journal (PostgreSQL) | 115 ms |
+| Get the history of 1 bonus cell (PostgreSQL) | 8.1 ms |
 
-The time to open from the PostgreSQL journal decreased to 1/17.
-The cause is that the engine reads large changes from Parquet as change blocks, and Rust writes them together.
-(Before, the engine converted npz to Python lists and wrote 1 cell at a time.)
-At that time, the file journal still kept changes as JSON lines. Thus the time to open almost did not change. (The next table shows the fix.)
-The "after" value of the spread is from after `spread` started to write all cells together.
-When the format changed to Parquet, the spread took 3,814 ms. Almost all of that time was 225 thousand calls to `set_cell` (the journal cost was less than 10%).
-Now `spread` reads the cells of the range as columns of member numbers for each dimension and distributes the values.
-It writes them in 1 call to `write_many` of the engine, and it also extends the changed range 1 time.
-`spread` alone decreased from 3.6 seconds to 22 ms (with Python 3.14t, from 3.7 seconds to 25 ms).
-The save of a snapshot became slower because of the Parquet encoding and compression.
 By default, the save occurs in a different thread every 1000 journal entries, thus writes do not wait.
 
-The file journal also changed. It now writes large changes to the same Parquet files as `PgJournal`, not to JSON lines.
-This is the comparison before and after (the same profit and loss plan (large), times through `Workspace`).
-"Before" is the state after the spread changed to write together with `write_many`.
+The file journal writes large changes to the same Parquet files as `PgJournal`.
 
-| Measurement (file journal) | Before | After | Before (3.14t) | After (3.14t) |
-|---|---:|---:|---:|---:|
-| Register bonuses by employee × month (720 thousand cells) | 869 ms | 488 ms | 994 ms | 594 ms |
-| Spread sales volume (225 thousand cells) | 238 ms | 88 ms | 217 ms | 92 ms |
-| Write 1 cell (median) | 5.0 ms | 5.0 ms | 6.0 ms | 6.0 ms |
-| After the writes above, open from a snapshot and the journal | 1,808 ms | 50 ms | 1,774 ms | 53 ms |
-| Get the history of 1 bonus cell | 584 ms | 10.5 ms | 527 ms | 9.1 ms |
-| Size of the journal (without snapshots) | 23.8 MB | 0.8 MB | Same as left | Same as left |
+| Measurement (file journal) | Python 3.14 | Python 3.14t |
+|---|---:|---:|
+| Register bonuses by employee × month (720 thousand cells) | 488 ms | 594 ms |
+| Spread sales volume (225 thousand cells) | 88 ms | 92 ms |
+| Write 1 cell (median) | 5.0 ms | 6.0 ms |
+| After the writes above, open from a snapshot and the journal | 50 ms | 53 ms |
+| Get the history of 1 bonus cell | 10.5 ms | 9.1 ms |
+| Size of the journal (without snapshots) | 0.8 MB | Same as left |
 
-For writes, the cost to convert changes of 225 thousand or 720 thousand cells to JSON strings is gone. (In the spread, this cost was 60% of the write time.)
 To open, the engine reads large changes from Parquet as change blocks, and Rust writes them together.
-(Before, the engine converted JSON lines to Python lists and wrote 1 cell at a time.)
 For the history, the file journal reads the journal from the start. But Rust finds the 1 cell in the change blocks, thus the engine does not convert all rows to Python.
-The write of 1 cell does not change, because almost all of its time is the write to the disk (`F_FULLFSYNC`, about 3 ms each time).
+Almost all of the time of a 1-cell write is the write to the disk (`F_FULLFSYNC`, about 3 ms each time).
 
 ## Cold start of the HTTP server
 
-The router starts an engine when the first request for a model comes ([design note](../../docs/engine-lifecycle.md)).
+The router starts an engine when the first request for a model comes.
 This table gives the time from the process start of `sparse_engine.server` with `--pg` until `GET /ready` returns 200.
 The snapshot is on the local disk, at the published version, so the journal replay is empty.
 Linux, 4 cores, PostgreSQL on the same host, 3 runs each.

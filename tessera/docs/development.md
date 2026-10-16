@@ -30,13 +30,8 @@ python3.14t -m venv .venv-ft
 .venv-ft/bin/pip install -e ".[dev]"
 VIRTUAL_ENV=$PWD/.venv-ft .venv-ft/bin/maturin develop --release -m native/Cargo.toml
 ```
-GitHub Actions (`.github/workflows/tessera-test.yml`) runs the tests and the static checks with the two engines.
-The workflow starts only when `tessera/` or the workflow file changes.
-The Python tests run in one job for each Python version.
-The Rust unit tests and clippy run in parallel in a different job.
-The cache keeps the built `nanashi_core` for each content of `native/`.
-If `native/` did not change, the job does not build it again.
-For branches other than `main`, the tests run on pull requests, not on push.
+
+The CI section of the root [CLAUDE.md](../../CLAUDE.md#ci) gives the CI workflows.
 
 Run the tests as follows.
 Use `SPARSE_ENGINE` to select the default engine (`reference` or `rust`; if you do not set it, `reference`).
@@ -113,8 +108,6 @@ The limit is soft. The watcher reads the RSS 10 times a second, and RSS does not
 ```
 
 To compare memory, compare the peak of the Rust heap. RSS varies from run to run, and it is different between Linux and macOS (see [Performance](performance.md)).
-
-We removed the measurement programs for key layouts ([member-numbering.md](member-numbering.md)) and for stored data on NVMe ([out-of-core.md](out-of-core.md)). They are in the git history.
 
 ### Measure the profit and loss plan at large sizes
 
