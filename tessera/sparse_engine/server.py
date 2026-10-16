@@ -590,7 +590,8 @@ class Handler(BaseHTTPRequestHandler):
         if length is None:
             raise ApiError(411, "length_required", "Content-Length が要る")
         # int() also takes "+5", " 5" and "05". A proxy that reads such a value in a different way frames a different body.
-        if not re.fullmatch("0|[1-9][0-9]*", length):
+        # int() refuses more than 4300 digits; 16 digits are more than any max_body.
+        if not re.fullmatch("0|[1-9][0-9]{0,15}", length):
             raise ApiError(400, "bad_request", "Content-Length は 0 以上の整数（符号、空白、先頭の 0 なし）")
         length = int(length)
         if length > self.server.max_body:

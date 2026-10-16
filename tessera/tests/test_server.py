@@ -728,7 +728,7 @@ class KeepAlive(unittest.TestCase):
     def test_a_content_length_that_is_not_plain_digits_is_refused(self):
         server = self.serve()
         body = json.dumps({"client_op_id": "c", "ops": [write(self.ws, "Stock", 1, Product="p0", Month="Jan")]}).encode()
-        for length in (f"+{len(body)}", f"0{len(body)}", f"{len(body)} "):  # Python strips the spaces before a value
+        for length in (f"+{len(body)}", f"0{len(body)}", f"{len(body)} ", "9" * 5000):  # Python strips the spaces before a value
             s = self.connect(server)
             status, headers, answer = exchange(s, f"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t-alice\r\n"
                                                   f"Content-Length: {length}\r\n\r\n".encode() + body)
