@@ -329,21 +329,20 @@ impl Store {
                 offsets[i] += offsets[i - 1];
             }
             let mut fill = offsets.clone();
-            let n = u32::try_from(self.base.keys.len()).expect("too many rows for the index") as u64;
-            // The rows are scattered as u32, and the u64 entries are packed as they are made, so the
-            // build holds 4 B for each row instead of 8 B.
+            let n = self.base.keys.len() as u64; // best_postings makes sure that n fits in u32
+            // Hold the rows as u32 and pack the u64 entries one at a time. Then the build needs 4 B for each row, not 8 B.
             let mut rows = vec![0u32; n as usize];
             for (row, k) in self.base.keys.iter().enumerate() {
                 let m = self.pack.get(k, pos) as usize;
                 rows[fill[m] as usize] = row as u32;
                 fill[m] += 1;
             }
+            drop(fill);
             let entries = || {
                 offsets.windows(2).enumerate().flat_map(|(m, w)| rows[w[0] as usize..w[1] as usize].iter().map(move |&row| m as u64 * n + row as u64))
             };
             let mut packed = PackedKeys::builder_with_bytes(n as usize, packed::packed_bytes(entries()));
             entries().for_each(|e| packed.push(e));
-            drop(rows);
             Arc::new(Postings { offsets, entries: packed.finish(), n })
         })
     }
@@ -353,7 +352,7 @@ impl Store {
     pub(crate) fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, &'a Postings)> {
         let min_rows = self.cfg.postings_min_rows;
         let n = self.base.keys.len();
-        if n == 0 || n < min_rows {
+        if n == 0 || n < min_rows || n > u32::MAX as usize {
             return None;
         }
         let mut best: Option<(usize, &Arc<Sel>, &Postings)> = None;

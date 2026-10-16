@@ -199,8 +199,7 @@ fn width_of(first: u64, last: u64) -> usize {
     64 - (last - first).leading_zeros() as usize
 }
 
-/// The bytes of the packed offsets of the sorted `keys`, without the 16 spare bytes. A caller that can
-/// iterate the keys twice reserves this in `builder_with_bytes`, so the builder never grows.
+/// The bytes of the packed offsets of the sorted `keys`, without the 16 spare bytes.
 pub(crate) fn packed_bytes(keys: impl Iterator<Item = u64>) -> usize {
     let (mut words, mut first, mut last, mut len) = (0, 0, 0, 0);
     for k in keys {
