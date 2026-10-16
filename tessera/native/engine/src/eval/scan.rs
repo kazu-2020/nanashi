@@ -93,7 +93,7 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
         Ok(out)
     };
     let mut operands = Vec::with_capacity(links.len());
-    b.take(before.cells.len(), "scan の加数")?;
+    b.take(before.cells.capacity(), "scan の加数")?;
     for l in links {
         let c = eval_with(l.operand, cat, src, r, b)?;
         // COALESCE does not expand its operand, thus it needs all dimensions of the Metric
@@ -119,7 +119,12 @@ pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: Dim
             }
         });
     }
-    let mut before = by_period(&before.repack(cfg, pack).cells)?;
+    let mut before = if &before.pack == pack {
+        by_period(&before.cells)?
+    } else {
+        b.take(before.cells.len(), "scan の加数")?;
+        by_period(&before.repack(cfg, pack).cells)?
+    };
     let mut acc: FxHashMap<u64, f64> = FxHashMap::default();
     let mut out = Vec::new();
     let mut last = None;
