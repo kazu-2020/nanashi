@@ -23,7 +23,7 @@ where
     }
 }
 
-/// Maps each cell to some cells (in parallel if there are many). `cap` is an upper bound of the result cells.
+/// Maps each cell to some cells (in parallel if there are many). Only the serial path uses `cap`, an upper bound of the result cells.
 pub(crate) fn flat_map_cells<F, I>(cfg: &Config, cells: &[(u64, f64)], cap: usize, f: F) -> Vec<(u64, f64)>
 where
     F: Fn(u64, f64) -> I + Sync + Send,

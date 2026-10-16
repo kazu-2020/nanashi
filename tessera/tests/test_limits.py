@@ -281,16 +281,17 @@ class BudgetBeforeAllocation(unittest.TestCase):
         n, k = 20_000, 20
         mib = 1 << 20
         # (formula, dimensions, a budget that refuses it, a budget that fits it)
+        # A fits budget is about 1.1x the smallest budget that works, so a 1.2x over-count fails the test.
         cases = [
-            ("IF(A > 0, B, C)", ["X", "Y"], 2 * mib, 3 * mib),
-            ("A + B", ["X", "Y"], 2 * mib, 3 * mib),
-            ("A * W", ["X", "Y", "Q"], 3 * mib, 4 * mib),
-            ("IF(P > 0, W, -1)", ["X", "Q"], 8 * mib, 12 * mib),
-            ("P[EXPAND: Q] + 5", ["X", "Q"], 8 * mib, 34 * mib),
-            ("P[EXPAND: Q] * R[EXPAND: X]", ["X", "Q"], 24 * mib, 34 * mib),
+            ("IF(A > 0, B, C)", ["X", "Y"], 2, 3.25),
+            ("A + B", ["X", "Y"], 2, 2.3),
+            ("A * W", ["X", "Y", "Q"], 3, 3.3),
+            ("IF(P > 0, W, -1)", ["X", "Q"], 8, 9.5),
+            ("P[EXPAND: Q] + 5", ["X", "Q"], 8, 27),
+            ("P[EXPAND: Q] * R[EXPAND: X]", ["X", "Q"], 24, 27),
         ]
         for formula, dims, refused, fits in cases:
-            for budget, ok in [(refused, False), (fits, True)]:
+            for budget, ok in [(int(refused * mib), False), (int(fits * mib), True)]:
                 with self.subTest(formula=formula, budget=budget):
                     # A large par_min keeps the work serial. The parallel collect is a known limit.
                     m = Named(Model(engine=RustEngine(max_bytes=budget, fuse=False, par_min=1 << 40)))

@@ -128,7 +128,6 @@ fn join(a: &Cube, b: &Cube, kind: Kind, cat: &Catalog, bud: &Budget, f: impl Fn(
         let cells = map_cells(cfg, &b.cells, |k, v| f(av, v).map(|x| (k, x)));
         return Ok(Cube { pack: b.pack.clone(), kind, cells });
     }
-    // 同じ軸どうしなら、並べて突き合わせる
     if same_set(a.dims(), b.dims()) {
         let x = in_order(cfg, bud, &a.cells)?;
         let y = if b.pack == a.pack {
@@ -212,10 +211,14 @@ pub(crate) fn expand(c: Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &B
         .map(|(i, &d)| (i, members(cat, d, r)))
         .collect();
     let n = combos(&missing);
-    b.take(n.saturating_mul(c.cells.len().max(1)).saturating_add(n), "EXPAND（軸の全メンバーへの展開）")?;
+    const WHAT: &str = "EXPAND（軸の全メンバーへの展開）";
+    let cells_out = n.saturating_mul(c.cells.len());
+    // The combos (8 bytes each) are freed when expand returns, so only the output stays counted.
+    b.need(cells_out.saturating_add(n.div_ceil(2)), WHAT)?;
+    b.take(cells_out, WHAT)?;
     let combos = product(&out, &missing);
     let combos = &combos;
-    let cells = flat_map_cells(cfg, &c.cells, n * c.cells.len(), |k, v| {
+    let cells = flat_map_cells(cfg, &c.cells, cells_out, |k, v| {
         let base = proj.apply(&c.pack, &out, k);
         combos.iter().map(move |&extra| (base | extra, v))
     });
