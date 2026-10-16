@@ -90,7 +90,8 @@ Some scans do not need an evaluation for each period (`eval/scan.rs`). This appl
 The formula of that Metric must be a tree of `+`, `-`, `*`, `/`, `IF` and `COALESCE` over `PREVIOUS(dim, n)` (n >= 1), for example `IF(IsActual, Actual, PREVIOUS(Month) * 0.9 + PREVIOUS(Month, 2) * 0.1 + Margin)`.
 The condition of `IF` must not read the Metric. `COALESCE` is the override of an overridable Metric.
 An operand is a part of the formula that does not read the Metric. The engine evaluates each operand one time for all periods in the range.
-Then it calculates the tree for each key along the time dimension and writes all periods back one time. It keeps only the results of the last periods that `PREVIOUS` can read.
+A row is a key without the time dimension. The value of a row at a period reads only earlier periods of the same row and the operands.
+Thus, the engine sorts each operand by row and then by period, and calculates the rows in parallel. For each row, it calculates the tree for the periods in ascending order. Then it writes all periods back one time.
 Each cell gets the same operations in the same order as in the evaluation for each period. Thus, the result is the same bit for bit.
 The engine does not use this path if an operand has an aggregation, because an aggregation of all periods can add the values in a different order.
 If the operands of all periods do not fit in the memory budget (`max_bytes`, stored data and intermediate results), the engine evaluates one period at a time.

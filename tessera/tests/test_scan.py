@@ -46,7 +46,8 @@ def model(engine) -> Named:
 class MatchesReference(unittest.TestCase):
     def test_random_edits(self):
         rng = random.Random(20261013)
-        ref, rs = model(ReferenceEngine()), model(RustEngine())
+        # par_min=0 splits the rows of the scan into parallel parts also in this small model
+        ref, rs, par = model(ReferenceEngine()), model(RustEngine()), model(RustEngine(par_min=0))
         inputs = {"A": ["Product", "Month"], "B": ["Product", "Month"], "Price": ["Product"], "Rate": ["Product"],
                   "Cash": ["Product", "Month"],  # set_cell on Cash writes its override
                   "IsActual": ["Month"], "RecvActual": ["Product", "Month"], "Revenue": ["Product", "Month"]}
@@ -55,11 +56,12 @@ class MatchesReference(unittest.TestCase):
             coords = {d: rng.choice(ref.dimension(d).members) for d in inputs[name]}
             values = [True, False] if name == "IsActual" else [0.0, -0.0, 0.1, 1 / 3, -2.5, 7.0]
             value = None if rng.random() < 0.3 else rng.choice(values)
-            for m in (ref, rs):
+            for m in (ref, rs, par):
                 m.set_cell(name, value, **coords)
             for scan, _ in SCANS:
                 with self.subTest(round=round_, metric=scan):
                     self.assertEqual(rs.value(scan).cells, ref.value(scan).cells)
+                    self.assertEqual(par.value(scan).cells, ref.value(scan).cells)
 
     def test_edit_in_a_middle_period(self):
         """An edit in a middle period recalculates only the later periods: PREVIOUS reads the stored values before them."""
