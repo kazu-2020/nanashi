@@ -275,6 +275,41 @@ class BudgetBeforeAllocation(unittest.TestCase):
                 finally:
                     m.remove_metric("Z")
 
+    def test_work_inside_one_node_stays_in_the_budget(self):
+        # The aggregations stop the fusion, so IF, + and the join make their own buffers next to their inputs
+        import gc
+
+        import nanashi_core
+        n, budget = 76_000, 8 << 20
+        gc.collect()
+        base = nanashi_core.heap()[0]
+        m = Named(Model(engine=RustEngine(max_bytes=budget)))
+        m.add_dimension("X", [f"x{i}" for i in range(n)])
+        m.add_dimension("Y", ["y0", "y1"])
+        m.add_dimension("Q", ["q0", "q1"])
+        for name in "ABC":
+            m.add_input(name, ["X", "Y"], {(f"x{i}", "y0"): 1.0 if i % 2 else -1.0 for i in range(n)})
+        m.add_input("W", ["X", "Q"], {(f"x{i}", "q0"): 1.0 for i in range(n)})
+        m.recalc()
+        for formula, dims in [
+            ("IF(A[REMOVE SUM: Y] > 0, B[REMOVE SUM: Y], C[REMOVE SUM: Y])", ["X"]),
+            ("A[REMOVE SUM: Y] + B[REMOVE SUM: Y]", ["X"]),
+            ("A[REMOVE SUM: Y] * W", ["X", "Q"]),
+        ]:
+            with self.subTest(formula=formula):
+                m.add_formula("Z", dims, formula)
+                try:
+                    gc.collect()
+                    nanashi_core.reset_heap_peak()
+                    try:
+                        m.recalc()
+                    except ValueError as e:
+                        self.assertIn("メモリの予算を超える", str(e))
+                    else:
+                        self.assertLessEqual(nanashi_core.heap()[1] - base, budget, "the work went over max_bytes")
+                finally:
+                    m.remove_metric("Z")
+
 
 class Memory(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
