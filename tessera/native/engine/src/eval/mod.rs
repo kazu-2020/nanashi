@@ -12,7 +12,7 @@ pub(crate) use agg::*;
 pub(crate) use exact::ExactSum;
 pub(crate) use fuse::*;
 pub(crate) use join::*;
-pub(crate) use scan::{chain, chain_scan};
+pub(crate) use scan::{tree, tree_scan};
 
 #[inline]
 pub(crate) fn b2f(x: bool) -> f64 {
