@@ -5,12 +5,12 @@
 
 #[allow(unused_imports)]
 use crate::*;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 /// One node of the formula tree for one cell.
 enum Step {
     /// The value of the Metric n periods before (n >= 1).
     Prev(u32),
-    /// An index into the operands.
     Operand(usize),
     Bin(Op, Box<Step>, Box<Step>),
     /// The condition is an operand (a lookup).
@@ -21,7 +21,7 @@ enum Step {
 /// How the tree reads an operand. This follows `eval_with`.
 #[derive(Clone, Copy)]
 enum Use {
-    /// + and - and the branches of IF: the operand is expanded to the dimensions of the Metric and adds keys.
+    /// + and - and the branches of IF: the engine expands the operand to the dimensions of the Metric. It adds keys.
     Union,
     /// COALESCE: the same as Union, but `eval_with` does not expand the operand, thus it needs all dimensions of the Metric.
     Coalesce,
@@ -43,39 +43,39 @@ pub(crate) fn tree<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool) -
     if plain(node, me) {
         return None;
     }
-    let mut t = Tree { root: Step::Prev(0), operands: Vec::new(), lags: Vec::new() };
-    t.root = step(node, dim, me, &mut t)?;
-    t.lags.sort_unstable();
-    t.lags.dedup();
-    Some(t)
+    let (mut operands, mut lags) = (Vec::new(), Vec::new());
+    let root = step(node, dim, me, &mut operands, &mut lags)?;
+    lags.sort_unstable();
+    lags.dedup();
+    Some(Tree { root, operands, lags })
 }
 
-fn step<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool, t: &mut Tree<'n>) -> Option<Step> {
-    let side = |n: &'n Node, u: Use, t: &mut Tree<'n>| -> Option<Box<Step>> {
+fn step<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool, ops: &mut Vec<(&'n Node, Use)>, lags: &mut Vec<u32>) -> Option<Step> {
+    let side = |n: &'n Node, u: Use, ops: &mut Vec<(&'n Node, Use)>, lags: &mut Vec<u32>| -> Option<Box<Step>> {
         if plain(n, me) {
-            t.operands.push((n, u));
-            Some(Box::new(Step::Operand(t.operands.len() - 1)))
+            ops.push((n, u));
+            Some(Box::new(Step::Operand(ops.len() - 1)))
         } else {
-            step(n, dim, me, t).map(Box::new)
+            step(n, dim, me, ops, lags).map(Box::new)
         }
     };
     match node {
         Node::Shift { child, dim: d, n } if *d == dim && *n >= 1 && matches!(**child, Node::Ref(i) if me(i)) => {
             let n = u32::try_from(*n).ok()?;
-            t.lags.push(n);
+            lags.push(n);
             Some(Step::Prev(n))
         }
         Node::Bin(op @ (Op::Add | Op::Sub | Op::Mul | Op::Div), l, r, _) => {
             let u = if matches!(op, Op::Mul | Op::Div) { Use::Lookup } else { Use::Union };
-            Some(Step::Bin(*op, side(l, u, t)?, side(r, u, t)?))
+            Some(Step::Bin(*op, side(l, u, ops, lags)?, side(r, u, ops, lags)?))
         }
-        Node::Coalesce(l, r) => Some(Step::Coalesce(side(l, Use::Coalesce, t)?, side(r, Use::Coalesce, t)?)),
+        Node::Coalesce(l, r) => Some(Step::Coalesce(side(l, Use::Coalesce, ops, lags)?, side(r, Use::Coalesce, ops, lags)?)),
         Node::If(c, then, else_, _) if plain(c, me) => {
-            t.operands.push((c, Use::Lookup));
-            let c = t.operands.len() - 1;
-            let then = side(then, Use::Union, t)?;
+            ops.push((c, Use::Lookup));
+            let c = ops.len() - 1;
+            let then = side(then, Use::Union, ops, lags)?;
             let else_ = match else_ {
-                Some(e) => Some(side(e, Use::Union, t)?),
+                Some(e) => Some(side(e, Use::Union, ops, lags)?),
                 None => None,
             };
             Some(Step::If(c, then, else_))
@@ -103,8 +103,8 @@ fn plain(node: &Node, me: &dyn Fn(usize) -> bool) -> bool {
 /// An operand, evaluated for all periods.
 enum Operand {
     /// The cells in the dimensions of the Metric, in the order of `by_row`.
-    ByPeriod(Vec<(u64, f64)>),
-    /// A lookup with all dimensions of the Metric: the same as ByPeriod, but it adds no rows.
+    ByRow(Vec<(u64, f64)>),
+    /// A lookup with all dimensions of the Metric: the same as ByRow, but it adds no rows.
     Aligned(Vec<(u64, f64)>),
     /// The cells by their own key, and the projection from the key of the Metric.
     Lookup(FxHashMap<u64, f64>, Packing, Proj),
@@ -116,11 +116,7 @@ fn by_row(cfg: &Config, mut cells: Vec<(u64, f64)>, shift: u32) -> Vec<(u64, f64
     for c in &mut cells {
         c.0 = c.0.rotate_right(shift);
     }
-    if cfg.par(cells.len()) {
-        cells.par_sort_unstable_by_key(|c| c.0);
-    } else {
-        cells.sort_unstable_by_key(|c| c.0);
-    }
+    sort_cells(cfg, &mut cells);
     cells
 }
 
@@ -140,7 +136,7 @@ struct At<'a> {
 impl At<'_> {
     fn operand(&self, i: usize) -> Option<f64> {
         match &self.operands[i] {
-            Operand::ByPeriod(_) | Operand::Aligned(_) => self.vals[i][self.t],
+            Operand::ByRow(_) | Operand::Aligned(_) => self.vals[i][self.t],
             Operand::Lookup(cells, cp, proj) => cells.get(&proj.apply(self.pack, cp, self.key)).copied(),
         }
     }
@@ -172,7 +168,7 @@ impl At<'_> {
 
 /// Calculate the scan for the periods `ts` (ascending) in the range r (r limits the time dimension to ts).
 /// `before` has the values of the Metric at each period t - n (n in `tree.lags`) that is not in ts. The result is in the packing `pack`.
-/// A row reads only its own earlier periods, thus the rows are calculated in parallel.
+/// A row reads only its own earlier periods, thus the engine calculates the rows in parallel.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
@@ -180,7 +176,7 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
     let size = cat.dims[dim].size as usize;
     let (shift, tmask) = (pack.shifts[p], pack.masks[p]);
     let mut operands = Vec::with_capacity(tree.operands.len());
-    // eval_with already counts each operand. The budget must also count the expanded operands, `before` and the result
+    // eval_with already counts each operand. The budget must also count the copies, `before`, the buffers and the result
     let mut held = before.cells.len();
     for &(node, u) in &tree.operands {
         let c = eval_with(node, cat, src, r, b)?;
@@ -192,7 +188,11 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
             return Err("scan の式の軸が Metric の軸と一致しない".into());
         }
         operands.push(match u {
-            Use::Lookup if same_set(c.dims(), &pack.dims) => Operand::Aligned(by_row(cfg, c.into_repacked(cfg, pack).cells, shift)),
+            Use::Lookup if same_set(c.dims(), &pack.dims) => {
+                held += c.cells.len();
+                b.need(held, "scan の加数")?;
+                Operand::Aligned(by_row(cfg, c.into_repacked(cfg, pack).cells, shift))
+            }
             Use::Lookup => {
                 let proj = Proj::new(pack, &c.pack);
                 Operand::Lookup(c.cells.into_iter().collect(), c.pack, proj)
@@ -201,46 +201,61 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
                 let e = expand(&c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
                 held += e.cells.len();
                 b.need(held, "scan の加数")?;
-                Operand::ByPeriod(by_row(cfg, e.cells, shift))
+                Operand::ByRow(by_row(cfg, e.cells, shift))
             }
         });
     }
+    held += before.cells.len();
+    b.need(held, "scan の加数")?;
     let before = by_row(cfg, before.repack(cfg, pack).cells, shift);
-    // The cells of each operand by row, and `before` as the last
-    let mut srcs: Vec<&[(u64, f64)]> = operands
-        .iter()
-        .map(|o| match o {
-            Operand::ByPeriod(c) | Operand::Aligned(c) => &c[..],
-            Operand::Lookup(..) => &[],
-        })
-        .collect();
-    srcs.push(&before);
     let row = |k: u64| k & !tmask;
     // A cell gets a value only from an operand that adds keys or from an earlier value of its row. These are all such rows
     let mut rows = Vec::new();
-    for (s, o) in srcs.iter().zip(operands.iter().map(Some).chain([None])) {
-        if matches!(o, Some(Operand::Aligned(_))) {
-            continue;
-        }
-        for c in s.iter() {
-            if rows.last() != Some(&row(c.0)) {
-                rows.push(row(c.0));
-            }
+    let adds = operands.iter().filter_map(|o| match o {
+        Operand::ByRow(c) => Some(&c[..]),
+        _ => None,
+    });
+    for c in adds.chain([&before[..]]).flatten() {
+        if rows.last() != Some(&row(c.0)) {
+            rows.push(row(c.0));
         }
     }
     rows.sort_unstable();
     rows.dedup();
-    let run = |chunk: &[u64]| {
-        let mut pos: Vec<usize> = srcs.iter().map(|s| s.partition_point(|c| c.0 < chunk[0])).collect();
-        let mut bufs = vec![vec![None; size]; srcs.len()];
+    // The cells of each operand by row, and `before` as the last. A Lookup operand has no cells here and no buffer
+    let mut srcs: Vec<Option<&[(u64, f64)]>> = operands
+        .iter()
+        .map(|o| match o {
+            Operand::ByRow(c) | Operand::Aligned(c) => Some(&c[..]),
+            Operand::Lookup(..) => None,
+        })
+        .collect();
+    srcs.push(Some(&before));
+    let parts = if cfg.par(held) { rayon::current_num_threads() * 4 } else { 1 };
+    // A row key takes half a cell. Each chunk that runs at the same time has a buffer of `size` slots for each source
+    let slots = srcs.iter().flatten().count() * size * parts.min(rayon::current_num_threads());
+    held += rows.len().div_ceil(2) + slots;
+    b.need(held, "scan の加数")?;
+    // A Budget is not Sync. The chunks count their cells here, and a chunk stops when the result does not fit
+    let room = b.room().saturating_sub(held);
+    let made = AtomicUsize::new(0);
+    let run = |chunk: &[u64]| -> Option<Vec<(u64, f64)>> {
+        let mut pos: Vec<usize> = srcs.iter().map(|s| s.map_or(0, |s| s.partition_point(|c| c.0 < chunk[0]))).collect();
+        // The cells of the last row of each source. Only their slots get a reset
+        let mut last: Vec<usize> = pos.clone();
+        let mut bufs: Vec<Vec<Option<f64>>> = srcs.iter().map(|s| vec![None; if s.is_some() { size } else { 0 }]).collect();
         let mut out = Vec::new();
         for &w in chunk {
-            for ((s, i), buf) in srcs.iter().zip(&mut pos).zip(&mut bufs) {
-                buf.fill(None);
+            for (((s, i), l), buf) in srcs.iter().zip(&mut pos).zip(&mut last).zip(&mut bufs) {
+                let Some(s) = s else { continue };
+                for c in &s[*l..*i] {
+                    buf[(c.0 & tmask) as usize] = None;
+                }
                 // An Aligned operand can have rows that are not in `rows`
                 while s.get(*i).is_some_and(|c| row(c.0) < w) {
                     *i += 1;
                 }
+                *l = *i;
                 while let Some(&(k, v)) = s.get(*i).filter(|c| row(c.0) == w) {
                     buf[(k & tmask) as usize] = Some(v);
                     *i += 1;
@@ -249,6 +264,7 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
             // A period in ts reads only earlier periods, and each of them in ts already has its new result here
             let (hist, vals) = bufs.split_last_mut().expect("srcs has before");
             let base = w.rotate_left(shift);
+            let n = out.len();
             for &t in ts {
                 let key = base | pack.put(p, t);
                 let v = At { t: t as usize, key, operands: &operands, pack, vals, hist }.value(&tree.root);
@@ -257,14 +273,22 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
                     out.push((key, v));
                 }
             }
+            let n = out.len() - n;
+            if made.fetch_add(n, Relaxed) + n > room {
+                return None;
+            }
         }
-        out
+        Some(out)
     };
-    let parts = if cfg.par(held) { rayon::current_num_threads() * 4 } else { 1 };
-    let len = rows.len().div_ceil(parts).max(1);
-    let outs: Vec<Vec<(u64, f64)>> = if parts > 1 { rows.par_chunks(len).map(run).collect() } else { rows.chunks(len).map(run).collect() };
-    b.need(held + outs.iter().map(Vec::len).sum::<usize>(), "scan の結果")?;
-    Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells: outs.concat() })
+    let outs: Option<Vec<Vec<(u64, f64)>>> = rows.par_chunks(rows.len().div_ceil(parts).max(1)).map(run).collect();
+    // If a chunk stopped, this is Err
+    b.need(held + made.load(Relaxed), "scan の結果")?;
+    let outs = outs.expect("the result fits");
+    let mut cells = Vec::with_capacity(outs.iter().map(Vec::len).sum());
+    for mut o in outs {
+        cells.append(&mut o);
+    }
+    Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells })
 }
 
 #[cfg(test)]

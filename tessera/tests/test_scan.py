@@ -34,7 +34,7 @@ def model(engine) -> Named:
     m.add_input("B", ["Product", "Month"], {("p1", "m02"): 0.1})
     m.add_input("Price", ["Product"], {("p2",): 0.3})
     m.add_input("Rate", ["Product"], {("p1",): 1.1, ("p3",): 0.7})
-    m.add_input("IsActual", ["Month"], {(mo,): True for mo in MONTHS[:4]}, kind="boolean")
+    m.add_input("IsActual", ["Month"], {(mo,): mo in MONTHS[:4] for mo in MONTHS}, kind="boolean")
     m.add_input("RecvActual", ["Product", "Month"], {(p, mo): 2.0 + i for i, (p, mo) in enumerate((p, mo) for p in ["p1", "p2"] for mo in MONTHS[:4])})
     m.add_input("Revenue", ["Product", "Month"], {(p, mo): 1.0 + (i % 5) / 4 for i, (p, mo) in enumerate((p, mo) for p in ["p1", "p2", "p3"] for mo in MONTHS)})
     for name, formula in SCANS:
@@ -64,16 +64,17 @@ class MatchesReference(unittest.TestCase):
                     self.assertEqual(par.value(scan).cells, ref.value(scan).cells)
 
     def test_edit_in_a_middle_period(self):
-        """An edit in a middle period recalculates only the later periods: PREVIOUS reads the stored values before them."""
+        """After an edit in a middle period, the values agree with the reference. PREVIOUS reads the stored values before the edit."""
         ref, rs = model(ReferenceEngine()), model(RustEngine())
         for m in (ref, rs):
-            m.value("Turn6")  # the first read calculates all periods. The edits below then recalculate from m06 or m07
+            m.value("Turn6")  # the first read calculates all periods. The edits below then recalculate from m03 or m07
+            m.set_cell("RecvActual", 9.0, Product="p1", Month="m03")
             m.set_cell("Revenue", 3.5, Product="p1", Month="m07")
-            m.set_cell("IsActual", True, Month="m06")
         for scan, _ in SCANS:
             with self.subTest(metric=scan):
                 self.assertEqual(rs.value(scan).cells, ref.value(scan).cells)
-        self.assertTrue(ref.value("Turn6").cells, "the turnover has values")
+        late = [k for k in ref.value("Turn6").cells if k[1] in MONTHS[6:]]
+        self.assertTrue(late, "the turnover has values in the forecast months")
 
     def test_small_budget_uses_the_per_period_path(self):
         """If the operands of all periods do not fit in max_bytes, the engine evaluates one period at a time."""

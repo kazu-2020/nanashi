@@ -87,7 +87,7 @@ If the range is the full Metric, the parallel step also makes the new stored dat
 If the work of a stage is small (the estimate of recalculated rows is less than 16,384), the cost of the parallel handoff is larger. Thus, the engine calculates the stage in sequence.
 A scan writes to its own stored data for each time period. Thus, the engine calculates scans in sequence at the end of the stage.
 Some scans do not need an evaluation for each period (`eval/scan.rs`). This applies if only one Metric of the scan changes.
-The formula of that Metric must be a tree of `+`, `-`, `*`, `/`, `IF` and `COALESCE` over `PREVIOUS(dim, n)` (n >= 1), for example `IF(IsActual, Actual, PREVIOUS(Month) * 0.9 + PREVIOUS(Month, 2) * 0.1 + Margin)`.
+The formula of that Metric must be a tree of `+`, `-`, `*`, `/`, `IF` and `COALESCE` over `PREVIOUS(dim, n)` (n >= 1). An example is `IF(IsActual, Actual, PREVIOUS(Month) * 0.9 + PREVIOUS(Month, 2) * 0.1 + Margin)`.
 The condition of `IF` must not read the Metric. `COALESCE` is the override of an overridable Metric.
 An operand is a part of the formula that does not read the Metric. The engine evaluates each operand one time for all periods in the range.
 A row is a key without the time dimension. The value of a row at a period reads only earlier periods of the same row and the operands.
