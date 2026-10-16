@@ -224,17 +224,14 @@ func (rt *Router) upstreamHeader(in http.Header, user, model string) http.Header
 }
 
 // rebinding refuses a request without authentication that a DNS rebinding page can send.
-// The engine (tessera/sparse_engine/server.py _check_host) uses the same rule.
 func rebinding(r *http.Request) *apiError {
-	local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
-	if local == nil {
-		return nil
+	// On a non-loopback address (--insecure), clients can use any host name, so do not check the Host.
+	if local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr); local != nil {
+		if ip, _, _ := net.SplitHostPort(local.String()); !Loopback(ip) {
+			return nil
+		}
 	}
-	// With --insecure, other clients connect to other addresses and can use other names.
-	if ip, _, _ := net.SplitHostPort(local.String()); !Loopback(ip) {
-		return nil
-	}
-	if !Loopback((&url.URL{Host: r.Host}).Hostname()) {
+	if !Loopback(strings.ToLower((&url.URL{Host: r.Host}).Hostname())) {
 		return &apiError{http.StatusForbidden, "forbidden", "認証なしのサーバーには 127.0.0.1 か localhost の名前でつなぐ（Host）"}
 	}
 	// A cross-site form or fetch without a preflight cannot send application/json.

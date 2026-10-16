@@ -515,6 +515,7 @@ func TestNoAuthRefusesRebinding(t *testing.T) {
 		{"foreign host on healthz", "GET", "/healthz", map[string]string{"Host": "evil.example"}, 403},
 		{"form post", "POST", writes, map[string]string{"Content-Type": "text/plain"}, 415},
 		{"localhost", "POST", writes, map[string]string{"Host": "localhost:8090"}, 200},
+		{"upper-case localhost", "POST", writes, map[string]string{"Host": "LOCALHOST"}, 200},
 		{"IPv6 loopback", "POST", writes, map[string]string{"Host": "[::1]:8090"}, 200},
 		{"json with charset", "POST", writes, map[string]string{"Content-Type": "application/json; charset=utf-8"}, 200},
 	} {
@@ -526,7 +527,7 @@ func TestNoAuthRefusesRebinding(t *testing.T) {
 			t.Errorf("%s: engine got %d requests, want 0", tt.name, sent)
 		}
 	}
-	// With authentication, the Host and the Content-Type stay as they are.
+	// With authentication, the router does not check the Host or the Content-Type.
 	rt.Auth = func(*http.Request) (string, error) { return "alice", nil }
 	got := do(t, rt, "POST", writes, []byte(write), map[string]string{"Host": "evil.example", "Content-Type": "text/plain"})
 	if got.status != 200 {
