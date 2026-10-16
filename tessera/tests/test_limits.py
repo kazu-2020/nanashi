@@ -289,6 +289,8 @@ class BudgetBeforeAllocation(unittest.TestCase):
             ("IF(P > 0, W, -1)", ["X", "Q"], 8, 9.5),
             ("P[EXPAND: Q] + 5", ["X", "Q"], 8, 27),
             ("P[EXPAND: Q] * R[EXPAND: X]", ["X", "Q"], 24, 27),
+            # A division by 0 drops all pairs, so the first join must not keep room for them.
+            ("P / Z1 + P / Z2", ["X", "Q"], 7, 8.3),
         ]
         for formula, dims, refused, fits in cases:
             for budget, ok in [(int(refused * mib), False), (int(fits * mib), True)]:
@@ -303,6 +305,8 @@ class BudgetBeforeAllocation(unittest.TestCase):
                     m.add_input("P", ["X"], {(f"x{i}",): 1.0 if i % 2 else -1.0 for i in range(n)})
                     m.add_input("R", ["Q"], {(f"q{i}",): 1.0 for i in range(k)})
                     m.add_input("W", ["X", "Q"], {(f"x{i}", "q0"): 1.0 for i in range(n)})
+                    for name in ("Z1", "Z2"):
+                        m.add_input(name, ["Q"], {(f"q{i}",): 0.0 for i in range(k)})
                     m.recalc()
                     gc.collect()
                     base = nanashi_core.heap()[0]
