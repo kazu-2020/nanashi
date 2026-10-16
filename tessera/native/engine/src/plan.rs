@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{chain, chain_scan, eval_columns, eval_sums, eval_with, held, remove_run, Agg, Budget, Catalog, Columns, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store, Whole};
+use crate::{eval_columns, eval_sums, eval_with, held, remove_run, tree, tree_scan, Agg, Budget, Catalog, Columns, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store, Whole};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -959,7 +959,7 @@ impl<'a> Run<'a> {
         let held = self.held();
         // If only one Metric of the scan is active, the other Metrics do not change, thus the operands can read their stored data
         if let [(n, r)] = &active[..] {
-            if self.chain_scan(dim, *n, r, held)? {
+            if self.tree_scan(dim, *n, r, held)? {
                 self.log.push((*n, false, r.clone()));
                 return Ok(());
             }
@@ -986,14 +986,16 @@ impl<'a> Run<'a> {
     }
 
     /// Calculate all periods of the range r for the scan Metric n in one pass, and write them back.
-    /// The formula must be a chain of +, -, *, / and COALESCE around PREVIOUS.
+    /// The formula must be a tree of +, -, *, /, IF and COALESCE over PREVIOUS (see `eval/scan.rs`).
     /// Return false if the pass cannot calculate the Metric. Then the per-period path calculates it.
-    fn chain_scan(&mut self, dim: DimId, n: usize, r: &Reg, held: usize) -> Result<bool> {
+    fn tree_scan(&mut self, dim: DimId, n: usize, r: &Reg, held: usize) -> Result<bool> {
         let f = self.formula(n);
-        let Some(links) = chain(&f.node, dim, &|i| f.refs[i] == n) else { return Ok(false) };
+        let Some(shape) = tree(&f.node, dim, &|i| f.refs[i] == n) else { return Ok(false) };
         let ts: Vec<u32> = (0..self.cat.dims[dim].size).filter(|&t| r.has(dim, t)).collect();
-        // The periods just before a gap in ts: PREVIOUS reads the stored values there
-        let gaps: Vec<u32> = ts.iter().filter(|&&t| t > 0 && !r.has(dim, t - 1)).map(|t| t - 1).collect();
+        // The periods that PREVIOUS reads outside ts: it reads the stored values there
+        let mut gaps: Vec<u32> = ts.iter().flat_map(|&t| shape.lags.iter().filter_map(move |&k| t.checked_sub(k))).filter(|&s| !r.has(dim, s)).collect();
+        gaps.sort_unstable();
+        gaps.dedup();
         let store = &self.stores[n];
         let before = if gaps.is_empty() {
             Cube { pack: store.pack.clone(), kind: store.kind, cells: Vec::new() }
@@ -1004,7 +1006,7 @@ impl<'a> Run<'a> {
         let rr = r.restrict(self.cat);
         let b = Budget::new(self.cat.cfg.max_bytes, held);
         // An error here also occurs in the per-period path, except a budget error. That path uses less memory
-        let Ok(value) = chain_scan(&links, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
+        let Ok(value) = tree_scan(&shape, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
         Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
         Ok(true)
     }

@@ -1,38 +1,84 @@
-//! A scan whose formula is a chain of +, -, *, / and COALESCE around PREVIOUS, for example `PREVIOUS(Month) * 0.9 + Margin`.
-//! The engine evaluates each operand one time for all periods, then runs the chain along the time dimension.
+//! A scan whose formula is a tree of +, -, *, /, IF and COALESCE over PREVIOUS(dim, n), for example
+//! `IF(IsActual, Actual, PREVIOUS(Month) * 0.9 + PREVIOUS(Month, 2) * 0.1 + Margin)`.
+//! The engine evaluates each operand one time for all periods, then runs the tree along the time dimension.
 //! Each cell gets the same operations in the same order as one evaluation for each period, thus the values agree bit for bit.
 
 #[allow(unused_imports)]
 use crate::*;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
-/// One operation on the path from PREVIOUS to the root: `acc op operand`, or `operand op acc` if `acc_left` is false.
-/// `op` None is COALESCE (an override of an overridable Metric).
-pub(crate) struct Link<'n> {
-    op: Option<Op>,
-    acc_left: bool,
-    operand: &'n Node,
+/// One node of the formula tree for one cell.
+enum Step {
+    /// The value of the Metric n periods before (n >= 1).
+    Prev(u32),
+    Operand(usize),
+    Bin(Op, Box<Step>, Box<Step>),
+    /// The condition is an operand (a lookup).
+    If(usize, Box<Step>, Option<Box<Step>>),
+    Coalesce(Box<Step>, Box<Step>),
 }
 
-/// The links from `PREVIOUS(dim)` of the Metric to the root, or None if the formula has a different shape.
+/// How the tree reads an operand. This follows `eval_with`.
+#[derive(Clone, Copy)]
+enum Use {
+    /// + and - and the branches of IF: the engine expands the operand to the dimensions of the Metric. It adds keys.
+    Union,
+    /// COALESCE: the same as Union, but `eval_with` does not expand the operand, thus it needs all dimensions of the Metric.
+    Coalesce,
+    /// * and / and the condition of IF: an intersection through a projection. It adds no keys.
+    Lookup,
+}
+
+/// The formula of a scan Metric as a tree over its operands.
+pub(crate) struct Tree<'n> {
+    root: Step,
+    operands: Vec<(&'n Node, Use)>,
+    /// The n of each PREVIOUS(dim, n), ascending, without duplicates.
+    pub(crate) lags: Vec<u32>,
+}
+
+/// The tree of the formula, or None if the formula has a different shape.
 /// `me(i)` is true if the Ref number i reads the Metric itself.
-pub(crate) fn chain<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool) -> Option<Vec<Link<'n>>> {
+pub(crate) fn tree<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool) -> Option<Tree<'n>> {
+    if plain(node, me) {
+        return None;
+    }
+    let (mut operands, mut lags) = (Vec::new(), Vec::new());
+    let root = step(node, dim, me, &mut operands, &mut lags)?;
+    lags.sort_unstable();
+    lags.dedup();
+    Some(Tree { root, operands, lags })
+}
+
+fn step<'n>(node: &'n Node, dim: DimId, me: &dyn Fn(usize) -> bool, ops: &mut Vec<(&'n Node, Use)>, lags: &mut Vec<u32>) -> Option<Step> {
+    let side = |n: &'n Node, u: Use, ops: &mut Vec<(&'n Node, Use)>, lags: &mut Vec<u32>| -> Option<Box<Step>> {
+        if plain(n, me) {
+            ops.push((n, u));
+            Some(Box::new(Step::Operand(ops.len() - 1)))
+        } else {
+            step(n, dim, me, ops, lags).map(Box::new)
+        }
+    };
     match node {
-        Node::Shift { child, dim: d, n: 1 } if *d == dim && matches!(**child, Node::Ref(i) if me(i)) => Some(Vec::new()),
-        Node::Bin(Op::Add | Op::Sub | Op::Mul | Op::Div, l, r, _) | Node::Coalesce(l, r) => {
-            let op = match node {
-                Node::Bin(op, ..) => Some(*op),
-                _ => None,
+        Node::Shift { child, dim: d, n } if *d == dim && *n >= 1 && matches!(**child, Node::Ref(i) if me(i)) => {
+            let n = u32::try_from(*n).ok()?;
+            lags.push(n);
+            Some(Step::Prev(n))
+        }
+        Node::Bin(op @ (Op::Add | Op::Sub | Op::Mul | Op::Div), l, r, _) => {
+            let u = if matches!(op, Op::Mul | Op::Div) { Use::Lookup } else { Use::Union };
+            Some(Step::Bin(*op, side(l, u, ops, lags)?, side(r, u, ops, lags)?))
+        }
+        Node::Coalesce(l, r) => Some(Step::Coalesce(side(l, Use::Coalesce, ops, lags)?, side(r, Use::Coalesce, ops, lags)?)),
+        Node::If(c, then, else_, _) if plain(c, me) => {
+            ops.push((c, Use::Lookup));
+            let c = ops.len() - 1;
+            let then = side(then, Use::Union, ops, lags)?;
+            let else_ = match else_ {
+                Some(e) => Some(side(e, Use::Union, ops, lags)?),
+                None => None,
             };
-            let (spine, operand, acc_left) = if plain(r, me) {
-                (l, r, true)
-            } else if plain(l, me) {
-                (r, l, false)
-            } else {
-                return None;
-            };
-            let mut links = chain(spine, dim, me)?;
-            links.push(Link { op, acc_left, operand });
-            Some(links)
+            Some(Step::If(c, then, else_))
         }
         _ => None,
     }
@@ -54,107 +100,195 @@ fn plain(node: &Node, me: &dyn Fn(usize) -> bool) -> bool {
     }
 }
 
-/// An operand of a link, evaluated for all periods.
+/// An operand, evaluated for all periods.
 enum Operand {
-    /// For +, - and COALESCE: the cells of each period (by the key without the time dimension), in the dimensions of the Metric.
-    ByPeriod(Vec<FxHashMap<u64, f64>>),
-    /// For * and /: the cells by their own key, and the projection from the key of the Metric.
+    /// The cells in the dimensions of the Metric, in the order of `by_row`.
+    ByRow(Vec<(u64, f64)>),
+    /// A lookup with all dimensions of the Metric: the same as ByRow, but it adds no rows.
+    Aligned(Vec<(u64, f64)>),
+    /// The cells by their own key, and the projection from the key of the Metric.
     Lookup(FxHashMap<u64, f64>, Packing, Proj),
 }
 
-/// A union of two values: + and - count a blank side as 0, COALESCE takes the left value if it is not blank.
-fn outer(op: Option<Op>, l: Option<f64>, r: Option<f64>) -> Option<f64> {
-    match op {
-        Some(op) => scalar(op, l.unwrap_or(0.0), r.unwrap_or(0.0)),
-        None => l.or(r),
+/// Rotate each key so that the time dimension is in the lowest bits, and sort the cells.
+/// Then the cells of one row (a key without the time dimension) are contiguous and ordered by period.
+fn by_row(cfg: &Config, mut cells: Vec<(u64, f64)>, shift: u32) -> Vec<(u64, f64)> {
+    for c in &mut cells {
+        c.0 = c.0.rotate_right(shift);
+    }
+    sort_cells(cfg, &mut cells);
+    cells
+}
+
+/// The inputs of the tree for one cell.
+struct At<'a> {
+    t: usize,
+    /// The key of the cell in the packing of the Metric.
+    key: u64,
+    operands: &'a [Operand],
+    pack: &'a Packing,
+    /// The values of each operand of this row, by period.
+    vals: &'a [Vec<Option<f64>>],
+    /// The values of the Metric in this row, by period: the results before t, or `before`.
+    hist: &'a [Option<f64>],
+}
+
+impl At<'_> {
+    fn operand(&self, i: usize) -> Option<f64> {
+        match &self.operands[i] {
+            Operand::ByRow(_) | Operand::Aligned(_) => self.vals[i][self.t],
+            Operand::Lookup(cells, cp, proj) => cells.get(&proj.apply(self.pack, cp, self.key)).copied(),
+        }
+    }
+
+    /// The value of the cell, with the semantics of `eval_with`.
+    fn value(&self, s: &Step) -> Option<f64> {
+        match s {
+            Step::Prev(n) => self.hist[self.t.checked_sub(*n as usize)?],
+            Step::Operand(i) => self.operand(*i),
+            // A union: a blank side counts as 0
+            Step::Bin(op @ (Op::Add | Op::Sub), l, r) => match (self.value(l), self.value(r)) {
+                (None, None) => None,
+                (a, b) => scalar(*op, a.unwrap_or(0.0), b.unwrap_or(0.0)),
+            },
+            // An intersection: a division by 0 is blank
+            Step::Bin(op, l, r) => scalar(*op, self.value(l)?, self.value(r)?),
+            // A blank condition goes to neither branch
+            Step::If(c, then, else_) => {
+                if self.operand(*c)? != 0.0 {
+                    self.value(then)
+                } else {
+                    self.value(else_.as_deref()?)
+                }
+            }
+            Step::Coalesce(l, r) => self.value(l).or_else(|| self.value(r)),
+        }
     }
 }
 
 /// Calculate the scan for the periods `ts` (ascending) in the range r (r limits the time dimension to ts).
-/// `before` has the values of the Metric at each period t - 1 that is not in ts. The result is in the packing `pack`.
+/// `before` has the values of the Metric at each period t - n (n in `tree.lags`) that is not in ts. The result is in the packing `pack`.
+/// A row reads only its own earlier periods, thus the engine calculates the rows in parallel.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn chain_scan(links: &[Link], before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
-    use Operand::*;
+pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let p = pack.pos(dim).expect("scan の軸");
     let size = cat.dims[dim].size as usize;
-    let by_period = |cells: &[(u64, f64)]| {
-        let mut out: Vec<FxHashMap<u64, f64>> = vec![FxHashMap::default(); size];
-        for &(k, v) in cells {
-            out[pack.get(k, p) as usize].insert(pack.clear(k, p), v);
-        }
-        out
-    };
-    let mut operands = Vec::with_capacity(links.len());
-    // eval_with already counts each operand. The budget must also count the expanded operands and `before`
+    let (shift, tmask) = (pack.shifts[p], pack.masks[p]);
+    let mut operands = Vec::with_capacity(tree.operands.len());
+    // eval_with already counts each operand. The budget must also count the copies, `before`, the buffers and the result
     let mut held = before.cells.len();
-    for l in links {
-        let c = eval_with(l.operand, cat, src, r, b)?;
-        // COALESCE does not expand its operand, thus it needs all dimensions of the Metric
-        let fits = match l.op {
-            None => same_set(c.dims(), &pack.dims),
-            Some(_) => c.dims().iter().all(|d| pack.dims.contains(d)),
+    for &(node, u) in &tree.operands {
+        let c = eval_with(node, cat, src, r, b)?;
+        let fits = match u {
+            Use::Coalesce => same_set(c.dims(), &pack.dims),
+            Use::Union | Use::Lookup => c.dims().iter().all(|d| pack.dims.contains(d)),
         };
         if !fits {
             return Err("scan の式の軸が Metric の軸と一致しない".into());
         }
-        operands.push(match l.op {
-            Some(Op::Mul | Op::Div) => {
-                let proj = Proj::new(pack, &c.pack);
-                Lookup(c.cells.into_iter().collect(), c.pack, proj)
+        operands.push(match u {
+            Use::Lookup if same_set(c.dims(), &pack.dims) => {
+                held += c.cells.len();
+                b.need(held, "scan の加数")?;
+                Operand::Aligned(by_row(cfg, c.into_repacked(cfg, pack).cells, shift))
             }
-            _ => {
+            Use::Lookup => {
+                let proj = Proj::new(pack, &c.pack);
+                Operand::Lookup(c.cells.into_iter().collect(), c.pack, proj)
+            }
+            Use::Union | Use::Coalesce => {
                 let e = expand(&c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
                 held += e.cells.len();
                 b.need(held, "scan の加数")?;
-                ByPeriod(by_period(&e.cells))
+                Operand::ByRow(by_row(cfg, e.cells, shift))
             }
         });
     }
-    let mut before = by_period(&before.repack(cfg, pack).cells);
-    let mut acc: FxHashMap<u64, f64> = FxHashMap::default();
-    let mut out = Vec::new();
-    let mut last = None;
-    for &t in ts {
-        if t == 0 {
-            acc.clear();
-        } else if last != Some(t - 1) {
-            acc = std::mem::take(&mut before[t as usize - 1]);
+    held += before.cells.len();
+    b.need(held, "scan の加数")?;
+    let before = by_row(cfg, before.repack(cfg, pack).cells, shift);
+    let row = |k: u64| k & !tmask;
+    // A cell gets a value only from an operand that adds keys or from an earlier value of its row. These are all such rows
+    let mut rows = Vec::new();
+    let adds = operands.iter().filter_map(|o| match o {
+        Operand::ByRow(c) => Some(&c[..]),
+        _ => None,
+    });
+    for c in adds.chain([&before[..]]).flatten() {
+        if rows.last() != Some(&row(c.0)) {
+            rows.push(row(c.0));
         }
-        last = Some(t);
-        for (l, operand) in links.iter().zip(&operands) {
-            match operand {
-                ByPeriod(cells) => {
-                    let f = |a: Option<f64>, x: Option<f64>| {
-                        let v = if l.acc_left { outer(l.op, a, x) } else { outer(l.op, x, a) };
-                        v.expect("一方に値があれば和集合は値を返す")
-                    };
-                    let cells = &cells[t as usize];
-                    for (k, a) in acc.iter_mut() {
-                        *a = f(Some(*a), cells.get(k).copied());
-                    }
-                    for (&k, &x) in cells {
-                        acc.entry(k).or_insert_with(|| f(None, Some(x)));
-                    }
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    // The cells of each operand by row, and `before` as the last. A Lookup operand has no cells here and no buffer
+    let mut srcs: Vec<Option<&[(u64, f64)]>> = operands
+        .iter()
+        .map(|o| match o {
+            Operand::ByRow(c) | Operand::Aligned(c) => Some(&c[..]),
+            Operand::Lookup(..) => None,
+        })
+        .collect();
+    srcs.push(Some(&before));
+    let parts = if cfg.par(held) { rayon::current_num_threads() * 4 } else { 1 };
+    // A row key takes half a cell. Each chunk that runs at the same time has a buffer of `size` slots for each source
+    let slots = srcs.iter().flatten().count() * size * parts.min(rayon::current_num_threads());
+    held += rows.len().div_ceil(2) + slots;
+    b.need(held, "scan の加数")?;
+    // A Budget is not Sync. The chunks count their cells here, and a chunk stops when the result does not fit
+    let room = b.room().saturating_sub(held);
+    let made = AtomicUsize::new(0);
+    let run = |chunk: &[u64]| -> Option<Vec<(u64, f64)>> {
+        let mut pos: Vec<usize> = srcs.iter().map(|s| s.map_or(0, |s| s.partition_point(|c| c.0 < chunk[0]))).collect();
+        // The cells of the last row of each source. Only their slots get a reset
+        let mut last: Vec<usize> = pos.clone();
+        let mut bufs: Vec<Vec<Option<f64>>> = srcs.iter().map(|s| vec![None; if s.is_some() { size } else { 0 }]).collect();
+        let mut out = Vec::new();
+        for &w in chunk {
+            for (((s, i), l), buf) in srcs.iter().zip(&mut pos).zip(&mut last).zip(&mut bufs) {
+                let Some(s) = s else { continue };
+                for c in &s[*l..*i] {
+                    buf[(c.0 & tmask) as usize] = None;
                 }
-                // An intersection: a cell stays only if the operand has a value, and a division by 0 is blank
-                Lookup(cells, cp, proj) => acc.retain(|&k, a| {
-                    let op = l.op.expect("* と /");
-                    let f = |x: f64| if l.acc_left { scalar(op, *a, x) } else { scalar(op, x, *a) };
-                    match cells.get(&proj.apply(pack, cp, k | pack.put(p, t))).and_then(|&x| f(x)) {
-                        Some(v) => {
-                            *a = v;
-                            true
-                        }
-                        None => false,
-                    }
-                }),
+                // An Aligned operand can have rows that are not in `rows`
+                while s.get(*i).is_some_and(|c| row(c.0) < w) {
+                    *i += 1;
+                }
+                *l = *i;
+                while let Some(&(k, v)) = s.get(*i).filter(|c| row(c.0) == w) {
+                    buf[(k & tmask) as usize] = Some(v);
+                    *i += 1;
+                }
+            }
+            // A period in ts reads only earlier periods, and each of them in ts already has its new result here
+            let (hist, vals) = bufs.split_last_mut().expect("srcs has before");
+            let base = w.rotate_left(shift);
+            let n = out.len();
+            for &t in ts {
+                let key = base | pack.put(p, t);
+                let v = At { t: t as usize, key, operands: &operands, pack, vals, hist }.value(&tree.root);
+                hist[t as usize] = v;
+                if let Some(v) = v {
+                    out.push((key, v));
+                }
+            }
+            let n = out.len() - n;
+            if made.fetch_add(n, Relaxed) + n > room {
+                return None;
             }
         }
-        b.need(held + out.len() + acc.len(), "scan の結果")?;
-        out.extend(acc.iter().map(|(&k, &v)| (k | pack.put(p, t), v)));
+        Some(out)
+    };
+    let outs: Option<Vec<Vec<(u64, f64)>>> = rows.par_chunks(rows.len().div_ceil(parts).max(1)).map(run).collect();
+    // If a chunk stopped, this is Err
+    b.need(held + made.load(Relaxed), "scan の結果")?;
+    let outs = outs.expect("the result fits");
+    let mut cells = Vec::with_capacity(outs.iter().map(Vec::len).sum());
+    for mut o in outs {
+        cells.append(&mut o);
     }
-    Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells: out })
+    Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells })
 }
 
 #[cfg(test)]
@@ -170,12 +304,23 @@ mod tests {
     }
 
     #[test]
-    fn chain_finds_only_the_supported_shapes() {
+    fn tree_finds_only_the_supported_shapes() {
         let me = |i: usize| i == 0;
+        let ok = |n: &Node| tree(n, 0, &me).is_some();
         let affine = bin(Op::Add, Box::new(bin(Op::Mul, prev(1), Node::Const(0.9, Kind::Num))), Node::Ref(1));
-        assert_eq!(chain(&affine, 0, &me).map(|l| l.len()), Some(2));
-        assert!(chain(&bin(Op::Add, prev(2), Node::Ref(1)), 0, &me).is_none(), "PREVIOUS(dim, 2)");
+        assert_eq!(tree(&affine, 0, &me).map(|t| t.operands.len()), Some(2));
+        assert!(ok(&bin(Op::Add, prev(2), Node::Ref(1))), "PREVIOUS(dim, 2)");
+        let sum = bin(Op::Add, Box::new(bin(Op::Add, prev(1), *prev(2))), *prev(3));
+        assert_eq!(tree(&sum, 0, &me).map(|t| t.lags), Some(vec![1, 2, 3]));
+        let turnover = Node::If(Box::new(Node::Ref(1)), Box::new(Node::Ref(2)), Some(Box::new(bin(Op::Mul, Box::new(Node::Ref(3)), sum))), vec![]);
+        assert!(ok(&turnover), "IF at the root with a plain condition");
         let agg = Node::Remove { child: Box::new(Node::Ref(1)), dim: 1, agg: Agg::Sum };
-        assert!(chain(&bin(Op::Add, prev(1), agg), 0, &me).is_none(), "an aggregation in an operand");
+        assert!(!ok(&bin(Op::Add, prev(1), agg)), "an aggregation in an operand");
+        assert!(!ok(&bin(Op::Add, prev(1), Node::Not(prev(1)))), "PREVIOUS under NOT");
+        assert!(!ok(&bin(Op::Add, prev(0), Node::Ref(1))), "PREVIOUS(dim, 0)");
+        let other = Node::Shift { child: Box::new(Node::Ref(0)), dim: 1, n: 1 };
+        assert!(!ok(&bin(Op::Add, Box::new(other), Node::Ref(1))), "PREVIOUS of another dimension");
+        let cond = Node::If(Box::new(bin(Op::Gt, prev(1), Node::Const(0.0, Kind::Num))), Box::new(Node::Ref(1)), None, vec![]);
+        assert!(!ok(&cond), "PREVIOUS in the condition of IF");
     }
 }
