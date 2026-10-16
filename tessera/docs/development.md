@@ -30,8 +30,13 @@ python3.14t -m venv .venv-ft
 .venv-ft/bin/pip install -e ".[dev]"
 VIRTUAL_ENV=$PWD/.venv-ft .venv-ft/bin/maturin develop --release -m native/Cargo.toml
 ```
-
-The CI section of the root [CLAUDE.md](../../CLAUDE.md#ci) gives the CI workflows.
+GitHub Actions (`.github/workflows/tessera-test.yml`) runs the tests and the static checks with the two engines.
+The workflow starts only when `tessera/`, `mise.toml` or the workflow file changes.
+The Python tests run in one job for each Python version.
+The Rust unit tests and clippy run in parallel in a different job.
+The cache keeps the built `nanashi_core` for each content of `native/`.
+If `native/` did not change, the job does not build it again.
+For branches other than `main`, the tests run on pull requests, not on push.
 
 Run the tests as follows.
 Use `SPARSE_ENGINE` to select the default engine (`reference` or `rust`; if you do not set it, `reference`).

@@ -2,7 +2,6 @@
 
 These are measurements of the Rust engine on an Apple M4 (10 cores, 16 GB of memory). Each value is the median of 5 runs.
 The data comes from random numbers, and the values vary by about 20% from run to run.
-The M4 tables come from an early version of the engine. Later changes decreased the time and the memory use.
 
 Profit and loss plan and headcount plan (`examples/fpa.py`, 18 formula Metrics):
 
@@ -56,7 +55,7 @@ It is the same flow as when you open a model from the journal, or when you chang
 | 20,000 chains | 0.83 s | 0.48 s |
 | 2,500 inputs + 2,500 formulas | 0.26 s | 0.57 s |
 
-Now the engine uses the affected range of a change to 1 cell of each input ([how to select the partition dimension](engine.md)).
+The engine uses the affected range of a change to 1 cell of each input ([how to select the partition dimension](engine.md)).
 It converts these ranges 1 time into a list for each Metric.
 In the rebuild of a model with many inputs, most of the remaining time is the cost to propagate the affected range of each input.
 1 propagation goes through all stages of the plan. Thus this cost is proportional to the number of inputs multiplied by the number of Metrics.
@@ -116,6 +115,7 @@ With many readers, the number of reads increases by more than 4 times, and write
 
 Memory usage (`bench_memory.py`). The model is the profit and loss plan (large) multiplied by 4, with 19.65 million cells.
 The engine opens it from a snapshot and does a full recalculation.
+We measured this table on a cloud Linux VM (Intel Xeon 2.1 GHz, 4 vCPUs, 15 GB of memory). The Rust heap does not change with the machine.
 
 | Measurement | Per cell |
 |---|---|
@@ -126,7 +126,7 @@ The engine opens it from a snapshot and does a full recalculation.
 | Same as above, calculated on 1 thread | 15.9 B |
 | RSS (after recalculation) | 23.0 B |
 
-The stored data was equal to the 16 B of the key and the value. After recalculation, the stored data is the only data that Rust keeps. The keys are now packed, and the stored data is about 10 B for each cell (see "Packed keys" below).
+After recalculation, the stored data is the only data that Rust keeps. The table counts 16 B (key and value) for each cell. Packed keys decrease this to about 10 B (see "Packed keys" below).
 The increase during recalculation (312 MB) is only about 1.25 times the new values of the formula Metrics (249 MB).
 Fused formulas do not do reads with a limited range.
 Thus a full recalculation does not make indexes for dimensions other than the partition dimension. (The engine makes these indexes when incremental recalculation reads a limited range.)
@@ -160,7 +160,6 @@ A random read with `PackedKeys::get` is about 1.6 times slower than a `Vec` read
 
 ## Save and journal formats
 
-These are the current values.
 (Profit and loss plan (large), PostgreSQL in local Docker, Python 3.14.)
 "Register bonuses by employee × month" is a write that adds an input Metric of 720 thousand cells.
 "Spread sales volume" is a write that changes 225 thousand cells. Both times are through `Workspace`.

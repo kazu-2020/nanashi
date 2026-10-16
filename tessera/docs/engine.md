@@ -31,7 +31,7 @@ It merges the cells directly into the value array and the packed keys of the new
 The engine does not change a base after it makes it, and versions share the base. The delta is a persistent tree (`OrdMap` of `imbl`), so a change does not break old versions.
 Thus, a writer can write while a reader keeps a published version. The engine does not copy all of the base or the delta.
 The values of the base are an immutable array with no extra capacity (`Box<[f64]>`). Its layout is the same as the buffer of an Arrow Float64 array.
-The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed.rs`). A block keeps its first key and the offset of each key from it, with the bit width of the largest offset (frame of reference). In the retail model the width is 14 to 19 bits, so the keys use about 2 B for each cell in place of 8 B ([Performance](performance.md)).
+The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed.rs`). A block keeps its first key and the offset of each key from it, with the bit width of the largest offset (frame of reference). In the retail model the width is 14 to 19 bits, so the keys use about 2 B for each cell in place of 8 B.
 A scan decodes one block at a time into a buffer of 1,024 keys and then reads a plain array. A binary search decodes one key at a time. The cursor of the fused evaluation (`Cursor`) decodes the block of a row near its last row, and reads a far row one key at a time. The `base` value of `Model.memory()` is equal to the size of the packed keys and the value array.
 The high bits of the key contain the **partition dimension**. Thus, a binary search can read and write a range that a filter on the partition dimension selects.
 For a filter on a different dimension, the engine uses an inverted index. The engine makes the index when it is necessary.
@@ -45,7 +45,7 @@ A join (`*`, comparisons, `ON`, `FILTER`, the branches of `IF`) evaluates one si
 For a join of two operands with the same dimensions, the engine matches cells in key order without a sort and without a copy. An example of such cells is cells read from stored data.
 For a join of two stored data with no delta (for example, `A * B` or `A > B` in a full recalculation), the engine matches the two bases directly. It does not copy them to a Cube.
 In a full recalculation, the engine evaluates independent Metrics in parallel.
-The engine keeps the calculated values in key order. When it writes them back, it moves the values one at a time into the format of stored data (packed keys and a value array). Thus, in one stage, only one Metric at a time has two copies of its values during the move.
+The engine keeps the calculated values in key order. When it writes them back, it moves the values one at a time into the format of stored data (packed keys and a value column). Thus, in one stage, only one Metric at a time has two copies of its values during the move.
 
 In a full evaluation, the engine fuses a formula that is a chain of element-wise operations. It evaluates the fused formula and does not make an intermediate result (Cube) for each operation (`eval/fuse.rs`).
 Fusion applies to these operations: the four arithmetic operations, comparisons, `AND` / `OR` / `NOT`, `IF`, `FILTER`, `ON`, `EXPAND`, `ISBLANK`, `IFBLANK`, dimension values (`Month`), `SELECT`, time shifts (`[SELECT: Month - 1]`), the BY mapping (`BY`), and manual overrides of formula Metrics.

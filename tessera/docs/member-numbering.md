@@ -202,7 +202,7 @@ Thus, a time-series master can use marks if it prevents a removal in the middle 
 
 ### What to divide when we put marks
 
-Now, `DimInfo::size` has 2 meanings.
+`DimInfo::size` has 2 meanings.
 If the numbers have gaps, we must divide these meanings:
 
 - Number range: the bit width of `Packing::new`, the size of `Sel`, the inverted index, the 2^22 check
@@ -220,7 +220,7 @@ We examined these options:
 | Option | Width increase | Cost | Result |
 |---|---|---|---|
 | Pack with mixed radix (key = Σ mᵢ × Π sizeⱼ) | It only removes the waste from rounding up. The example above still needs about 70 bits and does not fit | A division is necessary to get a dimension. Additions cause more compactions | Does not solve the problem |
-| A variable-length key for each cell (`Vec<u32>`) | No limit | Sort, join, and aggregation are 5 to 10 times slower. Memory is 2.5 to 3.5 times larger (see the measurement below) | Rejected |
+| A variable-length key for each cell (`Vec<u32>`) | No limit | Sort, join, and aggregation are 5 to 10 times slower. Memory is 2.5 to 3.5 times larger | Rejected |
 | For each Metric, set new numbers only for the members that it uses | Increases with sparsity | Each key copy between Metrics needs a conversion | Too complex |
 | Make the key type generic, and also supply a fixed-length array of N 64-bit words | 64 × N bits | Only above 64 bits, each word adds 8 bytes to each cell | Accepted |
 
@@ -250,13 +250,12 @@ The accepted option has these parts:
 N is not the number of dimensions.
 N is the number of 64-bit words.
 One word can hold any number of dimensions.
-In the measurement, 6 dimensions use 54 bits (1 word), 7 dimensions use 72 bits (2 words), and 13 dimensions use 129 bits (3 words).
+For example, 6 dimensions use 54 bits (1 word), 7 dimensions use 72 bits (2 words), and 13 dimensions use 129 bits (3 words).
 
 The compiler sets N, thus we must select in advance the values of N for which the compiler makes code.
 At first, we supply N = 1 (`u64`), 2, and 4.
 For a dimension set that is wider, the type check rejects it, as it does now for 64 bits.
 More words only increase the quantity of generated code.
-In the measurement, from 2 words to 3 words, the sort became only 1.1 times slower, and one cell increased only from 24 to 32 bytes.
 If we want to remove the limit, we can use a stride (the number of words is set at run time) only for keys wider than 256 bits.
 An FP&A Metric almost never uses more than 256 bits (about 25 dimensions of 1,000 members).
 Thus, we will add the stride only when it is necessary.
@@ -278,7 +277,7 @@ key[1]: [未使用 46][Customer 18]
 
 - To get the value of a dimension, shift and mask the word that holds it (`(key[word[i]] >> shift[i]) & mask[i]`). The only difference from the current `Packing::get` is the word position.
 - The comparison uses the lexicographic order of the array. An earlier dimension is more significant, thus the order is the same as a sort by the dimensions in sequence. If the partition dimension is first, the most significant bits of `key[0]` can limit the range.
-- The stored data keeps its form (`PackedKeys` keys and a `Box<[f64]>` value column). Only the key type changes from `u64` to `[u64; 2]`. For the delta tree and the inverted index, also only the key type changes.
+- The key type changes from `u64` to `[u64; 2]` in the stored data, the delta tree and the inverted index. `PackedKeys` encodes `u64` offsets, so it needs a new encoding for the wider key.
 
 If dimensions do not cross words, some bits at the word boundary are not used (in the example above, 56 bits of the 2 words).
 We can remove this waste if we treat 128 bits as one integer and pack without gaps.
@@ -295,7 +294,7 @@ Thus, we use the format in which dimensions do not cross words, because it is si
 | Up to 1,000,000 (customers, SKUs) | 20 | 3 | 6 |
 
 An FP&A Metric usually has 5 to 8 dimensions and uses about 80 to 100 bits, thus 128 bits are almost always sufficient.
-A model with 13 dimensions (including Customer 200,000, Employee 50,000, and Product 20,000) used 129 bits.
+A model with 13 dimensions (including Customer 200,000, Employee 50,000, and Product 20,000) uses 129 bits.
 A key comes near 128 bits in these 3 conditions:
 
 - Intermediate results of a formula: `EXPAND`, a join, or a `BY` with a Metric of member type gives an intermediate result more dimensions than the final result. Thus, an intermediate result reaches the limit before the Metric itself.
