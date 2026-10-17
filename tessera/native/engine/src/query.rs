@@ -72,7 +72,7 @@ enum Group {
 trait Acc: Clone + Default + Send + Sync {
     fn add(&mut self, v: f64, m: &Meter);
     fn merge(&mut self, o: &Self, m: &Meter);
-    fn value(&self, n: u32, agg: ReadAgg) -> f64;
+    fn value(&self, n: u64, agg: ReadAgg) -> f64;
 }
 
 impl Acc for FixSum {
@@ -83,7 +83,7 @@ impl Acc for FixSum {
     fn merge(&mut self, o: &Self, m: &Meter) {
         FixSum::merge(self, o, m)
     }
-    fn value(&self, n: u32, agg: ReadAgg) -> f64 {
+    fn value(&self, n: u64, agg: ReadAgg) -> f64 {
         if agg == ReadAgg::Avg { self.finish() / n as f64 } else { self.finish() }
     }
 }
@@ -113,7 +113,7 @@ impl Acc for Lo {
     fn merge(&mut self, o: &Self, _: &Meter) {
         self.0 = self.0.min(o.0);
     }
-    fn value(&self, _: u32, _: ReadAgg) -> f64 {
+    fn value(&self, _: u64, _: ReadAgg) -> f64 {
         from_key(self.0)
     }
 }
@@ -126,7 +126,7 @@ impl Acc for Hi {
     fn merge(&mut self, o: &Self, _: &Meter) {
         self.0 = self.0.max(o.0);
     }
-    fn value(&self, _: u32, _: ReadAgg) -> f64 {
+    fn value(&self, _: u64, _: ReadAgg) -> f64 {
         from_key(self.0)
     }
 }
@@ -135,7 +135,7 @@ impl Acc for () {
     #[inline]
     fn add(&mut self, _: f64, _: &Meter) {}
     fn merge(&mut self, _: &Self, _: &Meter) {}
-    fn value(&self, n: u32, _: ReadAgg) -> f64 {
+    fn value(&self, n: u64, _: ReadAgg) -> f64 {
         n as f64
     }
 }
@@ -166,7 +166,7 @@ impl Store {
         let items = items(&self.base.segs, self.delta.is_empty(), &ranges(&self.pack, r));
         let rows = items.iter().map(|it| it.rows.len()).sum::<usize>() + self.delta.len();
         let slots = radix.iter().try_fold(1usize, |a, x| a.checked_mul(x.member_of_rank.len()));
-        match choose(slots, size_of::<(A, u32)>(), items.len(), rows, &self.cfg) {
+        match choose(slots, size_of::<(A, u64)>(), items.len(), rows, &self.cfg) {
             Group::Dense { slots, tables } => self.dense::<A>(&radix, &tests, &items, slots, tables, agg, b),
             Group::Sort => self.sorted(&radix, &tests, &items, rows, agg, cat, b),
         }
@@ -174,16 +174,16 @@ impl Store {
 
     #[allow(clippy::too_many_arguments)]
     fn dense<A: Acc>(&self, radix: &[Radix], tests: &[Test], items: &[Item], slots: usize, tables: usize, agg: ReadAgg, b: &Budget) -> Result<Groups> {
-        let entry = size_of::<(A, u32)>();
+        let entry = size_of::<(A, u64)>();
         let pad = PAD.div_ceil(entry);
         let table_cells = ((slots + 2 * pad) * entry).saturating_mul(tables).div_ceil(CELL_BYTES);
         b.need(table_cells, "集計")?;
         let m = Meter::new(b.room().saturating_sub(table_cells));
         // A run holds at most one Spill for a short time, so the Meter of the table does not count it
         let short = Meter::unbounded();
-        let fill = |t: &mut [(A, u32)], it: &Item| {
+        let fill = |t: &mut [(A, u64)], it: &Item| {
             // A run of rows of one group adds up in a local: one table write per row costs about 3 times more
-            let (mut cur, mut run) = (NONE as usize, (A::default(), 0u32));
+            let (mut cur, mut run) = (NONE as usize, (A::default(), 0u64));
             scan(self, tests, it, |k, v| {
                 let mut s = 0usize;
                 for x in radix {
@@ -216,13 +216,13 @@ impl Store {
             }
         };
         // A thread locks only its own table, so the locks never wait
-        let new = || vec![(A::default(), 0u32); slots + 2 * pad];
-        let tabs: Vec<Vec<(A, u32)>> = if tables == 1 {
+        let new = || vec![(A::default(), 0u64); slots + 2 * pad];
+        let tabs: Vec<Vec<(A, u64)>> = if tables == 1 {
             let mut t = new();
             items.iter().for_each(|it| fill(&mut t, it));
             vec![t]
         } else {
-            let tabs: Vec<Mutex<Vec<(A, u32)>>> = (0..tables).into_par_iter().map(|_| Mutex::new(new())).collect();
+            let tabs: Vec<Mutex<Vec<(A, u64)>>> = (0..tables).into_par_iter().map(|_| Mutex::new(new())).collect();
             items.par_chunks(CHUNK).for_each(|c| {
                 let mut t = tabs[rayon::current_thread_index().unwrap_or(0) % tables].lock().expect("no panic holds the table");
                 c.iter().for_each(|it| fill(&mut t, it));
@@ -542,7 +542,7 @@ mod tests {
                 let r = region(&mut rng);
                 let keep: Vec<DimId> = (0..3).filter(|_| rng.below(2) == 0).collect();
                 let slots = keep.iter().map(|&d| r.get(d).map_or(SIZES[d] as usize, |s| s.members.len())).product();
-                let path = choose(Some(slots), size_of::<(FixSum, u32)>(), 8, st.rows_hint(), &cfg);
+                let path = choose(Some(slots), size_of::<(FixSum, u64)>(), 8, st.rows_hint(), &cfg);
                 if matches!(path, Group::Dense { .. }) { seen.0 += 1 } else { seen.1 += 1 }
                 for (a, f) in AGGS {
                     let b = Budget::new(usize::MAX, 0);
