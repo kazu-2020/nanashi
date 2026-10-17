@@ -5,6 +5,7 @@ use crate::eval::{from_key, group, max_key, min_key, FixSum, Meter, DENSE_MAX};
 use crate::packed::BLOCK;
 use crate::*;
 use std::ops::{Range, RangeInclusive};
+use std::sync::Mutex;
 
 /// The aggregations of a read (proto `Aggregation`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,29 +206,29 @@ impl Store {
                 e.1 += run.1;
             }
         };
-        let new = || vec![(A::default(), 0u32); slots + 2 * pad];
-        let t = if tables == 1 {
-            let mut t = new();
+        // One table for each thread. Small chunks of items balance the threads when one of them is slow (a
+        // busy core); a thread locks only its own table, so the locks never wait.
+        let new = || Mutex::new(vec![(A::default(), 0u32); slots + 2 * pad]);
+        let tabs: Vec<Mutex<Vec<(A, u32)>>> = if tables == 1 { vec![new()] } else { (0..tables).into_par_iter().map(|_| new()).collect() };
+        if tables == 1 {
+            let mut t = tabs[0].lock().expect("no panic holds the table");
             items.iter().for_each(|it| fill(&mut t, it));
-            t
         } else {
-            let min_len = items.len().div_ceil(tables);
-            items.par_iter().with_min_len(min_len).fold(new, |mut t, it| {
-                fill(&mut t, it);
-                t
-            }).reduce(Vec::new, |mut a, b| {
-                if a.is_empty() {
-                    return b;
+            items.par_chunks(64).for_each(|c| {
+                let mut t = tabs[rayon::current_thread_index().unwrap_or(0) % tables].lock().expect("no panic holds the table");
+                c.iter().for_each(|it| fill(&mut t, it));
+            });
+        }
+        let mut tabs = tabs.into_iter().map(|t| t.into_inner().expect("no panic holds the table"));
+        let mut t = tabs.next().expect("tables > 0");
+        for o in tabs {
+            for (x, y) in t.iter_mut().zip(&o) {
+                if y.1 > 0 {
+                    x.0.merge(&y.0, &m);
+                    x.1 += y.1;
                 }
-                for (x, y) in a.iter_mut().zip(&b) {
-                    if y.1 > 0 {
-                        x.0.merge(&y.0, &m);
-                        x.1 += y.1;
-                    }
-                }
-                a
-            })
-        };
+            }
+        }
         let t = &t[pad..pad + slots];
         // Err if the Meter refused a Spill: then the sums are wrong
         b.need(table_cells + m.cells(), "集計")?;
