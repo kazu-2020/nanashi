@@ -8,20 +8,21 @@ use std::ops::Range;
 
 /// Metric の格納。分割軸（index）を先頭（最上位ビット）に詰めた整数キーで持つ。
 ///
-/// 本体はキー順に並んだ配列で、全体の再計算の結果は並べ替えるだけで格納できる。
-/// 小さな書き換えは差分の木（delta）に入れ、読むときに本体と突き合わせる。
-/// 差分が大きくなったら本体にまとめ直す。分割軸で絞った範囲は、本体の二分探索と
-/// 差分の範囲検索で、その範囲の行数だけ読めばよい。
+/// The base is sorted in key order, so one sort stores the result of a full recalculation. A small change
+/// goes into the delta tree, and a read merges the delta with the base. When the delta becomes large, the
+/// engine merges it into a new base. A binary search in the base and a range search in the delta read
+/// only the rows of a range on the partition dimension.
 ///
-/// 本体は作ったら変えず、Arc で版どうし（複製したモデルどうし）で共有する。差分は書き換えても
-/// 古い版を壊さない永続的な木で持つ。そのため Store の複製は本体の配列も差分も写さず O(1) で済み、
-/// 公開済みの版を読み手が持っていても、書き込みの費用は変わらない。
+/// The base is a list of immutable segments (`Base`). Versions (clones of the model) share the segments by
+/// Arc. The delta is a persistent tree, so a write does not break an old version. A clone of a Store copies
+/// one Arc for each segment and no cells. So a reader that keeps a published version does not change the
+/// cost of a write.
 #[derive(Clone, Debug)]
 pub struct Store {
-    pub metric_dims: Vec<DimId>, // Metric として宣言した軸の順
-    pub pack: Packing,           // 分割軸が先頭
+    pub metric_dims: Vec<DimId>, // the dimensions in the declared order of the Metric
+    pub pack: Packing,           // the partition dimension first
     pub kind: Kind,
-    pub(crate) base: Arc<Base>,
+    pub(crate) base: Base,
     pub(crate) delta: OrdMap<u64, Slot>, // The delta (Some sets a value, None removes the cell)
     pub(crate) cfg: Config,               // 作ったときの Catalog の調整値
 }
@@ -56,35 +57,275 @@ impl Mem {
     }
 }
 
-/// The base of a Store. Nothing changes it after it is made.
+/// One immutable run of the base in key order. Nothing changes a segment after it is made.
 ///
 /// The keys are packed in frame-of-reference blocks (`PackedKeys`). The values are an immutable column
 /// with no gaps (`Box<[f64]>`), with the same layout as the data of an Arrow Float64 array.
-/// The index (postings) stays in memory.
+/// The index (postings) of the segment stays in memory. Its rows are local to the segment.
 #[derive(Debug)]
-pub(crate) struct Base {
-    pub(crate) keys: PackedKeys, // ascending, no duplicates
+pub(crate) struct Segment {
+    pub(crate) keys: PackedKeys, // ascending, no duplicates, never empty
     pub(crate) vals: Box<[f64]>,
-    pub(crate) postings: Vec<OnceLock<Arc<Postings>>>, // 分割軸以外の軸の索引（詰め方の位置ごと。必要になったら作る）
+    first: u64,
+    last: u64,
+    postings: Vec<OnceLock<Arc<Postings>>>, // one for each packing position, made when it is necessary
 }
 
-impl Base {
-    pub(crate) fn empty(n_dims: usize) -> Arc<Base> {
-        Arc::new(Base { keys: PackedKeys::new(&[], false), vals: Box::new([]), postings: fresh_postings(n_dims) })
+impl Segment {
+    fn new(keys: PackedKeys, vals: Box<[f64]>, n_dims: usize) -> Arc<Segment> {
+        debug_assert!(keys.len() > 0 && keys.len() == vals.len());
+        let (first, last) = (keys.get(0), keys.get(keys.len() - 1));
+        Arc::new(Segment { keys, vals, first, last, postings: fresh_postings(n_dims) })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn bytes(&self) -> usize {
+        self.keys.bytes() + self.vals.len() * 8
     }
 
     /// The keys are decoded one block at a time (`PackedKeys::range`).
     pub(crate) fn range(&self, r: Range<usize>) -> BaseRange<'_> {
         self.keys.range(r.clone()).zip(self.vals[r].iter().copied())
     }
+
+    /// The index of the dimension at packing position `pos`. The first use makes it with a counting sort (linear in
+    /// the rows). The build is sequential: a rayon wait inside `get_or_init` can run a task that waits on the same cell.
+    pub(crate) fn postings(&self, pack: &Packing, pos: usize) -> &Postings {
+        self.postings[pos].get_or_init(|| {
+            let size = (pack.masks[pos] + 1) as usize;
+            let mut count = vec![0u32; size + 1];
+            for k in self.keys.iter() {
+                count[pack.get(k, pos) as usize + 1] += 1;
+            }
+            for i in 1..count.len() {
+                count[i] += count[i - 1];
+            }
+            let mut fill = count.clone();
+            let n = self.len() as u64; // best_postings makes sure that n fits in u32
+            // Hold the rows as u32 and pack the u64 entries one at a time. Then the build needs 4 B for each row, not 8 B.
+            let mut rows = vec![0u32; n as usize];
+            for (row, k) in self.keys.iter().enumerate() {
+                let m = pack.get(k, pos) as usize;
+                rows[fill[m] as usize] = row as u32;
+                fill[m] += 1;
+            }
+            drop(fill);
+            let members: Box<[u32]> = (0..size as u32).filter(|&m| count[m as usize + 1] > count[m as usize]).collect();
+            let entries = || {
+                members.iter().enumerate().flat_map(|(j, &m)| rows[count[m as usize] as usize..count[m as usize + 1] as usize].iter().map(move |&row| j as u64 * n + row as u64))
+            };
+            let mut packed = PackedKeys::builder_with_bytes(n as usize, packed::packed_bytes(entries()));
+            entries().for_each(|e| packed.push(e));
+            let offsets = members.iter().map(|&m| count[m as usize]).chain([n as u32]).collect();
+            Arc::new(Postings { members, offsets, entries: packed.finish(), n })
+        })
+    }
+}
+
+/// The base of a Store: segments in key order, and the global row at which each segment starts. Readers
+/// address the base by the global row. A clone copies one Arc for each segment. Only `Base::new` makes a
+/// Base with segments, so `starts` and `rows` always agree with `segs`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Base {
+    pub(crate) segs: Vec<Arc<Segment>>,
+    starts: Vec<usize>, // starts[i] = the rows before segment i
+    rows: usize,        // a field, because the fused scan reads it for each row
+}
+
+impl Base {
+    fn new(segs: Vec<Arc<Segment>>) -> Base {
+        let mut starts = Vec::with_capacity(segs.len());
+        let mut rows = 0;
+        for s in &segs {
+            starts.push(rows);
+            rows += s.len();
+        }
+        Base { segs, starts, rows }
+    }
+
+    #[inline]
+    pub(crate) fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.segs.iter().map(|s| s.bytes()).sum()
+    }
+
+    /// The segment of global row `i` and the row inside it. `i` must be below `rows()`.
+    #[inline]
+    pub(crate) fn locate(&self, i: usize) -> (usize, usize) {
+        let s = self.starts.partition_point(|&start| start <= i) - 1;
+        (s, i - self.starts[s])
+    }
+
+    #[inline]
+    pub(crate) fn key(&self, i: usize) -> u64 {
+        let (s, j) = self.locate(i);
+        self.segs[s].keys.get(j)
+    }
+
+    /// The first global row whose key is at least `key`.
+    pub(crate) fn lower_bound(&self, key: u64) -> usize {
+        let s = self.segs.partition_point(|seg| seg.last < key);
+        if s == self.segs.len() {
+            return self.rows();
+        }
+        self.starts[s] + self.segs[s].keys.partition_point(|k| k < key)
+    }
+
+    /// The value of the row with `key`, or None if the base has no such row.
+    fn value(&self, key: u64) -> Option<f64> {
+        let seg = self.segs.get(self.segs.partition_point(|seg| seg.last < key))?;
+        seg.keys.find(key).map(|j| seg.vals[j])
+    }
+
+    /// The rows in `r` (global rows), decoded one block at a time, segment after segment.
+    pub(crate) fn range(&self, r: Range<usize>) -> Rows<'_> {
+        debug_assert!(r.end <= self.rows());
+        let mut out = Rows { base: self, seg: 0, cur: None, end: r.end };
+        if r.start < r.end {
+            let (s, j) = self.locate(r.start);
+            let seg = &self.segs[s];
+            out.seg = s;
+            out.cur = Some(seg.range(j..(r.end - self.starts[s]).min(seg.len())));
+        }
+        out
+    }
+
+    /// The rows of each segment with a key in `[lo, hi)`, segment by segment.
+    fn segments_in(&self, lo: u64, hi: Option<u64>) -> impl Iterator<Item = BaseRange<'_>> {
+        let first = self.segs.partition_point(|s| s.last < lo);
+        self.segs[first..].iter().take_while(move |s| hi.is_none_or(|h| s.first < h)).map(move |s| {
+            let a = if s.first < lo { s.keys.partition_point(|k| k < lo) } else { 0 };
+            let b = match hi {
+                Some(h) if s.last >= h => s.keys.partition_point(|k| k < h),
+                _ => s.len(),
+            };
+            s.range(a..b)
+        })
+    }
+
+    /// True if the two bases are the same segments (shared by Arc, not compared by cells).
+    fn same_as(&self, other: &Base) -> bool {
+        self.segs.len() == other.segs.len() && self.segs.iter().zip(&other.segs).all(|(a, b)| Arc::ptr_eq(a, b))
+    }
+
+    /// A base of the given segments, with the key as the value of each row (for the tests of the readers).
+    #[cfg(test)]
+    pub(crate) fn from_parts(parts: &[&[u64]]) -> Base {
+        Base::new(parts.iter().map(|p| Segment::new(PackedKeys::new(p, false), p.iter().map(|&k| k as f64).collect(), 0)).collect())
+    }
 }
 
 type BaseRange<'a> = std::iter::Zip<packed::Keys<'a>, std::iter::Copied<std::slice::Iter<'a, f64>>>;
 
+/// The iterator of `Base::range`: the rows of one segment, then the next segment, up to global row `end`.
+pub(crate) struct Rows<'a> {
+    base: &'a Base,
+    seg: usize,
+    cur: Option<BaseRange<'a>>,
+    end: usize,
+}
+
+impl Iterator for Rows<'_> {
+    type Item = (u64, f64);
+
+    #[inline]
+    fn next(&mut self) -> Option<(u64, f64)> {
+        loop {
+            if let Some(c) = self.cur.as_mut()?.next() {
+                return Some(c);
+            }
+            self.cur = self.next_segment();
+        }
+    }
+
+    /// Folds each segment with its own loop, so `for_each` has no segment check for each row.
+    fn fold<B, F: FnMut(B, (u64, f64)) -> B>(mut self, mut acc: B, mut f: F) -> B {
+        while let Some(cur) = self.cur.take() {
+            acc = cur.fold(acc, &mut f);
+            self.cur = self.next_segment();
+        }
+        acc
+    }
+}
+
+impl<'a> Rows<'a> {
+    /// The rows of the segment after `seg` up to `end`, or None at the end. `seg` becomes that segment.
+    fn next_segment(&mut self) -> Option<BaseRange<'a>> {
+        self.seg += 1;
+        let &start = self.base.starts.get(self.seg)?;
+        let seg = &self.base.segs[self.seg];
+        (start < self.end).then(|| seg.range(0..(self.end - start).min(seg.len())))
+    }
+}
+
+/// Builds a Base in key order. It cuts a segment at the first partition-member boundary after `seg_rows`
+/// rows, so a segment holds whole partition members. `like` gives the key density for the reservation.
+pub(crate) struct BaseBuilder<'a> {
+    pack: &'a Packing,
+    seg_rows: usize,
+    density: (usize, usize), // (bytes, rows) of the packed keys of a base like the new one
+    hint: usize,             // the rows still expected
+    keys: packed::Builder,
+    vals: Vec<f64>,
+    last: u64,
+    done: Vec<Arc<Segment>>,
+}
+
+impl<'a> BaseBuilder<'a> {
+    pub(crate) fn new(pack: &'a Packing, cfg: &Config, hint: usize, like: &Base) -> BaseBuilder<'a> {
+        let density = (like.segs.iter().map(|s| s.keys.bytes()).sum(), like.rows());
+        let seg_rows = cfg.seg_rows.max(1);
+        let cap = BaseBuilder::cap(seg_rows, hint);
+        BaseBuilder { pack, seg_rows, density, hint, keys: PackedKeys::builder(cap, density), vals: Vec::with_capacity(cap), last: 0, done: Vec::new() }
+    }
+
+    /// The reservation of one segment: `seg_rows` and room for the rest of the partition member at the cut,
+    /// so the columns do not grow by doubling (a copy of the segment) for a usual member.
+    fn cap(seg_rows: usize, hint: usize) -> usize {
+        seg_rows.saturating_add(seg_rows / 16).min(hint)
+    }
+
+    #[inline(always)]
+    pub(crate) fn push(&mut self, k: u64, v: f64) {
+        if self.vals.len() >= self.seg_rows && self.pack.get(k, 0) != self.pack.get(self.last, 0) {
+            self.cut();
+        }
+        self.keys.push(k);
+        self.vals.push(v);
+        self.last = k;
+    }
+
+    #[cold]
+    fn cut(&mut self) {
+        self.hint = self.hint.saturating_sub(self.vals.len());
+        let cap = BaseBuilder::cap(self.seg_rows, self.hint);
+        // The next segment packs like this one. In a full recalculation the old base is empty. Then 2 B for each
+        // key is too small, and the key bytes grow by doubling (a copy).
+        self.density = self.keys.density();
+        let keys = std::mem::replace(&mut self.keys, PackedKeys::builder(cap, self.density)).finish();
+        let vals = std::mem::replace(&mut self.vals, Vec::with_capacity(cap));
+        self.done.push(Segment::new(keys, vals.into_boxed_slice(), self.pack.dims.len()));
+    }
+
+    pub(crate) fn finish(mut self) -> Base {
+        if !self.vals.is_empty() {
+            let n_dims = self.pack.dims.len();
+            self.done.push(Segment::new(self.keys.finish(), self.vals.into_boxed_slice(), n_dims));
+        }
+        Base::new(self.done)
+    }
+}
+
 /// The iterator of `Store::merged_iter`: the base rows and the delta in one key order (as `merged`). A delta entry
 /// replaces the base row with the same key, and a removal (`Slot(None)`) gives nothing.
 pub(crate) struct Merged<'a> {
-    base: Peekable<BaseRange<'a>>,
+    base: Peekable<Rows<'a>>,
     delta: Peekable<DeltaRange<'a>>,
 }
 
@@ -118,8 +359,7 @@ impl Iterator for Merged<'_> {
 /// the changed keys against the old store while the new cells arrive, as `replaced_all` does.
 pub(crate) struct StoreSink<'a> {
     old: &'a Store,
-    keys: packed::Builder,
-    vals: Vec<f64>,
+    out: BaseBuilder<'a>,
     last: Option<u64>,
     diff: Option<Diff<'a>>,
 }
@@ -154,14 +394,13 @@ impl Diff<'_> {
 /// (None without a diff, or if nothing changed).
 #[derive(Debug)]
 pub struct Columns {
-    pub(crate) keys: PackedKeys,
-    pub(crate) vals: Vec<f64>,
+    pub(crate) base: Base,
     pub(crate) changed: Option<Vec<Vec<u32>>>,
 }
 
 impl Columns {
     pub fn bytes(&self) -> usize {
-        self.keys.bytes().saturating_add(self.vals.capacity().saturating_mul(8))
+        self.base.bytes()
     }
 }
 
@@ -172,8 +411,7 @@ impl Sink for StoreSink<'_> {
                 return Err("内部エラー: 融合した結果がキー順でない".into());
             }
             self.last = Some(k);
-            self.keys.push(k);
-            self.vals.push(v);
+            self.out.push(k, v);
             if let Some(d) = &mut self.diff {
                 d.step(k, v);
             }
@@ -183,41 +421,45 @@ impl Sink for StoreSink<'_> {
 }
 
 impl StoreSink<'_> {
-    pub(crate) fn finish(mut self) -> Columns {
+    pub(crate) fn finish(self) -> Columns {
         let changed = self.diff.map(|mut d| {
             d.changed.extend(d.old.map(|(k, _)| k));
             self.old.region_of(&d.changed)
         });
-        // The reservation is an upper bound (the rows of the drivers). Give the unused part back if it is large.
-        if self.vals.len() < self.vals.capacity() / 4 * 3 {
-            self.vals.shrink_to_fit();
-        }
-        Columns { keys: self.keys.finish(), vals: self.vals, changed: changed.flatten() }
+        Columns { base: self.out.finish(), changed: changed.flatten() }
     }
 }
 
-/// The index of a dimension other than the partition dimension: the base rows of each member (an inverted index).
+/// The index of a dimension other than the partition dimension, for one segment: the rows of each member
+/// (an inverted index). Only the members in the segment have an entry, so the index does not grow with the
+/// number of segments.
 #[derive(Debug)]
 pub(crate) struct Postings {
-    pub(crate) offsets: Vec<u32>, // the entries of member m are entries[offsets[m]..offsets[m + 1]]
-    pub(crate) entries: PackedKeys, // `m * n + row` for each base row, sorted
-    pub(crate) n: u64,              // the number of base rows
+    members: Box<[u32]>, // the members in the segment, ascending
+    offsets: Box<[u32]>, // the entries of members[j] are entries[offsets[j]..offsets[j + 1]]
+    entries: PackedKeys, // `j * n + row` for each row of the segment, sorted
+    n: u64,              // the rows of the segment
 }
 
 impl Postings {
-    /// The positions in `entries` of member `m`.
-    pub(crate) fn span(&self, m: u32) -> Range<usize> {
-        let m = m as usize;
-        if m + 1 >= self.offsets.len() {
-            return 0..0;
+    /// The index of `m` in `members` and its positions in `entries`.
+    fn at(&self, m: u32) -> (usize, Range<usize>) {
+        match self.members.binary_search(&m) {
+            Ok(j) => (j, self.offsets[j] as usize..self.offsets[j + 1] as usize),
+            Err(_) => (0, 0..0),
         }
-        self.offsets[m] as usize..self.offsets[m + 1] as usize
     }
 
-    /// The base rows of member `m`, in ascending order.
+    /// The number of rows of member `m`.
+    pub(crate) fn count(&self, m: u32) -> usize {
+        self.at(m).1.len()
+    }
+
+    /// The rows of member `m` in the segment, in ascending order.
     pub(crate) fn of(&self, m: u32) -> impl Iterator<Item = u32> + '_ {
-        let first = m as u64 * self.n;
-        self.entries.range(self.span(m)).map(move |k| (k - first) as u32)
+        let (j, span) = self.at(m);
+        let first = j as u64 * self.n;
+        self.entries.range(span).map(move |k| (k - first) as u32)
     }
 }
 
@@ -238,7 +480,7 @@ impl Store {
             metric_dims: metric_dims.to_vec(),
             pack: Packing::new(&order, cat)?,
             kind,
-            base: Base::empty(order.len()),
+            base: Base::default(),
             delta: OrdMap::new(),
             cfg: cat.cfg,
         })
@@ -249,40 +491,18 @@ impl Store {
     }
 
     /// Gives the cells in [lo, hi) in key order, merged from the base and the delta.
-    /// The loop is the same as `Merged`, written out because this is the hot path of every read with a delta.
     pub(crate) fn merged(&self, lo: u64, hi: Option<u64>, mut f: impl FnMut(u64, f64)) {
-        let start = self.base.keys.partition_point(|k| k < lo);
-        let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|k| k < h));
         let upper = hi.map_or(Bound::Unbounded, Bound::Excluded);
         let mut delta = self.delta.range((Bound::Included(lo), upper)).peekable();
-        let mut base = self.base.range(start..end).peekable();
-        while let Some(&(bk, bv)) = base.peek() {
-            match delta.peek() {
-                Some(&(&dk, &Slot(dv))) if dk <= bk => {
-                    delta.next();
-                    if dk == bk {
-                        base.next();
-                    }
-                    if let Some(v) = dv {
-                        f(dk, v);
-                    }
-                }
-                _ => {
-                    f(bk, bv);
-                    base.next();
-                }
-            }
+        for rows in self.base.segments_in(lo, hi) {
+            merge_rows(rows, &mut delta, &mut f);
         }
-        for (&dk, &Slot(dv)) in delta {
-            if let Some(v) = dv {
-                f(dk, v);
-            }
-        }
+        drain_delta(delta, &mut f);
     }
 
     /// The cells in key order, merged from the base and the delta, as an iterator (for `StoreSink`).
     fn merged_iter(&self) -> Merged<'_> {
-        Merged { base: self.base.range(0..self.base.keys.len()).peekable(), delta: self.delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable() }
+        Merged { base: self.base.range(0..self.base.rows()).peekable(), delta: self.delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable() }
     }
 
     pub(crate) fn for_each_in(&self, r: &Restrict, mut f: impl FnMut(u64, f64)) {
@@ -301,14 +521,17 @@ impl Store {
                 return;
             }
         }
-        if let Some((sel, post)) = self.best_postings(r) {
+        if let Some((sel, pos)) = self.best_postings(r) {
             // Collect only the rows of the selected members with the index. Match the changes in the delta tree separately
             let mut cells = Vec::new();
-            for &m in &sel.members {
-                for row in post.of(m) {
-                    let k = self.base.keys.get(row as usize);
-                    if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
-                        cells.push((k, self.base.vals[row as usize]));
+            for seg in &self.base.segs {
+                let post = seg.postings(&self.pack, pos);
+                for &m in &sel.members {
+                    for row in post.of(m) {
+                        let k = seg.keys.get(row as usize);
+                        if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
+                            cells.push((k, seg.vals[row as usize]));
+                        }
                     }
                 }
             }
@@ -338,7 +561,7 @@ impl Store {
 
     pub fn len(&self) -> usize {
         if self.delta.is_empty() {
-            return self.base.keys.len();
+            return self.base.rows();
         }
         let mut n = 0;
         self.merged(0, None, |_, _| n += 1);
@@ -348,7 +571,7 @@ impl Store {
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
             // Each block is decoded once, in parallel on a large base.
-            let mut cells = vec![(0u64, 0f64); self.base.keys.len()];
+            let mut cells = vec![(0u64, 0f64); self.base.rows()];
             let fill = |(b, out): (usize, &mut [(u64, f64)])| {
                 let rows = self.base.range(b * BLOCK..b * BLOCK + out.len());
                 for (c, row) in out.iter_mut().zip(rows) {
@@ -369,7 +592,7 @@ impl Store {
 
     /// 差分がなければ本体の行数（本体の行を番号で直接読める）。差分があれば None。
     pub fn base_rows(&self) -> Option<usize> {
-        self.delta.is_empty().then(|| self.base.keys.len())
+        self.delta.is_empty().then(|| self.base.rows())
     }
 
     /// The rows `r` of stored data without a delta, in order (the base rows are the cells). It decodes the
@@ -384,15 +607,15 @@ impl Store {
         self.merged(0, None, f);
     }
 
-    /// 格納データが確保しているメモリ（バイト）。本体はキーと値の列（余分な容量はない）、索引は作ったものだけを
-    /// 数える。差分の木は 1 件の大きさ×件数で、木の節の分を含まない（下限）。本体を版どうしで共有していても、
-    /// この Store の分として数える。
+    /// The memory of the stored data (bytes). The base is its key and value columns (no spare capacity). The index
+    /// counts only the parts that exist. The delta is the size of one entry x the entries, without the tree nodes
+    /// (a lower bound). A base that versions share counts for each Store.
     pub fn memory(&self) -> Mem {
-        let b = &*self.base;
-        let index = b.postings.iter().filter_map(|p| p.get()).map(|p| p.offsets.capacity() * 4 + p.entries.bytes()).sum();
+        let built = self.base.segs.iter().flat_map(|s| s.postings.iter().filter_map(|p| p.get()));
+        let index = built.map(|p| (p.members.len() + p.offsets.len()) * 4 + p.entries.bytes()).sum();
         Mem {
-            rows: b.keys.len(),
-            base: b.keys.bytes() + b.vals.len() * 8,
+            rows: self.base.rows(),
+            base: self.base.bytes(),
             delta_rows: self.delta.len(),
             delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
             index,
@@ -401,7 +624,7 @@ impl Store {
 
     /// 行数のおおよその値（本体と差分の件数の和。差分の上書きや削除を数え直さない）。
     pub fn rows_hint(&self) -> usize {
-        self.base.keys.len() + self.delta.len()
+        self.base.rows() + self.delta.len()
     }
 
     fn slots(&self) -> Vec<usize> {
@@ -414,7 +637,7 @@ impl Store {
             metric_dims: self.metric_dims.clone(),
             pack: self.pack.clone(),
             kind: self.kind,
-            base: Base::empty(self.pack.dims.len()),
+            base: Base::default(),
             delta: OrdMap::new(),
             cfg: self.cfg,
         }
@@ -423,90 +646,79 @@ impl Store {
     /// Make the sorted cells the base and drop the delta.
     /// Use the buffer of `cells` for the keys, so that only one new column is made.
     pub(crate) fn set_sorted(&mut self, cells: Vec<(u64, f64)>) {
-        let vals: Vec<f64> =
-            if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
+        let par = self.cfg.par(cells.len());
+        // The segment cuts are the ones of `BaseBuilder`. A cut is at the first member boundary at least `seg_rows`
+        // rows after the last cut. So the search starts there and does not read every row.
+        let seg_rows = self.cfg.seg_rows.max(1);
+        let mut cuts = vec![0];
+        let mut j = seg_rows;
+        while j < cells.len() {
+            if self.pack.get(cells[j - 1].0, 0) != self.pack.get(cells[j].0, 0) {
+                cuts.push(j);
+                j = j.saturating_add(seg_rows);
+            } else {
+                j += 1;
+            }
+        }
+        cuts.push(cells.len());
+        cuts.dedup();
+        // Allocate the value columns on the calling thread. A parallel collect also reserves its Vec there.
+        // If the rayon workers allocate the columns, their malloc arenas keep the freed columns of old segments.
+        // Then RSS grows by about 20 % on retail xlarge.
+        let column = |c: &[(u64, f64)]| -> Box<[f64]> {
+            if par { c.par_iter().map(|c| c.1).collect::<Vec<f64>>().into_boxed_slice() } else { c.iter().map(|c| c.1).collect() }
+        };
+        let vals: Vec<Box<[f64]>> = cuts.windows(2).map(|w| column(&cells[w[0]..w[1]])).collect();
         let keys = keys_in_place(cells);
-        self.set_columns(PackedKeys::new(&keys, self.cfg.par(keys.len())), vals);
+        let n_dims = self.pack.dims.len();
+        let make = |(w, vals): (&[usize], Box<[f64]>)| Segment::new(PackedKeys::new(&keys[w[0]..w[1]], par), vals, n_dims);
+        self.set_base(Base::new(cuts.windows(2).zip(vals).map(make).collect()));
     }
 
     /// A sink for at most `n` cells in key order that replace the whole stored data. With `diff`, the
     /// sink also finds the region of the cells whose value changed (as `replaced_all`).
     pub(crate) fn sink(&self, n: usize, diff: bool) -> StoreSink<'_> {
         let diff = diff.then(|| Diff { old: self.merged_iter().peekable(), changed: Vec::new() });
-        StoreSink { old: self, keys: PackedKeys::builder(n, &self.base.keys), vals: Vec::with_capacity(n), last: None, diff }
+        StoreSink { old: self, out: BaseBuilder::new(&self.pack, &self.cfg, n, &self.base), last: None, diff }
     }
 
     /// The Store with the finished sink as its base and no delta, and the region of the changed cells.
     pub fn with_columns(&self, c: Columns) -> (Store, Option<Vec<Vec<u32>>>) {
         let mut out = self.empty_like();
-        out.set_columns(c.keys, c.vals);
+        out.set_base(c.base);
         (out, c.changed)
     }
 
-    /// Make the packed sorted keys and the values the base and drop the delta.
-    fn set_columns(&mut self, keys: PackedKeys, vals: Vec<f64>) {
-        self.base = Arc::new(Base {
-            keys,
-            vals: vals.into_boxed_slice(),
-            postings: fresh_postings(self.pack.dims.len()),
-        });
+    /// Make `base` the base and drop the delta.
+    fn set_base(&mut self, base: Base) {
+        self.base = base;
         self.delta = OrdMap::new();
     }
 
-    /// The index of the dimension at packing position pos. The first use makes it with a counting sort (linear in the base rows).
-    /// The build is sequential: a rayon wait inside `get_or_init` can run a task that waits on the same cell.
-    pub(crate) fn postings(&self, pos: usize) -> &Postings {
-        let base = &*self.base;
-        base.postings[pos].get_or_init(|| {
-            let size = (self.pack.masks[pos] + 1) as usize;
-            let mut offsets = vec![0u32; size + 1];
-            for k in self.base.keys.iter() {
-                offsets[self.pack.get(k, pos) as usize + 1] += 1;
-            }
-            for i in 1..offsets.len() {
-                offsets[i] += offsets[i - 1];
-            }
-            let mut fill = offsets.clone();
-            let n = self.base.keys.len() as u64; // best_postings makes sure that n fits in u32
-            // Hold the rows as u32 and pack the u64 entries one at a time. Then the build needs 4 B for each row, not 8 B.
-            let mut rows = vec![0u32; n as usize];
-            for (row, k) in self.base.keys.iter().enumerate() {
-                let m = self.pack.get(k, pos) as usize;
-                rows[fill[m] as usize] = row as u32;
-                fill[m] += 1;
-            }
-            drop(fill);
-            let entries = || {
-                offsets.windows(2).enumerate().flat_map(|(m, w)| rows[w[0] as usize..w[1] as usize].iter().map(move |&row| m as u64 * n + row as u64))
-            };
-            let mut packed = PackedKeys::builder_with_bytes(n as usize, packed::packed_bytes(entries()));
-            entries().for_each(|e| packed.push(e));
-            Arc::new(Postings { offsets, entries: packed.finish(), n })
-        })
-    }
-
     /// If r filters a dimension other than the partition dimension and its index makes the rows much fewer,
-    /// return the selection and the index of that dimension.
-    pub(crate) fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, &'a Postings)> {
+    /// return the selection and the packing position of that dimension.
+    pub(crate) fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, usize)> {
         let min_rows = self.cfg.postings_min_rows;
-        let n = self.base.keys.len();
-        if n == 0 || n < min_rows || n > u32::MAX as usize {
+        let n = self.base.rows();
+        if n == 0 || n < min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize) {
             return None;
         }
-        let mut best: Option<(usize, &Arc<Sel>, &Postings)> = None;
+        let mut best: Option<(usize, &Arc<Sel>, usize)> = None;
         for (pos, &d) in self.pack.dims.iter().enumerate().skip(1) {
             let Some(sel) = r.get(d) else { continue };
             if self.pack.masks[pos] >= (1 << 22) {
                 continue; // no index for a dimension with too many members
             }
-            let post = self.postings(pos);
-            let cand: usize = sel.members.iter().map(|&m| post.span(m).len()).sum();
+            let cand: usize = self.base.segs.iter().map(|s| {
+                let p = s.postings(&self.pack, pos);
+                sel.members.iter().map(|&m| p.count(m)).sum::<usize>()
+            }).sum();
             if best.is_none_or(|(c, _, _)| cand < c) {
-                best = Some((cand, sel, post));
+                best = Some((cand, sel, pos));
             }
         }
-        let (cand, sel, post) = best?;
-        (min_rows == 0 || cand * 4 < n).then_some((sel, post))
+        let (cand, sel, pos) = best?;
+        (min_rows == 0 || cand * 4 < n).then_some((sel, pos))
     }
 
     /// A Store with only the rows in r (the same dimensions and partition dimension).
@@ -520,9 +732,15 @@ impl Store {
         out
     }
 
+    /// The bytes that the segments of a base of `rows` rows add. Each segment has 256 B for its struct, a partly
+    /// filled block of keys and 16 spare key bytes. It also has 16 B for the index cell of each dimension.
+    pub(crate) fn seg_bytes(&self, rows: usize) -> usize {
+        (rows / self.cfg.seg_rows.max(1) + 1).saturating_mul(256 + self.pack.dims.len() * 16)
+    }
+
     /// The most rows of the delta. With more rows, the delta goes into a new base.
     fn delta_limit(&self) -> usize {
-        self.cfg.compact_min.max(self.base.keys.len() / 8)
+        self.cfg.compact_min.max(self.base.rows() / 8)
     }
 
     /// The cells that `replace_diff` (if `diff`) or `replace` needs to write `n` new cells into a region of `size`
@@ -553,9 +771,9 @@ impl Store {
             // values, and the block buffer of the builder. The old base goes if no other version has it.
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
             let rows = self.rows_hint().saturating_add(n);
-            let base = rows.saturating_mul(16).saturating_add(rows.div_ceil(BLOCK) * 16).saturating_add(256);
+            let base = rows.saturating_mul(16).saturating_add(rows.div_ceil(BLOCK) * 16).saturating_add(self.seg_bytes(rows));
             let tree = tree.min(self.delta_limit().saturating_mul(4 * CELL_BYTES).saturating_add(1024));
-            let freed = if shared || Arc::strong_count(&self.base) > 1 { 0 } else { self.memory().base };
+            let freed = if shared || self.base.segs.iter().any(|s| Arc::strong_count(s) > 1) { 0 } else { self.memory().base };
             (base.max(tree), BLOCK * 8, base.saturating_sub(freed).max(tree))
         };
         // Small parts: the packing of the new cells, the checks of the region, the axes of region_of
@@ -571,38 +789,42 @@ impl Store {
     /// The bytes of the indexes that `for_each_in` builds for a region that filters the dimensions in `filtered`
     /// (see `best_postings` and `postings`): (the most at the peak, the bytes that the store keeps).
     fn postings_bytes(&self, filtered: impl Fn(DimId) -> bool) -> (usize, usize) {
-        let rows = self.base.keys.len();
-        if rows == 0 || rows < self.cfg.postings_min_rows || rows > u32::MAX as usize || self.pack.dims.first().is_some_and(|&d| filtered(d)) {
+        let n = self.base.rows();
+        if n == 0 || n < self.cfg.postings_min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize) || self.pack.dims.first().is_some_and(|&d| filtered(d)) {
             return (0, 0);
         }
         let (mut peak, mut kept) = (0usize, 0usize);
         for (pos, &d) in self.pack.dims.iter().enumerate().skip(1) {
-            if !filtered(d) || self.pack.masks[pos] >= (1 << 22) || self.base.postings[pos].get().is_some() {
+            if !filtered(d) || self.pack.masks[pos] >= (1 << 22) {
                 continue;
             }
-            // offsets (u32), the packed entries (at most 8 B each) with block headers, and the struct
-            let offsets = (self.pack.masks[pos] as usize + 2) * 4;
-            let entries = rows * 8 + rows.div_ceil(BLOCK) * 16 + 16 + 128;
-            // The build also holds a copy of the offsets, the rows (u32) and the block buffer of the builder
-            peak = peak.max(kept + offsets * 2 + entries + rows * 4 + BLOCK * 8);
-            kept += offsets + entries;
+            // Each segment has its own index
+            for seg in self.base.segs.iter().filter(|s| s.postings[pos].get().is_none()) {
+                let rows = seg.len();
+                // A member and an offset (u32 each) for each member. A segment has at most `rows` members. Then the
+                // packed entries (at most 8 B each), the block headers and the struct
+                let lists = (rows.min(self.pack.masks[pos] as usize + 1) + 1) * 8;
+                let entries = rows * 8 + rows.div_ceil(BLOCK) * 16 + 16 + 128;
+                // The build also holds the count and fill arrays (u32 for each dimension member), the rows (u32)
+                // and the block buffer of the builder
+                let dense = (self.pack.masks[pos] as usize + 2) * 4;
+                peak = peak.max(kept + dense * 2 + lists + entries + rows * 4 + BLOCK * 8);
+                kept += lists + entries;
+            }
         }
         (peak, kept)
     }
 
     /// Merge the delta into a new base.
     pub(crate) fn compact(&mut self) {
-        let n = self.base.keys.len() + self.delta.len();
-        let (mut keys, mut vals) = (PackedKeys::builder(n, &self.base.keys), Vec::with_capacity(n));
-        self.merged(0, None, |k, v| {
-            keys.push(k);
-            vals.push(v);
-        });
-        self.set_columns(keys.finish(), vals);
+        let mut out = BaseBuilder::new(&self.pack, &self.cfg, self.rows_hint(), &self.base);
+        let (base, delta) = (std::mem::take(&mut self.base), std::mem::take(&mut self.delta));
+        consume_merged(base, &delta, |k, v| out.push(k, v));
+        self.set_base(out.finish());
     }
 
     pub(crate) fn after_delta(&mut self) {
-        if self.delta.len() > self.cfg.compact_min.max(self.base.keys.len() / 8) {
+        if self.delta.len() > self.cfg.compact_min.max(self.base.rows() / 8) {
             self.compact();
         }
     }
@@ -648,23 +870,20 @@ impl Store {
             // Write directly into the new packed base columns. An intermediate cell array or a plain key
             // array adds to the peak memory. A new cell replaces a kept cell with the same key.
             let cs = checks(&self.pack, r);
-            let n = (self.base.keys.len() + self.delta.len() + new.len()).saturating_sub(old.len());
-            let (mut keys, mut vals) = (PackedKeys::builder(n, &self.base.keys), Vec::with_capacity(n));
-            let mut push = |(k, v): (u64, f64)| {
-                keys.push(k);
-                vals.push(v);
-            };
+            let n = (self.rows_hint() + new.len()).saturating_sub(old.len());
+            let mut out = BaseBuilder::new(&self.pack, &self.cfg, n, &self.base);
+            let (base, delta) = (std::mem::take(&mut self.base), std::mem::take(&mut self.delta));
             let mut new = new.into_iter().peekable();
-            self.merged(0, None, |k, v| {
-                while let Some(c) = new.next_if(|c| c.0 < k) {
-                    push(c);
+            consume_merged(base, &delta, |k, v| {
+                while let Some((nk, nv)) = new.next_if(|c| c.0 < k) {
+                    out.push(nk, nv);
                 }
                 if !pass(&self.pack, k, &cs) && new.peek().is_none_or(|c| c.0 != k) {
-                    push((k, v));
+                    out.push(k, v);
                 }
             });
-            new.for_each(push);
-            self.set_columns(keys.finish(), vals);
+            new.for_each(|(k, v)| out.push(k, v));
+            self.set_base(out.finish());
             return;
         }
         for &k in old {
@@ -703,7 +922,7 @@ impl Store {
         let changed = if self.base_rows().is_some() {
             changed_keys(self, &cells) // 差分がなければ、本体を写さずに突き合わせる
         } else {
-            let mut old = Vec::with_capacity(self.base.keys.len() + self.delta.len());
+            let mut old = Vec::with_capacity(self.rows_hint());
             self.merged(0, None, |k, v| old.push((k, v)));
             changed_keys(&old[..], &cells)
         };
@@ -730,9 +949,9 @@ impl Store {
         Some(sets)
     }
 
-    /// 同じ格納データ（複製しただけで、どちらにも書き込んでいない）か。
+    /// True if the two are the same stored data (one is a clone of the other, and nothing wrote to either).
     pub fn same_as(&self, other: &Store) -> bool {
-        Arc::ptr_eq(&self.base, &other.base) && self.delta.ptr_eq(&other.delta)
+        self.base.same_as(&other.base) && self.delta.ptr_eq(&other.delta)
     }
 
     /// The cells with different bits in self (before) and other (after), as (key, before, after). A blank cell is None.
@@ -744,7 +963,7 @@ impl Store {
             return None;
         }
         let mut out = Vec::new();
-        if Arc::ptr_eq(&self.base, &other.base) {
+        if self.base.same_as(&other.base) {
             for item in self.delta.diff(&other.delta) {
                 let k = *match item {
                     DiffItem::Add(k, _) | DiffItem::Remove(k, _) | DiffItem::Update { new: (k, _), .. } => k,
@@ -793,7 +1012,7 @@ impl Store {
     pub(crate) fn value_at(&self, k: u64) -> Option<f64> {
         match self.delta.get(&k) {
             Some(v) => v.0,
-            None => self.base.keys.find(k).map(|i| self.base.vals[i]),
+            None => self.base.value(k),
         }
     }
 
@@ -855,7 +1074,7 @@ impl Store {
 
     /// 値が v のセルを消す（メンバー型の Metric で、消すメンバーを指す値を空にする）。
     pub fn drop_value(&mut self, v: f64) {
-        let mut cells = Vec::with_capacity(self.base.keys.len() + self.delta.len());
+        let mut cells = Vec::with_capacity(self.rows_hint());
         self.merged(0, None, |k, x| {
             if x != v {
                 cells.push((k, x))
@@ -894,7 +1113,7 @@ impl Store {
     /// 同じセルが複数あれば後のものが勝つ。差分に入れると本体にまとめ直すことになる量なら
     /// （write_back と同じ基準）、差分に 1 件ずつ入れずに本体を作り直す。
     pub fn write_many(&mut self, cols: &[&[u32]], values: &[Option<f64>]) {
-        let limit = self.cfg.compact_min.max(self.base.keys.len() / 8);
+        let limit = self.cfg.compact_min.max(self.base.rows() / 8);
         if self.delta.len() + values.len() <= limit {
             let mut key = vec![0; cols.len()];
             for (i, v) in values.iter().enumerate() {
@@ -925,7 +1144,7 @@ impl Store {
                 _ => updates.push(c),
             }
         }
-        let mut out = Vec::with_capacity(self.base.keys.len() + self.delta.len() + updates.len());
+        let mut out = Vec::with_capacity(self.rows_hint() + updates.len());
         let mut i = 0;
         self.merged(0, None, |k, v| {
             while i < updates.len() && updates[i].0 < k {
@@ -997,7 +1216,7 @@ impl Store {
         let pack = &self.pack;
         let pos: Vec<usize> = (0..pack.dims.len()).filter(|&p| pack.dims[p] == dim).collect();
         let target = m as f64;
-        let mut cells = Vec::with_capacity(self.base.keys.len() + self.delta.len());
+        let mut cells = Vec::with_capacity(self.rows_hint());
         self.merged(0, None, |mut k, mut v| {
             for &p in &pos {
                 let c = pack.get(k, p);
@@ -1034,6 +1253,50 @@ pub(crate) fn same_set(a: &[DimId], b: &[DimId]) -> bool {
     a.len() == b.len() && a.iter().all(|d| b.contains(d))
 }
 
+/// Gives the base rows of one segment merged with the delta entries up to its last key, in key order. The loop
+/// is the same as `Merged`, written out because this is the hot path of every read with a delta.
+#[inline]
+fn merge_rows(rows: BaseRange<'_>, delta: &mut Peekable<DeltaRange<'_>>, f: &mut impl FnMut(u64, f64)) {
+    let mut base = rows.peekable();
+    while let Some(&(bk, bv)) = base.peek() {
+        match delta.peek() {
+            Some(&(&dk, &Slot(dv))) if dk <= bk => {
+                delta.next();
+                if dk == bk {
+                    base.next();
+                }
+                if let Some(v) = dv {
+                    f(dk, v);
+                }
+            }
+            _ => {
+                f(bk, bv);
+                base.next();
+            }
+        }
+    }
+}
+
+/// Gives the delta entries that are left after the last base row.
+fn drain_delta(delta: Peekable<DeltaRange<'_>>, f: &mut impl FnMut(u64, f64)) {
+    for (&dk, &Slot(dv)) in delta {
+        if let Some(v) = dv {
+            f(dk, v);
+        }
+    }
+}
+
+/// Gives all cells of `base` merged with `delta` as `Store::merged(0, None, f)`, and takes the base. It drops each
+/// segment after it reads its rows. A rewrite holds the unread old segments, the finished new segments and one
+/// segment in build: about one base and one segment. If a version shares the old segments, nothing frees.
+fn consume_merged(base: Base, delta: &OrdMap<u64, Slot>, mut f: impl FnMut(u64, f64)) {
+    let mut delta = delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable();
+    for seg in base.segs {
+        merge_rows(seg.range(0..seg.len()), &mut delta, &mut f);
+    }
+    drain_delta(delta, &mut f);
+}
+
 /// The standard library collects the keys into the buffer of `cells` (in-place iteration).
 /// It does not promise this, so a test checks it.
 fn keys_in_place(cells: Vec<(u64, f64)>) -> Vec<u64> {
@@ -1060,22 +1323,82 @@ mod tests {
 
     #[test]
     fn postings_give_the_rows_of_each_member() {
-        let dims = (0..2).map(|i| DimInfo { size: 64, ordered: false, name: format!("d{i}") }).collect();
-        let cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        let cat = two_dims_with(64, Config { seg_rows: 1000, postings_min_rows: 0, ..Config::default() });
         let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
-        // 3 blocks of rows, so the packed entries cross block boundaries inside and between members.
         let cells: Vec<(u64, f64)> = (0..64u64 * 50).map(|k| (k * 7 % 4096, k as f64)).filter(|c| c.0 % 3 != 0).collect();
         s.set_sorted(sorted(&cat.cfg, cells));
-        let keys: Vec<u64> = s.base.keys.iter().collect();
-        for m in 0..64 {
-            let want: Vec<u32> = keys.iter().enumerate().filter(|(_, &k)| s.pack.get(k, 1) == m).map(|(row, _)| row as u32).collect();
-            assert_eq!(s.postings(1).of(m).collect::<Vec<u32>>(), want, "m={m}");
+        assert_eq!(s.base.segs.len(), 3);
+        for seg in &s.base.segs {
+            let keys: Vec<u64> = seg.keys.iter().collect();
+            for m in 0..64 {
+                let want: Vec<u32> = keys.iter().enumerate().filter(|(_, &k)| s.pack.get(k, 1) == m).map(|(row, _)| row as u32).collect();
+                assert_eq!(seg.postings(&s.pack, 1).of(m).collect::<Vec<u32>>(), want, "m={m}");
+            }
         }
+        let r = Restrict::all(2).with(1, Sel::new(vec![3, 17, 40], 64));
+        assert!(s.best_postings(&r).is_some());
+        let want: Vec<(u64, f64)> = s.as_cube().cells.into_iter().filter(|c| [3, 17, 40].contains(&s.pack.get(c.0, 1))).collect();
+        assert_eq!(s.read(&r).cells, want);
     }
 
     fn two_dims(size: u32) -> Catalog {
+        two_dims_with(size, Config::default())
+    }
+
+    fn two_dims_with(size: u32, cfg: Config) -> Catalog {
         let dims = (0..2).map(|i| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
-        Catalog { dims, maps: Vec::new(), cfg: Config::default() }
+        Catalog { dims, maps: Vec::new(), cfg }
+    }
+
+    /// The cells of `s` as a map (the expected contents of a Store after writes).
+    fn map_of(s: &Store) -> std::collections::BTreeMap<u64, f64> {
+        s.as_cube().cells.into_iter().collect()
+    }
+
+    #[test]
+    fn a_segment_holds_whole_partition_members() {
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        let mut cells: Vec<(u64, f64)> = (0..1024u64).flat_map(|m| (0..10u64).map(move |j| ((m << 10) | (j * 100), m as f64))).collect();
+        cells.extend((0..1024u64).filter(|j| j % 100 != 0).map(|j| ((100 << 10) | j, 100.0)));
+        let cells = sorted(&cat.cfg, cells);
+        s.set_sorted(cells.clone());
+        assert!(s.base.segs.len() >= 4, "{}", s.base.segs.len());
+        for w in s.base.segs.windows(2) {
+            assert_ne!(s.pack.get(w[0].last, 0), s.pack.get(w[1].first, 0), "a member spans two segments");
+            assert!(w[0].len() >= 2048);
+        }
+        assert_eq!(s.as_cube().cells, cells);
+        let empty = s.empty_like();
+        let mut sink = empty.sink(cells.len(), false);
+        sink.part(cells.clone()).unwrap();
+        let (got, _) = s.with_columns(sink.finish());
+        assert_eq!(got.base.starts, s.base.starts);
+        s.set_sorted((0..1024u64).flat_map(|m| (0..8u64).map(move |j| ((m << 10) | j, 1.0))).collect());
+        assert_eq!(s.base.starts[..3], [0, 2048, 4096]);
+    }
+
+    #[test]
+    fn a_compaction_merges_the_delta_across_segments() {
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, compact_min: 16, ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted(random_cells(10_000, 7));
+        assert_eq!(s.base.segs.len(), 5);
+        let mut want = map_of(&s);
+        let (gaps, seg1, seg3) = (s.base.segs[2].last + 1..s.base.segs[3].first, s.base.segs[1].first, s.base.segs[3].last);
+        let keys: Vec<u64> = [0, u64::MAX >> 44, gaps.start, gaps.end - 1, seg1, seg1 + 1, seg3, seg3 - 1].into_iter().chain((1..1300).map(|i| seg1 + i * 7)).collect();
+        for (i, &k) in keys.iter().enumerate() {
+            let v = (i % 3 != 0).then_some(i as f64);
+            s.write(&s.decode(k), v);
+            match v {
+                Some(v) => want.insert(k, v),
+                None => want.remove(&k),
+            };
+        }
+        assert!(s.base.rows() > 10_500, "the compaction merged the delta into the base ({} rows)", s.base.rows());
+        assert!(s.base.segs.len() >= 5);
+        assert_eq!(map_of(&s), want);
+        assert_eq!(s.len(), want.len());
     }
 
     /// At most `n` distinct keys below `2^20` in ascending order, with a value for each.
@@ -1094,10 +1417,11 @@ mod tests {
 
     #[test]
     fn a_sink_builds_the_same_base_as_set_sorted() {
-        let cat = two_dims(1024);
-        let cells = random_cells(5000, 7);
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, ..Config::default() });
+        let cells = random_cells(10_000, 7);
         let mut want = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
         want.set_sorted(cells.clone());
+        assert_eq!(want.base.segs.len(), 5);
         // Also with more room than cells (the Exact cover reserves the rows of the drivers)
         let empty = want.empty_like();
         for n in [cells.len(), cells.len() + 1234] {
@@ -1107,9 +1431,12 @@ mod tests {
             }
             let (got, changed) = want.with_columns(sink.finish());
             assert!(changed.is_none());
-            assert_eq!(got.base.keys.bytes(), want.base.keys.bytes());
-            assert_eq!(got.base.keys.iter().collect::<Vec<u64>>(), want.base.keys.iter().collect::<Vec<u64>>());
-            assert_eq!(got.base.vals, want.base.vals);
+            assert_eq!(got.base.starts, want.base.starts);
+            for (g, w) in got.base.segs.iter().zip(&want.base.segs) {
+                assert_eq!(g.keys.bytes(), w.keys.bytes());
+                assert_eq!(g.keys.iter().collect::<Vec<u64>>(), w.keys.iter().collect::<Vec<u64>>());
+                assert_eq!(g.vals, w.vals);
+            }
         }
     }
 

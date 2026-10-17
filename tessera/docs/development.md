@@ -167,7 +167,7 @@ The tests make sure that the results do not change.
 - Parallel execution, the widening of a range to the full range, and the fused scan in parallel batches of small parts (`par_min=0, widen_min_rows=0, chunk=3`), the path that aggregates while it reads (`stream_always=True`): `tests/test_redefine.py`
 - Fusion of operations (match with `fuse=False`), the unit of parallel work (`chunk=3`), aggregation into an array of all combinations of the aggregation target (`dense_always=True`), and the fill of that array through bucket buffers (`scatter_bytes=0`): `tests/test_fusion.py`
 - Split of formula evaluation by the memory budget (`max_bytes`, stored data and intermediate results): `tests/test_failures.py`
-- Compaction of deltas and the inverted index (`compact_min`, `postings_min_rows`): the Rust property test `native/engine/tests/store_model.rs`
+- Compaction of deltas, the segments of the base and the inverted index (`compact_min`, `seg_rows`, `postings_min_rows`): the Rust property test `native/engine/tests/store_model.rs`
 
 The tests that use a journal (the common properties of journal and replay, `Workspace`, the HTTP server) run with the file journal and with the PostgreSQL journal (`JournalCase` in `tests/journals.py`).
 In production, the combination is the Rust engine and the PostgreSQL journal.

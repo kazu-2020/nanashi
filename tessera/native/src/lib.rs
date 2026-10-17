@@ -420,6 +420,7 @@ impl Core {
             let k: String = k.extract()?;
             match k.as_str() {
                 "compact_min" => cfg.compact_min = v.extract()?,
+                "seg_rows" => cfg.seg_rows = v.extract()?,
                 "par_min" => cfg.par_min = v.extract()?,
                 "postings_min_rows" => cfg.postings_min_rows = v.extract()?,
                 "stream_always" => cfg.stream_always = v.extract()?,
