@@ -1601,12 +1601,12 @@ fn query_arrow<'py>(
             let rows = rows.iter().map(|r| r.cast_into::<PyList>().map_err(PyErr::from)).collect::<PyResult<Vec<_>>>()?;
             let column = |i: usize| rows.iter().map(|r| r.get_item(i)?.extract::<PyBackedStr>()).collect::<PyResult<Vec<_>>>();
             let coords = at.iter().map(|a| a.map(column).transpose()).collect::<PyResult<Vec<_>>>()?;
-            let values = rows.iter().map(|r| r.get_item(r.len().wrapping_sub(1))?.extract::<f64>()).collect::<PyResult<Vec<_>>>()?;
+            let values = rows.iter().map(|r| r.get_item(r.len().saturating_sub(1))?.extract::<f64>()).collect::<PyResult<Vec<_>>>()?;
             Ok(ipc::Part { metric, coords, values })
         })
         .collect::<PyResult<Vec<_>>>()?;
     // Borrow parts, so that they drop after detach. A drop without the thread state puts each decref in a global pool.
-    let buf = py.detach(|| ipc::query_stream(seq, &dims, &parts)).map_err(err)?;
+    let buf = py.detach(|| ipc::query_stream(seq, &dims, &parts)).map_err(PyRuntimeError::new_err)?;
     Ok(PyBytes::new(py, &buf))
 }
 

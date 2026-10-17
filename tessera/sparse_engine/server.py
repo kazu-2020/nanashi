@@ -94,7 +94,6 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -520,17 +519,14 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------ 応答
 
     def _json(self, status: int, body: Any) -> None:
-        extra = {}
         if isinstance(body, _Text):
             data, kind = body.encode("utf-8"), "text/plain; version=0.0.4; charset=utf-8"
         elif isinstance(body, _Arrow):
-            data, kind, extra = body.data, ARROW_STREAM, {"X-Seq": str(body.seq)}
+            data, kind = bytes(body), ARROW_STREAM
         else:
             data, kind = _dumps(body).encode("utf-8"), "application/json; charset=utf-8"
         self.send_response(status)
         self.send_header("Content-Type", kind)
-        for name, value in extra.items():
-            self.send_header(name, value)
         self.send_header("Content-Length", str(len(data)))
         # send_header sets close_connection when it sends Connection: close, so an unread body is never read as the next request.
         if self.close_connection or self.unread_body:
@@ -754,7 +750,7 @@ class Handler(BaseHTTPRequestHandler):
                                             lambda: _summary_out(v.summarize(m.id, coords, keep=keep, agg=a)))
             parts.append((m.id, out["cells"], [out["dims"].index(d) if d in out["dims"] else None for d in dims]))
         if wants_arrow(self.headers.get("Accept")):
-            return 200, _Arrow(native().query_arrow(v.seq, dims, parts), v.seq)
+            return 200, _Arrow(native().query_arrow(v.seq, dims, parts))
         cells = []
         for mid, rows, at in parts:
             for row in rows:
@@ -837,19 +833,24 @@ class _Text(str):
     """JSON でなく、テキストのまま返す応答の本文。"""
 
 
-@dataclass(frozen=True)
-class _Arrow:
-    """An Arrow IPC stream body. seq also goes out in the X-Seq header."""
-    data: bytes
-    seq: int
+class _Arrow(bytes):
+    """An Arrow IPC stream body."""
 
 
 ARROW_STREAM = "application/vnd.apache.arrow.stream"
 
 
 def wants_arrow(accept: str | None) -> bool:
-    """Return True if the Accept header names the Arrow IPC stream (parameters such as q are not examined)."""
-    return any(r.split(";")[0].strip().lower() == ARROW_STREAM for r in (accept or "").split(","))
+    """Return True if the Accept header names the Arrow IPC stream with a q above 0."""
+    for r in (accept or "").split(","):
+        kind, *params = [x.strip().lower() for x in r.split(";")]
+        if kind == ARROW_STREAM:
+            q = next((p[2:] for p in params if p.startswith("q=")), "1")
+            try:
+                return float(q) > 0
+            except ValueError:
+                return False
+    return False
 
 
 def role_of(ws) -> str:

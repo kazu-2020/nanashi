@@ -1,5 +1,4 @@
-//! The Arrow IPC stream of a `POST /query` result (docs/server.md). It is one table with the columns `metric`,
-//! one column for each dimension of the query (named by the dimension id), and `value`.
+//! The Arrow IPC stream of a `POST /query` result (docs/server.md).
 
 use crate::Result;
 use arrow_array::builder::StringDictionaryBuilder;
@@ -60,13 +59,12 @@ pub fn query_stream<S: AsRef<str>>(seq: u64, dims: &[String], parts: &[Part<S>])
 mod tests {
     use super::*;
     use arrow_array::cast::AsArray;
+    use arrow_array::types::Float64Type;
     use arrow_array::Array;
     use arrow_ipc::reader::StreamReader;
 
-    /// The text columns of a row (metric and the dimensions) and its value.
     type Row = (Vec<Option<String>>, f64);
 
-    /// Decode a stream into (metadata, column names, rows).
     fn decode(data: &[u8]) -> (HashMap<String, String>, Vec<String>, Vec<Row>) {
         let r = StreamReader::try_new(data, None).unwrap();
         let schema = r.schema();
@@ -82,7 +80,7 @@ mod tests {
                         d.is_valid(i).then(|| d.values().as_string::<i32>().value(d.keys().value(i) as usize).to_string())
                     })
                     .collect();
-                (text, b.column(last).as_primitive::<arrow_array::types::Float64Type>().value(i))
+                (text, b.column(last).as_primitive::<Float64Type>().value(i))
             })
             .collect();
         (schema.metadata().clone().into(), schema.fields().iter().map(|f| f.name().clone()).collect(), rows)

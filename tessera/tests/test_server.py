@@ -217,9 +217,8 @@ class Api:
         self.assertEqual((status, len(out["cells"])), (200, 4))
         self.assertEqual(summarize.call_count, 1)
 
+    @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_query_as_arrow(self):
-        if RustEngine is None:
-            self.skipTest("nanashi_core がない")
         import nanashi_core
         ws = self.ws
         stock, total = mid(ws, "Stock"), mid(ws, "Total")
@@ -241,11 +240,12 @@ class Api:
             status, headers, data = post("text/html, application/vnd.apache.arrow.stream;q=0.9", body)
             self.assertEqual(self.c.post("/query", body)[0], 200)
         self.assertEqual(summarize.call_count, 2, "JSON uses the results that the Arrow read put in the cache")
-        self.assertEqual((status, headers["Content-Type"], headers["X-Seq"]), (200, "application/vnd.apache.arrow.stream", "0"))
-        # Total has neither dimension of the query, so its member columns are null.
+        self.assertEqual((status, headers["Content-Type"]), (200, "application/vnd.apache.arrow.stream"))
         want = nanashi_core.query_arrow(0, [month, product], [(stock, [[jan, p1, 100.0], [jan, p2, 100.0]], [0, 1]),
                                                               (total, [[8000.0]], [None, None])])
         self.assertEqual(data, want)
+        status, headers, data = post("application/json, application/vnd.apache.arrow.stream;q=0", body)
+        self.assertEqual((status, headers["Content-Type"], len(json.loads(data)["cells"])), (200, "application/json; charset=utf-8", 3))
         status, headers, data = post("application/vnd.apache.arrow.stream", {"metrics": [stock], "rows": [product, month]})
         self.assertEqual((status, headers["Content-Type"], json.loads(data)["error"]),
                          (413, "application/json; charset=utf-8", "too_large"))
