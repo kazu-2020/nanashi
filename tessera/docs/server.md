@@ -25,6 +25,7 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 Each reference in a path, a query, or an op is a UUID. [ids.md](../../docs/ids.md) gives the rules and the arguments of each op.
 The server checks that the model has each UUID and gives the UUIDs to the Model API. The Model API takes and gives ids, so the server does not look up names.
 In a result, a dimension is a dimension UUID, a member is a member UUID, and a value of a member-type Metric is a member UUID.
+A formula can make an infinite or NaN value (for example `1e308 * 2`). JSON has no such numbers, so a result gives `null` for them, as JavaScript `JSON.stringify` does.
 An op is an object with `op` (the operation name) and the arguments by name, for example `{"op": "add_member", "dim": "<uuid>", "id": "<uuid>", "name": "A"}`.
 `WRITE_OPS` in `server.py` lists the permitted operations:
 
@@ -38,6 +39,10 @@ With `--tokens`, the server requires `Authorization: Bearer <token>`.
 With `--user-header X-Forwarded-User`, the server uses the value of the header that an authenticating proxy added.
 You cannot use `--tokens` and `--user-header` together.
 If neither option is given, the server does no authentication (the user is blank). Then it refuses to listen on an address other than 127.0.0.1 (`--insecure` removes this limit).
+Without authentication, the server also refuses requests that a web page on another site can make a browser send:
+
+- If the server listens on a loopback address and the `Host` header is not `127.0.0.1`, `localhost` or `[::1]`, the server returns 403 `forbidden`. This check also applies to `/health` and `/ready`. It stops DNS rebinding to the port of the engine. A router without authentication in front of the engine does the same check (see [router.md](../../router/README.md)).
+- If a write does not have `Content-Type: application/json`, the server returns 415 `unsupported_media_type`. A cross-site form or `fetch` without a preflight cannot send this type.
 
 ### Authentication through a proxy
 
@@ -82,6 +87,7 @@ These are the limits:
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`).
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`).
 - The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 5 seconds, it gets 503 `busy`. The short wait keeps a write below the 70 seconds that the router gives an attempt.
+- The server reads the body of a write before it takes a slot. Thus a client that sends a body slowly does not block reads. Up to `--max-threads` writes can read or hold a body at the same time, so bodies use up to `--max-threads` × `--max-body` of memory. A write above this waits too. This wait and the wait for a slot share the same 5 seconds. Then the write gets 503 `busy`.
 - The server keeps up to 1024 connections open at the same time (`--max-connections`). Each open connection holds a thread. A connection above this gets 503 `busy`, and the server closes it.
 - If the read or write of a request stops for 30 seconds, the server closes the connection. The same limit closes a keep-alive connection that is idle.
 
@@ -128,7 +134,7 @@ On SIGTERM and SIGINT, the server completes the received requests, commits the w
 The standby sees the release at its next poll (0.2 seconds), gets the right, and becomes the writer.
 If the server crashes (SIGKILL), the failover occurs at the next poll after the lease expires.
 
-With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress, the count does not start. An open keep-alive connection with no request in progress does not keep the server alive. If the value is 0 (the default), the server does not stop for this reason.
+With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress or the server reads the body of a write, the count does not start. An open keep-alive connection with no request in progress does not keep the server alive. If the value is 0 (the default), the server does not stop for this reason.
 
 In the profit and loss plan (large), a read of 1 cell through HTTP takes 0.24 ms. A write that changes the salary of 1 employee takes 0.9 ms.
 A write while 8 readers read continuously takes 2.2 ms (`bench_http.py`, local loopback, about 2,800 reads per second).

@@ -87,7 +87,7 @@ func main() {
 		fail("--trusted-proxy は --user-header と一緒に使う")
 	}
 	// --user-header always comes with --trusted-proxy (above), so it also allows a non-loopback address.
-	if *tokensFile == "" && *userHeader == "" && !*insecure && !loopback(host) {
+	if *tokensFile == "" && *userHeader == "" && !*insecure && !router.Loopback(host) {
 		fail(*listen + " で待ち受けるには --tokens か --user-header で認証する（試すだけなら --insecure）")
 	}
 	var engine engineConfig
@@ -194,7 +194,7 @@ func newEngineConfig(dir, dsn string, idle time.Duration, host string, maxBytes 
 		dir = abs
 	}
 	cfg := engineConfig{dir: dir, dsn: dsn, idle: idle, host: host, maxBytes: maxBytes}
-	if loopback(host) {
+	if router.Loopback(host) {
 		if len(trusted) > 0 {
 			return engineConfig{}, errors.New("--engine-trusted-proxy は --engine-host が 127.0.0.1 以外のときに使う" +
 				"（127.0.0.1 のエンジンには同じホストのルーターだけがつなぐ）")
@@ -268,14 +268,6 @@ func bearer(tokens map[string]string) func(*http.Request) (string, error) {
 		}
 		return "", errors.New("Authorization: Bearer <トークン> が要る")
 	}
-}
-
-func loopback(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func fail(msg string) {

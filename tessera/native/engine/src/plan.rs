@@ -988,9 +988,9 @@ impl<'a> Run<'a> {
         };
         let src: Vec<Src> = f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect();
         let rr = r.restrict(self.cat);
-        let b = Budget::new(self.cat.cfg.max_bytes, held);
+        let b = Budget::new(self.cat.cfg.max_bytes, held.saturating_add(ts.capacity() * size_of::<u32>()));
         // An error here also occurs in the per-period path, except a budget error. That path uses less memory
-        let Ok(value) = tree_scan(&shape, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
+        let Ok(value) = tree_scan(&shape, before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
         Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
         Ok(true)
     }

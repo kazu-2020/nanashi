@@ -1,4 +1,5 @@
 """エンジンの上限の検査、セル数の見積もりの上限、観察用の記録の上限、メモリの内訳。"""
+import gc
 import math
 import tempfile
 import unittest
@@ -276,12 +277,70 @@ class BudgetBeforeAllocation(unittest.TestCase):
                 finally:
                     m.remove_metric("Z")
 
+    def test_work_inside_one_node_stays_in_the_budget(self):
+        import nanashi_core
+        n, k = 20_000, 20
+        mib = 1 << 20
+        # (formula, dimensions, a budget that refuses it, a budget that fits it)
+        # A fits budget is about 1.1x the smallest budget that works, so a 1.2x over-count fails the test.
+        cases = [
+            ("IF(A > 0, B, C)", ["X", "Y"], 2, 3.25),
+            ("A + B", ["X", "Y"], 2, 2.3),
+            ("A * W", ["X", "Y", "Q"], 3, 3.3),
+            ("IF(P > 0, W, -1)", ["X", "Q"], 8, 9.5),
+            ("P[EXPAND: Q] + 5", ["X", "Q"], 8, 27),
+            ("P[EXPAND: Q] * R[EXPAND: X]", ["X", "Q"], 24, 27),
+            # A division by 0 drops all pairs, so the first join must not keep room for them.
+            ("P / Z1 + P / Z2", ["X", "Q"], 7, 8.3),
+        ]
+        for formula, dims, refused, fits in cases:
+            for budget, ok in [(int(refused * mib), False), (int(fits * mib), True)]:
+                with self.subTest(formula=formula, budget=budget):
+                    # A large par_min keeps the work serial. The parallel collect is a known limit.
+                    m = Named(Model(engine=RustEngine(max_bytes=budget, fuse=False, par_min=1 << 40)))
+                    m.add_dimension("X", [f"x{i}" for i in range(n)])
+                    m.add_dimension("Y", ["y0", "y1"])
+                    m.add_dimension("Q", [f"q{i}" for i in range(k)])
+                    for name in "ABC":
+                        m.add_input(name, ["X", "Y"], {(f"x{i}", "y0"): 1.0 if i % 2 else -1.0 for i in range(n)})
+                    m.add_input("P", ["X"], {(f"x{i}",): 1.0 if i % 2 else -1.0 for i in range(n)})
+                    m.add_input("R", ["Q"], {(f"q{i}",): 1.0 for i in range(k)})
+                    m.add_input("W", ["X", "Q"], {(f"x{i}", "q0"): 1.0 for i in range(n)})
+                    for name in ("Z1", "Z2"):
+                        m.add_input(name, ["Q"], {(f"q{i}",): 0.0 for i in range(k)})
+                    m.recalc()
+                    gc.collect()
+                    base = nanashi_core.heap()[0]
+                    m.add_formula("Z", dims, formula)
+                    nanashi_core.reset_heap_peak()
+                    if ok:
+                        m.recalc()
+                    else:
+                        with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+                            m.recalc()
+                    self.assertLessEqual(nanashi_core.heap()[1] - base, budget, "the work went over max_bytes")
+
+    def test_parallel_expand_stays_in_the_budget(self):
+        import nanashi_core
+        n, k, budget = 20_000, 100, 70 << 20
+        m = Named(Model(engine=RustEngine(max_bytes=budget, par_min=0), max_cells=None))
+        m.add_dimension("X", [f"x{i}" for i in range(n)])
+        m.add_dimension("T", [f"t{i}" for i in range(k)], ordered=True)
+        m.add_input("G", ["X"], {(f"x{i}",): 0.0 for i in range(n)})
+        m.add_input("H", ["T"], {(f"t{i}",): 1.0 for i in range(k)})
+        m.add_input("B", ["X", "T"], {("x0", "t0"): 1.0})
+        m.recalc()
+        gc.collect()
+        base = nanashi_core.heap()[0]
+        m.add_formula("Z", ["X", "T"], "IF(G > 0, H[EXPAND: X] + PREVIOUS(T), B)")
+        nanashi_core.reset_heap_peak()
+        m.recalc()
+        self.assertLessEqual(nanashi_core.heap()[1] - base, budget, "the work went over max_bytes")
+
 
 class Memory(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
     def test_rust_reports_storage_bytes(self):
-        import gc
-
         import nanashi_core
         gc.collect()
         before = nanashi_core.heap()[0]
