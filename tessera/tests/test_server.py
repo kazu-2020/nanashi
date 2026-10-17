@@ -170,6 +170,45 @@ class Api:
         self.assertEqual(self.c.post("/writes", body)[0], 200)
         self.assertEqual(total(), [[301.0]])
 
+    def test_query(self):
+        ws = self.ws
+        stock, total, by_month = mid(ws, "Stock"), mid(ws, "Total"), mid(ws, "ByMonth")
+        product, month = did(ws, "Product"), did(ws, "Month")
+        p1, p2, jan = xid(ws, "Product", "p1"), xid(ws, "Product", "p2"), xid(ws, "Month", "Jan")
+        status, body = self.c.post("/query", {"metrics": [stock, total, "no-such-metric"], "rows": [month], "columns": [product],
+                                              "filters": {product: {"ids": [p1, p2]}, month: {"ids": [jan]}}})
+        self.assertEqual((status, body["seq"], body["dimensions"]), (200, 0, [month, product]), body)
+        cells = sorted(body["cells"], key=json.dumps)
+        self.assertEqual(cells, sorted([{"metric": stock, "coords": [jan, p1], "value": {"number": 100.0}},
+                                        {"metric": stock, "coords": [jan, p2], "value": {"number": 100.0}},
+                                        {"metric": total, "coords": ["", ""], "value": {"number": 8000.0}}], key=json.dumps))
+        query = lambda **kw: self.c.post("/query", {"metrics": [stock], **kw})
+        self.assertEqual(query(aggregation="AGGREGATION_AVG")[1]["cells"], [{"metric": stock, "coords": [], "value": {"number": 100.0}}])
+        self.assertEqual(query(aggregation=5, filters={product: {"ids": [p1]}})[1]["cells"][0]["value"], {"number": 4.0})  # COUNT
+        status, body = self.c.post("/query", {"metrics": [by_month], "rows": [month], "aggregation": "AGGREGATION_MAX"})
+        self.assertEqual(sorted(c["value"]["number"] for c in body["cells"]), [2000.0] * 4)
+        for bad in [{"aggregation": "AGGREGATION_MEDIAN"}, {"aggregation": True}, {"metrics": stock}, {"rows": ["no-dim"]},
+                    {"rows": [month], "columns": [month]}, {"filters": {product: {"ids": ["no-member"]}}},
+                    {"filters": {product: [p1]}}, {"limit": 3}]:
+            status, err = self.c.post("/query", {"metrics": [stock], **bad})
+            self.assertEqual((status, err["error"]), (400, "bad_request"), bad)
+        status, err = query(rows=[product, month])  # 80 groups are more than max_cells (50)
+        self.assertEqual((status, err["error"]), (413, "too_large"))
+        status, err = self.c.post("/query", {"metrics": [stock, mid(ws, "Double")], "rows": [product], "columns": [month],
+                                             "filters": {month: {"ids": [jan, xid(ws, "Month", "Feb")]}}})
+        self.assertEqual((status, err["error"]), (413, "too_large"), "2 Metrics of 40 groups")
+
+    def test_query_reuses_the_summary_cache(self):
+        ws = self.ws
+        with mock.patch.object(Model, "summarize", autospec=True, side_effect=Model.summarize) as summarize:
+            self.assertEqual(self.cells("Stock", "summary", keep=["Month"], Product=["p1", "p2"])[0], ["Apr", 200.0])
+            product = did(ws, "Product")
+            body = {"metrics": [mid(ws, "Stock")], "rows": [did(ws, "Month")],
+                    "filters": {product: {"ids": [xid(ws, "Product", "p2"), xid(ws, "Product", "p1")]}}}
+            status, out = self.c.post("/query", body)
+        self.assertEqual((status, len(out["cells"])), (200, 4))
+        self.assertEqual(summarize.call_count, 1)
+
     def test_member_values_are_uuids(self):
         v = Named(self.ws.version)
         ops = [{"op": "add_input", "id": "m-pick", "name": "Pick", "dims": [did(self.ws, "Product")],

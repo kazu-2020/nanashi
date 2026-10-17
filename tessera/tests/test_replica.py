@@ -10,7 +10,7 @@ from sparse_engine.workspace import Replica, Workspace
 
 from .journals import JournalCase, PgStore
 from .test_journal import check_same_state
-from .test_server import Client, path, write
+from .test_server import Client, coords, mid, path, write
 from .test_workspace import model, move
 
 try:
@@ -99,6 +99,9 @@ class Follow(JournalCase):
             self.assertEqual(c.get(path(self.replica, "Stock", "cell", Product="p1", Month="Jan")), (200, {"seq": 1, "value": 105.0}))
             status, err = c.post("/writes", {"client_op_id": "x", "ops": [write(self.replica, "Stock", 1, Product="p0", Month="Jan")]})
             self.assertEqual((status, err["error"]), (405, "read_only"))
+            filters = {d: {"ids": [x]} for d, x in coords(self.replica, Product="p1", Month="Jan").items()}
+            status, body = c.post("/query", {"metrics": [mid(self.replica, "Stock")], "filters": filters})
+            self.assertEqual((status, body["cells"][0]["value"]), (200, {"number": 105.0}))
             self.assertEqual(c.get("/operations/x")[0], 404)  # a follower reads the journal only
         finally:
             server.stop()
