@@ -234,7 +234,7 @@ pub(crate) struct Builder {
 impl Builder {
     /// The (bytes, keys) of the keys packed so far, without the block that is not yet packed.
     pub(crate) fn density(&self) -> (usize, usize) {
-        (self.bytes.len(), self.len - self.buf.len())
+        (self.bytes.len(), self.len)
     }
 
     #[inline]
@@ -602,6 +602,7 @@ mod tests {
             assert_eq!(packed_bytes(keys.iter().copied()), want.bytes.len() - 16, "n={}", keys.len());
             let mut b = PackedKeys::builder(keys.len(), (want.bytes.len(), want.len));
             keys.iter().for_each(|&k| b.push(k));
+            assert_eq!(b.density().1, keys.len() / BLOCK * BLOCK, "n={}", keys.len());
             let got = b.finish();
             assert_eq!(got.len, want.len, "n={}", keys.len());
             assert_eq!(got.bytes, want.bytes, "n={}", keys.len());

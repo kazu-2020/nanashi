@@ -498,13 +498,14 @@ fn set_bytes(sets: &Option<Vec<Vec<u32>>>) -> usize {
 /// 1 cell for each row). With `diff`, Store::replaced_all also merges the old and the new cells. The merge uses 1.5
 /// cells for each old and new row, and a copy of the old cells if the store has a delta. Then Store::region_of keeps
 /// the changed keys (1 cell for each row) and makes a member list for each axis (4 bytes for each row).
-/// PackedKeys::new also makes 3 lists with 56 bytes for each block of keys. Count 64 bytes and 1 KiB of small parts.
+/// PackedKeys::new also makes 3 lists with 56 bytes for each block of keys. Count 64 bytes and 1 KiB of small parts,
+/// and the bytes of the segments (Store::seg_bytes).
 fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usize {
     let (n, old) = (value.cells.len(), store.rows_hint());
     let lists = (old + n).saturating_mul(4 + store.metric_dims.len()) / 4;
     let merge = if diff { ((old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 }).max(lists) } else { 0 };
     let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
-    let blocks = sides.iter().map(|c| c.cells.len()).fold(n, usize::max).div_ceil(crate::packed::BLOCK) * 4 + 64;
+    let blocks = sides.iter().map(|c| c.cells.len()).fold(n, usize::max).div_ceil(crate::packed::BLOCK) * 4 + 64 + store.seg_bytes(n).div_ceil(CELL_BYTES);
     sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak + blocks
 }
 
@@ -1135,8 +1136,8 @@ mod tests {
     fn each_wave_fits_in_the_room_that_the_earlier_waves_leave() {
         // The rows of a stored result set the estimate of its task. Metric 1 runs alone. Metrics 2 and 3 fit
         // together at the start of the level, but not after metric 1 keeps 16,000 bytes for apply. The write of a
-        // copy of 1,000 rows needs 33,088 bytes (the result, the new columns and the lists of PackedKeys::new). The level
-        // also counts 10 KiB of small parts
+        // copy of 1,000 rows needs 33,360 bytes (the result, the new columns, the lists of PackedKeys::new and the
+        // segment). The level also counts 10 KiB of small parts
         let dims = vec![crate::DimInfo { size: 1000, ordered: false, name: "d0".into() }];
         let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg: crate::Config::default() };
         let store = |n: u32| {
@@ -1149,7 +1150,7 @@ mod tests {
         let plan = Plan { metrics: vec![input(), copy(0), copy(0), copy(4), input()], levels: vec![vec![Step::One(1), Step::One(2), Step::One(3)]] };
         let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
         let held = held(&src);
-        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held + 10_240 + 49_088, ..crate::Config::default() } };
+        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held + 10_240 + 49_360, ..crate::Config::default() } };
         let all = || Reg::new(vec![]);
         let changed = vec![(0, all()), (4, all())];
         recalc(&cat, &plan, &mut stores, &mut vec![None; 5], &mut vec![None; 5], changed, &[], vec![], vec![], true).unwrap();

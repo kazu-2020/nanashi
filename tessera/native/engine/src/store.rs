@@ -113,7 +113,7 @@ impl Segment {
                 fill[m] += 1;
             }
             drop(fill);
-            let members: Vec<u32> = (0..size as u32).filter(|&m| count[m as usize + 1] > count[m as usize]).collect();
+            let members: Box<[u32]> = (0..size as u32).filter(|&m| count[m as usize + 1] > count[m as usize]).collect();
             let entries = || {
                 members.iter().enumerate().flat_map(|(j, &m)| rows[count[m as usize] as usize..count[m as usize + 1] as usize].iter().map(move |&row| j as u64 * n + row as u64))
             };
@@ -435,8 +435,8 @@ impl StoreSink<'_> {
 /// number of segments.
 #[derive(Debug)]
 pub(crate) struct Postings {
-    members: Vec<u32>,   // the members in the segment, ascending
-    offsets: Vec<u32>,   // the entries of members[j] are entries[offsets[j]..offsets[j + 1]]
+    members: Box<[u32]>, // the members in the segment, ascending
+    offsets: Box<[u32]>, // the entries of members[j] are entries[offsets[j]..offsets[j + 1]]
     entries: PackedKeys, // `j * n + row` for each row of the segment, sorted
     n: u64,              // the rows of the segment
 }
@@ -732,6 +732,12 @@ impl Store {
         out
     }
 
+    /// The bytes that the segments of a base of `rows` rows add to the rows: each segment has its struct, a cell
+    /// for the index of each dimension, a part block of keys, and 16 spare key bytes.
+    pub(crate) fn seg_bytes(&self, rows: usize) -> usize {
+        (rows / self.cfg.seg_rows.max(1) + 1).saturating_mul(256 + self.pack.dims.len() * 16)
+    }
+
     /// The most rows of the delta. With more rows, the delta goes into a new base.
     fn delta_limit(&self) -> usize {
         self.cfg.compact_min.max(self.base.rows() / 8)
@@ -765,7 +771,7 @@ impl Store {
             // values, and the block buffer of the builder. The old base goes if no other version has it.
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
             let rows = self.rows_hint().saturating_add(n);
-            let base = rows.saturating_mul(16).saturating_add(rows.div_ceil(BLOCK) * 16).saturating_add(256);
+            let base = rows.saturating_mul(16).saturating_add(rows.div_ceil(BLOCK) * 16).saturating_add(self.seg_bytes(rows));
             let tree = tree.min(self.delta_limit().saturating_mul(4 * CELL_BYTES).saturating_add(1024));
             let freed = if shared || self.base.segs.iter().any(|s| Arc::strong_count(s) > 1) { 0 } else { self.memory().base };
             (base.max(tree), BLOCK * 8, base.saturating_sub(freed).max(tree))
@@ -795,12 +801,15 @@ impl Store {
             // Each segment has its own index
             for seg in self.base.segs.iter().filter(|s| s.postings[pos].get().is_none()) {
                 let rows = seg.len();
-                // offsets (u32), the packed entries (at most 8 B each) with block headers, and the struct
-                let offsets = (self.pack.masks[pos] as usize + 2) * 4;
+                // members and offsets (u32) of the members in the segment, the packed entries (at most 8 B each)
+                // with block headers, and the struct
+                let lists = (rows.min(self.pack.masks[pos] as usize + 1) + 1) * 8;
                 let entries = rows * 8 + rows.div_ceil(BLOCK) * 16 + 16 + 128;
-                // The build also holds a copy of the offsets, the rows (u32) and the block buffer of the builder
-                peak = peak.max(kept + offsets * 2 + entries + rows * 4 + BLOCK * 8);
-                kept += offsets + entries;
+                // The build also holds the count and fill arrays (u32 for each member of the dimension), the rows
+                // (u32) and the block buffer of the builder
+                let dense = (self.pack.masks[pos] as usize + 2) * 4;
+                peak = peak.max(kept + dense * 2 + lists + entries + rows * 4 + BLOCK * 8);
+                kept += lists + entries;
             }
         }
         (peak, kept)
