@@ -249,7 +249,13 @@ impl FixSum {
     }
 
     pub(crate) fn merge(&mut self, o: &FixSum, m: &Meter) {
-        put(&mut self.rest, o.acc, o.base, m);
+        if self.n == 0 {
+            (self.acc, self.base, self.n) = (o.acc, o.base, o.n);
+        } else if o.base == self.base && self.n + o.n <= FLUSH {
+            (self.acc, self.n) = (self.acc + o.acc, self.n + o.n);
+        } else {
+            put(&mut self.rest, o.acc, o.base, m);
+        }
         self.rest.merge(&o.rest, m);
     }
 
