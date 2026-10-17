@@ -629,11 +629,12 @@ class Handler(BaseHTTPRequestHandler):
         length = self.headers.get("Content-Length")
         if length is None:
             raise ApiError(411, "length_required", "Content-Length が要る")
-        try:
-            length = int(length)
-        except ValueError:
-            raise ApiError(400, "bad_request", "Content-Length は整数") from None
-        if length < 0 or length > self.server.max_body:
+        # int() also takes "+5", " 5" and "05". A proxy that reads such a value in a different way frames a different body.
+        # int() refuses more than 4300 digits; 16 digits are more than any max_body.
+        if not re.fullmatch("0|[1-9][0-9]{0,15}", length):
+            raise ApiError(400, "bad_request", "Content-Length は 16 桁までの 0 以上の整数（符号、空白、先頭の 0 なし）")
+        length = int(length)
+        if length > self.server.max_body:
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
         # The body is read before the slot, so a slow client holds a body permit but no request slot.
         # The write keeps the permit until it ends: bodies in memory stay below max_threads x max_body.
