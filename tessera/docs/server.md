@@ -25,6 +25,7 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 Each reference in a path, a query, or an op is a UUID. [ids.md](../../docs/ids.md) gives the rules and the arguments of each op.
 The server checks that the model has each UUID and gives the UUIDs to the Model API. The Model API takes and gives ids, so the server does not look up names.
 In a result, a dimension is a dimension UUID, a member is a member UUID, and a value of a member-type Metric is a member UUID.
+A formula can make an infinite or NaN value (for example `1e308 * 2`). JSON has no such numbers, so a result gives `null` for them, as JavaScript `JSON.stringify` does.
 An op is an object with `op` (the operation name) and the arguments by name, for example `{"op": "add_member", "dim": "<uuid>", "id": "<uuid>", "name": "A"}`.
 `WRITE_OPS` in `server.py` lists the permitted operations:
 

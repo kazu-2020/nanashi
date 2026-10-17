@@ -522,6 +522,12 @@ class Api:
         self.assertEqual(status, 200)
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][2], "p_renamed")
 
+    def test_a_non_finite_result_is_null(self):
+        op = write(self.ws, "Stock", 1e308, Product="p0", Month="Jan")
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "big", "ops": [op]}), (200, {"seq": 1}))
+        self.assertEqual(self.c.get(path(self.ws, "Double", "cell", Product="p0", Month="Jan")), (200, {"seq": 1, "value": None}))
+        self.assertEqual(self.cells("Double", Product="p0", Month="Jan"), [["p0", "Jan", None]])
+
 
 class ReferenceApi(Api, unittest.TestCase):
     pass

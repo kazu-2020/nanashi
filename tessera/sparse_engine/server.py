@@ -368,6 +368,25 @@ def _finite_number(text: str) -> float:
     return number
 
 
+def _dumps(body) -> str:
+    """A formula can make a non-finite number (1e308 * 2), but JSON has no Infinity or NaN,
+    so it becomes null, as in JavaScript JSON.stringify."""
+    try:
+        return json.dumps(body, ensure_ascii=False, allow_nan=False)
+    except ValueError:
+        return json.dumps(_nan_to_null(body), ensure_ascii=False)
+
+
+def _nan_to_null(x):
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: _nan_to_null(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_nan_to_null(v) for v in x]
+    return x
+
+
 _BAD_CHAR = re.compile("[\x00\ud800-\udfff]")  # PostgreSQL refuses a NUL, and UTF-8 cannot encode a lone surrogate
 
 
@@ -420,7 +439,7 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(body, _Text):
             data, kind = body.encode("utf-8"), "text/plain; version=0.0.4; charset=utf-8"
         else:
-            data, kind = json.dumps(body, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8"
+            data, kind = _dumps(body).encode("utf-8"), "application/json; charset=utf-8"
         self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
