@@ -183,13 +183,19 @@ class Api:
                                         {"metric": stock, "coords": [jan, p2], "value": {"number": 100.0}},
                                         {"metric": total, "coords": ["", ""], "value": {"number": 8000.0}}], key=json.dumps))
         query = lambda **kw: self.c.post("/query", {"metrics": [stock], **kw})
-        self.assertEqual(query(aggregation="AGGREGATION_AVG")[1]["cells"], [{"metric": stock, "coords": [], "value": {"number": 100.0}}])
-        self.assertEqual(query(aggregation=5, filters={product: {"ids": [p1]}})[1]["cells"][0]["value"], {"number": 4.0})  # COUNT
+        avg = [{"metric": stock, "coords": [], "value": {"number": 100.0}}]
+        self.assertEqual(query(aggregation="AGGREGATION_AVG")[1]["cells"], avg)
+        self.assertEqual(query(aggregation=2)[1]["cells"], avg)
+        self.assertEqual(query(aggregation="AGGREGATION_COUNT", filters={product: {"ids": [p1]}})[1]["cells"][0]["value"], {"number": 4.0})
+        nulls = query(appId="", aggregation=None, rows=None, columns=None, filters={product: {"ids": None}})
+        self.assertEqual(nulls, (200, {"seq": 0, "dimensions": [], "cells": []}))
+        self.assertEqual(self.c.post("/query", {"metrics": None}), (200, {"seq": 0, "dimensions": [], "cells": []}))
         status, body = self.c.post("/query", {"metrics": [by_month], "rows": [month], "aggregation": "AGGREGATION_MAX"})
         self.assertEqual(sorted(c["value"]["number"] for c in body["cells"]), [2000.0] * 4)
         for bad in [{"aggregation": "AGGREGATION_MEDIAN"}, {"aggregation": True}, {"metrics": stock}, {"rows": ["no-dim"]},
                     {"rows": [month], "columns": [month]}, {"filters": {product: {"ids": ["no-member"]}}},
-                    {"filters": {product: [p1]}}, {"limit": 3}]:
+                    {"filters": {product: [p1]}}, {"limit": 3}, {"aggregation": [1]}, {"aggregation": {}},
+                    {"aggregation": 5.0}, {"app_id": "", "appId": ""}, {"appId": 1}]:
             status, err = self.c.post("/query", {"metrics": [stock], **bad})
             self.assertEqual((status, err["error"]), (400, "bad_request"), bad)
         status, err = query(rows=[product, month])  # 80 groups are more than max_cells (50)
@@ -220,6 +226,8 @@ class Api:
         self.assertEqual(self.c.get(path(self.ws, "Pick", "cell", Product="p1"))[1]["value"], feb)
         self.assertEqual([c[1] for c in self.c.get(path(self.ws, "Pick", "slice"))[1]["cells"]].count(mar), 1)
         self.assertEqual(Named(self.ws.version).get("Pick", Product="p2"), "Mar")
+        status, body = self.c.post("/query", {"metrics": ["m-pick"], "aggregation": "AGGREGATION_SUM"})
+        self.assertEqual((status, body["cells"]), (200, [{"metric": "m-pick", "coords": [], "value": {"number": 2.0}}]), "COUNT")
 
     def test_overrides(self):
         ws = self.ws

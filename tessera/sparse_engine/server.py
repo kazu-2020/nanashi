@@ -217,11 +217,13 @@ def _groups(v, m: Metric, keep: list[str], coords: dict[str, Any]) -> int:
 AGGREGATIONS = {"AGGREGATION_UNSPECIFIED": "sum", "AGGREGATION_SUM": "sum", "AGGREGATION_AVG": "avg",
                 "AGGREGATION_MIN": "min", "AGGREGATION_MAX": "max", "AGGREGATION_COUNT": "count"}
 AGGREGATION_NUMBERS = dict(enumerate(AGGREGATIONS.values()))
-QUERY_FIELDS = frozenset({"app_id", "metrics", "rows", "columns", "filters", "aggregation"})
+QUERY_FIELDS = frozenset({"app_id", "appId", "metrics", "rows", "columns", "filters", "aggregation"})
 
 
 def _ids(body: dict, key: str) -> list[str]:
-    x = body.get(key, [])
+    x = body.get(key)
+    if x is None:
+        x = []
     if not isinstance(x, list) or not all(isinstance(i, str) for i in x):
         raise ApiError(400, "bad_request", f"{key} は ID の配列")
     return x
@@ -234,7 +236,10 @@ def query_in(n: Names, body) -> tuple[list[str], list[str], dict[str, list[str]]
         raise ApiError(400, "bad_request", "本文は QueryRequest の JSON オブジェクト")
     if unknown := sorted(set(body) - QUERY_FIELDS):
         raise ApiError(400, "bad_request", f"QueryRequest にないフィールド {unknown}")
-    if not isinstance(body.get("app_id", ""), str):
+    body = {k: x for k, x in body.items() if x is not None}  # proto3 JSON: null is the default value
+    if {"app_id", "appId"} <= set(body):
+        raise ApiError(400, "bad_request", "app_id と appId を両方指定している")
+    if not isinstance(body.get("app_id", body.get("appId", "")), str):
         raise ApiError(400, "bad_request", "app_id は文字列")
     metrics = _ids(body, "metrics")
     dims = [n.dim(d).id for d in _ids(body, "rows") + _ids(body, "columns")]
@@ -249,8 +254,11 @@ def query_in(n: Names, body) -> tuple[list[str], list[str], dict[str, list[str]]
             raise ApiError(400, "bad_request", "filters は {軸の ID: {\"ids\": [メンバーの ID, ...]}}")
         dim = n.dim(d)
         out[dim.id] = [n.member(dim, x) for x in _ids(members, "ids")]
-    agg = body.get("aggregation", "AGGREGATION_UNSPECIFIED")
-    agg = AGGREGATION_NUMBERS.get(agg) if isinstance(agg, int) and not isinstance(agg, bool) else AGGREGATIONS.get(agg)
+    agg = body.get("aggregation", 0)
+    if isinstance(agg, str):
+        agg = AGGREGATIONS.get(agg)
+    else:
+        agg = AGGREGATION_NUMBERS.get(agg) if isinstance(agg, int) and not isinstance(agg, bool) else None
     if agg is None:
         raise ApiError(400, "bad_request", f"aggregation は {'、'.join(AGGREGATIONS)} のいずれか")
     return metrics, dims, out, agg
@@ -728,18 +736,16 @@ class Handler(BaseHTTPRequestHandler):
         n = Names(v)
         ids, dims, filters, agg = query_in(n, body)
         metrics = [v.metrics[i] for i in dict.fromkeys(ids) if i in v.metrics and not v.metrics[i].name.startswith("__")]
-        jobs = []
-        for m in metrics:
-            keep = [d for d in dims if d in m.dims]
-            coords = {d: ms for d, ms in filters.items() if d in m.dims}
-            jobs.append((m, keep, coords))
-        groups = sum(_groups(v, m, keep, coords) for m, keep, coords in jobs)
+        # A Metric that is not a number has only COUNT
+        jobs = [(m, [d for d in dims if d in m.dims], {d: ms for d, ms in filters.items() if d in m.dims},
+                 agg if m.kind == "number" else "count") for m in metrics]
+        groups = sum(_groups(v, m, keep, coords) for m, keep, coords, _ in jobs)
         if groups > self.server.max_cells:
             raise ApiError(413, "too_large", f"集計の結果が最大 {groups:,} 件になり、上限 {self.server.max_cells:,} を超える")
         cells = []
-        for m, keep, coords in jobs:
-            out = self.server.summaries.get(v, _summary_key(m, agg, keep, coords),
-                                            lambda: _summary_out(v.summarize(m.id, coords, keep=keep, agg=agg)))
+        for m, keep, coords, a in jobs:
+            out = self.server.summaries.get(v, _summary_key(m, a, keep, coords),
+                                            lambda: _summary_out(v.summarize(m.id, coords, keep=keep, agg=a)))
             at = [out["dims"].index(d) if d in out["dims"] else None for d in dims]
             for row in out["cells"]:
                 cells.append({"metric": m.id, "coords": ["" if i is None else row[i] for i in at],
