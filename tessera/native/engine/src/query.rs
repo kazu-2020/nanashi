@@ -150,6 +150,9 @@ impl Store {
     }
 
     fn summarize_with<A: Acc>(&self, keep: &[DimId], r: &Restrict, agg: ReadAgg, cat: &Catalog, b: &Budget) -> Result<Groups> {
+        // The remap and members of each kept dimension: at most 8 B a member
+        let kept = self.metric_dims.iter().filter(|d| keep.contains(d)).map(|&d| cat.dims[d].size as usize * 8).sum::<usize>();
+        b.take(kept.div_ceil(CELL_BYTES), "集計")?;
         let radix = radix(self, keep, r, cat);
         let tests = tests(&self.pack, r);
         let items = items(&self.base.segs, self.delta.is_empty(), &ranges(&self.pack, r));
@@ -283,6 +286,8 @@ impl Store {
             ReadAgg::Count => Agg::Count,
         };
         let cube = group(&self.cfg, pairs, out.clone(), &[a], b)?.remove(0);
+        let groups = cube.cells.len();
+        b.need(groups + (groups * (4 * dims.len() + 8)).div_ceil(CELL_BYTES), "集計")?;
         let cols = (0..dims.len()).map(|j| cube.cells.iter().map(|&(k, _)| out.get(k, j)).collect()).collect();
         Ok(Groups { cols, vals: cube.cells.iter().map(|c| c.1).collect() })
     }
@@ -595,6 +600,49 @@ mod tests {
         let st = store(&mut Rng(3), 0, &cat);
         let e = st.summarize(&[0, 1, 2], &Restrict::all(3), ReadAgg::Sum, &cat, &Budget::new(1000, 0)).unwrap_err();
         assert!(e.starts_with("メモリの予算を超える: 集計"), "{e}");
+    }
+
+    /// A Store with each key of `sizes` and no delta. Each run of 13 rows needs a Spill: the magnitudes are far apart.
+    fn plain(sizes: &[u32], cat: &Catalog) -> Store {
+        let mut cols = vec![Vec::new(); sizes.len()];
+        let mut vals = Vec::new();
+        let n = sizes.iter().product::<u32>();
+        for mut i in 0..n {
+            for (c, &s) in cols.iter_mut().zip(sizes).rev() {
+                c.push(i % s);
+                i /= s;
+            }
+            vals.push([1e200, 1.0, 1e-200, 1e100][vals.len() % 4]);
+        }
+        let slices: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
+        let dims: Vec<DimId> = (0..sizes.len()).collect();
+        Store::new(&dims, Some(0), Kind::Num, cat).unwrap().with_rows(&slices, &vals).unwrap()
+    }
+
+    fn over(r: Result<Groups>) -> bool {
+        r.is_err_and(|e| e.starts_with("メモリの予算を超える: 集計"))
+    }
+
+    /// The Sort path counts the result Cube and the output columns (20 B a group here) with the budget.
+    #[test]
+    fn sort_counts_the_output_columns() {
+        let cat = catalog(Config { compact_min: usize::MAX, par_min: usize::MAX, ..Config::default() });
+        let st = plain(&SIZES, &cat);
+        let rows = st.rows_hint();
+        let run = |cells: usize| st.summarize(&[0, 1, 2], &Restrict::all(3), ReadAgg::Sum, &cat, &Budget::new(cells * CELL_BYTES, 0));
+        assert_eq!(run(rows * 3).unwrap().vals.len(), rows);
+        assert!(over(run(rows * 2 + rows / 8)), "the pairs fit, the Cube and the columns do not");
+    }
+
+    /// The remap and the members of a kept dimension (8 B a member) count with the budget.
+    #[test]
+    fn the_members_of_a_kept_dimension_count() {
+        let dims = [1 << 20, 3].iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: Config { compact_min: usize::MAX, ..Config::default() } };
+        let st = plain(&[100, 3], &cat);
+        let run = |bytes: usize| st.summarize(&[0], &Restrict::all(2), ReadAgg::Sum, &cat, &Budget::new(bytes, 0));
+        assert_eq!(run(9 << 20).unwrap().vals.len(), 100);
+        assert!(over(run(1 << 20)));
     }
 }
 
