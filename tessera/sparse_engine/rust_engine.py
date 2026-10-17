@@ -35,6 +35,14 @@ def _formula_error(e: nanashi_core.Diagnostic) -> FormulaError:
 EXPRS_MAX = 20_000  # 式の変換結果を覚えておく数の上限
 
 
+def _ids_at(ids: list[str], at: np.ndarray) -> np.ndarray:
+    """The ids at the member numbers in at, as an object array."""
+    # A copy of all the ids of a dimension of 1M members takes about 45 ms. Thus a small result takes only its ids.
+    if 2 * len(at) < len(ids):
+        return np.array([ids[i] for i in at.tolist()], dtype=object)
+    return np.asarray(ids, dtype=object)[at]
+
+
 class RustEngine:
     name = "rust"
     partitions = 1 << 20  # 分割軸のメンバーごとに範囲検索できる（分割軸の自動選択に使う）
@@ -390,7 +398,7 @@ class RustEngine:
         """One pass in the engine (Store::summarize). Member numbers become member ids column by column."""
         cols, values = self.core.summarize(store, [self._dim(cat, d) for d in set(keep)], self._region(cat, restrict), agg)
         order = tuple(d for d in dims if d in keep)
-        return Summary(order, tuple(np.asarray(cat.dimension(d).ids, dtype=object)[c] for d, c in zip(order, cols)), values)
+        return Summary(order, tuple(_ids_at(cat.dimension(d).ids, c) for d, c in zip(order, cols)), values)
 
     def _is_bool(self, store) -> bool:
         return bool(self.core.is_bool(store))
