@@ -562,6 +562,23 @@ class Limits(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_without_authentication_a_page_on_another_site_is_refused(self):
+        server = Server(self.ws, "127.0.0.1", 0).start()
+        self.addCleanup(server.stop)
+        port = server.server_address[1]
+        body = json.dumps({"client_op_id": "x", "ops": [write(self.ws, "Stock", 5, Product="p0", Month="Jan")]}).encode()
+
+        def post(host, kind):
+            with socket.create_connection(server.server_address[:2], timeout=10) as s:
+                return exchange(s, f"POST /writes HTTP/1.1\r\nHost: {host}\r\nContent-Type: {kind}\r\n"
+                                   f"Content-Length: {len(body)}\r\n\r\n".encode() + body)[0]
+        self.assertEqual(post(f"evil.example:{port}", "application/json"), 403)
+        self.assertEqual(post(f"127.0.0.1:{port}", "text/plain"), 415)
+        for path in ("/", "/health", "/ready"):
+            self.assertEqual(Client(server.url, token=None, headers={"Host": "evil.example"}).get(path)[0], 403)
+        self.assertEqual(post(f"localhost:{port}", "application/json; charset=utf-8"), 200)
+        self.assertEqual(self.ws.seq, 1)
+
     def test_connections_beyond_max_connections_are_refused(self):
         server = Server(self.ws, "127.0.0.1", 0, max_connections=2, request_timeout=5).start()
         idle = []

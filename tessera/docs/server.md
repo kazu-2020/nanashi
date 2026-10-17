@@ -39,6 +39,10 @@ With `--tokens`, the server requires `Authorization: Bearer <token>`.
 With `--user-header X-Forwarded-User`, the server uses the value of the header that an authenticating proxy added.
 You cannot use `--tokens` and `--user-header` together.
 If neither option is given, the server does no authentication (the user is blank). Then it refuses to listen on an address other than 127.0.0.1 (`--insecure` removes this limit).
+Without authentication, the server also refuses requests that a web page on another site can make a browser send:
+
+- If the server listens on a loopback address and the `Host` header is not `127.0.0.1`, `localhost` or `[::1]`, the server returns 403 `forbidden`. This check also applies to `/health` and `/ready`. It stops DNS rebinding to the port of the engine. A router without authentication in front of the engine does the same check (see [router.md](../../router/README.md)).
+- If a write does not have `Content-Type: application/json`, the server returns 415 `unsupported_media_type`. A cross-site form or `fetch` without a preflight cannot send this type.
 
 ### Authentication through a proxy
 
