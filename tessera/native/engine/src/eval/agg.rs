@@ -61,20 +61,15 @@ impl Acc {
 }
 
 /// Sort the (group key, value) pairs and aggregate each run of the same key. Gives one Cube for each of aggs,
-/// in key order. b counts the pairs and the result before the result is made.
+/// in key order. b checks the pairs and the result before the result is made.
 pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, aggs: &[Agg], b: &Budget) -> Result<Vec<Cube>> {
     sort_cells(cfg, &mut pairs);
-    let groups = pairs.len().min(1) + pairs.windows(2).filter(|w| w[0].0 != w[1].0).count();
-    let mut cells = out_cells(aggs, groups, pairs.capacity(), b)?;
-    let mut i = 0;
-    while i < pairs.len() {
+    let runs = pairs.chunk_by(|x, y| x.0 == y.0);
+    let mut cells = out_cells(aggs, runs.clone().count(), pairs.capacity(), b)?;
+    for run in runs {
         let mut acc = Acc::new();
-        let k = pairs[i].0;
-        while i < pairs.len() && pairs[i].0 == k {
-            acc.add(pairs[i].1);
-            i += 1;
-        }
-        push_group(&mut cells, aggs, k, |a| acc.finish(a));
+        run.iter().for_each(|&(_, v)| acc.add(v));
+        push_group(&mut cells, aggs, run[0].0, |a| acc.finish(a));
     }
     Ok(cubes(pack, cells))
 }
@@ -219,10 +214,22 @@ pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -
     cfg.stream_always || groups * (rayon::current_num_threads() * 16) as f64 <= rows as f64
 }
 
-/// Reads `rows` and adds each value to the group that `key` gives. Many rows are read in parallel.
-pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option<u64> + Sync) -> FxHashMap<u64, Acc> {
+/// The bytes of one bucket of a group hash map: the entry and 1 control byte.
+const GROUP_BYTES: usize = std::mem::size_of::<(u64, Acc)>() + 1;
+
+/// Reads `rows` and adds each value to the group that `key` gives. Many rows are read in parallel. groups is
+/// the most groups. Err if the hash maps can be larger than b permits with the `live` cells of the caller.
+pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b: &Budget, key: impl Fn(u64) -> Option<u64> + Sync) -> Result<FxHashMap<u64, Acc>> {
     use crate::packed::BLOCK; // one unit of work is one block of packed keys
     let n = rows.len();
+    let blocks = n.div_ceil(BLOCK);
+    let min_len = (blocks / rayon::current_num_threads()).max(1); // one table of intermediate values per thread
+    let maps = if cfg.par(n) { blocks.div_ceil(min_len) } else { 1 };
+    // A map with e entries has at most 16e/7 buckets (7/8 full, a power of 2, at least 4). While it grows, its
+    // old table (half of the buckets) is also live
+    let entries = (groups * maps as f64).min(n as f64) as usize;
+    let bytes = entries.saturating_add(4 * maps).saturating_mul(24 * GROUP_BYTES) / 7;
+    b.need(live.saturating_add(bytes.div_ceil(CELL_BYTES)), "集計")?;
     let add = |mut g: FxHashMap<u64, Acc>, b: usize| {
         rows.for_each_in(b * BLOCK..((b + 1) * BLOCK).min(n), |k, v| {
             if let Some(o) = key(k) {
@@ -231,23 +238,21 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option
         });
         g
     };
-    let blocks = n.div_ceil(BLOCK);
-    if !cfg.par(n) {
-        return (0..blocks).fold(FxHashMap::default(), add);
+    if maps == 1 {
+        return Ok((0..blocks).fold(FxHashMap::default(), add));
     }
-    let min_len = (blocks / rayon::current_num_threads()).max(1); // one table of intermediate values per thread
-    (0..blocks).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
+    Ok((0..blocks).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
         for (k, x) in &b {
             a.entry(*k).or_insert_with(Acc::new).merge(x);
         }
         a
-    })
+    }))
 }
 
 /// Finish each group into one cell for each of aggs, then sort the cells (16 B each, not the 64 B groups).
-/// shortcut: b does not count the hash map, which few_groups keeps small; count it if stream_always is used in production.
 pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, aggs: &[Agg], b: &Budget) -> Result<Vec<Cube>> {
-    let mut cells = out_cells(aggs, groups.len(), 0, b)?;
+    let map = (groups.capacity() * 8 / 7 + 1).saturating_mul(GROUP_BYTES).div_ceil(CELL_BYTES);
+    let mut cells = out_cells(aggs, groups.len(), map, b)?;
     for (k, x) in groups {
         push_group(&mut cells, aggs, k, |a| x.finish(a));
     }
@@ -296,7 +301,7 @@ pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catal
         }
     }
     if few_groups(cfg, aggs, groups, rows.len()) {
-        return finish_groups(fold_groups(cfg, &rows, k), out, aggs, b);
+        return finish_groups(fold_groups(cfg, &rows, groups, 0, b, k)?, out, aggs, b);
     }
     if !dense_first {
         if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, b, k)? {
@@ -329,7 +334,7 @@ impl Table {
         if dense > (4.0 * rows).max((1u64 << 20) as f64) || dense > (1u64 << 27) as f64 {
             return Ok(None);
         }
-        b.need((dense as usize).div_ceil(CELL_BYTES / 4), "集計")?;
+        b.need((dense as usize).div_ceil(CELL_BYTES / size_of::<u32>()), "集計")?;
         let mut strides = Vec::with_capacity(v.pack.dims.len());
         let mut w = 1usize;
         for &d in v.pack.dims.iter().rev() {
@@ -361,19 +366,20 @@ pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &St
     }
     let keep = (!removed.contains(&target)).then_some(target);
     let dims: Vec<DimId> = xp.dims.iter().copied().filter(|d| !removed.contains(d)).chain(keep).collect();
-    if !few_groups(cfg, aggs, combos_in(&dims, cat, r), x.len()) {
+    let most = combos_in(&dims, cat, r);
+    if !few_groups(cfg, aggs, most, x.len()) {
         return Ok(None);
     }
     let Some(table) = Table::of(v, target, cat, b)? else { return Ok(None) };
     let out = Packing::new(&dims, cat)?;
     let (proj, pt) = (Proj::new(xp, &out), out.pos(target));
     let at: Vec<(usize, usize)> = table.strides.iter().map(|&(d, s)| (xp.pos(d).unwrap(), s)).collect();
-    let groups = fold_groups(cfg, x, |k| {
+    let groups = fold_groups(cfg, x, most, table.cells.len().div_ceil(CELL_BYTES / size_of::<u32>()), b, |k| {
         let i: usize = at.iter().map(|&(p, s)| xp.get(k, p) as usize * s).sum();
         let t = table.cells[i];
         (t != u32::MAX).then(|| proj.apply(xp, &out, k) | pt.map_or(0, |p| out.put(p, t)))
-    });
-    drop(table);
+    })?;
+    drop(table); // finish_groups checks the budget without the table
     finish_groups(groups, out, aggs, b).map(Some)
 }
 
@@ -470,8 +476,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         if !cfg.dense_always && array_bytes > n.saturating_mul(row_bytes) {
             return Ok(None);
         }
-        let array_cells = array_bytes.div_ceil(CELL_BYTES);
-        b.need(array_cells, "集計")?;
+        b.need(array_bytes.div_ceil(CELL_BYTES), "集計")?;
         let g: Vec<(T, u32)> = if partitioned {
             let mut g = vec![(init, 0u32); slots];
             let buckets = slots.div_ceil(BUCKET);
@@ -556,7 +561,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             g
         };
         let groups = g.iter().filter(|e| e.1 > 0).count();
-        let mut cells = out_cells(self.aggs, groups, array_cells, b)?;
+        let mut cells = out_cells(self.aggs, groups, (slots * tuple_bytes).div_ceil(CELL_BYTES), b)?;
         for (s, (x, cnt)) in g.iter().enumerate() {
             if *cnt == 0 {
                 continue;

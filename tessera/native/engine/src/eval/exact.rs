@@ -10,8 +10,11 @@ pub(crate) struct ExactSum {
     spill: Option<Box<Spill>>,
 }
 
-// The Budget does not count a Spill: only a group with more than 2 partials has one, and it holds at most about
-// 40 partials (non-overlapping partials below HUGE cover 2^-1074 to 2^960, 53 bits each)
+// A Spill holds at most about 40 partials (non-overlapping partials below HUGE cover 2^-1074 to 2^960, 53 bits
+// each). Only a group with more than 2 partials has one.
+// shortcut: the Budget does not count a Spill. A worst-case bound (32 B + 64 partials for each group) made normal
+// models need about 9 times their budget, and inputs that spill in each group went 1.9 times over max_bytes.
+// Count each Spill when it is made if such inputs are common.
 #[derive(Clone, Default, Debug)]
 struct Spill {
     parts: Vec<f64>,
