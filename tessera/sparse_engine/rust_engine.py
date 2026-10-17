@@ -15,8 +15,6 @@ import weakref
 
 import nanashi_core
 
-import numpy as np
-
 from .core import Cube, Summary
 from .delta import COUNTED, DeltaPlan
 from .engine import parquet_columns, parquet_value
@@ -33,14 +31,6 @@ def _formula_error(e: nanashi_core.Diagnostic) -> FormulaError:
 
 
 EXPRS_MAX = 20_000  # 式の変換結果を覚えておく数の上限
-
-
-def _ids_at(ids: list[str], at: np.ndarray) -> np.ndarray:
-    """The ids at the member numbers in at, as an object array."""
-    # A copy of all the ids of a dimension of 1M members takes about 45 ms. Thus a small result takes only its ids.
-    if 2 * len(at) < len(ids):
-        return np.array([ids[i] for i in at.tolist()], dtype=object)
-    return np.asarray(ids, dtype=object)[at]
 
 
 class RustEngine:
@@ -395,10 +385,11 @@ class RustEngine:
         return rows, total
 
     def summarize(self, store, dims, keep, agg, restrict, cat):
-        """One pass in the engine (Store::summarize). Member numbers become member ids column by column."""
-        cols, values = self.core.summarize(store, [self._dim(cat, d) for d in set(keep)], self._region(cat, restrict), agg)
+        """One pass in the engine (Store::summarize). The engine also gives the member ids of the groups."""
         order = tuple(d for d in dims if d in keep)
-        return Summary(order, tuple(_ids_at(cat.dimension(d).ids, c) for d, c in zip(order, cols)), values)
+        coords, values = self.core.summarize(store, [self._dim(cat, d) for d in order], self._region(cat, restrict),
+                                             agg, [cat.dimension(d).ids for d in order])
+        return Summary(order, tuple(coords), array("d", values))
 
     def _is_bool(self, store) -> bool:
         return bool(self.core.is_bool(store))

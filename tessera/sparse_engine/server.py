@@ -191,7 +191,7 @@ def _cube_out(cube) -> dict:
 
 def _summary_out(s) -> dict:
     """A Summary of the Model as the body of a summary read: [[member uuid..., value], ...]."""
-    return {"dims": list(s.dims), "cells": [list(r) for r in zip(*(c.tolist() for c in s.coords), s.values.tolist())]}
+    return {"dims": list(s.dims), "cells": [list(r) for r in zip(*s.coords, s.values)]}
 
 
 def _summary_key(m: Metric, agg: str, keep: list[str], coords: dict[str, Any]) -> tuple:

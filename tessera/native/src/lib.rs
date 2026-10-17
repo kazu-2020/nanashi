@@ -5,7 +5,7 @@ use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
 use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
 use bytes::Bytes;
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
@@ -649,7 +649,8 @@ impl Core {
     }
 
     /// Aggregate the region of the store to the dimensions in keep (sum, avg, min, max or count), with the GIL
-    /// released. Returns the member numbers of each kept dimension (in metric_dims order) and the values.
+    /// released. ids has the member ids of each kept dimension, in metric_dims order. Returns one tuple of
+    /// member ids for each kept dimension and the values as f64 bytes in native byte order (for array.array).
     #[allow(clippy::type_complexity)]
     fn summarize<'py>(
         &self,
@@ -658,7 +659,8 @@ impl Core {
         keep: Vec<DimId>,
         region: Region,
         agg: &str,
-    ) -> PyResult<(Vec<Bound<'py, PyArray1<u32>>>, Bound<'py, PyArray1<f64>>)> {
+        ids: Vec<Bound<'py, PyList>>,
+    ) -> PyResult<(Vec<Bound<'py, PyTuple>>, Bound<'py, PyBytes>)> {
         let agg = match agg {
             "sum" => ReadAgg::Sum,
             "avg" => ReadAgg::Avg,
@@ -670,7 +672,18 @@ impl Core {
         self.dims(&keep)?;
         let (s, r, cat) = (read(store)?, self.restrict(&region)?, self.cat.clone());
         let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes()))).map_err(err)?;
-        Ok((g.cols.into_iter().map(|c| PyArray1::from_vec(py, c)).collect(), PyArray1::from_vec(py, g.vals)))
+        if ids.len() != g.cols.len() {
+            return Err(err(format!("ids の数 {} が残す軸の数 {} と違う", ids.len(), g.cols.len())));
+        }
+        // The tuples refer to the id strings of the lists: no new Python object for each group.
+        let cols = g.cols.iter().zip(&ids).map(|(c, l)| {
+            PyTuple::new(py, c.iter().map(|&i| l.get_item(i as usize)).collect::<PyResult<Vec<_>>>()?)
+        }).collect::<PyResult<_>>()?;
+        let vals = PyBytes::new_with(py, g.vals.len() * 8, |b| {
+            b.as_chunks_mut::<8>().0.iter_mut().zip(&g.vals).for_each(|(o, x)| *o = x.to_ne_bytes());
+            Ok(())
+        })?;
+        Ok((cols, vals))
     }
 
     fn replace(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region, new: &Bound<'_, PyAny>) -> PyResult<()> {

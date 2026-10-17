@@ -94,7 +94,7 @@ Reads (`bench_reads.py`, profit and loss plan (large), PayrollByEmployee has 1.3
 | `save` (snapshot, 1.02 million input cells) | 33 ms |
 
 `summarize` reads the stored data one time in the engine, in parallel and with no copy (see the read query in [Engine](engine.md)).
-It does not make a Python object for each cell: the result is numpy columns (`Summary`).
+It does not make a Python object for each cell: the result is columns (`Summary`), with the values in an `array.array`.
 `bench_query.py --k 8` compares it with DuckDB 1.5.6 (4 threads) and Polars 2.0.0 on the same cells (PayrollByEmployee at 8 times the large size, 11.0 million cells, and Revenue, 3.24 million cells).
 DuckDB and Polars read the member numbers as u32 columns. The script checks that the 3 give the same groups and values before it measures.
 The measurement used a cloud VM with 4 vCPUs (median of 9 rounds, ms, and the range). The table gives the second of 2 runs.
