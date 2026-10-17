@@ -4,7 +4,7 @@
 use crate::*;
 use std::ops::Range;
 
-use super::exact::ExactSum;
+use super::exact::{ExactSum, Meter};
 
 #[derive(Clone)]
 pub(crate) struct Acc {
@@ -38,11 +38,11 @@ impl Acc {
     pub(crate) fn new() -> Acc {
         Acc { sum: ExactSum::default(), cnt: 0, min: i64::MAX, max: i64::MIN, first: 0.0 }
     }
-    pub(crate) fn add(&mut self, v: f64) {
+    pub(crate) fn add(&mut self, v: f64, m: &Meter) {
         if self.cnt == 0 {
             self.first = v;
         }
-        self.sum.add(v);
+        self.sum.add(v, m);
         self.cnt += 1;
         self.min = self.min.min(min_key(v));
         self.max = self.max.max(max_key(v));
@@ -66,10 +66,11 @@ pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, agg
     sort_cells(cfg, &mut pairs);
     let runs = pairs.chunk_by(|x, y| x.0 == y.0);
     let mut cells = out_cells(aggs, runs.clone().count(), pairs.capacity(), b)?;
+    let m = Meter::new(usize::MAX); // only one Acc lives at a time
     for run in runs {
         let mut acc = Acc::new();
-        run.iter().for_each(|&(_, v)| acc.add(v));
-        push_group(&mut cells, aggs, run[0].0, |a| acc.finish(a));
+        run.iter().for_each(|&(_, v)| acc.add(v, &m));
+        push_group(&mut cells, aggs, run[0].0, pairs.capacity(), b, |a| acc.finish(a))?;
     }
     Ok(cubes(pack, cells))
 }
@@ -83,14 +84,24 @@ fn out_cells(aggs: &[Agg], groups: usize, live: usize, b: &Budget) -> Result<Vec
 }
 
 /// Push the result of each of aggs for group k. A Low (residual) of 0 is not a cell: a missing residual means 0,
-/// and the residual Cube of a one-pass SUM then stays small.
-fn push_group(cells: &mut [Vec<(u64, f64)>], aggs: &[Agg], k: u64, finish: impl Fn(Agg) -> f64) {
-    for (c, &a) in cells.iter_mut().zip(aggs) {
+/// and the residual Cube of a one-pass SUM then stays small. Err if a Low list must grow and does not fit in b
+/// with the `live` cells.
+fn push_group(cells: &mut [Vec<(u64, f64)>], aggs: &[Agg], k: u64, live: usize, b: &Budget, finish: impl Fn(Agg) -> f64) -> Result<()> {
+    for (i, &a) in aggs.iter().enumerate() {
         let v = finish(a);
-        if !(a == Agg::Low && v == 0.0) {
-            c.push((k, v));
+        if a == Agg::Low && v == 0.0 {
+            continue;
         }
+        let cap = cells[i].capacity();
+        if cells[i].len() == cap {
+            // The old buffer is live while the new one gets the cells
+            let (held, grow) = (cells.iter().map(Vec::capacity).sum::<usize>(), cap.max(4));
+            b.need(live.saturating_add(held).saturating_add(cap + grow), "集計")?;
+            cells[i].reserve_exact(grow);
+        }
+        cells[i].push((k, v));
     }
+    Ok(())
 }
 
 /// One Cube of numbers with pack for each cell list.
@@ -99,15 +110,14 @@ fn cubes(pack: Packing, cells: Vec<Vec<(u64, f64)>>) -> Vec<Cube> {
 }
 
 impl Acc {
-    pub(crate) fn merge(&mut self, o: &Acc) {
+    pub(crate) fn merge(&mut self, o: &Acc, m: &Meter) {
         if o.cnt == 0 {
             return;
         }
         if self.cnt == 0 {
-            *self = o.clone();
-            return;
+            self.first = o.first;
         }
-        self.sum.merge(&o.sum);
+        self.sum.merge(&o.sum, m);
         self.cnt += o.cnt;
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
@@ -218,8 +228,9 @@ pub(crate) fn few_groups(cfg: &Config, aggs: &[Agg], groups: f64, rows: usize) -
 const GROUP_BYTES: usize = std::mem::size_of::<(u64, Acc)>() + 1;
 
 /// Reads `rows` and adds each value to the group that `key` gives. Many rows are read in parallel. groups is
-/// the most groups. Err if the hash maps can be larger than b permits with the `live` cells of the caller.
-pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b: &Budget, key: impl Fn(u64) -> Option<u64> + Sync) -> Result<FxHashMap<u64, Acc>> {
+/// the most groups. Err if the hash maps and the Spills are larger than b permits with the `live` cells of the
+/// caller. Also gives the cells of the Spills.
+pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b: &Budget, key: impl Fn(u64) -> Option<u64> + Sync) -> Result<(FxHashMap<u64, Acc>, usize)> {
     use crate::packed::BLOCK; // one unit of work is one block of packed keys
     let n = rows.len();
     let blocks = n.div_ceil(BLOCK);
@@ -229,32 +240,40 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b
     // old table (half of the buckets) is also live
     let entries = (groups * maps as f64).min(n as f64) as usize;
     let bytes = entries.saturating_add(4 * maps).saturating_mul(24 * GROUP_BYTES) / 7;
-    b.need(live.saturating_add(bytes.div_ceil(CELL_BYTES)), "集計")?;
+    let live = live.saturating_add(bytes.div_ceil(CELL_BYTES));
+    b.need(live, "集計")?;
+    let m = Meter::new(b.room().saturating_sub(live));
     let add = |mut g: FxHashMap<u64, Acc>, b: usize| {
         rows.for_each_in(b * BLOCK..((b + 1) * BLOCK).min(n), |k, v| {
             if let Some(o) = key(k) {
-                g.entry(o).or_insert_with(Acc::new).add(v);
+                g.entry(o).or_insert_with(Acc::new).add(v, &m);
             }
         });
         g
     };
-    if maps == 1 {
-        return Ok((0..blocks).fold(FxHashMap::default(), add));
-    }
-    Ok((0..blocks).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
-        for (k, x) in &b {
-            a.entry(*k).or_insert_with(Acc::new).merge(x);
-        }
-        a
-    }))
+    let g = if maps == 1 {
+        (0..blocks).fold(FxHashMap::default(), add)
+    } else {
+        (0..blocks).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
+            for (k, x) in &b {
+                a.entry(*k).or_insert_with(Acc::new).merge(x, &m);
+            }
+            a
+        })
+    };
+    // Err if the Meter refused a Spill: then the sums are wrong
+    b.need(live.saturating_add(m.cells()), "集計")?;
+    Ok((g, m.cells()))
 }
 
 /// Finish each group into one cell for each of aggs, then sort the cells (16 B each, not the 64 B groups).
-pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, aggs: &[Agg], b: &Budget) -> Result<Vec<Cube>> {
+/// spill is the cells of the Spills in groups.
+pub(crate) fn finish_groups((groups, spill): (FxHashMap<u64, Acc>, usize), pack: Packing, aggs: &[Agg], b: &Budget) -> Result<Vec<Cube>> {
     let map = (groups.capacity() * 8 / 7 + 1).saturating_mul(GROUP_BYTES).div_ceil(CELL_BYTES);
-    let mut cells = out_cells(aggs, groups.len(), map, b)?;
+    let live = map.saturating_add(spill);
+    let mut cells = out_cells(aggs, groups.len(), live, b)?;
     for (k, x) in groups {
-        push_group(&mut cells, aggs, k, |a| x.finish(a));
+        push_group(&mut cells, aggs, k, live, b, |a| x.finish(a))?;
     }
     for c in &mut cells {
         c.sort_unstable_by_key(|c| c.0);
@@ -394,13 +413,13 @@ pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catal
     let d = Dense { cfg, rows, out, cat, aggs, key };
     match aggs {
         [Agg::First] => Ok(None),
-        [Agg::Min] => d.fold(i64::MAX, |x, v| *x = (*x).min(min_key(v)), |x, o| *x = (*x).min(*o), |x, _, _| from_key(*x), 8, b),
-        [Agg::Max] => d.fold(i64::MIN, |x, v| *x = (*x).max(max_key(v)), |x, o| *x = (*x).max(*o), |x, _, _| from_key(*x), 8, b),
-        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64, 8, b),
+        [Agg::Min] => d.fold(i64::MAX, |x, v, _| *x = (*x).min(min_key(v)), |x, o, _| *x = (*x).min(*o), |x, _, _| from_key(*x), 8, b),
+        [Agg::Max] => d.fold(i64::MIN, |x, v, _| *x = (*x).max(max_key(v)), |x, o, _| *x = (*x).max(*o), |x, _, _| from_key(*x), 8, b),
+        [Agg::Count] => d.fold((), |_, _, _| {}, |_, _, _| {}, |_, n, _| n as f64, 8, b),
         _ => d.fold(
             ExactSum::default(),
-            |s, v| s.add(v),
-            |s, o| s.merge(o),
+            |s, v, m| s.add(v, m),
+            |s, o, m| s.merge(o, m),
             |s, n, agg| match agg {
                 Agg::Sum => s.finish(),
                 Agg::Avg => s.finish() / n as f64,
@@ -450,8 +469,8 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
     fn fold<T: Clone + Send + Sync>(
         &self,
         init: T,
-        add: impl Fn(&mut T, f64) + Sync,
-        merge: impl Fn(&mut T, &T),
+        add: impl Fn(&mut T, f64, &Meter) + Sync,
+        merge: impl Fn(&mut T, &T, &Meter),
         finish: impl Fn(&T, u32, Agg) -> f64,
         row_bytes: usize,
         b: &Budget,
@@ -476,7 +495,9 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         if !cfg.dense_always && array_bytes > n.saturating_mul(row_bytes) {
             return Ok(None);
         }
-        b.need(array_bytes.div_ceil(CELL_BYTES), "集計")?;
+        let array_cells = array_bytes.div_ceil(CELL_BYTES);
+        b.need(array_cells, "集計")?;
+        let m = Meter::new(b.room().saturating_sub(array_cells));
         let g: Vec<(T, u32)> = if partitioned {
             let mut g = vec![(init, 0u32); slots];
             let buckets = slots.div_ceil(BUCKET);
@@ -520,7 +541,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                     for Round { start, pairs, .. } in &bufs {
                         for &(s, v) in &pairs[start[bi]..start[bi + 1]] {
                             let e = &mut chunk[s as usize - bi * BUCKET];
-                            add(&mut e.0, v);
+                            add(&mut e.0, v, &m);
                             e.1 += 1;
                         }
                     }
@@ -537,7 +558,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 let mut g = vec![(init.clone(), 0u32); slots];
                 rows.for_each_in(lo..hi, |k, v| {
                     if let Some(s) = slot(k) {
-                        add(&mut g[s].0, v);
+                        add(&mut g[s].0, v, &m);
                         g[s].1 += 1;
                     }
                 });
@@ -553,15 +574,18 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             for g2 in acc {
                 for (e, e2) in g.iter_mut().zip(&g2) {
                     if e2.1 > 0 {
-                        merge(&mut e.0, &e2.0);
+                        merge(&mut e.0, &e2.0, &m);
                         e.1 += e2.1;
                     }
                 }
             }
             g
         };
+        // Err if the Meter refused a Spill: then the sums are wrong
+        b.need(array_cells + m.cells(), "集計")?;
         let groups = g.iter().filter(|e| e.1 > 0).count();
-        let mut cells = out_cells(self.aggs, groups, (slots * tuple_bytes).div_ceil(CELL_BYTES), b)?;
+        let live = (slots * tuple_bytes).div_ceil(CELL_BYTES) + m.cells();
+        let mut cells = out_cells(self.aggs, groups, live, b)?;
         for (s, (x, cnt)) in g.iter().enumerate() {
             if *cnt == 0 {
                 continue;
@@ -571,7 +595,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 k |= out.put(j, (rest % sizes[j]) as u32);
                 rest /= sizes[j];
             }
-            push_group(&mut cells, self.aggs, k, |a| finish(x, *cnt, a));
+            push_group(&mut cells, self.aggs, k, live, b, |a| finish(x, *cnt, a))?;
         }
         Ok(Some(cubes(out.clone(), cells)))
     }

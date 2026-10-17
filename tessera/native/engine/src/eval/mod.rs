@@ -9,7 +9,7 @@ mod fuse;
 mod join;
 mod scan;
 pub(crate) use agg::*;
-pub(crate) use exact::ExactSum;
+pub(crate) use exact::{ExactSum, Meter};
 pub(crate) use fuse::*;
 pub(crate) use join::*;
 pub(crate) use scan::{tree, tree_scan};

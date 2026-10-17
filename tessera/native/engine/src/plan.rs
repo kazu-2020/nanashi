@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{eval_sums, eval_with, held, remove_run, tree, tree_scan, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{eval_sums, eval_with, held, remove_run, tree, tree_scan, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Meter, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -892,13 +892,16 @@ impl<'a> Run<'a> {
         let parts = [(store.read(&r), 1.0), (low, 1.0), (v_new, 1.0), (l_new, 1.0), (v_old, -1.0), (l_old, -1.0)];
         // A map entry (a key and an ExactSum) is about 3 cells. The values and the residuals are 2 cells a group
         let rows: usize = parts.iter().map(|(c, _)| c.cells.len()).sum();
-        b.need(rows.saturating_mul(3).saturating_add(kept.cells.len() * 2), "差分集計の合算")?;
+        let need = rows.saturating_mul(3).saturating_add(kept.cells.len() * 2);
+        b.need(need, "差分集計の合算")?;
+        let m = Meter::new(b.room().saturating_sub(need));
         let mut exact: FxHashMap<u64, ExactSum> = FxHashMap::default();
         for (c, sign) in parts {
             for &(k, v) in &c.into_repacked(&cat.cfg, &store.pack).cells {
-                exact.entry(k).or_default().add(sign * v);
+                exact.entry(k).or_default().add(sign * v, &m);
             }
         }
+        b.need(need.saturating_add(m.cells()), "差分集計の合算")?;
         let (mut values, mut lows) = (Vec::with_capacity(kept.cells.len()), Vec::new());
         let zero = ExactSum::default();
         for &(k, _) in &kept.cells {

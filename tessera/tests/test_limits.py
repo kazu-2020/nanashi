@@ -1,4 +1,5 @@
 """エンジンの上限の検査、セル数の見積もりの上限、観察用の記録の上限、メモリの内訳。"""
+import math
 import tempfile
 import unittest
 
@@ -381,6 +382,30 @@ class AggregationBudget(unittest.TestCase):
             m.add_formula("Z", ["D", "M"], "S[BY SUM: E.DeptOf]")
             return {"D": "d7", "M": "m3"}, ne / nd
         self.check(build, fit=int(7.5 * (1 << 20)), below=7 << 20)
+
+    def test_spill(self):
+        # Each group spills (3 partials) and then cancels back to 1.0, so its residual is 0. The 20,000 Spills
+        # take about 1.7 MiB next to the 0.6 MiB array
+        vals = [1.0, 2.0 ** -60, 2.0 ** -130, -(2.0 ** -60), -(2.0 ** -130)]
+
+        def build(m):
+            m.add_dimension("X", [f"x{i}" for i in range(20_000)])
+            m.add_dimension("Y", [f"y{j}" for j in range(len(vals))])
+            m.add_input("A", ["X", "Y"], {(f"x{i}", f"y{j}"): v for i in range(20_000) for j, v in enumerate(vals)})
+            m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
+            return {"X": "x7"}, 1.0
+        self.check(build, fit=4 << 20, below=3 << 20)
+
+    def test_residual_cells(self):
+        # Ten values of 0.1 give a residual that is not 0 in each of the 20,000 groups. The residual list grows
+        # after the check of the other lists
+        def build(m):
+            m.add_dimension("X", [f"x{i}" for i in range(20_000)])
+            m.add_dimension("Y", [f"y{j}" for j in range(10)])
+            m.add_input("A", ["X", "Y"], {(f"x{i}", f"y{j}"): 0.1 for i in range(20_000) for j in range(10)})
+            m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
+            return {"X": "x7"}, math.fsum([0.1] * 10)
+        self.check(build, fit=4 << 20, below=int(3.5 * (1 << 20)))
 
 
 if __name__ == "__main__":
