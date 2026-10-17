@@ -16,6 +16,7 @@ mod eval;
 pub mod graph;
 mod key;
 mod packed;
+mod query;
 pub mod plan;
 pub mod pq;
 mod restrict;
@@ -31,6 +32,7 @@ pub use diag::*;
 pub use eval::*;
 pub use key::*;
 pub(crate) use packed::{Cursor, PackedKeys, Sorted};
+pub use query::{Groups, ReadAgg};
 pub use restrict::*;
 pub use store::*;
 

@@ -205,6 +205,73 @@ impl ExactSum {
     }
 }
 
+/// An exact sum that is fast when most values have near exponents (for example, amounts with 2 decimals).
+/// A value whose lowest mantissa bit is 0 to WINDOW bits above `base` goes into a 128-bit integer. Other values
+/// go to an ExactSum. `finish` adds the integer to that ExactSum exactly, so it gives the same bits as ExactSum.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct FixSum {
+    acc: i128,
+    base: i32, // the exponent of bit 0 of acc
+    n: u32,    // the values in acc. The first value sets base
+    rest: ExactSum,
+}
+
+/// A value in acc is less than 2^(WINDOW + 53) = 2^100. Thus FLUSH values stay less than 2^126.
+const WINDOW: i32 = 47;
+const FLUSH: u32 = 1 << 26;
+/// The first value puts base this number of bits below its lowest mantissa bit.
+const BELOW: i32 = 24;
+/// The limits of base. Then each 43-bit chunk of acc is an f64 from 2^-1022 to less than HUGE, with no rounding.
+/// They also keep subnormal values, infinities, NaN and values of HUGE or more out of acc.
+const BASE: std::ops::RangeInclusive<i32> = -1022..=831;
+const CHUNK: u32 = 43;
+
+impl FixSum {
+    #[inline]
+    pub(crate) fn add(&mut self, x: f64, m: &Meter) {
+        let bits = x.to_bits();
+        let e = ((bits >> 52) & 0x7ff) as i32 - 1075; // the exponent of the lowest mantissa bit
+        if self.n == 0 {
+            self.base = (e - BELOW).clamp(*BASE.start(), *BASE.end());
+        }
+        let shift = e - self.base;
+        if !(0..=WINDOW).contains(&shift) {
+            return self.rest.add(x, m);
+        }
+        let v = (((bits & ((1 << 52) - 1)) | (1 << 52)) as i128) << shift;
+        let sign = (bits as i64 >> 63) as i128; // -1 for a negative value
+        self.acc += (v ^ sign) - sign;
+        self.n += 1;
+        if self.n == FLUSH {
+            put(&mut self.rest, self.acc, self.base, m);
+            (self.acc, self.n) = (0, 0);
+        }
+    }
+
+    pub(crate) fn merge(&mut self, o: &FixSum, m: &Meter) {
+        put(&mut self.rest, o.acc, o.base, m);
+        self.rest.merge(&o.rest, m);
+    }
+
+    pub(crate) fn finish(&self) -> f64 {
+        // The copy lives only in this call, so its Spill is not counted
+        let (mut s, m) = (self.rest.clone(), Meter::new(usize::MAX));
+        put(&mut s, self.acc, self.base, &m);
+        s.finish()
+    }
+}
+
+/// Add acc * 2^base to s exactly, as chunks of CHUNK bits.
+fn put(s: &mut ExactSum, acc: i128, base: i32, m: &Meter) {
+    let (neg, mut a, mut at) = (acc < 0, acc.unsigned_abs(), base);
+    while a != 0 {
+        let c = (a & ((1 << CHUNK) - 1)) as f64 * f64::from_bits(((at + 1023) as u64) << 52);
+        s.push(if neg { -c } else { c }, m);
+        a >>= CHUNK;
+        at += CHUNK as i32;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +355,51 @@ mod tests {
         assert_eq!(sum(&[HUGE * 0.75, HUGE * 0.75, -HUGE * 0.75]).finish(), HUGE * 0.75);
         assert!(sum(&[1.0, f64::INFINITY]).residual().is_nan());
         assert_eq!(std::mem::size_of::<ExactSum>(), 24);
+    }
+
+    /// FixSum gives the same bits as ExactSum for values in and out of its window, split and merged.
+    #[test]
+    fn fix_sum_matches_exact_sum() {
+        let m = Meter::new(usize::MAX);
+        let mut x = 99u64;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x >> 11
+        };
+        let specials = [0.0, -0.0, 1e300, -1e-300, 5e-324, f64::MIN_POSITIVE, HUGE, -HUGE * 0.75, 1e16, -1e16, f64::INFINITY, f64::NEG_INFINITY, f64::NAN];
+        for round in 0..400 {
+            let n = 1 + next() as usize % 300;
+            let vs: Vec<f64> = (0..n)
+                .map(|_| match next() % 20 {
+                    0 => specials[next() as usize % if round % 2 == 0 { 10 } else { specials.len() }],
+                    1 => (next() % 1000) as f64 * 1e-7,
+                    2 => -((next() % 100_000) as f64) * 1e5,
+                    _ => (next() % 100_000) as f64 * 0.01 * if next() % 3 == 0 { -1.0 } else { 1.0 },
+                })
+                .collect();
+            let want = sum(&vs).finish();
+            let cut = next() as usize % (n + 1);
+            let (mut a, mut b) = (FixSum::default(), FixSum::default());
+            vs[..cut].iter().for_each(|&v| a.add(v, &m));
+            vs[cut..].iter().for_each(|&v| b.add(v, &m));
+            a.merge(&b, &m);
+            let got = a.finish();
+            assert!(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()), "{got} {want} {vs:?}");
+        }
+    }
+
+    /// acc goes into rest before it can overflow: 2^27 + 3 values at the top of the window overflow 2^127.
+    #[test]
+    fn fix_sum_flushes_before_overflow() {
+        let m = Meter::new(usize::MAX);
+        let top = ((1u64 << 53) - 1) as f64 * 2f64.powi(-52 - BELOW + WINDOW);
+        let (mut f, mut e) = (FixSum::default(), sum(&[1.0]));
+        f.add(1.0, &m);
+        for _ in 0..2 * FLUSH + 3 {
+            f.add(top, &m);
+            e.add(top, &m);
+        }
+        assert_eq!(f.finish().to_bits(), e.finish().to_bits());
     }
 
     #[test]
