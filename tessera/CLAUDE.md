@@ -60,7 +60,7 @@ cargo clippy --release --workspace --all-targets --manifest-path native/Cargo.to
 ```
 
 - If you change `native/`, run `maturin develop` again before the Python tests. The tests load the `nanashi_core` in `.venv`.
-  - If you edit and test in a loop, use `--profile quick` in place of `--release` (also for `cargo test`). A rebuild after an edit takes about 3-17 s, not about 55 s. Use `--release` for benchmarks.
+  - If you edit and test in a loop, give `--profile quick` to `maturin develop` and `cargo test`, not `--release`. Before a benchmark, run `maturin develop --release` again (`docs/development.md`).
 - If a prerequisite is missing, a test is skipped. It does not fail. Always look at the number of skipped tests.
   - If `nanashi_core` is not installed, the Rust engine tests are skipped.
   - If the tests cannot connect to PostgreSQL (`NANASHI_PG_DSN`), or `psycopg` cannot find libpq, the journal tests are skipped.

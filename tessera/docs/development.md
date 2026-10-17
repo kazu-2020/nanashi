@@ -50,10 +50,16 @@ cargo test --release --workspace --manifest-path native/Cargo.toml   # Rust unit
 ```
 
 If you change `native/`, build again with `maturin develop` before you run the Python tests.
-If you edit and test in a loop, use `--profile quick` in place of `--release`. The `quick` profile has no LTO and uses incremental builds, so a rebuild after an engine edit takes about 3-17 s, not about 55 s. Use `--release` for benchmarks.
 The tests read the `nanashi_core` that is installed in `.venv`.
 If you did not build `nanashi_core`, the tests for the Rust engine do not fail, but they are skipped.
 Thus, also look at the number of skipped tests.
+
+If you edit and test in a loop, give `--profile quick` to `maturin develop` and `cargo test`, not `--release`.
+The `quick` profile has no LTO across crates and uses incremental builds.
+A rebuild after an engine edit takes about 3-17 seconds, not about 55 seconds.
+The engine with `quick` was about as fast as the engine with `release` in `bench.py --size large`.
+Before a benchmark, run `maturin develop --release` again.
+
 Most of the test time is waiting: round trips to PostgreSQL, server starts and lease expiry.
 Thus, `tests.parallel` is about 3 times faster than a sequential run (37 seconds, not 137 seconds, with 4 cores).
 At the end, it shows the number of tests and skipped tests for each module, and the total.

@@ -23,8 +23,6 @@ members = ["engine"]
 [profile.release]
 lto = "thin"
 
-# For the edit loop. No LTO and incremental builds make a rebuild after an engine edit about 55 s -> 3-17 s.
-# Use release for benchmarks and wheels.
 [profile.quick]
 inherits = "release"
 lto = false
