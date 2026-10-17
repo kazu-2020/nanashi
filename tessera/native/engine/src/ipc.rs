@@ -21,7 +21,8 @@ fn ipc_err(e: impl std::fmt::Display) -> String {
     format!("Arrow IPC: {e}")
 }
 
-/// Encode the parts as one record batch, with `seq` in the schema metadata.
+/// Encode the parts as one record batch, with `seq` in the schema metadata. The column of dimension j has the
+/// name `d<j>` and the dimension id in its field metadata, because a dimension id can be "metric" or "value".
 pub fn query_stream<S: AsRef<str>>(seq: u64, dims: &[String], parts: &[Part<S>]) -> Result<Vec<u8>> {
     for p in parts {
         if p.coords.len() != dims.len() || p.coords.iter().flatten().any(|c| c.len() != p.values.len()) {
@@ -30,7 +31,9 @@ pub fn query_stream<S: AsRef<str>>(seq: u64, dims: &[String], parts: &[Part<S>])
     }
     let text = || DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
     let mut fields = vec![Field::new("metric", text(), false)];
-    fields.extend(dims.iter().map(|d| Field::new(d, text(), true)));
+    fields.extend(dims.iter().enumerate().map(|(j, d)| {
+        Field::new(format!("d{j}"), text(), true).with_metadata(HashMap::from([("dimension".to_string(), d.clone())]))
+    }));
     fields.push(Field::new("value", DataType::Float64, false));
     let schema = Arc::new(Schema::new_with_metadata(fields, HashMap::from([("seq".to_string(), seq.to_string())])));
 
@@ -64,8 +67,10 @@ mod tests {
     use arrow_ipc::reader::StreamReader;
 
     type Row = (Vec<Option<String>>, f64);
+    /// The name of a field and the dimension id in its field metadata.
+    type Col = (String, Option<String>);
 
-    fn decode(data: &[u8]) -> (HashMap<String, String>, Vec<String>, Vec<Row>) {
+    fn decode(data: &[u8]) -> (HashMap<String, String>, Vec<Col>, Vec<Row>) {
         let r = StreamReader::try_new(data, None).unwrap();
         let schema = r.schema();
         let batches: Vec<RecordBatch> = r.map(|b| b.unwrap()).collect();
@@ -83,7 +88,7 @@ mod tests {
                 (text, b.column(last).as_primitive::<Float64Type>().value(i))
             })
             .collect();
-        (schema.metadata().clone().into(), schema.fields().iter().map(|f| f.name().clone()).collect(), rows)
+        (schema.metadata().clone().into(), schema.fields().iter().map(|f| (f.name().clone(), f.metadata().get("dimension").cloned())).collect(), rows)
     }
 
     #[test]
@@ -95,8 +100,9 @@ mod tests {
         ];
         let (meta, names, rows) = decode(&query_stream(12, &dims, &parts).unwrap());
         assert_eq!(meta, HashMap::from([("seq".to_string(), "12".to_string())]));
-        assert_eq!(names, ["metric", "d-month", "d-product", "value"]);
         let s = |x: &str| Some(x.to_string());
+        let f = |n: &str, d: Option<&str>| (n.to_string(), d.map(str::to_string));
+        assert_eq!(names, [f("metric", None), f("d0", Some("d-month")), f("d1", Some("d-product")), f("value", None)]);
         assert_eq!(rows[0], (vec![s("m-stock"), s("jan"), s("p1")], 1.5));
         assert_eq!(rows[1].0, vec![s("m-stock"), s("feb"), s("p1")]);
         assert!(rows[1].1.is_nan());
@@ -107,7 +113,18 @@ mod tests {
     #[test]
     fn no_metrics() {
         let (meta, names, rows) = decode(&query_stream::<&str>(0, &[], &[]).unwrap());
-        assert_eq!((meta["seq"].as_str(), names, rows.len()), ("0", vec!["metric".to_string(), "value".to_string()], 0));
+        assert_eq!((meta["seq"].as_str(), names, rows.len()), ("0", vec![("metric".to_string(), None), ("value".to_string(), None)], 0));
+    }
+
+    #[test]
+    fn dimension_ids_equal_to_fixed_column_names() {
+        let dims = ["value".to_string(), "metric".to_string()];
+        let parts = [Part { metric: "m".into(), coords: vec![Some(vec!["a"]), Some(vec!["b"])], values: vec![3.0] }];
+        let (_, names, rows) = decode(&query_stream(1, &dims, &parts).unwrap());
+        let f = |n: &str, d: Option<&str>| (n.to_string(), d.map(str::to_string));
+        assert_eq!(names, [f("metric", None), f("d0", Some("value")), f("d1", Some("metric")), f("value", None)]);
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(rows, [(vec![s("m"), s("a"), s("b")], 3.0)]);
     }
 
     #[test]

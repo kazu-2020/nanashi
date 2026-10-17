@@ -38,7 +38,9 @@ In a result, a dimension is a dimension UUID, a member is a member UUID, and a v
 A formula can make an infinite or NaN value (for example `1e308 * 2`). JSON has no such numbers, so a result gives `null` for them, as JavaScript `JSON.stringify` does.
 If the `Accept` header of `POST /query` names `application/vnd.apache.arrow.stream`, the answer is an Arrow IPC stream with that `Content-Type`.
 If this media type is not in `Accept`, or has `q=0`, the answer is JSON.
-The stream has 1 record batch. Its columns are `metric`, 1 column for each dimension of the query (the dimension UUID is the column name), and `value`.
+The stream has 1 record batch. Its columns are `metric`, 1 column for each dimension of the query, and `value`.
+The dimension columns have the names `d0`, `d1`, ... in the order of `rows`, then `columns`. The field metadata `dimension` of each dimension column has the dimension UUID.
+The column names do not come from the dimension ids, because a dimension id can be equal to `metric` or `value`.
 `metric` and the dimension columns are UTF-8 dictionary arrays with Int32 keys. A dimension column is null for a Metric that does not have the dimension.
 `value` is float64 and keeps NaN and the infinities. The schema metadata has `seq`.
 Errors stay JSON. The limit of `--max-cells` and the summary cache are the same for the 2 formats.
