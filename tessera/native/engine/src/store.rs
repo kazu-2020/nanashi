@@ -209,6 +209,19 @@ impl Base {
         })
     }
 
+    /// Marks in `out` the segments that a rewrite with `keys` must make again. A member in a gap goes with the
+    /// segment before it, so no member spans two segments.
+    fn touched(&self, pack: &Packing, keys: impl Iterator<Item = u64>, out: &mut [bool]) {
+        let member = |k| if pack.dims.is_empty() { 0 } else { pack.get(k, 0) };
+        let firsts: Vec<u32> = self.segs.iter().map(|s| member(s.first)).collect();
+        for k in keys {
+            let m = member(k);
+            if let Some(t) = out.get_mut(firsts.partition_point(|&f| f <= m).saturating_sub(1)) {
+                *t = true;
+            }
+        }
+    }
+
     /// True if the two bases are the same segments (shared by Arc, not compared by cells).
     fn same_as(&self, other: &Base) -> bool {
         self.segs.len() == other.segs.len() && self.segs.iter().zip(&other.segs).all(|(a, b)| Arc::ptr_eq(a, b))
@@ -311,6 +324,17 @@ impl<'a> BaseBuilder<'a> {
         let keys = std::mem::replace(&mut self.keys, PackedKeys::builder(cap, self.density)).finish();
         let vals = std::mem::replace(&mut self.vals, Vec::with_capacity(cap));
         self.done.push(Segment::new(keys, vals.into_boxed_slice(), self.pack.dims.len()));
+    }
+
+    /// Appends a segment of the old base unchanged (an Arc clone, so its index survives). The segment in build
+    /// ends first, so a kept segment and its neighbours stay whole partition members.
+    pub(crate) fn keep(&mut self, seg: &Arc<Segment>) {
+        if !self.vals.is_empty() {
+            self.cut();
+        }
+        self.hint = self.hint.saturating_sub(seg.len());
+        self.last = seg.last;
+        self.done.push(Arc::clone(seg));
     }
 
     pub(crate) fn finish(mut self) -> Base {
@@ -817,9 +841,41 @@ impl Store {
 
     /// Merge the delta into a new base.
     pub(crate) fn compact(&mut self) {
-        let mut out = BaseBuilder::new(&self.pack, &self.cfg, self.rows_hint(), &self.base);
+        let mut touched = vec![false; self.base.segs.len()];
+        self.base.touched(&self.pack, self.delta.keys().copied(), &mut touched);
+        self.rewrite(self.rows_hint(), &touched, Vec::new(), None);
+    }
+
+    /// Makes a new base from the old base and the delta. With `removed`, the keys that pass its checks go out (no
+    /// checks take every key out), and `new` (in key order) goes in. Each old segment drops after the builder reads
+    /// it, so a rewrite holds about one base and one segment. If a version shares the old segments, nothing frees.
+    fn rewrite(&mut self, hint: usize, touched: &[bool], new: Vec<(u64, f64)>, removed: Option<&[(usize, Arc<Sel>)]>) {
+        let mut out = BaseBuilder::new(&self.pack, &self.cfg, hint, &self.base);
         let (base, delta) = (std::mem::take(&mut self.base), std::mem::take(&mut self.delta));
-        consume_merged(base, &delta, |k, v| out.push(k, v));
+        let mut delta = delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable();
+        let mut new = new.into_iter().peekable();
+        let kept = |k| removed.is_none_or(|cs| !pass(&self.pack, k, cs));
+        for (seg, &hit) in base.segs.into_iter().zip(touched) {
+            if hit && removed.is_none() {
+                // Compaction: no check for new or removed cells on each row
+                merge_rows(seg.range(0..seg.len()), &mut delta, &mut |k, v| out.push(k, v));
+            } else if hit {
+                merge_rows(seg.range(0..seg.len()), &mut delta, &mut |k, v| rewrite_row(&mut out, &mut new, kept, k, v));
+            } else {
+                // The keys in the gap before this segment belong to the segment before it
+                while let Some((&dk, &Slot(dv))) = delta.next_if(|e| *e.0 < seg.first) {
+                    if let Some(v) = dv {
+                        rewrite_row(&mut out, &mut new, kept, dk, v);
+                    }
+                }
+                while let Some((nk, nv)) = new.next_if(|c| c.0 < seg.first) {
+                    out.push(nk, nv);
+                }
+                out.keep(&seg);
+            }
+        }
+        drain_delta(delta, &mut |k, v| rewrite_row(&mut out, &mut new, kept, k, v));
+        new.for_each(|(k, v)| out.push(k, v));
         self.set_base(out.finish());
     }
 
@@ -871,19 +927,11 @@ impl Store {
             // array adds to the peak memory. A new cell replaces a kept cell with the same key.
             let cs = checks(&self.pack, r);
             let n = (self.rows_hint() + new.len()).saturating_sub(old.len());
-            let mut out = BaseBuilder::new(&self.pack, &self.cfg, n, &self.base);
-            let (base, delta) = (std::mem::take(&mut self.base), std::mem::take(&mut self.delta));
-            let mut new = new.into_iter().peekable();
-            consume_merged(base, &delta, |k, v| {
-                while let Some((nk, nv)) = new.next_if(|c| c.0 < k) {
-                    out.push(nk, nv);
-                }
-                if !pass(&self.pack, k, &cs) && new.peek().is_none_or(|c| c.0 != k) {
-                    out.push(k, v);
-                }
-            });
-            new.for_each(|(k, v)| out.push(k, v));
-            self.set_base(out.finish());
+            let mut touched = vec![false; self.base.segs.len()];
+            self.base.touched(&self.pack, old.iter().copied(), &mut touched);
+            self.base.touched(&self.pack, new.iter().map(|c| c.0), &mut touched);
+            self.base.touched(&self.pack, self.delta.keys().copied(), &mut touched);
+            self.rewrite(n, &touched, new, Some(&cs));
             return;
         }
         for &k in old {
@@ -1277,6 +1325,17 @@ fn merge_rows(rows: BaseRange<'_>, delta: &mut Peekable<DeltaRange<'_>>, f: &mut
     }
 }
 
+/// A function, not a closure, so `#[inline(always)]` puts it into each loop of `Store::rewrite`.
+#[inline(always)]
+fn rewrite_row(out: &mut BaseBuilder, new: &mut Peekable<std::vec::IntoIter<(u64, f64)>>, kept: impl Fn(u64) -> bool, k: u64, v: f64) {
+    while let Some((nk, nv)) = new.next_if(|c| c.0 < k) {
+        out.push(nk, nv);
+    }
+    if kept(k) && new.peek().is_none_or(|c| c.0 != k) {
+        out.push(k, v);
+    }
+}
+
 /// Gives the delta entries that are left after the last base row.
 fn drain_delta(delta: Peekable<DeltaRange<'_>>, f: &mut impl FnMut(u64, f64)) {
     for (&dk, &Slot(dv)) in delta {
@@ -1284,17 +1343,6 @@ fn drain_delta(delta: Peekable<DeltaRange<'_>>, f: &mut impl FnMut(u64, f64)) {
             f(dk, v);
         }
     }
-}
-
-/// Gives all cells of `base` merged with `delta` as `Store::merged(0, None, f)`, and takes the base. It drops each
-/// segment after it reads its rows. A rewrite holds the unread old segments, the finished new segments and one
-/// segment in build: about one base and one segment. If a version shares the old segments, nothing frees.
-fn consume_merged(base: Base, delta: &OrdMap<u64, Slot>, mut f: impl FnMut(u64, f64)) {
-    let mut delta = delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable();
-    for seg in base.segs {
-        merge_rows(seg.range(0..seg.len()), &mut delta, &mut f);
-    }
-    drain_delta(delta, &mut f);
 }
 
 /// The standard library collects the keys into the buffer of `cells` (in-place iteration).
@@ -1399,6 +1447,119 @@ mod tests {
         assert!(s.base.segs.len() >= 5);
         assert_eq!(map_of(&s), want);
         assert_eq!(s.len(), want.len());
+    }
+
+    /// The partition members of the segments are in order and do not meet (no member spans two segments).
+    fn members_are_whole(s: &Store) {
+        for w in s.base.segs.windows(2) {
+            assert!(s.pack.get(w[0].last, 0) < s.pack.get(w[1].first, 0), "a member spans two segments");
+        }
+    }
+
+    /// For each segment of `before`, true if `s` still holds it (by Arc, at any position).
+    fn kept(before: &Base, s: &Store) -> Vec<bool> {
+        before.segs.iter().map(|old| s.base.segs.iter().any(|new| Arc::ptr_eq(old, new))).collect()
+    }
+
+    #[test]
+    fn a_compaction_keeps_the_untouched_segments() {
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, compact_min: 16, postings_min_rows: 0, ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted(random_cells(10_000, 7));
+        assert_eq!(s.base.segs.len(), 5);
+        // Take one member out after segment 2, so a gap is between segments 2 and 3
+        let hole = s.pack.get(s.base.segs[2].last, 0) + 1;
+        s.set_sorted(random_cells(10_000, 7).into_iter().filter(|c| s.pack.get(c.0, 0) != hole).collect());
+        assert_eq!(s.base.segs.len(), 5);
+        let before = s.base.clone();
+        let index: Vec<*const Postings> = before.segs.iter().map(|seg| seg.postings(&s.pack, 1) as *const Postings).collect();
+        let mut want = map_of(&s);
+        // Keys in segment 2, a key of a member in the gap after it, and a key of a member after the last segment
+        let gap = s.pack.put(0, s.pack.get(before.segs[2].last, 0) + 1);
+        assert!(s.pack.get(gap, 0) < s.pack.get(before.segs[3].first, 0));
+        let after = s.pack.put(0, 1023) | s.pack.put(1, 5);
+        assert!(s.pack.get(before.segs[4].last, 0) < 1023);
+        let keys: Vec<u64> = (0..20).map(|i| before.segs[2].first + i * 3).chain([gap, after]).collect();
+        for (i, &k) in keys.iter().enumerate() {
+            s.write(&s.decode(k), Some(i as f64));
+            want.insert(k, i as f64);
+        }
+        s.compact();
+        assert!(s.delta.is_empty());
+        assert_eq!(map_of(&s), want);
+        members_are_whole(&s);
+        assert_eq!(kept(&before, &s), [true, true, false, true, false]);
+        for i in [0, 1, 3] {
+            assert!(std::ptr::eq(before.segs[i].postings(&s.pack, 1), index[i]), "the index of segment {i} survived");
+        }
+    }
+
+    #[test]
+    fn write_back_direct_keeps_the_untouched_segments() {
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, compact_min: 16, ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted(random_cells(8_000, 7));
+        assert_eq!(s.base.segs.len(), 4);
+        let before = s.base.clone();
+        let m = s.pack.get(before.segs[1].first, 0) + 1;
+        assert!(m < s.pack.get(before.segs[1].last, 0));
+        let r = Restrict::all(2).with(0, Sel::new(vec![m], 1024));
+        // More new cells than the delta limit (8000 / 8), so the write goes directly into a new base
+        let cells: Vec<(u64, f64)> = (0..1024u32).map(|j| (s.pack.put(0, m) | s.pack.put(1, j), j as f64)).collect();
+        let cube = Cube { pack: s.pack.clone(), kind: Kind::Num, cells: cells.clone() };
+        let mut want = map_of(&s);
+        want.retain(|&k, _| s.pack.get(k, 0) != m);
+        want.extend(cells);
+        s.replace(&r, &cube).unwrap();
+        assert!(s.delta.is_empty(), "the write made a new base");
+        assert_eq!(map_of(&s), want);
+        members_are_whole(&s);
+        assert_eq!(kept(&before, &s), [true, false, true, true]);
+    }
+
+    #[test]
+    fn write_back_direct_puts_new_cells_in_a_gap_before_a_kept_segment() {
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, compact_min: 16, ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted(random_cells(8_000, 7));
+        let hole = s.pack.get(s.base.segs[1].last, 0) + 1;
+        s.set_sorted(random_cells(8_000, 7).into_iter().filter(|c| s.pack.get(c.0, 0) != hole).collect());
+        assert_eq!(s.base.segs.len(), 4);
+        let before = s.base.clone();
+        assert!(hole < s.pack.get(before.segs[2].first, 0));
+        let r = Restrict::all(2).with(0, Sel::new(vec![hole], 1024));
+        let cells: Vec<(u64, f64)> = (0..1024u32).map(|j| (s.pack.put(0, hole) | s.pack.put(1, j), j as f64)).collect();
+        let mut want = map_of(&s);
+        want.extend(cells.iter().copied());
+        s.replace(&r, &Cube { pack: s.pack.clone(), kind: Kind::Num, cells }).unwrap();
+        assert!(s.delta.is_empty(), "the write made a new base");
+        assert_eq!(map_of(&s), want);
+        members_are_whole(&s);
+        assert_eq!(kept(&before, &s), [true, false, true, true]);
+    }
+
+    #[test]
+    fn write_back_direct_takes_out_every_cell_if_the_region_filters_no_dimension_of_the_metric() {
+        let cat = two_dims_with(1024, Config { seg_rows: 256, compact_min: 16, ..Config::default() });
+        let mut s = Store::new(&[0], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted((0..1024u64).map(|k| (k, 1.0)).collect());
+        let r = Restrict::all(2).with(1, Sel::new(vec![3], 1024));
+        let cells: Vec<(u64, f64)> = (0..300u64).map(|k| (k * 3, 2.0)).collect();
+        s.replace(&r, &Cube { pack: s.pack.clone(), kind: Kind::Num, cells: cells.clone() }).unwrap();
+        assert!(s.delta.is_empty(), "the write made a new base");
+        assert_eq!(map_of(&s), cells.into_iter().collect());
+    }
+
+    #[test]
+    fn a_store_with_no_dimensions_compacts() {
+        let cat = two_dims(4);
+        let mut s = Store::new(&[], None, Kind::Num, &cat).unwrap();
+        s.write(&[], Some(1.0));
+        s.compact();
+        s.write(&[], Some(2.0));
+        s.compact();
+        assert_eq!(s.get(&[]), Some(2.0));
+        assert_eq!(s.base.rows(), 1);
     }
 
     /// At most `n` distinct keys below `2^20` in ascending order, with a value for each.
