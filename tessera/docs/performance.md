@@ -93,6 +93,25 @@ Reads (`bench_reads.py`, profit and loss plan (large), PayrollByEmployee has 1.3
 | `summarize`: the monthly totals of sales (all products) | 2.2 ms |
 | `save` (snapshot, 1.02 million input cells) | 33 ms |
 
+`summarize` reads the stored data one time in the engine, in parallel and with no copy (see the read query in [Engine](engine.md)).
+It does not make a Python object for each cell: the result is numpy columns (`Summary`).
+`bench_query.py --k 8` compares it with DuckDB 1.5.6 (4 threads) and Polars 2.0.0 on the same cells (PayrollByEmployee at 8 times the large size, 11.0 million cells, and Revenue, 3.24 million cells).
+DuckDB and Polars read the member numbers as u32 columns. The script checks that the 3 give the same groups and values before it measures.
+The measurement used a cloud VM with 4 vCPUs (median of 7 rounds, ms, and the range).
+
+| Query | Groups | tessera | DuckDB | Polars |
+|---|---|---|---|---|
+| sum by Month, Version=予算 | 36 | 40.2 (35.7 to 55.0) | 21.3 (18.8 to 21.8) | 40.3 (30.3 to 70.8) |
+| sum by Employee (all) | 157,922 | 80.1 (71.5 to 119.6) | 65.8 (60.9 to 82.6) | 102.7 (70.8 to 142.7) |
+| sum by Version, Month, 1000 Employees (partition dimension) | 81 | 2.0 (1.9 to 4.9) | 2.8 (2.2 to 4.8) | 7.3 (5.5 to 9.8) |
+| total, Month in m01..m12 | 1 | 42.1 (27.9 to 55.0) | 13.1 (12.2 to 16.0) | 26.4 (18.4 to 40.0) |
+| avg by Version | 3 | 63.4 (48.1 to 94.1) | 21.5 (18.5 to 24.8) | 30.7 (27.2 to 36.0) |
+| 2 Metrics: sum by Month, Version=予算 | 72 | 58.4 (45.8 to 87.2) | 28.9 (25.4 to 33.3) | 66.8 (47.2 to 95.9) |
+
+Before this path (a filtered copy of the stored data and a compiled `REMOVE`), the first 5 queries took 200, 454, 3.2, 186 and 146 ms on the same VM (through `Named`).
+A filter on the partition dimension is faster than DuckDB, because it reads only the rows of the selected members.
+A full scan is 1.2 to 3.2 times slower than DuckDB. The cause is the exact sum: `FixSum` uses about 4 ns for each value on 1 thread, and a plain f64 sum uses less than 1 ns. DuckDB and Polars add in f64, so their sums can change with the order of the rows.
+
 Write while 8 readers read continuously (change the salary of 1 employee, 0.6 ms when it is the only operation).
 In standard Python, this write takes 84 ms (median), also when the readers use `get`.
 The cause is not the cost of the reads. Each time the writer gets the GIL again, it waits for the Python thread switch interval (5 ms by default).
