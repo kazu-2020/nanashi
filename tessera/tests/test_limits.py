@@ -493,8 +493,9 @@ class WriteBudget(unittest.TestCase):
         self.assertIn(True, accepted)
         self.assertTrue(all(accepted[accepted.index(True):]), accepted)
 
-    def test_part_writes_after_a_fork_and_in_one_level_stay_in_the_budget(self):
-        """A part write into a shared delta tree copies its nodes. The part writes of one level wait in sequence."""
+    def test_writes_stay_in_the_budget_at_the_smallest_budget(self):
+        """A part write into a shared delta tree copies its nodes. The writes of one level wait in sequence, with the
+        changed members of a whole write. The per-period scan keeps the delta tree of the earlier periods."""
         import nanashi_core
         n, mib = 40_000, 1 << 20
 
@@ -551,7 +552,30 @@ class WriteBudget(unittest.TestCase):
             edit(m, 2000)
             return work(m, max_bytes)
 
-        for label, trial in [("a fork", fork), ("8 Metrics in one level", level)]:
+        def whole(max_bytes):
+            # Empty destinations and 4,096 changed rows on 5 axes: the member lists are as large as the result
+            dims, k = [f"D{j}" for j in range(5)], 4096
+            m = Named(Model(engine=RustEngine(max_bytes=1 << 50, fuse=False, par_min=1 << 40)))
+            for d in dims:
+                m.add_dimension(d, [f"m{i}" for i in range(k)])
+            m.add_input("A", dims, {tuple(f"m{i}" for _ in dims): float(i + 1) for i in range(k)})
+            m.recalc()
+            for j in range(4):
+                m.add_formula(f"Z{j}", dims, f"A * {j + 2}")
+            return work(m, max_bytes)
+
+        def scan(max_bytes):
+            # IF on PREVIOUS is not a tree, so the scan writes 80 periods of 50 rows into one delta tree
+            m = Named(Model(engine=RustEngine(max_bytes=1 << 50, par_min=1 << 40)))
+            m.add_dimension("X", [f"x{i}" for i in range(50)])
+            m.add_dimension("T", [f"t{i}" for i in range(80)], ordered=True)
+            m.add_input("A", ["X", "T"], {(f"x{i}", f"t{t}"): 1.0 + i % 3 for i in range(50) for t in range(80)})
+            m.recalc()
+            m.add_formula("Z", ["X", "T"], "IF(ISBLANK(PREVIOUS(T)), A, PREVIOUS(T) + A)")
+            return work(m, max_bytes)
+
+        for label, trial in [("a fork", fork), ("8 Metrics in one level", level), ("4 whole writes in one level", whole),
+                             ("a scan by period", scan)]:
             with self.subTest(label):
                 budget, (error, total) = smallest(trial)
                 self.assertIsNone(error)

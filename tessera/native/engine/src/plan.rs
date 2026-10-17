@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{eval_sums, eval_with, held, remove_run, tree, tree_scan, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{eval_sums, eval_with, held, remove_run, tree, tree_scan, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Mem, Node, Op, Restrict, Result, Sel, Src, Store};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -468,20 +468,24 @@ enum Write {
 impl Write {
     fn bytes(&self) -> usize {
         match self {
-            Write::Whole(cells, _) => cells.capacity(),
-            Write::Part(c) => c.cells.capacity(),
+            Write::Whole(cells, sets) => {
+                let sets = sets.iter().flatten().map(|ms| ms.capacity() * size_of::<u32>()).sum::<usize>();
+                cells.capacity().saturating_mul(CELL_BYTES).saturating_add(sets)
+            }
+            Write::Part(c) => c.cells.capacity().saturating_mul(CELL_BYTES),
         }
-        .saturating_mul(CELL_BYTES)
     }
 }
 
 /// The cells that the write of whole results needs at its peak, with the results. The write puts the cells in the
 /// order of the store. If the packing is different, this makes a copy. Then the write makes the new columns (about
 /// 1 cell for each row). With `diff`, Store::replaced_all also merges the old and the new cells. The merge uses 1.5
-/// cells for each old and new row, and a copy of the old cells if the store has a delta.
+/// cells for each old and new row, and a copy of the old cells if the store has a delta. Then Store::region_of keeps
+/// the changed keys (1 cell for each row) and makes a member list for each axis (4 bytes for each row).
 fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usize {
     let (n, old) = (value.cells.len(), store.rows_hint());
-    let merge = if diff { (old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 } } else { 0 };
+    let lists = (old + n).saturating_mul(4 + store.metric_dims.len()) / 4;
+    let merge = if diff { ((old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 }).max(lists) } else { 0 };
     let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
     sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak
 }
@@ -982,9 +986,11 @@ impl<'a> Run<'a> {
                 return Ok(());
             }
         }
-        // The active stores grow in each period, so count their current bytes again before each evaluation
-        let grown = |stores: &[Arc<Store>]| active.iter().map(|(n, _)| stores[*n].memory().bytes()).sum::<usize>();
-        let others = held.saturating_sub(grown(self.stores));
+        // The active stores grow in each period, so count their current bytes again before each evaluation. Store::memory
+        // does not count the tree nodes of the delta. A tree row uses about 4 cells (see Store::part_write_cells)
+        let mems = |stores: &[Arc<Store>]| active.iter().map(|(n, _)| stores[*n].memory()).collect::<Vec<_>>();
+        let grown = |stores: &[Arc<Store>]| mems(stores).iter().map(|m| m.base + m.index + m.delta_rows * 4 * CELL_BYTES).sum::<usize>();
+        let others = held.saturating_sub(mems(self.stores).iter().map(Mem::bytes).sum());
         // 格納データにその場で 1 時点ずつ書き込む。次の時点の前月参照は、書き込んだばかりの時点を読む
         for t in 0..self.cat.dims[dim].size {
             for (n, r) in &active {

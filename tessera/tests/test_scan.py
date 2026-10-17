@@ -88,7 +88,7 @@ class MatchesReference(unittest.TestCase):
             m.add_input("A", ["Product", "Month"], values)
             m.add_formula("Stock", ["Product", "Month"], "PREVIOUS(Month) * 0.9 + A + A")
             if engine.name == "rust":
-                engine.core.configure(max_bytes=stored_bytes(m) + (96 << 10))
+                engine.core.configure(max_bytes=stored_bytes(m) + (128 << 10))
             results.append(m.value("Stock").cells)
         self.assertEqual(results[1], results[0])
 
