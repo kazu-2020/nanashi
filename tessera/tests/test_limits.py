@@ -341,46 +341,98 @@ class WriteBudget(unittest.TestCase):
         import nanashi_core
         n, k = 20_000, 20
         mib = 1 << 20
-        # (formula, dimensions, fuse, a budget that refuses it, a budget that fits it)
-        # A fits budget is about 1.1x the smallest budget that works.
+        # (label, formula, dimensions, partition, fuse, edit, a budget in MiB that refuses it, a budget in MiB that
+        # fits it). The fit budget is about 1.1x the smallest budget that works. The repacked case uses about 1.02x,
+        # because the too large copy that it finds is only about 9% of the total. With an edit, the formula is
+        # calculated first and the edit makes the work.
+        wide = lambda m: m.spread("P", 1.0)  # noqa: E731
         cases = [
-            ("A + 0", ["X", "Y"], True, 1.5, 2.3),  # the lookup array of A
-            ("A * B + 0", ["X", "Y"], True, 1.5, 2.3),
-            ("R * P", ["X", "Q"], False, 15, 19.5),  # the write of the result
+            ("the lookup array of A", "A + 0", ["X", "Y"], None, True, None, 2.0, 2.6),
+            ("the lookup arrays of A and B", "A * B + 0", ["X", "Y"], None, True, None, 2.0, 2.6),
+            ("the write of the result", "R * P", ["X", "Q"], None, False, None, 15.5, 19.8),
+            ("the write of a repacked result", "C * 2", ["X", "Y"], "Y", False, None, 2.4, 2.65),
+            ("the write after an edit of all members", "P * 2", ["X"], None, False, wide, 2.3, 2.7),
         ]
 
         def build(engine):
-            m = Named(Model(engine=engine))
+            m = Named(Model(engine=engine, auto_layout=False))
             m.add_dimension("X", [f"x{i}" for i in range(n)])
             m.add_dimension("Y", ["y0", "y1"])
             m.add_dimension("Q", [f"q{i}" for i in range(k)])
             for name in "AB":
-                m.add_input(name, ["X", "Y"], {(f"x{i}", "y0"): 1.0 if i % 2 else -1.0 for i in range(n)})
+                m.add_input(name, ["X", "Y"], {(f"x{i}", f"y{i % 2}"): 1.0 if i % 3 else -1.0 for i in range(n)},
+                            partition="X")
+            # 32,800 cells: a Vec that grows one cell at a time gets room for 65,536
+            m.add_input("C", ["X", "Y"], {(f"x{i % n}", f"y{i // n}"): 1.0 for i in range(32_800)}, partition="X")
             m.add_input("P", ["X"], {(f"x{i}",): 1.0 if i % 2 else -1.0 for i in range(n)})
             m.add_input("R", ["Q"], {(f"q{i}",): 1.0 for i in range(k)})
             return m
 
-        for formula, dims, fuse, refused, fits in cases:
-            with self.subTest(formula=formula):
-                gc.collect()
-                m = build(RustEngine(max_bytes=int(refused * mib), fuse=fuse, par_min=1 << 40))
+        def held(m):
+            return sum(r["base"] + r["delta"] + r["index"] + r.get("counts", 0) for r in m.memory().values())
+
+        def work(m, max_bytes):
+            """Recalculate with max_bytes. Give the error (or None) and the stored bytes plus the new Rust heap at
+            the peak."""
+            m.engine.core.configure(max_bytes=int(max_bytes * mib))
+            gc.collect()
+            start, base = held(m), nanashi_core.heap()[0]
+            nanashi_core.reset_heap_peak()
+            try:
                 m.recalc()
+                error = None
+            except ValueError as e:
+                error = str(e)
+            return error, start + nanashi_core.heap()[1] - base
+
+        for label, formula, dims, partition, fuse, edit, refused, fits in cases:
+            with self.subTest(label):
+                kw = {"partition": partition} if partition else {}
                 gc.collect()
-                base = nanashi_core.heap()[0]
-                m.add_formula("Z", dims, formula)
-                nanashi_core.reset_heap_peak()
-                with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
-                    m.recalc()
-                self.assertLessEqual(nanashi_core.heap()[1] - base, refused * mib, "the refused work went over max_bytes")
-                m.engine.core.configure(max_bytes=int(fits * mib))
-                nanashi_core.reset_heap_peak()
-                m.recalc()
-                self.assertLessEqual(nanashi_core.heap()[1] - base, fits * mib, "the work went over max_bytes")
+                m = build(RustEngine(max_bytes=1 << 50, fuse=fuse, par_min=1 << 40))
                 ref = build(ReferenceEngine())
-                ref.add_formula("Z", dims, formula)
+                for x in (m, ref):
+                    x.recalc()
+                    x.add_formula("Z", dims, formula, **kw)
+                    if edit:
+                        x.recalc()
+                        edit(x)
+                error, total = work(m, refused)
+                self.assertRegex(error or "", "メモリの予算を超える")
+                self.assertLessEqual(total, refused * mib, "the refused work went over max_bytes")
+                error, total = work(m, fits)
+                self.assertIsNone(error)
+                self.assertLessEqual(total, fits * mib, "the work went over max_bytes")
                 ref.recalc()
                 self.assertEqual(sorted(m.rows("Z")[0]), sorted(ref.rows("Z")[0]))
                 del m
+
+    def test_a_larger_budget_accepts_what_a_smaller_budget_accepts(self):
+        """The lookup arrays leave room for the cells that the scan needs after them."""
+        n = 5000
+
+        def build():
+            m = Named(Model(engine=RustEngine(max_bytes=1 << 50, fuse=True, par_min=1 << 40)))
+            m.add_dimension("X", [f"x{i}" for i in range(n)])
+            m.add_dimension("Y", ["y0", "y1", "y2"])
+            m.add_input("A", ["X", "Y"], {(f"x{i}", f"y{i % 3}"): (i % 13) / 7.0 - 0.9 for i in range(n)})
+            m.add_input("B", ["Y", "X"], {(f"y{(i + 1) % 3}", f"x{i}"): 1.0 / (1 + i % 11) for i in range(0, n, 2)})
+            m.add_input("C", ["X"], {(f"x{i}",): 0.1 * (i % 17) for i in range(n)})
+            m.recalc()
+            m.add_formula("Z", ["X", "Y"], "A - B * C[EXPAND: Y] + 0.3")
+            return m
+
+        accepted = []
+        for i in range(17):
+            m = build()
+            m.engine.core.configure(max_bytes=int((1.2 + 0.05 * i) * (1 << 20)))
+            try:
+                m.recalc()
+                accepted.append(True)
+            except ValueError:
+                accepted.append(False)
+        self.assertIn(True, accepted)
+        self.assertTrue(all(accepted[accepted.index(True):]), accepted)
 
 
 if __name__ == "__main__":
