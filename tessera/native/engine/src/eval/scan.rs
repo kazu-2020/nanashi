@@ -169,8 +169,9 @@ impl At<'_> {
 /// Calculate the scan for the periods `ts` (ascending) in the range r (r limits the time dimension to ts).
 /// `before` has the values of the Metric at each period t - n (n in `tree.lags`) that is not in ts. The result is in the packing `pack`.
 /// A row reads only its own earlier periods, thus the engine calculates the rows in parallel.
+/// The scan stops with a budget error when `fits` is false for the count of the cells that it made.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
+pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget, fits: &(dyn Fn(usize) -> bool + Sync)) -> Result<Cube> {
     let cfg = &cat.cfg;
     let p = pack.pos(dim).expect("scan の軸");
     let size = cat.dims[dim].size as usize;
@@ -240,13 +241,13 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
     b.take(srcs.iter().flatten().count() * size * parts.min(rayon::current_num_threads()), WHAT)?;
     // A Budget is not Sync. The chunks count the capacity of their results here, and a chunk stops when it does not fit
     let room = b.room();
-    let made = AtomicUsize::new(0);
+    let (made, pushed) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let run = |chunk: &[u64]| -> Option<Vec<(u64, f64)>> {
         let mut pos: Vec<usize> = srcs.iter().map(|s| s.map_or(0, |s| s.partition_point(|c| c.0 < chunk[0]))).collect();
         // The cells of the last row of each source. Only their slots get a reset
         let mut last: Vec<usize> = pos.clone();
         let mut bufs: Vec<Vec<Option<f64>>> = srcs.iter().map(|s| vec![None; if s.is_some() { size } else { 0 }]).collect();
-        let mut out = Vec::new();
+        let (mut out, mut told) = (Vec::new(), 0);
         for &w in chunk {
             for (((s, i), l), buf) in srcs.iter().zip(&mut pos).zip(&mut last).zip(&mut bufs) {
                 let Some(s) = s else { continue };
@@ -269,7 +270,9 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
             if out.capacity() - out.len() < ts.len() {
                 // Count the old buffer too: it lives while the realloc copies it
                 let (old, grow) = (out.capacity(), out.capacity().max(ts.len()));
-                if made.fetch_add(old + grow, Relaxed) + old + grow > room {
+                let cells = pushed.fetch_add(out.len() - told, Relaxed) + out.len() - told;
+                told = out.len();
+                if made.fetch_add(old + grow, Relaxed) + old + grow > room || !fits(cells) {
                     return None;
                 }
                 // Reserve up to old + grow so the capacity equals the charged count
