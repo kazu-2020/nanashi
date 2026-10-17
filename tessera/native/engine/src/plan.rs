@@ -48,6 +48,17 @@ impl Reg {
         self.sels.is_empty()
     }
 
+    /// The bytes of the member lists.
+    fn bytes(&self) -> usize {
+        self.sels.iter().map(|(_, ms)| ms.capacity() * size_of::<u32>()).sum::<usize>() + self.sels.capacity() * 32
+    }
+
+    /// The bytes of `self.restrict(cat)`: a copy of each member list, its mask and Sel, and 2 lists of all dimensions.
+    fn restrict_bytes(&self, cat: &Catalog) -> usize {
+        let sels: usize = self.sels.iter().map(|(d, ms)| ms.len() * size_of::<u32>() + (cat.dims[*d].size as usize).div_ceil(64) * 8 + 64).sum();
+        sels + cat.dims.len() * 16
+    }
+
     fn without(&self, ds: &[DimId]) -> Reg {
         Reg { sels: self.sels.iter().filter(|s| !ds.contains(&s.0)).cloned().collect() }
     }
@@ -482,12 +493,14 @@ impl Write {
 /// 1 cell for each row). With `diff`, Store::replaced_all also merges the old and the new cells. The merge uses 1.5
 /// cells for each old and new row, and a copy of the old cells if the store has a delta. Then Store::region_of keeps
 /// the changed keys (1 cell for each row) and makes a member list for each axis (4 bytes for each row).
+/// PackedKeys::new also makes 3 lists with 56 bytes for each block of keys. Count 64 bytes and 1 KiB of small parts.
 fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usize {
     let (n, old) = (value.cells.len(), store.rows_hint());
     let lists = (old + n).saturating_mul(4 + store.metric_dims.len()) / 4;
     let merge = if diff { ((old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 }).max(lists) } else { 0 };
     let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
-    sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak
+    let blocks = sides.iter().map(|c| c.cells.len()).fold(n, usize::max).div_ceil(crate::packed::BLOCK) * 4 + 64;
+    sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak + blocks
 }
 
 /// The keys of `store` in the part `region`.
@@ -496,17 +509,20 @@ fn region_size(region: &Reg, cat: &Catalog, store: &Store) -> usize {
     store.metric_dims.iter().map(|&d| size(d)).fold(1usize, usize::saturating_mul)
 }
 
-/// The cells that the writes of results into the part `region` need: (the most at the peak with the results, the
-/// cells that the stores keep after the writes). The writes `(store, cells, diff)` come one after the other. With
-/// `diff`, the write also finds the changed keys. A store with more than 1 reference is shared.
+/// The cells that the writes of results into the part `region` need: (the most at the peak with the results and
+/// the restriction of the region, the cells that the stores keep after the writes). The writes `(store, cells, diff)`
+/// come one after the other. With `diff`, the write also finds the changed keys. A store with more than 1 reference
+/// is shared.
 fn part_write(region: &Reg, cat: &Catalog, writes: &[(&Arc<Store>, &Cube, bool)]) -> (usize, usize) {
     let (mut peak, mut kept) = (0usize, 0usize);
     for (s, c, diff) in writes {
-        let (p, k) = s.part_write_cells(region_size(region, cat, s), c.cells.len(), *diff, Arc::strong_count(s) > 1);
+        let filtered = |d: DimId| region.get(d).is_some();
+        let (p, k) = s.part_write_cells(region_size(region, cat, s), c.cells.len(), *diff, Arc::strong_count(s) > 1, filtered);
         peak = peak.max(kept.saturating_add(p));
         kept = kept.saturating_add(k);
     }
-    (writes.iter().map(|(_, c, _)| c.cells.capacity()).sum::<usize>().saturating_add(peak), kept)
+    let results = writes.iter().map(|(_, c, _)| c.cells.capacity()).sum::<usize>();
+    (results.saturating_add(region.restrict_bytes(cat).div_ceil(CELL_BYTES)).saturating_add(peak), kept)
 }
 
 struct Done {
@@ -551,7 +567,8 @@ impl From<Old> for Src {
 impl Done {
     fn bytes(&self) -> usize {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
-        writes.saturating_add(self.old.as_ref().map_or(0, Old::copied)).saturating_add(self.kept.saturating_mul(CELL_BYTES))
+        let old = self.old.as_ref().map_or(0, Old::copied);
+        writes.saturating_add(old).saturating_add(self.region.bytes()).saturating_add(self.kept.saturating_mul(CELL_BYTES))
     }
 }
 
@@ -689,7 +706,12 @@ impl<'a> Run<'a> {
         let weight: usize = tasks.iter().map(|t| t.weight).sum();
         let run: &Self = self;
         let max = self.cat.cfg.max_bytes;
-        let held = if tasks.is_empty() { 0 } else { self.held() };
+        // The regions of the tasks and the changed regions of the Metrics stay until the level ends. The small parts
+        // of the level and of each task (headers, Done, the plan of the run) are not counted one by one: a probe
+        // measured less than 2 KiB for each task and 4 KiB for the level
+        let regions: usize = tasks.iter().map(|t| t.region.bytes()).chain(self.regions.iter().flatten().map(Reg::bytes)).sum();
+        let small = (tasks.len() * 2 + 4) << 10;
+        let held = if tasks.is_empty() { 0 } else { self.held().saturating_add(regions).saturating_add(small) };
         let mut unapplied = 0;
         let mut done: Vec<Result<Done>> = Vec::with_capacity(tasks.len());
         let parallel = tasks.len() > 1 && (self.full || weight >= self.cat.cfg.par_min);
@@ -784,7 +806,7 @@ impl<'a> Run<'a> {
         let (value, count, low) = match delta {
             Some(done) => done,
             None => {
-                let (r, b) = (t.region.restrict(self.cat), Budget::new(limit, held));
+                let (r, b) = (t.region.restrict(self.cat), Budget::new(limit, held.saturating_add(t.region.restrict_bytes(self.cat))));
                 match metric.delta.as_ref().map(|d| &d.method) {
                     Some(Method::OnePass { .. }) => {
                         let [value, count, low] = self.sums(self.formula(t.m), None, &r, &b)?;
@@ -1034,7 +1056,8 @@ impl<'a> Run<'a> {
         // Store::replace keeps the result while it makes a copy and new columns. The scan stops early if the write of
         // the cells that it made does not fit. Then it does not make a result that the write cannot use
         let (room, size, shared) = (Budget::new(self.cat.cfg.max_bytes, held).room(), region_size(r, self.cat, store), Arc::strong_count(store) > 1);
-        let fits = |n: usize| n.saturating_add(store.part_write_cells(size, n, false, shared).0) <= room;
+        let restrict = r.restrict_bytes(self.cat).div_ceil(CELL_BYTES);
+        let fits = |n: usize| n.saturating_add(restrict).saturating_add(store.part_write_cells(size, n, false, shared, |d| r.get(d).is_some()).0) <= room;
         // An error here also occurs in the per-period path, except a budget error. That path uses less memory
         let Ok(value) = tree_scan(&shape, before, &store.pack, dim, &ts, self.cat, &src, &rr, &b, &fits) else { return Ok(false) };
         if !fits(value.cells.capacity()) {
@@ -1072,14 +1095,15 @@ mod tests {
         let part = Reg::new(vec![(0, vec![1])]);
         let bytes = store.slice(&part.restrict(&cat)).memory().bytes();
         assert!(bytes > 0);
-        assert_eq!(done(part).bytes(), bytes);
+        assert_eq!(done(part.clone()).bytes(), bytes + part.bytes());
     }
 
     #[test]
     fn each_wave_fits_in_the_room_that_the_earlier_waves_leave() {
         // The rows of a stored result set the estimate of its task. Metric 1 runs alone. Metrics 2 and 3 fit
         // together at the start of the level, but not after metric 1 keeps 16,000 bytes for apply. The write of a
-        // copy of 1,000 rows needs 32,000 bytes (the result and the new columns)
+        // copy of 1,000 rows needs 33,088 bytes (the result, the new columns and the lists of PackedKeys::new). The level
+        // also counts 10 KiB of small parts
         let dims = vec![crate::DimInfo { size: 1000, ordered: false, name: "d0".into() }];
         let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg: crate::Config::default() };
         let store = |n: u32| {
@@ -1092,7 +1116,7 @@ mod tests {
         let plan = Plan { metrics: vec![input(), copy(0), copy(0), copy(4), input()], levels: vec![vec![Step::One(1), Step::One(2), Step::One(3)]] };
         let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
         let held = held(&src);
-        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held + 48_000, ..crate::Config::default() } };
+        let cat = Catalog { dims, maps: Vec::new(), cfg: crate::Config { max_bytes: held + 10_240 + 49_088, ..crate::Config::default() } };
         let all = || Reg::new(vec![]);
         let changed = vec![(0, all()), (4, all())];
         recalc(&cat, &plan, &mut stores, &mut vec![None; 5], &mut vec![None; 5], changed, &[], vec![], vec![], true).unwrap();

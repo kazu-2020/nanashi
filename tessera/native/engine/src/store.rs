@@ -389,26 +389,65 @@ impl Store {
 
     /// The cells that `replace_diff` (if `diff`) or `replace` needs to write `n` new cells into a region of `size`
     /// keys: (the most at the peak, the cells that the store keeps after the write). If `shared`, another version of
-    /// the store shares the base and the delta tree. A list of keys or cells can grow to 2 times its length.
-    pub(crate) fn part_write_cells(&self, size: usize, n: usize, diff: bool, shared: bool) -> (usize, usize) {
+    /// the store shares the base and the delta tree. `filtered(d)` tells if the region filters dimension d.
+    /// Each term below is one allocation of the write, in bytes. A list that grows by push can be 2 times its length.
+    pub(crate) fn part_write_cells(&self, size: usize, n: usize, diff: bool, shared: bool, filtered: impl Fn(DimId) -> bool) -> (usize, usize) {
         let old = size.min(self.rows_hint());
-        // replace_diff keeps the old cells, their keys and the changed keys. replace keeps only the old keys
-        let lists = if diff { old * 2 + old / 2 + (old + n) } else { old };
-        let (rows, limit) = (self.delta.len().saturating_add(old).saturating_add(n), self.delta_limit());
-        // The new rows of the delta tree (a probe measured 57 bytes, about 4 cells, for each row). A shared tree
+        let (index, index_kept) = self.postings_bytes(filtered);
+        // for_each_in: the old cells (replace_diff) or keys (replace), and the cells that it collects with an index
+        let olds = old.saturating_mul(if diff { 32 } else { 16 });
+        let found = if index > 0 { old.saturating_mul(32) } else { 0 };
+        let repacked = n.saturating_mul(CELL_BYTES);
+        // replace_diff: the changed keys (a cell for each old and new cell), the old keys, then region_of's lists
+        let changed = if diff { (old + n).saturating_mul(CELL_BYTES) } else { 0 };
+        let old_keys = if diff { old.saturating_mul(8) } else { 0 };
+        let axes = self.metric_dims.len();
+        let sets = if diff { (old + n).saturating_mul(axes * 4).saturating_add(axes * 24) } else { 0 };
+        // write_back into the delta tree: a probe measured 57 B for each row and 416 B for a small tree. A shared tree
         // also copies the nodes on the path to each key: about 3 nodes of 16 rows, less than 32 rows
         let keys = (old + n).min(size);
         let copy = if shared { self.delta.len().min(keys.saturating_mul(32).saturating_add(64)) } else { 0 };
-        let tree = (keys + copy).saturating_mul(4);
-        let (tail, kept) = if rows <= limit {
-            (tree, tree)
+        let tree = (keys + copy).saturating_mul(4 * CELL_BYTES).saturating_add(1024);
+        let (built, scratch, grown) = if self.delta.len().saturating_add(old).saturating_add(n) <= self.delta_limit() {
+            (tree, 0, tree)
         } else {
-            // New base columns (about 1 cell for each row). The other version keeps the old base if it is shared.
+            // write_back into new base columns: keys (at most 8 B each, PackedKeys::builder), block headers, 8 B
+            // values, and the block buffer of the builder. The old base goes if no other version has it.
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
-            let (new, tree) = (self.rows_hint().saturating_add(n), tree.min(limit.saturating_mul(4)));
-            (new.max(tree), if shared { new } else { n }.max(tree))
+            let rows = self.rows_hint().saturating_add(n);
+            let base = rows.saturating_mul(16).saturating_add(rows.div_ceil(BLOCK) * 16).saturating_add(256);
+            let tree = tree.min(self.delta_limit().saturating_mul(4 * CELL_BYTES).saturating_add(1024));
+            let freed = if shared || Arc::strong_count(&self.base) > 1 { 0 } else { self.memory().base };
+            (base.max(tree), BLOCK * 8, base.saturating_sub(freed).max(tree))
         };
-        (lists.saturating_add(n).saturating_add(tail), kept)
+        // Small parts: the packing of the new cells, the checks of the region, the axes of region_of
+        let small = 256 + axes * 64;
+        let lists = [found + olds + repacked, olds + repacked + changed + old_keys + built + scratch, olds + changed + built + sets];
+        let peak = index.max(index_kept.saturating_add(lists.into_iter().max().unwrap_or(0)).saturating_add(small));
+        let kept = index_kept.saturating_add(grown).saturating_add(sets);
+        (peak.div_ceil(CELL_BYTES), kept.div_ceil(CELL_BYTES))
+    }
+
+    /// The bytes of the indexes that `for_each_in` builds for a region that filters the dimensions in `filtered`
+    /// (see `best_postings` and `postings`): (the most at the peak, the bytes that the store keeps).
+    fn postings_bytes(&self, filtered: impl Fn(DimId) -> bool) -> (usize, usize) {
+        let rows = self.base.keys.len();
+        if rows == 0 || rows < self.cfg.postings_min_rows || rows > u32::MAX as usize || self.pack.dims.first().is_some_and(|&d| filtered(d)) {
+            return (0, 0);
+        }
+        let (mut peak, mut kept) = (0usize, 0usize);
+        for (pos, &d) in self.pack.dims.iter().enumerate().skip(1) {
+            if !filtered(d) || self.pack.masks[pos] >= (1 << 22) || self.base.postings[pos].get().is_some() {
+                continue;
+            }
+            // offsets (u32), the packed entries (at most 8 B each) with block headers, and the struct
+            let offsets = (self.pack.masks[pos] as usize + 2) * 4;
+            let entries = rows * 8 + rows.div_ceil(BLOCK) * 16 + 16 + 128;
+            // The build also holds a copy of the offsets, the rows (u32) and the block buffer of the builder
+            peak = peak.max(kept + offsets * 2 + entries + rows * 4 + BLOCK * 8);
+            kept += offsets + entries;
+        }
+        (peak, kept)
     }
 
     /// Merge the delta into a new base.

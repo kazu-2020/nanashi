@@ -495,9 +495,13 @@ class WriteBudget(unittest.TestCase):
 
     def test_writes_stay_in_the_budget_at_the_smallest_budget(self):
         """A part write into a shared delta tree copies its nodes. The writes of one level wait in sequence, with the
-        changed members of a whole write. The per-period scan keeps the delta tree of the earlier periods."""
+        changed members of a whole write. The per-period scan keeps the delta tree of the earlier periods. A part
+        write into an empty store makes new columns with a block buffer, and member lists for each axis.
+        The heap count is exact here, so an excess of a few KiB fails."""
         import nanashi_core
         n, mib = 40_000, 1 << 20
+        nanashi_core.heap_exact(True)
+        self.addCleanup(nanashi_core.heap_exact, False)
 
         def build(k):
             m = Named(Model(engine=RustEngine(max_bytes=1 << 50, fuse=False, par_min=1 << 40)))
@@ -574,8 +578,24 @@ class WriteBudget(unittest.TestCase):
             m.add_formula("Z", ["X", "T"], "IF(ISBLANK(PREVIOUS(T)), A, PREVIOUS(T) + A)")
             return work(m, max_bytes)
 
+        def part(rows, axes, size, compact_min):
+            # An empty destination, then `rows` new cells in the first 64 members of D0 (a part region)
+            def trial(max_bytes):
+                dims = [f"D{j}" for j in range(axes)]
+                m = Named(Model(engine=RustEngine(max_bytes=1 << 50, fuse=False, par_min=1 << 40, compact_min=compact_min)))
+                for d in dims:
+                    m.add_dimension(d, [f"m{i}" for i in range(size)])
+                m.add_input("A", dims, {})
+                m.add_formula("Z", dims, "A * 2")
+                m.recalc()
+                for i in range(rows):
+                    m.set_cell("A", float(i + 1), **{d: f"m{i % 64 if j == 0 else (i // 64 + i * j) % size}" for j, d in enumerate(dims)})
+                return work(m, max_bytes)
+            return trial
+
         for label, trial in [("a fork", fork), ("8 Metrics in one level", level), ("4 whole writes in one level", whole),
-                             ("a scan by period", scan)]:
+                             ("a scan by period", scan), ("member lists of a part write", part(64, 9, 128, 0)),
+                             ("new columns of a part write", part(2000, 2, 256, 0))]:
             with self.subTest(label):
                 budget, (error, total) = smallest(trial)
                 self.assertIsNone(error)
