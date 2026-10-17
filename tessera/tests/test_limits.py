@@ -1,5 +1,6 @@
 """エンジンの上限の検査、セル数の見積もりの上限、観察用の記録の上限、メモリの内訳。"""
 import gc
+import math
 import tempfile
 import unittest
 
@@ -388,6 +389,135 @@ class Logs(unittest.TestCase):
         self.assertEqual(len(m.eval_log), LOG_MAX)
         self.assertEqual(len(m.slice_log), LOG_MAX)
         self.assertEqual(m.eval_log[-1], "Y")
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class AggregationBudget(unittest.TestCase):
+    """Each aggregation path checks the budget before it makes its buffers. The run at the fitting budget is
+    accepted. The run below it is refused before it goes over max_bytes."""
+
+    def check(self, build, fit, below, **cfg):
+        import nanashi_core
+        for max_bytes, refused in [(below, True), (fit, False)]:
+            with self.subTest(max_bytes=max_bytes):
+                m = Named(Model(engine=RustEngine(**({"max_bytes": max_bytes, "fuse": False, "par_min": 1 << 40} | cfg))))
+                at, want = build(m)
+                held = sum(v.get("base", 0) for v in m.memory().values())
+                nanashi_core.reset_heap_peak()
+                base = nanashi_core.heap()[0]
+                if refused:
+                    with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+                        m.recalc()
+                else:
+                    m.recalc()
+                    self.assertEqual(m.get("Z", **at), want)
+                self.assertLessEqual(held + nanashi_core.heap()[1] - base, max_bytes, "a buffer was made before the check")
+
+    @staticmethod
+    def grid(m, nx, ny, rows):
+        m.add_dimension("X", [f"x{i}" for i in range(nx)])
+        m.add_dimension("Y", [f"y{j}" for j in range(ny)])
+        m.add_input("A", ["X", "Y"], {(f"x{i}", f"y{j}"): 1.0 for i in range(nx) for j in range(rows)})
+        m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
+        return {"X": "x7"}, float(rows)
+
+    def test_sort_path(self):
+        # 200,000 groups take the sort path. Its pairs and its 2 results (SUM and COUNT) are about 9.2 MiB
+        self.check(lambda m: self.grid(m, 200_000, 1, 1), fit=12 << 20, below=8 << 20)
+
+    def test_sort_path_parallel(self):
+        # With one row in each chunk, the parallel copy also holds 16 B of chunk sizes for each row
+        self.check(lambda m: self.grid(m, 200_000, 1, 1), fit=12 << 20, below=6 << 20, par_min=0, chunk=1)
+
+    def test_dense_path(self):
+        # The partitioned fill checks the array (1.2 MiB) and the round buffers (1.5 MiB) first. Only the array
+        # stays while the result is made
+        self.check(lambda m: self.grid(m, 40_000, 10, 10), fit=7 << 20, below=6 << 20, scatter_bytes=0)
+
+    def test_partitioned_buffers(self):
+        # 32,768 slots of 32 B and 3 rounds of 65,536 rows. s0 has no department, so the first round has fewer
+        # pairs. The pair buffer must not grow to 2 times its size in the second round
+        def build(m):
+            ns, nt, nd = 48, 4096, 8
+            m.add_dimension("S", [f"s{i}" for i in range(ns)])
+            m.add_dimension("T", [f"t{j}" for j in range(nt)])
+            m.add_dimension("D", [f"d{i}" for i in range(nd)])
+            m.add_property("S", "P", "D", {f"s{i}": f"d{i % nd}" for i in range(1, ns)})
+            m.add_input("A", ["S", "T"], {(f"s{i}", f"t{j}"): 1.0 for i in range(ns) for j in range(nt)})
+            m.add_formula("Z", ["D", "T"], "A[BY SUM: S.P]")
+            return {"D": "d0", "T": "t5"}, float(ns // nd - 1)
+        self.check(build, fit=int(4.875 * (1 << 20)), below=int(3.75 * (1 << 20)), scatter_bytes=0)
+
+    def test_hash_merge(self):
+        # 65,536 groups in the hash maps of the threads. With 2 or more threads, a merge holds the source map, the
+        # destination map and its old table. With 1 thread, 16 MiB fits. Thus 16 MiB is refused or stays in it
+        import nanashi_core
+        nanashi_core.heap_exact(True)
+        self.addCleanup(nanashi_core.heap_exact, False)
+        for mib, must_fit in [(16, False), (20, True)]:
+            with self.subTest(mib=mib):
+                m = Named(Model(engine=RustEngine(max_bytes=mib << 20, fuse=False, par_min=0, stream_always=True)))
+                at, want = self.grid(m, 65_536, 2, 1)
+                held = sum(v.get("base", 0) for v in m.memory().values())
+                nanashi_core.reset_heap_peak()
+                base = nanashi_core.heap()[0]
+                try:
+                    m.recalc()
+                    self.assertEqual(m.get("Z", **at), want)
+                except ValueError as e:
+                    self.assertFalse(must_fit, e)
+                    self.assertRegex(str(e), "メモリの予算を超える")
+                self.assertLessEqual(held + nanashi_core.heap()[1] - base, mib << 20, "the merge went over max_bytes")
+
+    def test_table_path(self):
+        # BY SUM with a member Metric uses the mapping table (1.1 MiB) and a hash map of 3,600 groups
+        def build(m):
+            ne, nm, nd = 24_000, 12, 300
+            m.add_dimension("E", [f"e{i}" for i in range(ne)])
+            m.add_dimension("M", [f"m{i}" for i in range(nm)])
+            m.add_dimension("D", [f"d{i}" for i in range(nd)])
+            m.add_input("S", ["E", "M"], {(f"e{i}", f"m{t}"): 1.0 for i in range(ne) for t in range(nm)})
+            m.add_input("DeptOf", ["E", "M"], {(f"e{i}", f"m{t}"): f"d{i % nd}" for i in range(ne) for t in range(nm)}, kind="member:D")
+            m.add_formula("Z", ["D", "M"], "S[BY SUM: E.DeptOf]")
+            return {"D": "d7", "M": "m3"}, ne / nd
+        self.check(build, fit=int(7.5 * (1 << 20)), below=7 << 20, stream_always=True)
+
+    def test_table_falls_back_to_the_join(self):
+        # The member Metric has 1,000 cells over 1,044,000 combinations. Its mapping table (4.2 MB) does not fit,
+        # but the join of the 1,000 cells does
+        m = Named(Model(engine=RustEngine(max_bytes=2 << 20, fuse=False, par_min=1 << 40, stream_always=True)))
+        m.add_dimension("E", [f"e{i}" for i in range(87_000)])
+        m.add_dimension("M", [f"m{i}" for i in range(12)])
+        m.add_dimension("D", [f"d{i}" for i in range(30)])
+        m.add_input("S", ["E", "M"], {(f"e{i}", "m0"): 1.0 for i in range(1000)})
+        m.add_input("DeptOf", ["E", "M"], {(f"e{i}", "m0"): f"d{i % 30}" for i in range(1000)}, kind="member:D")
+        m.add_formula("Z", ["D", "M"], "S[BY SUM: E.DeptOf]")
+        m.recalc()
+        self.assertEqual(m.get("Z", D="d7", M="m0"), 34.0)
+
+    def test_spill(self):
+        # Each group spills (3 partials) and then cancels back to 1.0, so its residual is 0. The 20,000 Spills
+        # take about 1.7 MiB next to the 0.6 MiB array
+        vals = [1.0, 2.0 ** -60, 2.0 ** -130, -(2.0 ** -60), -(2.0 ** -130)]
+
+        def build(m):
+            m.add_dimension("X", [f"x{i}" for i in range(20_000)])
+            m.add_dimension("Y", [f"y{j}" for j in range(len(vals))])
+            m.add_input("A", ["X", "Y"], {(f"x{i}", f"y{j}"): v for i in range(20_000) for j, v in enumerate(vals)})
+            m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
+            return {"X": "x7"}, 1.0
+        self.check(build, fit=4 << 20, below=3 << 20)
+
+    def test_residual_cells(self):
+        # Ten values of 0.1 give a residual that is not 0 in each of the 20,000 groups. The residual list grows
+        # after the check of the other lists
+        def build(m):
+            m.add_dimension("X", [f"x{i}" for i in range(20_000)])
+            m.add_dimension("Y", [f"y{j}" for j in range(10)])
+            m.add_input("A", ["X", "Y"], {(f"x{i}", f"y{j}"): 0.1 for i in range(20_000) for j in range(10)})
+            m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
+            return {"X": "x7"}, math.fsum([0.1] * 10)
+        self.check(build, fit=4 << 20, below=int(3.5 * (1 << 20)))
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")

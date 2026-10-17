@@ -9,7 +9,7 @@ mod fuse;
 mod join;
 mod scan;
 pub(crate) use agg::*;
-pub(crate) use exact::ExactSum;
+pub(crate) use exact::{ExactSum, Meter};
 pub(crate) use fuse::*;
 pub(crate) use join::*;
 pub(crate) use scan::{tree, tree_scan};
@@ -319,10 +319,10 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
             let out = Packing::new(&dims, cat)?;
             let (ps, pd) = (rows.pack().pos(*s).unwrap(), out.pos(*dst).unwrap());
             let rest = Proj::new(rows.pack(), &out);
-            Ok(aggregate_rows(rows, out, aggs, cat, r, move |xp, out, k| {
+            aggregate_rows(rows, out, aggs, cat, r, bud, move |xp, out, k| {
                 let t = mp.fwd[xp.get(k, ps) as usize];
                 (t >= 0).then(|| rest.apply(xp, out, k) | out.put(pd, t as u32))
-            }))
+            })
         }
 
         Node::Remove { child, dim, agg } => {
@@ -334,7 +334,7 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                     if let (Node::Ref(vi), true) = (&**v, sub.is_all()) {
                         if let Src::Store(vs) = &src[*vi] {
                             let rows = rows_of(x, cat, src, &sub, bud)?;
-                            if let Some(c) = remove_by_table(&rows, &dims, *target, vs, aggs, cat, r)? {
+                            if let Some(c) = remove_by_table(&rows, &dims, *target, vs, aggs, cat, r, bud)? {
                                 return Ok(c);
                             }
                             // If the table cannot be used, join and then aggregate (the same as On)
@@ -344,12 +344,12 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                                 None => eval_with(edges, cat, src, &sub, bud)?,
                             };
                             let joined = intersect(&xc, &o, xc.kind, cat, bud, |a, _| Some(a))?;
-                            return remove_rows(Rows::Owned(joined), &dims, aggs, cat, r);
+                            return remove_rows(Rows::Owned(joined), &dims, aggs, cat, r, bud);
                         }
                     }
                 }
             }
-            remove_rows(rows_of(child, cat, src, &sub, bud)?, &dims, aggs, cat, r)
+            remove_rows(rows_of(child, cat, src, &sub, bud)?, &dims, aggs, cat, r, bud)
         }
 
         _ => unreachable!("an aggregation node"),
