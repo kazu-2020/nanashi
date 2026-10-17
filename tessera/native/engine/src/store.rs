@@ -423,7 +423,9 @@ impl Store {
         // Small parts: the packing of the new cells, the checks of the region, the axes of region_of
         let small = 256 + axes * 64;
         let lists = [found + olds + repacked, olds + repacked + changed + old_keys + built + scratch, olds + changed + built + sets];
-        let peak = index.max(index_kept.saturating_add(lists.into_iter().max().unwrap_or(0)).saturating_add(small));
+        // replace repacks the result before for_each_in builds the index, so the result lives during the build
+        let building = if diff || index == 0 { index } else { index.saturating_add(repacked) };
+        let peak = building.max(index_kept.saturating_add(lists.into_iter().max().unwrap_or(0)).saturating_add(small));
         let kept = index_kept.saturating_add(grown).saturating_add(sets);
         (peak.div_ceil(CELL_BYTES), kept.div_ceil(CELL_BYTES))
     }
