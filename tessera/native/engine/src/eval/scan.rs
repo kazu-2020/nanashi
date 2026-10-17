@@ -272,7 +272,8 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
                 if made.fetch_add(old + grow, Relaxed) + old + grow > room {
                     return None;
                 }
-                out.reserve_exact(grow);
+                // Reserve up to old + grow so the capacity equals the charged count
+                out.reserve_exact(old + grow - out.len());
                 made.fetch_sub(old, Relaxed);
             }
             for &t in ts {
