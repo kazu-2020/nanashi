@@ -223,8 +223,11 @@ impl Store {
             vec![t]
         } else {
             let tabs: Vec<Mutex<Vec<(A, u64)>>> = (0..tables).into_par_iter().map(|_| Mutex::new(new())).collect();
-            items.par_chunks(CHUNK).for_each(|c| {
-                let mut t = tabs[rayon::current_thread_index().unwrap_or(0) % tables].lock().expect("no panic holds the table");
+            // With a table for each chunk, each chunk takes its own table. Two thread indexes can give the same table
+            let own = items.len().div_ceil(CHUNK) <= tables;
+            items.par_chunks(CHUNK).enumerate().for_each(|(i, c)| {
+                let k = if own { i } else { rayon::current_thread_index().unwrap_or(0) % tables };
+                let mut t = tabs[k].lock().expect("no panic holds the table");
                 c.iter().for_each(|it| fill(&mut t, it));
             });
             tabs.into_iter().map(|t| t.into_inner().expect("no panic holds the table")).collect()
