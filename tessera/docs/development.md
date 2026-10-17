@@ -164,7 +164,7 @@ You can change the tuning values for the speed of the Rust engine (`Config` in `
 With these values, the paths that operate only for large models also operate for small models.
 The tests make sure that the results do not change.
 
-- Parallel execution and the widening of a range to the full range (`par_min=0, widen_min_rows=0`), the path that aggregates while it reads (`stream_always=True`): `tests/test_redefine.py`
+- Parallel execution, the widening of a range to the full range, and the fused scan in parallel batches of small parts (`par_min=0, widen_min_rows=0, chunk=3`), the path that aggregates while it reads (`stream_always=True`): `tests/test_redefine.py`
 - Fusion of operations (match with `fuse=False`), the unit of parallel work (`chunk=3`), aggregation into an array of all combinations of the aggregation target (`dense_always=True`), and the fill of that array through bucket buffers (`scatter_bytes=0`): `tests/test_fusion.py`
 - Split of formula evaluation by the memory budget (`max_bytes`, stored data and intermediate results): `tests/test_failures.py`
 - Compaction of deltas and the inverted index (`compact_min`, `postings_min_rows`): the Rust property test `native/engine/tests/store_model.rs`

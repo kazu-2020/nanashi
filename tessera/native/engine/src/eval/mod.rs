@@ -95,6 +95,72 @@ pub fn eval_with(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, b: &Budg
     Ok(out)
 }
 
+/// The result of `eval_columns`.
+pub enum Whole {
+    Columns(Columns),
+    Cube(Cube),
+}
+
+/// Evaluate a formula whose result replaces the whole stored data of `store`. If the top node fuses in the
+/// packing of `store`, the cells go in key order into the new base, and the 16 B cells never exist.
+/// With `diff`, the result also has the region of the cells whose value changed (as `replaced_all`).
+/// If the result has another packing, or its part buffers do not fit in `b`, gives the fused result as a Cube.
+/// Gives Ok(None) if the formula does not fuse. Then the caller uses `eval`.
+pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: &Store, diff: bool) -> Result<Option<Whole>> {
+    if !cat.cfg.fuse {
+        return Ok(None);
+    }
+    let mark = b.mark();
+    let r = Restrict::all(cat.dims.len());
+    let make = |pack: &Packing, n, buffered| {
+        if *pack == store.pack && b.need(buffered, "").is_ok() {
+            Out::Store(Box::new(store.sink(n, diff)))
+        } else {
+            Out::Cells(Vec::new())
+        }
+    };
+    let Some((pack, kind, sink)) = fused_into(node, cat, src, &r, b, make)? else { return Ok(None) };
+    let out = match sink {
+        Out::Store(s) => Whole::Columns((*s).finish()),
+        Out::Cells(cells) => Whole::Cube(Cube { pack, kind, cells }),
+    };
+    let bytes = match &out {
+        Whole::Columns(c) => c.bytes(),
+        Whole::Cube(c) => c.cells.capacity().saturating_mul(CELL_BYTES),
+    };
+    b.settle_bytes(mark, bytes)?;
+    Ok(Some(out))
+}
+
+/// The sink of `eval_columns`: the columns of the new base, or an array of cells.
+enum Out<'a> {
+    Store(Box<StoreSink<'a>>),
+    Cells(Vec<(u64, f64)>),
+}
+
+impl Sink for Out<'_> {
+    fn part(&mut self, cells: Vec<(u64, f64)>) -> Result<()> {
+        match self {
+            Out::Store(s) => s.part(cells),
+            Out::Cells(c) => c.part(cells),
+        }
+    }
+
+    fn presized(&mut self, sizes: &[usize]) -> Option<&mut Vec<(u64, f64)>> {
+        match self {
+            Out::Store(s) => s.presized(sizes),
+            Out::Cells(c) => c.presized(sizes),
+        }
+    }
+
+    fn sort_if_unsorted(&mut self, cfg: &Config) {
+        match self {
+            Out::Store(s) => s.sort_if_unsorted(cfg),
+            Out::Cells(c) => c.sort_if_unsorted(cfg),
+        }
+    }
+}
+
 fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let ev = |n: &Node| eval_with(n, cat, src, r, bud);

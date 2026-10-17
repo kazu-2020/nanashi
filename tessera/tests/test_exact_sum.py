@@ -72,7 +72,7 @@ class ExactSumFunction(unittest.TestCase):
 class SameBitsOnEveryPath(unittest.TestCase):
     def test_paths_and_thread_counts_give_the_same_bits(self):
         want = None
-        engines = [ReferenceEngine(), RustEngine(), RustEngine(par_min=0), RustEngine(par_min=0, stream_always=True),
+        engines = [ReferenceEngine(), RustEngine(), RustEngine(par_min=0), RustEngine(par_min=0, chunk=3), RustEngine(par_min=0, stream_always=True),
                    RustEngine(par_min=0, dense_always=True), RustEngine(dense_always=True),
                    RustEngine(par_min=0, dense_always=True, scatter_bytes=0), RustEngine(dense_always=True, scatter_bytes=0)]
         for engine in engines:

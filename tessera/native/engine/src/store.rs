@@ -3,6 +3,7 @@
 #[allow(unused_imports)]
 use crate::*;
 use crate::packed::BLOCK;
+use std::iter::Peekable;
 use std::ops::Range;
 
 /// Metric の格納。分割軸（index）を先頭（最上位ビット）に詰めた整数キーで持つ。
@@ -73,8 +74,125 @@ impl Base {
     }
 
     /// The keys are decoded one block at a time (`PackedKeys::range`).
-    pub(crate) fn range(&self, r: Range<usize>) -> impl Iterator<Item = (u64, f64)> + '_ {
+    pub(crate) fn range(&self, r: Range<usize>) -> BaseRange<'_> {
         self.keys.range(r.clone()).zip(self.vals[r].iter().copied())
+    }
+}
+
+type BaseRange<'a> = std::iter::Zip<packed::Keys<'a>, std::iter::Copied<std::slice::Iter<'a, f64>>>;
+
+/// The iterator of `Store::merged_iter`: the base rows and the delta in one key order (as `merged`). A delta entry
+/// replaces the base row with the same key, and a removal (`Slot(None)`) gives nothing.
+pub(crate) struct Merged<'a> {
+    base: Peekable<BaseRange<'a>>,
+    delta: Peekable<DeltaRange<'a>>,
+}
+
+type DeltaRange<'a> = imbl::ordmap::RangedIter<'a, u64, Slot, imbl::shared_ptr::DefaultSharedPtr>;
+
+impl Iterator for Merged<'_> {
+    type Item = (u64, f64);
+
+    fn next(&mut self) -> Option<(u64, f64)> {
+        loop {
+            let Some(&(&dk, &Slot(dv))) = self.delta.peek() else { return self.base.next() };
+            match self.base.peek() {
+                Some(&(bk, bv)) if bk < dk => {
+                    self.base.next();
+                    return Some((bk, bv));
+                }
+                Some(&(bk, _)) if bk == dk => {
+                    self.base.next();
+                }
+                _ => {}
+            }
+            self.delta.next();
+            if let Some(v) = dv {
+                return Some((dk, v));
+            }
+        }
+    }
+}
+
+/// The new base of a whole-region write while it fills in key order (`Store::sink`). With a diff, it finds
+/// the changed keys against the old store while the new cells arrive, as `replaced_all` does.
+pub(crate) struct StoreSink<'a> {
+    old: &'a Store,
+    keys: packed::Builder,
+    vals: Vec<f64>,
+    last: Option<u64>,
+    diff: Option<Diff<'a>>,
+}
+
+/// The old cells (the base and the delta merged) and the keys whose value changed so far.
+struct Diff<'a> {
+    old: Peekable<Merged<'a>>,
+    changed: Vec<u64>,
+}
+
+impl Diff<'_> {
+    /// The new cell `(k, v)` arrived. Old keys below `k` are removed, and `k` is added or changed.
+    fn step(&mut self, k: u64, v: f64) {
+        while let Some(&(ok, ov)) = self.old.peek() {
+            if ok > k {
+                break;
+            }
+            self.old.next();
+            if ok == k {
+                if ov.to_bits() != v.to_bits() {
+                    self.changed.push(k);
+                }
+                return;
+            }
+            self.changed.push(ok);
+        }
+        self.changed.push(k);
+    }
+}
+
+/// The finished new base of a whole-region write, and the region of the cells whose value changed
+/// (None without a diff, or if nothing changed).
+#[derive(Debug)]
+pub struct Columns {
+    pub(crate) keys: PackedKeys,
+    pub(crate) vals: Vec<f64>,
+    pub(crate) changed: Option<Vec<Vec<u32>>>,
+}
+
+impl Columns {
+    pub fn bytes(&self) -> usize {
+        self.keys.bytes().saturating_add(self.vals.capacity().saturating_mul(8))
+    }
+}
+
+impl Sink for StoreSink<'_> {
+    fn part(&mut self, cells: Vec<(u64, f64)>) -> Result<()> {
+        for (k, v) in cells {
+            if self.last.is_some_and(|last| last >= k) {
+                return Err("内部エラー: 融合した結果がキー順でない".into());
+            }
+            self.last = Some(k);
+            self.keys.push(k);
+            self.vals.push(v);
+            if let Some(d) = &mut self.diff {
+                d.step(k, v);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl StoreSink<'_> {
+    pub(crate) fn finish(mut self) -> Columns {
+        let changed = self.diff.map(|mut d| {
+            d.changed.extend(d.old.map(|(k, _)| k));
+            self.old.region_of(&d.changed)
+        });
+        // The reservation is an upper bound (the rows of the drivers). Give the unused part back if it is large.
+        if self.vals.len() < self.vals.capacity() / 4 * 3 {
+            self.vals.shrink_to_fit();
+        }
+        Columns { keys: self.keys.finish(), vals: self.vals, changed: changed.flatten() }
     }
 }
 
@@ -131,6 +249,7 @@ impl Store {
     }
 
     /// Gives the cells in [lo, hi) in key order, merged from the base and the delta.
+    /// The loop is the same as `Merged`, written out because this is the hot path of every read with a delta.
     pub(crate) fn merged(&self, lo: u64, hi: Option<u64>, mut f: impl FnMut(u64, f64)) {
         let start = self.base.keys.partition_point(|k| k < lo);
         let end = hi.map_or(self.base.keys.len(), |h| self.base.keys.partition_point(|k| k < h));
@@ -159,6 +278,11 @@ impl Store {
                 f(dk, v);
             }
         }
+    }
+
+    /// The cells in key order, merged from the base and the delta, as an iterator (for `StoreSink`).
+    fn merged_iter(&self) -> Merged<'_> {
+        Merged { base: self.base.range(0..self.base.keys.len()).peekable(), delta: self.delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable() }
     }
 
     pub(crate) fn for_each_in(&self, r: &Restrict, mut f: impl FnMut(u64, f64)) {
@@ -303,6 +427,20 @@ impl Store {
             if self.cfg.par(cells.len()) { cells.par_iter().map(|c| c.1).collect() } else { cells.iter().map(|c| c.1).collect() };
         let keys = keys_in_place(cells);
         self.set_columns(PackedKeys::new(&keys, self.cfg.par(keys.len())), vals);
+    }
+
+    /// A sink for at most `n` cells in key order that replace the whole stored data. With `diff`, the
+    /// sink also finds the region of the cells whose value changed (as `replaced_all`).
+    pub(crate) fn sink(&self, n: usize, diff: bool) -> StoreSink<'_> {
+        let diff = diff.then(|| Diff { old: self.merged_iter().peekable(), changed: Vec::new() });
+        StoreSink { old: self, keys: PackedKeys::builder(n, &self.base.keys), vals: Vec::with_capacity(n), last: None, diff }
+    }
+
+    /// The Store with the finished sink as its base and no delta, and the region of the changed cells.
+    pub fn with_columns(&self, c: Columns) -> (Store, Option<Vec<Vec<u32>>>) {
+        let mut out = self.empty_like();
+        out.set_columns(c.keys, c.vals);
+        (out, c.changed)
     }
 
     /// Make the packed sorted keys and the values the base and drop the delta.
@@ -933,6 +1071,92 @@ mod tests {
             let want: Vec<u32> = keys.iter().enumerate().filter(|(_, &k)| s.pack.get(k, 1) == m).map(|(row, _)| row as u32).collect();
             assert_eq!(s.postings(1).of(m).collect::<Vec<u32>>(), want, "m={m}");
         }
+    }
+
+    fn two_dims(size: u32) -> Catalog {
+        let dims = (0..2).map(|i| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
+        Catalog { dims, maps: Vec::new(), cfg: Config::default() }
+    }
+
+    /// At most `n` distinct keys below `2^20` in ascending order, with a value for each.
+    fn random_cells(n: usize, seed: u64) -> Vec<(u64, f64)> {
+        let mut x = seed;
+        let mut keys: Vec<u64> = (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x >> 44
+            })
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys.into_iter().map(|k| (k, (k % 97) as f64)).collect()
+    }
+
+    #[test]
+    fn a_sink_builds_the_same_base_as_set_sorted() {
+        let cat = two_dims(1024);
+        let cells = random_cells(5000, 7);
+        let mut want = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        want.set_sorted(cells.clone());
+        // Also with more room than cells (the Exact cover reserves the rows of the drivers)
+        let empty = want.empty_like();
+        for n in [cells.len(), cells.len() + 1234] {
+            let mut sink = empty.sink(n, false);
+            for part in cells.chunks(700) {
+                sink.part(part.to_vec()).unwrap();
+            }
+            let (got, changed) = want.with_columns(sink.finish());
+            assert!(changed.is_none());
+            assert_eq!(got.base.keys.bytes(), want.base.keys.bytes());
+            assert_eq!(got.base.keys.iter().collect::<Vec<u64>>(), want.base.keys.iter().collect::<Vec<u64>>());
+            assert_eq!(got.base.vals, want.base.vals);
+        }
+    }
+
+    #[test]
+    fn a_sink_finds_the_same_changed_region_as_replaced_all() {
+        let cat = two_dims(64);
+        let mut old = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        old.set_sorted(random_cells(300, 3));
+        old.write(&[5, 5], Some(1.0));
+        old.write(&[6, 6], Some(0.0));
+        old.write(&[7, 7], None);
+        let mut new: Vec<(u64, f64)> = Vec::new();
+        old.merged(0, None, |k, v| new.push((k, v)));
+        assert!(new.len() > 200);
+        new[10].1 += 1.0;
+        let zero = old.encode(&[6, 6]);
+        new.iter_mut().find(|c| c.0 == zero).unwrap().1 = -0.0;
+        new.remove(30);
+        let added = (0..1u64 << 12).find(|k| new.binary_search_by_key(k, |c| c.0).is_err()).unwrap();
+        new.push((added, 9.0));
+        new.sort_unstable_by_key(|c| c.0);
+        let cube = Cube { pack: old.pack.clone(), kind: Kind::Num, cells: new.clone() };
+        let want = old.replaced_all(cube).unwrap().1;
+        assert!(want.as_ref().is_some_and(|sets| sets.iter().all(|ms| ms.len() >= 2)));
+        let mut sink = old.sink(new.len(), true);
+        for part in new.chunks(37) {
+            sink.part(part.to_vec()).unwrap();
+        }
+        let (got, changed) = old.with_columns(sink.finish());
+        assert_eq!(changed, want);
+        assert_eq!(got.as_cube().cells, new);
+        let same = Cube { pack: old.pack.clone(), kind: Kind::Num, cells: got.as_cube().cells };
+        assert_eq!(got.replaced_all(same).unwrap().1, None);
+        let mut sink = got.sink(new.len(), true);
+        sink.part(new.clone()).unwrap();
+        assert_eq!(got.with_columns(sink.finish()).1, None);
+    }
+
+    #[test]
+    fn a_sink_refuses_a_descent() {
+        let cat = two_dims(64);
+        let s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        let mut sink = s.sink(2, false);
+        sink.part(vec![(5, 1.0)]).unwrap();
+        assert!(sink.part(vec![(4, 1.0)]).unwrap_err().contains("キー順"));
+        let mut sink = s.sink(2, false);
+        assert!(sink.part(vec![(5, 1.0), (5, 2.0)]).is_err());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! 新旧の値を比べ、実際に値が変わったセルだけを下流への影響範囲にする。影響範囲はメンバー名ではなく
 //! 番号の集合で持つので、1 回の変更で何百もの Metric を計算し直しても、Python との往復は 1 回で済む。
 
-use crate::{eval_sums, eval_with, held, remove_run, tree, tree_scan, Agg, Budget, Catalog, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Mem, Meter, Node, Op, Restrict, Result, Sel, Src, Store};
+use crate::{eval_columns, eval_sums, eval_with, held, remove_run, tree, tree_scan, Agg, Budget, Catalog, Columns, Cube, CELL_BYTES, DimId, ExactSum, FxHashMap, Kind, Mem, Meter, Node, Op, Restrict, Result, Sel, Src, Store, Whole};
 use rayon::prelude::*;
 
 use std::sync::Arc;
@@ -468,24 +468,29 @@ struct Task {
     weight: usize, // 計算し直す行数の見積もり（並列にするかの判断に使う）
 }
 
-/// 計算し終えて、書き戻しを待つ値。範囲が全体なら、新しい格納データの本体になるキー順のセルまで作っておく
-/// （置き換える前の格納データを読むだけで作れるので、同じ段の Metric と並列に作れる）。格納データの形
-/// （キーと値の 2 列）に移すのは書き戻すときで、移す間だけ値が 2 つ分になるのを、段の中で 1 つずつに抑える。
+/// A calculated value that waits for the write-back. If the region is the whole, the cells of the new base
+/// are already in key order. They only read the old stored data, so the Metrics of one level make them in
+/// parallel. The move into the two columns of the stored data (keys and values) is the write-back. Only one
+/// Metric of a level moves at a time, so only one Metric holds its values two times.
 enum Write {
-    Whole(Vec<(u64, f64)>, Option<Vec<Vec<u32>>>), // 新しい本体のセルと、値が変わったセルの範囲
-    Part(Cube),                          // 範囲の中の新しい値
+    Whole(Vec<(u64, f64)>, Option<Vec<Vec<u32>>>), // the cells of the new base, and the region of the cells whose value changed
+    Part(Cube),                          // the new values in the region
+    Columns(Columns),                    // the new base, filled in key order by the fused scan (`eval_columns`)
 }
 
 impl Write {
     fn bytes(&self) -> usize {
         match self {
-            Write::Whole(cells, sets) => {
-                let sets = sets.iter().flatten().map(|ms| ms.capacity() * size_of::<u32>()).sum::<usize>();
-                cells.capacity().saturating_mul(CELL_BYTES).saturating_add(sets)
-            }
+            Write::Whole(cells, sets) => cells.capacity().saturating_mul(CELL_BYTES).saturating_add(set_bytes(sets)),
             Write::Part(c) => c.cells.capacity().saturating_mul(CELL_BYTES),
+            Write::Columns(c) => c.bytes().saturating_add(set_bytes(&c.changed)),
         }
     }
+}
+
+/// The bytes of the member lists of a changed region.
+fn set_bytes(sets: &Option<Vec<Vec<u32>>>) -> usize {
+    sets.iter().flatten().map(|ms| ms.capacity() * size_of::<u32>()).sum()
 }
 
 /// The cells that the write of whole results needs at its peak, with the results. The write puts the cells in the
@@ -812,7 +817,18 @@ impl<'a> Run<'a> {
                         let [value, count, low] = self.sums(self.formula(t.m), None, &r, &b)?;
                         (value, Some(count), Some(low))
                     }
-                    _ => (self.eval(self.formula(t.m), None, &r, &b)?, None, None),
+                    _ => {
+                        let f = self.formula(t.m);
+                        let fused = if t.region.is_all() { eval_columns(&f.node, self.cat, &self.srcs(f, None), &b, &self.stores[t.m], !self.full)? } else { None };
+                        let value = match fused {
+                            Some(Whole::Columns(c)) => {
+                                return Ok(Done { m: t.m, region: t.region.clone(), delta: false, value: Write::Columns(c), count: None, low: None, old, kept: 0 });
+                            }
+                            Some(Whole::Cube(c)) => c,
+                            None => self.eval(f, None, &r, &b)?,
+                        };
+                        (value, None, None)
+                    }
                 }
             }
         };
@@ -854,11 +870,17 @@ impl<'a> Run<'a> {
                 sets
             }
             Write::Part(value) => Arc::make_mut(&mut self.stores[m]).replace_diff(&r, &value)?,
+            Write::Columns(c) => {
+                let (store, sets) = self.stores[m].with_columns(c);
+                self.stores[m] = Arc::new(store);
+                sets
+            }
         };
         for (side, w) in [(&mut *self.counts, count), (&mut *self.lows, low)] {
             match w {
                 Some(Write::Whole(cells, _)) => side[m] = Some(Arc::new(side[m].as_ref().expect("件数か残差の格納").with_sorted(cells))),
                 Some(Write::Part(c)) => Arc::make_mut(side[m].as_mut().expect("件数か残差の格納")).replace(&r, &c)?,
+                Some(Write::Columns(_)) => unreachable!("件数と残差は融合した走査の結果にならない"),
                 None => {}
             }
         }
@@ -1099,6 +1121,13 @@ mod tests {
         let bytes = store.slice(&part.restrict(&cat)).memory().bytes();
         assert!(bytes > 0);
         assert_eq!(done(part.clone()).bytes(), bytes + part.bytes());
+        // A streamed result counts the bytes of its columns, with the room that the sink reserved
+        let mut sink = store.sink(4, false);
+        crate::Sink::part(&mut sink, vec![(1, 1.0), (2, 2.0), (3, 3.0)]).unwrap();
+        let c = sink.finish();
+        let bytes = c.keys.bytes() + 4 * 8;
+        let done = Done { m: 0, region: Reg::new(vec![]), delta: false, value: Write::Columns(c), count: None, low: None, old: None, kept: 0 };
+        assert_eq!(done.bytes(), bytes);
     }
 
     #[test]

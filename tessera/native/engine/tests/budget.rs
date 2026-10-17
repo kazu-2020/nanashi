@@ -1,6 +1,6 @@
 //! Memory budget tests. An operation that can make a large result checks the budget before it makes the result.
 
-use nanashi_engine::{eval, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
+use nanashi_engine::{eval, eval_columns, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store, Whole, CELL_BYTES};
 use std::sync::Arc;
 
 fn catalog(max_bytes: usize) -> Catalog {
@@ -94,6 +94,34 @@ fn by_lookup_on_one_member_counts_only_that_member() {
     let c = eval(&node, &cat, &src, &one).unwrap();
     assert_eq!(c.cells.len(), 3000);
     assert!(c.cells.iter().all(|&(_, v)| v == 1.0));
+}
+
+#[test]
+fn a_streamed_result_is_budgeted_by_its_columns() {
+    let cat = catalog(usize::MAX);
+    let rows = 3000usize;
+    let src = [column(&cat, &[0], rows as u32)];
+    let held = held(&src);
+    let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
+    let store = Store::new(&[0], None, Kind::Num, &cat).unwrap();
+    // The scan checks CELL_BYTES for each driver row before it starts. The columns also need room for the part
+    // buffers (here one part of all rows). Without that room, the result is a Cube.
+    let b = Budget::new(held + rows * CELL_BYTES, held);
+    assert!(matches!(eval_columns(&node, &cat, &src, &b, &store, false).unwrap(), Some(Whole::Cube(c)) if c.cells.len() == rows));
+    let limit = 2 * rows * CELL_BYTES;
+    let b = Budget::new(held + limit, held);
+    let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &b, &store, false).unwrap() else { panic!("streams") };
+    // Only the columns stay counted, and they are smaller than the cells
+    assert!(c.bytes() < rows * CELL_BYTES, "{}", c.bytes());
+    let room = (limit - c.bytes()) / CELL_BYTES;
+    assert!(b.need(room, "x").is_ok());
+    assert!(b.need(room + 1, "x").is_err());
+    assert_eq!(store.with_columns(c).0.as_cube().cells.len(), rows);
+    // The check before the scan (CELL_BYTES for each driver row) is the stricter one. If it fails, the scan does
+    // not start, and the evaluation of one operation at a time reports the budget error
+    let tight = Budget::new(held + rows * 9, held);
+    assert!(eval_columns(&node, &cat, &src, &tight, &store, false).unwrap().is_none());
+    assert!(eval_with(&node, &cat, &src, &Restrict::all(1), &tight).unwrap_err().contains("メモリの予算を超える"));
 }
 
 #[test]
