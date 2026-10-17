@@ -175,26 +175,42 @@ fn bits(pack: &Packing) -> u32 {
 }
 
 impl<'a> Access<'a> {
-    fn new(leaf: &Leaf<'a>, ctx: &Packing, aligned: bool) -> Access<'a> {
+    /// A Dense access uses at most `room` cells of the budget. If it needs more, it is a Search access.
+    fn new(leaf: &Leaf<'a>, ctx: &Packing, aligned: bool, room: usize) -> Access<'a> {
         if aligned && leaf.pack == ctx {
             return Access::Aligned(leaf.col);
         }
         let proj = Proj::new(ctx, leaf.pack);
         let width = bits(leaf.pack);
-        // 配列の大きさが行数に比べて大きすぎなければ、配列で引く
-        if width <= DENSE_BITS && (1usize << width) <= leaf.col.n().saturating_mul(64).max(1 << 12) {
+        if width <= DENSE_BITS {
+            // If the array is not too large for the row count, look up the keys in an array
             let size = 1usize << width;
-            let (mut vals, mut has) = (vec![0.0; size], vec![false; size]);
-            let mut rd = leaf.col.cursor();
-            for i in 0..leaf.col.n() {
-                let k = rd.key(i) as usize;
-                vals[k] = leaf.col.val(i);
-                has[k] = true;
+            if size <= leaf.col.n().saturating_mul(64).max(1 << 12) && dense_cells(size) <= room {
+                let (mut vals, mut has) = (vec![0.0; size], vec![false; size]);
+                let mut rd = leaf.col.cursor();
+                for i in 0..leaf.col.n() {
+                    let k = rd.key(i) as usize;
+                    vals[k] = leaf.col.val(i);
+                    has[k] = true;
+                }
+                return Access::Dense { ctx: ctx.clone(), proj, pack: leaf.pack, vals, has };
             }
-            return Access::Dense { ctx: ctx.clone(), proj, pack: leaf.pack, vals, has };
         }
         Access::Search { ctx: ctx.clone(), proj, pack: leaf.pack, col: leaf.col }
     }
+
+    /// The budget cells of the lookup arrays of a Dense access. Other accesses have no lookup arrays.
+    fn cells(&self) -> usize {
+        match self {
+            Access::Dense { vals, .. } => dense_cells(vals.len()),
+            _ => 0,
+        }
+    }
+}
+
+/// The budget cells of the 2 lookup arrays (an f64 and a bool for each key) of a Dense access with `size` keys.
+fn dense_cells(size: usize) -> usize {
+    (size * 9).div_ceil(CELL_BYTES)
 }
 
 struct Fuse<'a> {
@@ -203,6 +219,7 @@ struct Fuse<'a> {
     bud: &'a Budget,
     merged: &'a [OnceCell<Cube>], // Per src index: the stored data merged with its delta, made on first use
     copied: usize,                // The cell capacity of `merged`. Later budget checks add it, because Budget::need does not keep it
+    reserve: usize,               // The cells that the scan needs after `build`. A Dense access leaves room for them
     leaves: Vec<Leaf<'a>>,
     ids: Vec<usize>, // leaves の番号 -> src の番号
 }
@@ -393,7 +410,8 @@ impl<'a> Fuse<'a> {
         Some(match node {
             Node::Ref(i) => {
                 let l = self.ids.iter().position(|x| x == i)?;
-                acc.push(Access::new(&self.leaves[l], ctx, aligned));
+                let taken = self.copied.saturating_add(self.reserve).saturating_add(acc.iter().map(Access::cells).sum());
+                acc.push(Access::new(&self.leaves[l], ctx, aligned, self.bud.room().saturating_sub(taken)));
                 F::Leaf(acc.len() - 1)
             }
             Node::Const(v, _) => F::Const(*v),
@@ -614,7 +632,7 @@ pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: 
         return Ok(None);
     }
     let merged: Vec<OnceCell<Cube>> = src.iter().map(|_| OnceCell::new()).collect();
-    let mut fu = Fuse { cat, src, bud, merged: &merged, copied: 0, leaves: Vec::new(), ids: Vec::new() };
+    let mut fu = Fuse { cat, src, bud, merged: &merged, copied: 0, reserve: 0, leaves: Vec::new(), ids: Vec::new() };
     let Some(info) = fu.info(node) else { return Ok(None) };
     if !fits(info.mat, fu.copied, bud) {
         return Ok(None);
@@ -634,10 +652,11 @@ fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Op
     if let Cover::Exact(ls) = &info.cover {
         let out = fu.leaves[ls[0]].pack;
         if same_set(&out.dims, &info.dims) && ls.iter().all(|&l| fu.leaves[l].pack == out) {
+            let drivers: Vec<Col> = ls.iter().map(|&l| fu.leaves[l].col).collect();
+            fu.reserve = drivers.iter().map(|d| d.n()).sum();
             let mut access = Vec::new();
             let Some(f) = fu.build(node, out, true, &mut access) else { return Ok(None) };
-            let drivers: Vec<Col> = ls.iter().map(|&l| fu.leaves[l].col).collect();
-            bud.need(drivers.iter().map(|d| d.n()).sum::<usize>() + fu.copied, "式の結果")?;
+            bud.need(fu.reserve + fu.copied + access.iter().map(Access::cells).sum::<usize>(), "式の結果")?;
             let cells = run_sorted(cfg, &drivers, &access, &compile(&f, &access));
             return Ok(Some(Cube { pack: out.clone(), kind: info.kind, cells }));
         }
@@ -664,8 +683,6 @@ fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Op
         }
     };
     let Ok(out) = Packing::new(&order, cat) else { return Ok(None) };
-    let mut access = Vec::new();
-    let Some(f) = fu.build(node, &out, false, &mut access) else { return Ok(None) };
     let base = match cover {
         Cover::Part(l) => Some((fu.leaves[l].col, Proj::new(fu.leaves[l].pack, &out), fu.leaves[l].pack)),
         _ => None,
@@ -678,7 +695,11 @@ fn fused_with(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget) -> Result<Op
         .map(|(i, &d)| (i, (0..cat.dims[d].size).collect()))
         .collect();
     let space = Space { base: base.as_ref().map(|(c, p, pk)| (*c, p, *pk)), out: &out, fill: &fill };
-    let mut cells = run_space(cfg, &space, &access, &compile(&f, &access), bud, fu.copied)?;
+    fu.reserve = space.len().saturating_add(list_cells(space.len(), cfg));
+    let mut access = Vec::new();
+    let Some(f) = fu.build(node, &out, false, &mut access) else { return Ok(None) };
+    let copied = fu.copied + access.iter().map(Access::cells).sum::<usize>();
+    let mut cells = run_space(cfg, &space, &access, &compile(&f, &access), bud, copied)?;
     if !cells.windows(2).all(|w| w[0].0 < w[1].0) {
         sort_cells(cfg, &mut cells);
     }
@@ -794,6 +815,12 @@ impl<'a> Space<'_, 'a> {
     }
 }
 
+/// The cells of the lists of the parts (parts, sizes and slices) that `run_space` makes for a space of `n` keys.
+/// The lists use 40 bytes for each part, which is less than 3 cells.
+fn list_cells(n: usize, cfg: &Config) -> usize {
+    n.div_ceil(cfg.chunk.max(1)).saturating_mul(3)
+}
+
 /// Scan the keys of space, and get the value of f at each key. It counts the values before it makes the
 /// result array, so the array is only as large as the result (f runs two times at each key).
 /// If the dimensions of the base source come first in the result key, the result is in key order.
@@ -803,8 +830,8 @@ fn run_space(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budge
         return Ok(Vec::new());
     }
     let chunk = cfg.chunk.max(1);
-    // parts, sizes and slices use 40 bytes for each part, which is less than 3 cells. Check them before they exist.
-    let lists = n.div_ceil(chunk).saturating_mul(3).saturating_add(copied);
+    // Check the lists before they exist
+    let lists = list_cells(n, cfg).saturating_add(copied);
     bud.need(lists, "式の結果")?;
     let parts: Vec<(usize, usize)> = (0..n).step_by(chunk).map(|lo| (lo, (lo + chunk).min(n))).collect();
     let count = |&(lo, hi): &(usize, usize)| {

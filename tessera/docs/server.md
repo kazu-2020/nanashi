@@ -84,6 +84,7 @@ If the router is between the proxy and the engine, see [router.md](../../router/
 These are the limits:
 
 - The request body can be up to 16 MiB (`--max-body`).
+- A write must have a `Content-Length` of 1 to 16 digits, without a leading zero (`0` is correct). The server refuses `Transfer-Encoding`, 2 different `Content-Length` values, and other values such as `+5`, `05` or `5` with a space after it with 400. Then a proxy cannot frame the body in a different way.
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`).
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`).
 - The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 5 seconds, it gets 503 `busy`. The short wait keeps a write below the 70 seconds that the router gives an attempt.
