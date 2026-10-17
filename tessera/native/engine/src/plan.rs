@@ -476,14 +476,23 @@ impl Write {
 }
 
 /// The cells that the write of whole results needs at its peak, with the results. The write puts the cells in the
-/// order of the store (a copy if the packing is different) and then makes the new columns (about 1 cell for each
-/// row). With `diff`, Store::replaced_all also merges the old and the new cells: 1.5 cells for each row of both,
-/// and a copy of the old cells if the store has a delta.
+/// order of the store. If the packing is different, this makes a copy. Then the write makes the new columns (about
+/// 1 cell for each row). With `diff`, Store::replaced_all also merges the old and the new cells. The merge uses 1.5
+/// cells for each old and new row, and a copy of the old cells if the store has a delta.
 fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usize {
     let (n, old) = (value.cells.len(), store.rows_hint());
     let merge = if diff { (old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 } } else { 0 };
     let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
     sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak
+}
+
+/// The cells that the writes of results into the part `region` need at their peak, with the results. The writes
+/// `(store, cells, diff)` come one after the other. With `diff`, the write also finds the changed keys.
+fn part_write(region: &Reg, cat: &Catalog, writes: &[(&Store, &Cube, bool)]) -> usize {
+    let size = |d: DimId| region.get(d).map_or(cat.dims[d].size as usize, <[u32]>::len);
+    let old = |s: &Store| s.metric_dims.iter().map(|&d| size(d)).fold(1usize, usize::saturating_mul).min(s.rows_hint());
+    let peak = writes.iter().map(|(s, c, diff)| s.part_write_cells(old(s), c.cells.len(), *diff)).max().unwrap_or(0);
+    writes.iter().map(|(_, c, _)| c.cells.capacity()).sum::<usize>() + peak
 }
 
 struct Done {
@@ -770,11 +779,9 @@ impl<'a> Run<'a> {
                 }
             }
         };
-        if t.region.is_all() {
+        let (value, count, low) = if t.region.is_all() {
             let sides: Vec<&Cube> = count.iter().chain(&low).collect();
             Budget::new(limit, held).need(whole_write(&self.stores[t.m], &value, &sides, !self.full), "結果の書き込み")?;
-        }
-        let (value, count, low) = if t.region.is_all() {
             let (cells, sets) = if self.full {
                 // 全体の再計算では下流も全体を計算し直すので、値が変わった範囲は求めない
                 (self.stores[t.m].sorted_cells(value)?, None)
@@ -786,6 +793,9 @@ impl<'a> Run<'a> {
             };
             (Write::Whole(cells, sets), whole(&*self.counts, count)?, whole(&*self.lows, low)?)
         } else {
+            let sides = [(&*self.counts, &count), (&*self.lows, &low)].into_iter().filter_map(|(s, c)| Some((&**s[t.m].as_ref()?, c.as_ref()?, false)));
+            let writes: Vec<(&Store, &Cube, bool)> = std::iter::once((&*self.stores[t.m], &value, true)).chain(sides).collect();
+            Budget::new(limit, held).need(part_write(&t.region, self.cat, &writes), "結果の書き込み")?;
             (Write::Part(value), count.map(Write::Part), low.map(Write::Part))
         };
         Ok(Done { m: t.m, region: t.region.clone(), delta: delta_used, value, count, low, old })
@@ -969,9 +979,11 @@ impl<'a> Run<'a> {
                 if !r.has(dim, t) {
                     continue;
                 }
-                let sub = r.set(dim, vec![t]).restrict(self.cat);
-                let held = others.saturating_add(grown(self.stores));
+                let (part, held) = (r.set(dim, vec![t]), others.saturating_add(grown(self.stores)));
+                let sub = part.restrict(self.cat);
                 let value = self.eval(self.formula(*n), None, &sub, &Budget::new(self.cat.cfg.max_bytes, held))?;
+                let write = part_write(&part, self.cat, &[(&self.stores[*n], &value, false)]);
+                Budget::new(self.cat.cfg.max_bytes, held).need(write, "結果の書き込み")?;
                 Arc::make_mut(&mut self.stores[*n]).replace(&sub, &value)?;
             }
         }
@@ -1003,6 +1015,10 @@ impl<'a> Run<'a> {
         let b = Budget::new(self.cat.cfg.max_bytes, held);
         // An error here also occurs in the per-period path, except a budget error. That path uses less memory
         let Ok(value) = tree_scan(&shape, &before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
+        // Store::replace keeps `value` while it makes a copy and new columns, so use the estimate of a part write
+        if Budget::new(self.cat.cfg.max_bytes, held).need(part_write(r, self.cat, &[(store, &value, false)]), "").is_err() {
+            return Ok(false);
+        }
         Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
         Ok(true)
     }

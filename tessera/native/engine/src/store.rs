@@ -382,6 +382,24 @@ impl Store {
         out
     }
 
+    /// The most rows of the delta. With more rows, the delta goes into a new base.
+    fn delta_limit(&self) -> usize {
+        self.cfg.compact_min.max(self.base.keys.len() / 8)
+    }
+
+    /// The most cells that `replace_diff` (if `diff`) or `replace` needs at its peak to write `n` new cells into a
+    /// region with at most `old` cells. A list of keys or cells can grow to 2 times its length.
+    pub(crate) fn part_write_cells(&self, old: usize, n: usize, diff: bool) -> usize {
+        // replace_diff keeps the old cells, their keys and the changed keys. replace keeps only the old keys
+        let lists = if diff { old * 2 + old / 2 + (old + n) } else { old };
+        // The new rows of the delta tree (a probe measured 57 bytes, about 4 cells, for each row), or new base
+        // columns (about 1 cell for each row). shortcut: a delta tree that another store shares is copied when it
+        // changes, and this does not count the copy. Count it if a probe finds such a copy over the budget.
+        let (rows, limit) = (self.delta.len().saturating_add(old).saturating_add(n), self.delta_limit());
+        let tail = if rows <= limit { (old + n) * 4 } else { self.rows_hint().saturating_add(n).max(limit * 4) };
+        lists.saturating_add(n).saturating_add(tail)
+    }
+
     /// Merge the delta into a new base.
     pub(crate) fn compact(&mut self) {
         let n = self.base.keys.len() + self.delta.len();
@@ -435,7 +453,7 @@ impl Store {
     /// Remove the old cells in r (the keys in old) and put new (in key order). If the delta tree would then
     /// need a compaction, make a new base directly. The delta tree inserts one cell at a time, so this is faster.
     pub(crate) fn write_back(&mut self, r: &Restrict, old: &[u64], new: Vec<(u64, f64)>) {
-        let limit = self.cfg.compact_min.max(self.base.keys.len() / 8);
+        let limit = self.delta_limit();
         if self.delta.len() + old.len() + new.len() > limit {
             // Write directly into the new packed base columns. An intermediate cell array or a plain key
             // array adds to the peak memory. A new cell replaces a kept cell with the same key.

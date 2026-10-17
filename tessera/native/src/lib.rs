@@ -224,6 +224,16 @@ impl Core {
             return Err(err(format!("Metric の番号 {m} が計算計画にない")));
         }
         r.iter().try_for_each(|(d, ms)| self.members(*d, ms))?;
+        // A list of all the members of an axis is the whole axis. Then a wide edit writes a whole result
+        let size = |d: DimId| self.cat.dims[d].size as usize;
+        let r = r
+            .into_iter()
+            .filter_map(|(d, mut ms)| {
+                ms.sort_unstable();
+                ms.dedup();
+                (ms.len() < size(d)).then_some((d, ms))
+            })
+            .collect();
         Ok((m, Reg::new(r)))
     }
 
