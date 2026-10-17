@@ -170,14 +170,14 @@ impl At<'_> {
 /// `before` has the values of the Metric at each period t - n (n in `tree.lags`) that is not in ts. The result is in the packing `pack`.
 /// A row reads only its own earlier periods, thus the engine calculates the rows in parallel.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
+pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, ts: &[u32], cat: &Catalog, src: &[Src], r: &Restrict, b: &Budget) -> Result<Cube> {
     let cfg = &cat.cfg;
     let p = pack.pos(dim).expect("scan の軸");
     let size = cat.dims[dim].size as usize;
     let (shift, tmask) = (pack.shifts[p], pack.masks[p]);
     let mut operands = Vec::with_capacity(tree.operands.len());
-    // eval_with already counts each operand. The budget must also count the copies, `before`, the buffers and the result
-    let mut held = before.cells.len();
+    const WHAT: &str = "scan の作業領域";
+    b.take(before.cells.capacity(), WHAT)?;
     for &(node, u) in &tree.operands {
         let c = eval_with(node, cat, src, r, b)?;
         let fits = match u {
@@ -189,25 +189,27 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
         }
         operands.push(match u {
             Use::Lookup if same_set(c.dims(), &pack.dims) => {
-                held += c.cells.len();
-                b.need(held, "scan の加数")?;
+                if &c.pack != pack {
+                    b.take(c.cells.len(), WHAT)?;
+                }
                 Operand::Aligned(by_row(cfg, c.into_repacked(cfg, pack).cells, shift))
             }
             Use::Lookup => {
                 let proj = Proj::new(pack, &c.pack);
+                b.take(table_cells(c.cells.len(), size_of::<(u64, f64)>()), WHAT)?;
                 Operand::Lookup(c.cells.into_iter().collect(), c.pack, proj)
             }
             Use::Union | Use::Coalesce => {
-                let e = expand(&c, &pack.dims, cat, r, b)?.into_repacked(cfg, pack);
-                held += e.cells.len();
-                b.need(held, "scan の加数")?;
-                Operand::ByRow(by_row(cfg, e.cells, shift))
+                let e = expand(c, &pack.dims, cat, r, b)?;
+                if &e.pack != pack {
+                    b.take(e.cells.len(), WHAT)?;
+                }
+                Operand::ByRow(by_row(cfg, e.into_repacked(cfg, pack).cells, shift))
             }
         });
     }
-    held += before.cells.len();
-    b.need(held, "scan の加数")?;
-    let before = by_row(cfg, before.repack(cfg, pack).cells, shift);
+    debug_assert!(&before.pack == pack);
+    let before = by_row(cfg, before.cells, shift);
     let row = |k: u64| k & !tmask;
     // A cell gets a value only from an operand that adds keys or from an earlier value of its row. These are all such rows
     let mut rows = Vec::new();
@@ -222,6 +224,8 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
     }
     rows.sort_unstable();
     rows.dedup();
+    // A row key takes half a cell
+    b.take(rows.capacity().div_ceil(2), WHAT)?;
     // The cells of each operand by row, and `before` as the last. A Lookup operand has no cells here and no buffer
     let mut srcs: Vec<Option<&[(u64, f64)]>> = operands
         .iter()
@@ -231,13 +235,11 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
         })
         .collect();
     srcs.push(Some(&before));
-    let parts = if cfg.par(held) { rayon::current_num_threads() * 4 } else { 1 };
-    // A row key takes half a cell. Each chunk that runs at the same time has a buffer of `size` slots for each source
-    let slots = srcs.iter().flatten().count() * size * parts.min(rayon::current_num_threads());
-    held += rows.len().div_ceil(2) + slots;
-    b.need(held, "scan の加数")?;
-    // A Budget is not Sync. The chunks count their cells here, and a chunk stops when the result does not fit
-    let room = b.room().saturating_sub(held);
+    let parts = if cfg.par(srcs.iter().flatten().map(|s| s.len()).sum()) { rayon::current_num_threads() * 4 } else { 1 };
+    // Each chunk that runs at the same time has a buffer of `size` slots for each source
+    b.take(srcs.iter().flatten().count() * size * parts.min(rayon::current_num_threads()), WHAT)?;
+    // A Budget is not Sync. The chunks count the capacity of their results here, and a chunk stops when it does not fit
+    let room = b.room();
     let made = AtomicUsize::new(0);
     let run = |chunk: &[u64]| -> Option<Vec<(u64, f64)>> {
         let mut pos: Vec<usize> = srcs.iter().map(|s| s.map_or(0, |s| s.partition_point(|c| c.0 < chunk[0]))).collect();
@@ -264,7 +266,16 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
             // A period in ts reads only earlier periods, and each of them in ts already has its new result here
             let (hist, vals) = bufs.split_last_mut().expect("srcs has before");
             let base = w.rotate_left(shift);
-            let n = out.len();
+            if out.capacity() - out.len() < ts.len() {
+                // Count the old buffer too: it lives while the realloc copies it
+                let (old, grow) = (out.capacity(), out.capacity().max(ts.len()));
+                if made.fetch_add(old + grow, Relaxed) + old + grow > room {
+                    return None;
+                }
+                // Reserve up to old + grow so the capacity equals the charged count
+                out.reserve_exact(old + grow - out.len());
+                made.fetch_sub(old, Relaxed);
+            }
             for &t in ts {
                 let key = base | pack.put(p, t);
                 let v = At { t: t as usize, key, operands: &operands, pack, vals, hist }.value(&tree.root);
@@ -273,21 +284,24 @@ pub(crate) fn tree_scan(tree: &Tree, before: &Cube, pack: &Packing, dim: DimId, 
                     out.push((key, v));
                 }
             }
-            let n = out.len() - n;
-            if made.fetch_add(n, Relaxed) + n > room {
-                return None;
-            }
         }
         Some(out)
     };
     let outs: Option<Vec<Vec<(u64, f64)>>> = rows.par_chunks(rows.len().div_ceil(parts).max(1)).map(run).collect();
-    // If a chunk stopped, this is Err
-    b.need(held + made.load(Relaxed), "scan の結果")?;
-    let outs = outs.expect("the result fits");
-    let mut cells = Vec::with_capacity(outs.iter().map(Vec::len).sum());
-    for mut o in outs {
-        cells.append(&mut o);
-    }
+    let Some(mut outs) = outs else {
+        b.need(room + 1, "scan の結果")?;
+        unreachable!("room + 1 cells never fit");
+    };
+    let cells = if outs.len() == 1 {
+        // The capacity can be larger than the length. Free the unused capacity: `replace` copies the result, and both copies exist at the same time
+        let mut cells = outs.pop().expect("one chunk");
+        cells.shrink_to_fit();
+        cells
+    } else {
+        let n: usize = outs.iter().map(Vec::len).sum();
+        b.need(made.load(Relaxed) + n, "scan の結果")?;
+        outs.concat()
+    };
     Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells })
 }
 

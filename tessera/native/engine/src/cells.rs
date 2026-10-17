@@ -23,8 +23,9 @@ where
     }
 }
 
-/// 各セルを複数のセルへ写す（件数が多ければ並列に）。
-pub(crate) fn flat_map_cells<F, I>(cfg: &Config, cells: &[(u64, f64)], f: F) -> Vec<(u64, f64)>
+/// Maps each cell to some cells (in parallel if there are many). Only the serial path uses `cap`, an upper bound of the result cells.
+/// If there are fewer cells than `cap` (a join that drops pairs), the result gives back the capacity that it does not use.
+pub(crate) fn flat_map_cells<F, I>(cfg: &Config, cells: &[(u64, f64)], cap: usize, f: F) -> Vec<(u64, f64)>
 where
     F: Fn(u64, f64) -> I + Sync + Send,
     I: Iterator<Item = (u64, f64)>,
@@ -32,6 +33,9 @@ where
     if cfg.par(cells.len()) {
         cells.par_iter().flat_map_iter(|&(k, v)| f(k, v)).collect()
     } else {
-        cells.iter().flat_map(|&(k, v)| f(k, v)).collect()
+        let mut out = Vec::with_capacity(cap);
+        out.extend(cells.iter().flat_map(|&(k, v)| f(k, v)));
+        out.shrink_to_fit();
+        out
     }
 }
