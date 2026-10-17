@@ -224,6 +224,16 @@ impl Core {
             return Err(err(format!("Metric の番号 {m} が計算計画にない")));
         }
         r.iter().try_for_each(|(d, ms)| self.members(*d, ms))?;
+        // A list of all the members of an axis is the whole axis. Then a wide edit writes a whole result
+        let size = |d: DimId| self.cat.dims[d].size as usize;
+        let r = r
+            .into_iter()
+            .filter_map(|(d, mut ms)| {
+                ms.sort_unstable();
+                ms.dedup();
+                (ms.len() < size(d)).then_some((d, ms))
+            })
+            .collect();
         Ok((m, Reg::new(r)))
     }
 
@@ -1087,7 +1097,8 @@ fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
 struct Counting;
 
 const SLOTS: usize = 64;
-const SLOT_FLUSH: usize = 64 << 10;
+// The change that a slot keeps before it goes to the total. heap_exact(True) sets 0, so the peak is exact.
+static SLOT_FLUSH: AtomicUsize = AtomicUsize::new(64 << 10);
 
 #[repr(align(128))] // 128, not 64: the adjacent-line prefetch moves cache lines in pairs
 struct Slot(AtomicIsize);
@@ -1109,7 +1120,8 @@ fn heap_flush(v: isize) {
 
 fn heap_add(n: isize) {
     // A large change skips the slot, so the value in transit stays below about 2 * SLOT_FLUSH.
-    if n.unsigned_abs() > SLOT_FLUSH {
+    let flush = SLOT_FLUSH.load(Ordering::Relaxed);
+    if n.unsigned_abs() > flush {
         return heap_flush(n);
     }
     let i = MY_SLOT.with(|c| {
@@ -1120,7 +1132,7 @@ fn heap_add(n: isize) {
     });
     let slot = &HEAP_SLOTS[i].0;
     let v = slot.fetch_add(n, Ordering::Relaxed) + n;
-    if v.unsigned_abs() > SLOT_FLUSH {
+    if v.unsigned_abs() > flush {
         // swap, not fetch_sub: after more than SLOTS threads, two threads can share a slot.
         heap_flush(slot.swap(0, Ordering::Relaxed));
     }
@@ -1163,6 +1175,16 @@ unsafe impl GlobalAlloc for Counting {
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
+
+/// If `exact`, count each allocation in the total at once. Then the maximum of `heap` is exact, but allocation is
+/// slower. Tests use it to compare a peak with a budget of a few KiB.
+#[pyfunction]
+fn heap_exact(exact: bool) {
+    SLOT_FLUSH.store(if exact { 0 } else { 64 << 10 }, Ordering::Relaxed);
+    for s in &HEAP_SLOTS {
+        heap_flush(s.0.swap(0, Ordering::Relaxed));
+    }
+}
 
 /// The memory that Rust allocated after the process started, and the maximum after reset_heap_peak (bytes).
 /// The maximum can be wrong by about 128 KiB for each thread that allocated.
@@ -1535,6 +1557,7 @@ fn parquet_metadata(py: Python<'_>, data: PyBackedBytes) -> PyResult<Vec<(String
 fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(heap, m)?)?;
     m.add_function(wrap_pyfunction!(reset_heap_peak, m)?)?;
+    m.add_function(wrap_pyfunction!(heap_exact, m)?)?;
     m.add_function(wrap_pyfunction!(write_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_metadata, m)?)?;

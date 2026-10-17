@@ -2,6 +2,9 @@
 //! A SUM gives the correctly rounded exact sum. Thus the result does not change with the order of the rows,
 //! the aggregation path or the thread count.
 
+use crate::CELL_BYTES;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
 /// The exact value of a sum, as non-overlapping partials in increasing magnitude. All partials are not zero.
 /// Most sums need 2 partials or less, so they stay inline (24 B). More partials go to `spill`.
 #[derive(Clone, Default, Debug)]
@@ -10,12 +13,56 @@ pub(crate) struct ExactSum {
     spill: Option<Box<Spill>>,
 }
 
-// The Budget does not count a Spill: only a group with more than 2 partials has one, and it holds at most about
-// 40 partials (non-overlapping partials below HUGE cover 2^-1074 to 2^960, 53 bits each)
+// A Spill holds at most about 40 partials (non-overlapping partials below HUGE cover 2^-1074 to 2^960, 53 bits
+// each). Only a group with more than 2 partials has one. A Meter counts it.
 #[derive(Clone, Default, Debug)]
 struct Spill {
     parts: Vec<f64>,
     special: f64, // the sum of the non-finite inputs; NaN for an input of HUGE or more
+}
+
+/// Counts the bytes of the Spills that are made, also from parallel workers. Over room, no Spill is made or grows:
+/// the sums become wrong, and cells() is more than room, so the caller's budget check refuses the result.
+pub(crate) struct Meter {
+    made: AtomicUsize,
+    room: usize,
+}
+
+impl Meter {
+    pub(crate) fn new(room_cells: usize) -> Meter {
+        Meter { made: AtomicUsize::new(0), room: room_cells.saturating_mul(CELL_BYTES) }
+    }
+
+    fn take(&self, bytes: usize) -> bool {
+        self.made.fetch_add(bytes, Relaxed).saturating_add(bytes) <= self.room
+    }
+
+    /// The cells of the Spills made (or refused) until now.
+    pub(crate) fn cells(&self) -> usize {
+        self.made.load(Relaxed).div_ceil(CELL_BYTES)
+    }
+}
+
+impl Spill {
+    #[cold]
+    fn push(&mut self, x: f64, m: &Meter) {
+        let n = self.parts.len();
+        if n == self.parts.capacity() {
+            let more = n.max(4);
+            if !m.take(more * std::mem::size_of::<f64>()) {
+                return;
+            }
+            self.parts.reserve_exact(more);
+        }
+        self.parts.push(0.0);
+        let k = grow(&mut self.parts, n, x);
+        self.parts.truncate(k);
+    }
+}
+
+/// The bytes of a new Spill with n partials (the Box and the Vec buffer).
+fn spill_bytes(n: usize) -> usize {
+    std::mem::size_of::<Spill>() + n * std::mem::size_of::<f64>()
 }
 
 /// A finite input with this magnitude or more makes the sum NaN. Below it, the partials cannot overflow
@@ -55,49 +102,57 @@ impl ExactSum {
         self.spill.as_ref().map_or(0.0, |s| s.special)
     }
 
-    pub(crate) fn add(&mut self, x: f64) {
+    pub(crate) fn add(&mut self, x: f64, m: &Meter) {
         if x.is_nan() || x.abs() >= HUGE {
-            self.spill_mut().special += if x.is_infinite() { x } else { f64::NAN };
+            if let Some(s) = self.spill_mut(m) {
+                s.special += if x.is_infinite() { x } else { f64::NAN };
+            }
             return;
         }
-        self.push(x);
+        self.push(x, m);
     }
 
     /// Add a finite value with no check (a partial or a rounded sum of inputs below HUGE).
-    fn push(&mut self, x: f64) {
+    fn push(&mut self, x: f64, m: &Meter) {
         if let Some(s) = &mut self.spill {
-            let n = s.parts.len();
-            s.parts.push(0.0);
-            let k = grow(&mut s.parts, n, x);
-            s.parts.truncate(k);
-            return;
+            return s.push(x, m);
         }
         let n = self.parts().len();
         let mut buf = [self.p[0], self.p[1], 0.0];
         match grow(&mut buf, n, x) {
             k if k <= 2 => self.p = [if k > 0 { buf[0] } else { 0.0 }, if k > 1 { buf[1] } else { 0.0 }],
-            k => {
-                self.spill = Some(Box::new(Spill { parts: buf[..k].to_vec(), special: 0.0 }));
-                self.p = [0.0; 2];
-            }
+            k => self.make_spill(&buf[..k], m),
         }
     }
 
-    fn spill_mut(&mut self) -> &mut Spill {
+    #[cold]
+    fn make_spill(&mut self, parts: &[f64], m: &Meter) {
+        if m.take(spill_bytes(parts.len())) {
+            self.spill = Some(Box::new(Spill { parts: parts.to_vec(), special: 0.0 }));
+            self.p = [0.0; 2];
+        }
+    }
+
+    fn spill_mut(&mut self, m: &Meter) -> Option<&mut Spill> {
         if self.spill.is_none() {
             let parts = self.parts().to_vec();
+            if !m.take(spill_bytes(parts.len())) {
+                return None;
+            }
             self.spill = Some(Box::new(Spill { parts, special: 0.0 }));
             self.p = [0.0; 2];
         }
-        self.spill.as_mut().unwrap()
+        self.spill.as_deref_mut()
     }
 
-    pub(crate) fn merge(&mut self, o: &ExactSum) {
+    pub(crate) fn merge(&mut self, o: &ExactSum, m: &Meter) {
         for &x in o.parts() {
-            self.push(x);
+            self.push(x, m);
         }
         if o.special() != 0.0 {
-            self.spill_mut().special += o.special();
+            if let Some(s) = self.spill_mut(m) {
+                s.special += o.special();
+            }
         }
     }
 
@@ -141,10 +196,11 @@ impl ExactSum {
         if self.special() != 0.0 {
             return f64::NAN;
         }
-        let mut rest = self.clone();
-        rest.push(-self.finish());
+        // rest lives only in this call, so it is not counted
+        let (mut rest, m) = (self.clone(), Meter::new(usize::MAX));
+        rest.push(-self.finish(), &m);
         let r = rest.finish();
-        rest.push(-r);
+        rest.push(-r, &m);
         if rest.special() == 0.0 && rest.parts().is_empty() { r } else { f64::NAN }
     }
 }
@@ -154,8 +210,8 @@ mod tests {
     use super::*;
 
     fn sum(vs: &[f64]) -> ExactSum {
-        let mut s = ExactSum::default();
-        vs.iter().for_each(|&v| s.add(v));
+        let (mut s, m) = (ExactSum::default(), Meter::new(usize::MAX));
+        vs.iter().for_each(|&v| s.add(v, &m));
         s
     }
 
@@ -197,7 +253,7 @@ mod tests {
             }
         }
         let (mut a, b) = (sum(&vs[..2]), sum(&vs[2..]));
-        a.merge(&b);
+        a.merge(&b, &Meter::new(usize::MAX));
         assert_eq!(a.finish().to_bits(), want);
     }
 
@@ -209,7 +265,8 @@ mod tests {
         assert!(lo != 0.0 && lo.is_finite());
         // [hi, lo] holds the same exact value: adding the inputs back with a minus sign gives 0
         let mut back = sum(&[hi, lo]);
-        vs.iter().for_each(|&v| back.add(-v));
+        let m = Meter::new(usize::MAX);
+        vs.iter().for_each(|&v| back.add(-v, &m));
         assert!(back.parts().is_empty());
         assert_eq!(sum(&[hi, lo]).finish().to_bits(), hi.to_bits());
         assert_eq!(sum(&[1.0, 2.0]).residual(), 0.0);
@@ -231,5 +288,19 @@ mod tests {
         assert_eq!(sum(&[HUGE * 0.75, HUGE * 0.75, -HUGE * 0.75]).finish(), HUGE * 0.75);
         assert!(sum(&[1.0, f64::INFINITY]).residual().is_nan());
         assert_eq!(std::mem::size_of::<ExactSum>(), 24);
+    }
+
+    #[test]
+    fn meter_counts_each_spill_and_stops_at_room() {
+        let vs: Vec<f64> = (0..10).map(|j| 2f64.powi(60 * j)).collect();
+        let (mut s, m) = (ExactSum::default(), Meter::new(usize::MAX));
+        vs.iter().for_each(|&v| s.add(v, &m));
+        // 3 partials make the Spill, and its buffer grows from 3 to 7 and 14
+        assert_eq!(m.made.load(Relaxed), spill_bytes(3) + (4 + 7) * 8);
+        assert_eq!((s.parts().len(), s.spill.as_ref().unwrap().parts.capacity()), (10, 14));
+        let (mut s, m) = (ExactSum::default(), Meter::new(0));
+        vs.iter().for_each(|&v| s.add(v, &m));
+        assert!(s.spill.is_none());
+        assert!(m.cells() > 0, "a refused Spill counts over room");
     }
 }

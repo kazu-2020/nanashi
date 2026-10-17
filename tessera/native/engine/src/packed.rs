@@ -104,6 +104,7 @@ impl PackedKeys {
             blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
             bytes: Vec::with_capacity(bytes + 16),
             buf: Vec::with_capacity(BLOCK),
+            most: capacity.saturating_mul(8).saturating_add(16),
         }
     }
 
@@ -226,6 +227,7 @@ pub(crate) struct Builder {
     blocks: Vec<Block>,
     bytes: Vec<u8>,
     buf: Vec<u64>, // the keys of the block that is not yet packed
+    most: usize,   // 8 B for each key of the capacity and the 16 spare bytes: the packed offsets never need more
 }
 
 impl Builder {
@@ -241,7 +243,13 @@ impl Builder {
         let chunk = &self.buf;
         let start = self.bytes.len() / 8;
         let (blk, words) = block_of(chunk, start);
-        self.bytes.resize((start + words) * 8, 0);
+        let need = (start + words) * 8;
+        if need > self.bytes.capacity() {
+            // Do not double past `most`. Store::part_write_cells counts at most 8 B for each key
+            let cap = self.bytes.capacity().saturating_mul(2).min(self.most).max(need);
+            self.bytes.reserve_exact(cap - self.bytes.len());
+        }
+        self.bytes.resize(need, 0);
         pack_into(&mut self.bytes[start * 8..], chunk, &blk);
         self.blocks.push(blk);
         self.len += chunk.len();
@@ -444,7 +452,9 @@ fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
     if width == 0 {
         return; // every key equals the base
     }
-    let mut words = vec![0u64; out.len() / 8];
+    // On the stack: a heap buffer would add a block of scratch to each write. The last block has 2 spare words
+    let mut buf = [0u64; BLOCK + 2];
+    let words = &mut buf[..out.len() / 8];
     for (j, &k) in chunk.iter().enumerate() {
         let off = k - blk.base;
         let bit = j * width;
@@ -454,7 +464,7 @@ fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
             words[w + 1] |= off >> (64 - sh);
         }
     }
-    for (dst, w) in out.as_chunks_mut::<8>().0.iter_mut().zip(&words) {
+    for (dst, w) in out.as_chunks_mut::<8>().0.iter_mut().zip(words.iter()) {
         *dst = w.to_le_bytes();
     }
 }
@@ -519,6 +529,19 @@ mod tests {
         mixed.extend(sorted_random(&mut seed, 1024, 1 << 20, 50));
         mixed.push(1 << 62);
         check(&mixed);
+    }
+
+    #[test]
+    fn builder_reserves_at_most_8_bytes_for_each_key() {
+        // A narrow `like` makes a small reservation. Wide keys then grow the buffer, but not past 8 B for each key
+        let mut seed = 0x9E37_79B9_7F4A_7C15;
+        let like = PackedKeys::new(&(0..4096).collect::<Vec<u64>>(), false);
+        let keys = sorted_random(&mut seed, 5000, 1 << 40, 62);
+        let mut b = PackedKeys::builder(keys.len(), &like);
+        keys.iter().for_each(|&k| b.push(k));
+        b.flush();
+        assert!(b.bytes.capacity() <= keys.len() * 8 + 16, "{} bytes for {} keys", b.bytes.capacity(), keys.len());
+        assert_eq!(b.finish().bytes, PackedKeys::new(&keys, false).bytes);
     }
 
     #[test]

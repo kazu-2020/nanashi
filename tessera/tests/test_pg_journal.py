@@ -562,6 +562,19 @@ class PgJournalTests(unittest.TestCase):
         with self.assertRaisesRegex(Fenced, "開き直す"):  # 読み込んだあとに書き込まれているので書けない
             stale.set_cell("Price", 13, Product="A")
 
+    def test_stale_reader_does_not_take_a_free_lease(self):
+        m = build_with(ReferenceEngine())
+        first = self.journal(heartbeat=False)
+        first.start(m.model)
+        stale = Named(self.journal().open(ReferenceEngine()))
+        m.set_cell("Price", 12, Product="A")
+        first.release()
+        with self.assertRaisesRegex(Fenced, "開き直す"):
+            stale.set_cell("Price", 13, Product="A")
+        writer = Named(self.journal(acquire_wait=0.0).open(ReferenceEngine()))
+        writer.set_cell("Price", 14, Product="A")
+        self.assertEqual(Named(self.journal().open(ReferenceEngine())).get("Price", Product="A"), 14)
+
     def test_corrupted_snapshot_falls_back(self):
         m = build_with(ReferenceEngine())
         j = self.journal()
