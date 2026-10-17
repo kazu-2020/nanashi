@@ -387,17 +387,28 @@ impl Store {
         self.cfg.compact_min.max(self.base.keys.len() / 8)
     }
 
-    /// The most cells that `replace_diff` (if `diff`) or `replace` needs at its peak to write `n` new cells into a
-    /// region with at most `old` cells. A list of keys or cells can grow to 2 times its length.
-    pub(crate) fn part_write_cells(&self, old: usize, n: usize, diff: bool) -> usize {
+    /// The cells that `replace_diff` (if `diff`) or `replace` needs to write `n` new cells into a region of `size`
+    /// keys: (the most at the peak, the cells that the store keeps after the write). If `shared`, another version of
+    /// the store shares the base and the delta tree. A list of keys or cells can grow to 2 times its length.
+    pub(crate) fn part_write_cells(&self, size: usize, n: usize, diff: bool, shared: bool) -> (usize, usize) {
+        let old = size.min(self.rows_hint());
         // replace_diff keeps the old cells, their keys and the changed keys. replace keeps only the old keys
         let lists = if diff { old * 2 + old / 2 + (old + n) } else { old };
-        // The new rows of the delta tree (a probe measured 57 bytes, about 4 cells, for each row), or new base
-        // columns (about 1 cell for each row). shortcut: a delta tree that another store shares is copied when it
-        // changes, and this does not count the copy. Count it if a probe finds such a copy over the budget.
         let (rows, limit) = (self.delta.len().saturating_add(old).saturating_add(n), self.delta_limit());
-        let tail = if rows <= limit { (old + n) * 4 } else { self.rows_hint().saturating_add(n).max(limit * 4) };
-        lists.saturating_add(n).saturating_add(tail)
+        // The new rows of the delta tree (a probe measured 57 bytes, about 4 cells, for each row). A shared tree
+        // also copies the nodes on the path to each key: about 3 nodes of 16 rows, less than 32 rows
+        let keys = (old + n).min(size);
+        let copy = if shared { self.delta.len().min(keys.saturating_mul(32).saturating_add(64)) } else { 0 };
+        let tree = (keys + copy).saturating_mul(4);
+        let (tail, kept) = if rows <= limit {
+            (tree, tree)
+        } else {
+            // New base columns (about 1 cell for each row). The other version keeps the old base if it is shared.
+            // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
+            let (new, tree) = (self.rows_hint().saturating_add(n), tree.min(limit.saturating_mul(4)));
+            (new.max(tree), if shared { new } else { n }.max(tree))
+        };
+        (lists.saturating_add(n).saturating_add(tail), kept)
     }
 
     /// Merge the delta into a new base.

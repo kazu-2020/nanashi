@@ -486,13 +486,23 @@ fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usiz
     sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak
 }
 
-/// The cells that the writes of results into the part `region` need at their peak, with the results. The writes
-/// `(store, cells, diff)` come one after the other. With `diff`, the write also finds the changed keys.
-fn part_write(region: &Reg, cat: &Catalog, writes: &[(&Store, &Cube, bool)]) -> usize {
+/// The keys of `store` in the part `region`.
+fn region_size(region: &Reg, cat: &Catalog, store: &Store) -> usize {
     let size = |d: DimId| region.get(d).map_or(cat.dims[d].size as usize, <[u32]>::len);
-    let old = |s: &Store| s.metric_dims.iter().map(|&d| size(d)).fold(1usize, usize::saturating_mul).min(s.rows_hint());
-    let peak = writes.iter().map(|(s, c, diff)| s.part_write_cells(old(s), c.cells.len(), *diff)).max().unwrap_or(0);
-    writes.iter().map(|(_, c, _)| c.cells.capacity()).sum::<usize>() + peak
+    store.metric_dims.iter().map(|&d| size(d)).fold(1usize, usize::saturating_mul)
+}
+
+/// The cells that the writes of results into the part `region` need: (the most at the peak with the results, the
+/// cells that the stores keep after the writes). The writes `(store, cells, diff)` come one after the other. With
+/// `diff`, the write also finds the changed keys. A store with more than 1 reference is shared.
+fn part_write(region: &Reg, cat: &Catalog, writes: &[(&Arc<Store>, &Cube, bool)]) -> (usize, usize) {
+    let (mut peak, mut kept) = (0usize, 0usize);
+    for (s, c, diff) in writes {
+        let (p, k) = s.part_write_cells(region_size(region, cat, s), c.cells.len(), *diff, Arc::strong_count(s) > 1);
+        peak = peak.max(kept.saturating_add(p));
+        kept = kept.saturating_add(k);
+    }
+    (writes.iter().map(|(_, c, _)| c.cells.capacity()).sum::<usize>().saturating_add(peak), kept)
 }
 
 struct Done {
@@ -503,6 +513,7 @@ struct Done {
     count: Option<Write>, // 差分集計する SUM の、各グループの件数（Whole の範囲は使わない）
     low: Option<Write>,   // the residual of each group of an incremental SUM (cells that are not 0)
     old: Option<Old>,     // the value before the write (if it is the source of a downstream incremental aggregation)
+    kept: usize,          // The cells that a part write adds to the stores. Later tasks of the level count them
 }
 
 enum Old {
@@ -536,7 +547,7 @@ impl From<Old> for Src {
 impl Done {
     fn bytes(&self) -> usize {
         let writes: usize = [Some(&self.value), self.count.as_ref(), self.low.as_ref()].into_iter().flatten().map(Write::bytes).sum();
-        writes.saturating_add(self.old.as_ref().map_or(0, Old::copied))
+        writes.saturating_add(self.old.as_ref().map_or(0, Old::copied)).saturating_add(self.kept.saturating_mul(CELL_BYTES))
     }
 }
 
@@ -779,7 +790,7 @@ impl<'a> Run<'a> {
                 }
             }
         };
-        let (value, count, low) = if t.region.is_all() {
+        let (value, count, low, kept) = if t.region.is_all() {
             let sides: Vec<&Cube> = count.iter().chain(&low).collect();
             Budget::new(limit, held).need(whole_write(&self.stores[t.m], &value, &sides, !self.full), "結果の書き込み")?;
             let (cells, sets) = if self.full {
@@ -791,19 +802,20 @@ impl<'a> Run<'a> {
             let whole = |side: &[Option<Arc<Store>>], c: Option<Cube>| {
                 c.map(|c| side[t.m].as_ref().expect("件数か残差の格納").sorted_cells(c).map(|cells| Write::Whole(cells, None))).transpose()
             };
-            (Write::Whole(cells, sets), whole(&*self.counts, count)?, whole(&*self.lows, low)?)
+            (Write::Whole(cells, sets), whole(&*self.counts, count)?, whole(&*self.lows, low)?, 0)
         } else {
-            let sides = [(&*self.counts, &count), (&*self.lows, &low)].into_iter().filter_map(|(s, c)| Some((&**s[t.m].as_ref()?, c.as_ref()?, false)));
-            let writes: Vec<(&Store, &Cube, bool)> = std::iter::once((&*self.stores[t.m], &value, true)).chain(sides).collect();
-            Budget::new(limit, held).need(part_write(&t.region, self.cat, &writes), "結果の書き込み")?;
-            (Write::Part(value), count.map(Write::Part), low.map(Write::Part))
+            let sides = [(&*self.counts, &count), (&*self.lows, &low)].into_iter().filter_map(|(s, c)| Some((s[t.m].as_ref()?, c.as_ref()?, false)));
+            let writes: Vec<(&Arc<Store>, &Cube, bool)> = std::iter::once((&self.stores[t.m], &value, true)).chain(sides).collect();
+            let (need, kept) = part_write(&t.region, self.cat, &writes);
+            Budget::new(limit, held).need(need, "結果の書き込み")?;
+            (Write::Part(value), count.map(Write::Part), low.map(Write::Part), kept)
         };
-        Ok(Done { m: t.m, region: t.region.clone(), delta: delta_used, value, count, low, old })
+        Ok(Done { m: t.m, region: t.region.clone(), delta: delta_used, value, count, low, old, kept })
     }
 
     /// Write back the calculated values. The region of the cells whose values changed goes downstream.
     fn apply(&mut self, done: Done) -> Result<()> {
-        let Done { m, region, delta, value, count, low, old } = done;
+        let Done { m, region, delta, value, count, low, old, .. } = done;
         match self.cat.cfg.fail_at {
             Some((f, false)) if f == m => return Err(format!("書き戻しの失敗（テスト用、Metric {m}）")),
             Some((f, true)) if f == m => panic!("書き戻しの panic（テスト用、Metric {m}）"),
@@ -982,7 +994,7 @@ impl<'a> Run<'a> {
                 let (part, held) = (r.set(dim, vec![t]), others.saturating_add(grown(self.stores)));
                 let sub = part.restrict(self.cat);
                 let value = self.eval(self.formula(*n), None, &sub, &Budget::new(self.cat.cfg.max_bytes, held))?;
-                let write = part_write(&part, self.cat, &[(&self.stores[*n], &value, false)]);
+                let (write, _) = part_write(&part, self.cat, &[(&self.stores[*n], &value, false)]);
                 Budget::new(self.cat.cfg.max_bytes, held).need(write, "結果の書き込み")?;
                 Arc::make_mut(&mut self.stores[*n]).replace(&sub, &value)?;
             }
@@ -1013,10 +1025,13 @@ impl<'a> Run<'a> {
         let src: Vec<Src> = f.refs.iter().map(|&i| Src::Store(self.stores[i].clone())).collect();
         let rr = r.restrict(self.cat);
         let b = Budget::new(self.cat.cfg.max_bytes, held.saturating_add(ts.capacity() * size_of::<u32>()));
+        // Store::replace keeps the result while it makes a copy and new columns. The scan stops early if the write of
+        // the cells that it made does not fit. Then it does not make a result that the write cannot use
+        let (room, size, shared) = (Budget::new(self.cat.cfg.max_bytes, held).room(), region_size(r, self.cat, store), Arc::strong_count(store) > 1);
+        let fits = |n: usize| n.saturating_add(store.part_write_cells(size, n, false, shared).0) <= room;
         // An error here also occurs in the per-period path, except a budget error. That path uses less memory
-        let Ok(value) = tree_scan(&shape, before, &store.pack, dim, &ts, self.cat, &src, &rr, &b) else { return Ok(false) };
-        // Store::replace keeps `value` while it makes a copy and new columns, so use the estimate of a part write
-        if Budget::new(self.cat.cfg.max_bytes, held).need(part_write(r, self.cat, &[(store, &value, false)]), "").is_err() {
+        let Ok(value) = tree_scan(&shape, before, &store.pack, dim, &ts, self.cat, &src, &rr, &b, &fits) else { return Ok(false) };
+        if !fits(value.cells.capacity()) {
             return Ok(false);
         }
         Arc::make_mut(&mut self.stores[n]).replace(&rr, &value)?;
@@ -1045,7 +1060,7 @@ mod tests {
         let store = Arc::new(Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[1, 2]], &[1.0, 2.0]).unwrap());
         let done = |region: Reg| {
             let old = old_of(&store, &region, &cat);
-            Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old) }
+            Done { m: 0, region, delta: false, value: Write::Whole(Vec::new(), None), count: None, low: None, old: Some(old), kept: 0 }
         };
         assert_eq!(done(Reg::new(vec![])).bytes(), 0);
         let part = Reg::new(vec![(0, vec![1])]);
