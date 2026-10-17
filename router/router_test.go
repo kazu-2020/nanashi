@@ -20,38 +20,37 @@ import (
 func TestDecide(t *testing.T) {
 	tests := []struct {
 		name   string
-		method string // POST unless set
+		read   bool // a write unless set
 		status int
 		head   string
 		want   decision
 	}{
-		{"ok", "", 200, `{"seq": 3}`, decision{action: deliver}},
-		{"bad request", "", 400, `{"error": "bad_request"}`, decision{action: deliver}},
-		{"unauthorized", "", 401, `{"error": "unauthorized"}`, decision{action: deliver}},
-		{"not found", "", 404, `{"error": "not_found"}`, decision{action: deliver}},
-		{"method", "", 405, `{"error": "read_only"}`, decision{action: deliver}},
-		{"conflict", "", 409, `{"error": "conflict", "seq": 4}`, decision{action: deliver}},
-		{"length required", "", 411, `{"error": "length_required"}`, decision{action: deliver}},
-		{"too large", "", 413, `{"error": "too_large"}`, decision{action: deliver}},
-		{"not leader", "", 421, `{"error": "not_leader", "leader": "http://a:8080"}`, decision{action: redirect, leader: "http://a:8080"}},
-		{"not leader, unknown leader", "", 421, `{"error": "not_leader", "leader": null}`, decision{action: reresolve}},
-		{"not leader, not a URL", "", 421, `{"error": "not_leader", "leader": "a:8080"}`, decision{action: reresolve}},
-		{"not leader, no body", "", 421, ``, decision{action: reresolve}},
-		{"overloaded", "", 429, `{"error": "overloaded"}`, decision{action: retrySame}},
-		{"internal", "", 500, `{"error": "internal"}`, decision{action: reresolve}},
-		{"internal on a read", "GET", 500, `{"error": "internal"}`, decision{action: deliver}},
-		{"busy", "", 503, `{"error": "busy"}`, decision{action: reresolve}},
-		{"stale", "", 503, `{"error": "stale"}`, decision{action: reresolve}},
-		{"closed", "", 503, `{"error": "closed"}`, decision{action: reresolve}},
-		{"not ready", "", 503, `{"ready": false, "reasons": ["x"]}`, decision{action: deliver}},
-		{"timeout", "", 504, `{"error": "timeout"}`, decision{action: reresolve}},
-		{"no response", "", 0, ``, decision{action: reresolve}},
+		{"ok", false, 200, `{"seq": 3}`, decision{action: deliver}},
+		{"bad request", false, 400, `{"error": "bad_request"}`, decision{action: deliver}},
+		{"unauthorized", false, 401, `{"error": "unauthorized"}`, decision{action: deliver}},
+		{"not found", false, 404, `{"error": "not_found"}`, decision{action: deliver}},
+		{"method", false, 405, `{"error": "read_only"}`, decision{action: deliver}},
+		{"conflict", false, 409, `{"error": "conflict", "seq": 4}`, decision{action: deliver}},
+		{"length required", false, 411, `{"error": "length_required"}`, decision{action: deliver}},
+		{"too large", false, 413, `{"error": "too_large"}`, decision{action: deliver}},
+		{"not leader", false, 421, `{"error": "not_leader", "leader": "http://a:8080"}`, decision{action: redirect, leader: "http://a:8080"}},
+		{"not leader, unknown leader", false, 421, `{"error": "not_leader", "leader": null}`, decision{action: reresolve}},
+		{"not leader, not a URL", false, 421, `{"error": "not_leader", "leader": "a:8080"}`, decision{action: reresolve}},
+		{"not leader, no body", false, 421, ``, decision{action: reresolve}},
+		{"overloaded", false, 429, `{"error": "overloaded"}`, decision{action: retrySame}},
+		{"internal", false, 500, `{"error": "internal"}`, decision{action: reresolve}},
+		{"internal on a read", true, 500, `{"error": "internal"}`, decision{action: deliver}},
+		{"busy", false, 503, `{"error": "busy"}`, decision{action: reresolve}},
+		{"stale", false, 503, `{"error": "stale"}`, decision{action: reresolve}},
+		{"closed", false, 503, `{"error": "closed"}`, decision{action: reresolve}},
+		{"not ready", false, 503, `{"ready": false, "reasons": ["x"]}`, decision{action: deliver}},
+		{"timeout", false, 504, `{"error": "timeout"}`, decision{action: reresolve}},
+		{"no response", false, 0, ``, decision{action: reresolve}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			method := cmp.Or(tt.method, http.MethodPost)
-			if got := decide(method, tt.status, []byte(tt.head)); got != tt.want {
-				t.Errorf("decide(%s, %d, %s) = %+v, want %+v", method, tt.status, tt.head, got, tt.want)
+			if got := decide(!tt.read, tt.status, []byte(tt.head)); got != tt.want {
+				t.Errorf("decide(%t, %d, %s) = %+v, want %+v", !tt.read, tt.status, tt.head, got, tt.want)
 			}
 		})
 	}
@@ -244,6 +243,14 @@ func TestFinalStatusDeliveredUnchanged(t *testing.T) {
 		if n := len(e.requests()); n != 1 {
 			t.Errorf("%d: engine got %d requests, want 1", status, n)
 		}
+	}
+}
+
+func TestQueryInternalErrorDelivered(t *testing.T) {
+	e := newEngine(t, reply{500, `{"error": "internal", "message": "x"}`, nil}, reply{200, `{"cells": []}`, nil})
+	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/"+testModel+"/query", []byte(`{}`), nil)
+	if got.status != 500 || len(e.requests()) != 1 {
+		t.Fatalf("got %d %s after %d requests, want the 500 of a read after 1 request", got.status, got.body, len(e.requests()))
 	}
 }
 
