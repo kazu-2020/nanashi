@@ -50,6 +50,7 @@ cargo test --release --workspace --manifest-path native/Cargo.toml   # Rust unit
 ```
 
 If you change `native/`, build again with `maturin develop` before you run the Python tests.
+If you edit and test in a loop, use `--profile quick` in place of `--release`. The `quick` profile has no LTO and uses incremental builds, so a rebuild after an engine edit takes about 3-17 s, not about 55 s. Use `--release` for benchmarks.
 The tests read the `nanashi_core` that is installed in `.venv`.
 If you did not build `nanashi_core`, the tests for the Rust engine do not fail, but they are skipped.
 Thus, also look at the number of skipped tests.
