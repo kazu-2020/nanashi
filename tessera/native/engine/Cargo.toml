@@ -11,4 +11,5 @@ imbl = "7.0"
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
 arrow-array = "60"
 arrow-schema = "60"
+arrow-ipc = { version = "60", default-features = false }
 bytes = "1"

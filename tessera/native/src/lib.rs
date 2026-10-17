@@ -3,12 +3,12 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
+use nanashi_engine::{eval, graph, ipc, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::pybacked::PyBackedBytes;
+use pyo3::pybacked::{PyBackedBytes, PyBackedStr};
 use pyo3::types::{PyBool, PyBytes, PyDict, PyIterator, PyList, PyString, PyTuple};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1585,6 +1585,31 @@ fn read_parquet(
     py.detach(move || pq::read(Bytes::from_owner(data), &names, value, &sizes)).map_err(err)
 }
 
+/// The Arrow IPC stream of a POST /query result (ipc::query_stream). Each part is (Metric id, rows, at):
+/// rows are the cached rows of a summary ([member id..., value]), and at[j] is the row position of dimension j
+/// of the query, or None if the Metric does not have dimension j.
+#[pyfunction]
+fn query_arrow<'py>(
+    py: Python<'py>,
+    seq: u64,
+    dims: Vec<String>,
+    parts: Vec<(String, Bound<'py, PyList>, Vec<Option<usize>>)>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let parts = parts
+        .into_iter()
+        .map(|(metric, rows, at)| {
+            let rows = rows.iter().map(|r| r.cast_into::<PyList>().map_err(PyErr::from)).collect::<PyResult<Vec<_>>>()?;
+            let column = |i: usize| rows.iter().map(|r| r.get_item(i)?.extract::<PyBackedStr>()).collect::<PyResult<Vec<_>>>();
+            let coords = at.iter().map(|a| a.map(column).transpose()).collect::<PyResult<Vec<_>>>()?;
+            let values = rows.iter().map(|r| r.get_item(r.len().saturating_sub(1))?.extract::<f64>()).collect::<PyResult<Vec<_>>>()?;
+            Ok(ipc::Part { metric, coords, values })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    // Borrow parts, so that they drop after detach. A drop without the thread state puts each decref in a global pool.
+    let buf = py.detach(|| ipc::query_stream(seq, &dims, &parts)).map_err(PyRuntimeError::new_err)?;
+    Ok(PyBytes::new(py, &buf))
+}
+
 /// Parquet のフッターのキーと値（本体は読まない）。
 #[pyfunction]
 fn parquet_metadata(py: Python<'_>, data: PyBackedBytes) -> PyResult<Vec<(String, String)>> {
@@ -1599,6 +1624,7 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(query_arrow, m)?)?;
     m.add("Diagnostic", m.py().get_type::<Diagnostic>())?;
     m.add_class::<Core>()?;
     m.add_class::<Expr>()?;

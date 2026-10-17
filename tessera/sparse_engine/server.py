@@ -98,6 +98,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .core import Dimension
+from .engine import native
 from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
 from .model import DuplicateId, Metric
@@ -520,6 +521,8 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, body: Any) -> None:
         if isinstance(body, _Text):
             data, kind = body.encode("utf-8"), "text/plain; version=0.0.4; charset=utf-8"
+        elif isinstance(body, _Arrow):
+            data, kind = bytes(body), ARROW_STREAM
         else:
             data, kind = _dumps(body).encode("utf-8"), "application/json; charset=utf-8"
         self.send_response(status)
@@ -741,13 +744,17 @@ class Handler(BaseHTTPRequestHandler):
         groups = sum(_groups(v, m, keep, coords) for m, keep, coords, _ in jobs)
         if groups > self.server.max_cells:
             raise ApiError(413, "too_large", f"集計の結果が最大 {groups:,} 件になり、上限 {self.server.max_cells:,} を超える")
-        cells = []
+        parts = []
         for m, keep, coords, a in jobs:
             out = self.server.summaries.get(v, _summary_key(m, a, keep, coords),
                                             lambda: _summary_out(v.summarize(m.id, coords, keep=keep, agg=a)))
-            at = [out["dims"].index(d) if d in out["dims"] else None for d in dims]
-            for row in out["cells"]:
-                cells.append({"metric": m.id, "coords": ["" if i is None else row[i] for i in at],
+            parts.append((m.id, out["cells"], [out["dims"].index(d) if d in out["dims"] else None for d in dims]))
+        if wants_arrow(self.headers.get("Accept")):
+            return 200, _Arrow(native().query_arrow(v.seq, dims, parts))
+        cells = []
+        for mid, rows, at in parts:
+            for row in rows:
+                cells.append({"metric": mid, "coords": ["" if i is None else row[i] for i in at],
                               "value": {"number": _number_out(row[-1])}})
         return 200, {"seq": v.seq, "dimensions": dims, "cells": cells}
 
@@ -824,6 +831,26 @@ def _metrics_out(n: Names) -> dict:
 
 class _Text(str):
     """JSON でなく、テキストのまま返す応答の本文。"""
+
+
+class _Arrow(bytes):
+    """An Arrow IPC stream body."""
+
+
+ARROW_STREAM = "application/vnd.apache.arrow.stream"
+
+
+def wants_arrow(accept: str | None) -> bool:
+    """Return True if the Accept header names the Arrow IPC stream with a q above 0."""
+    for r in (accept or "").split(","):
+        kind, *params = [x.strip().lower() for x in r.split(";")]
+        if kind == ARROW_STREAM:
+            q = next((p[2:] for p in params if p.startswith("q=")), "1")
+            try:
+                return float(q) > 0
+            except ValueError:
+                return False
+    return False
 
 
 def role_of(ws) -> str:
