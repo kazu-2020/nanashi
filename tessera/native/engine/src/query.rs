@@ -263,7 +263,6 @@ impl Store {
     fn sorted(&self, radix: &[Radix], tests: &[Test], items: &[Item], rows: usize, agg: ReadAgg, cat: &Catalog, b: &Budget) -> Result<Groups> {
         let dims: Vec<DimId> = radix.iter().map(|x| x.dim).collect();
         let out = Packing::new(&dims, cat)?;
-        // The parts (sized to their bounds, at most rows in all) and the concatenated pairs
         let live_rows = rows.saturating_mul(2).saturating_add((items.len() * size_of::<Vec<(u64, f64)>>()).div_ceil(CELL_BYTES));
         b.need(live_rows, "集計")?;
         let pair = |k: u64| -> Option<u64> {
@@ -277,7 +276,7 @@ impl Store {
             }
             Some(o)
         };
-        // An item gives at most its base rows and its delta keys, so no part grows and the parts hold at most rows pairs
+        // A part sized to its bound never grows, so the parts hold at most rows pairs
         let fill = |it: &Item| {
             let mut p = Vec::with_capacity(it.rows.len() + self.delta.range(it.keys.clone()).count());
             scan(self, tests, it, |k, v| p.extend(pair(k).map(|o| (o, v))));
@@ -653,7 +652,6 @@ mod tests {
         assert!(over(run(1 << 20)));
     }
 
-    /// The key ranges and the Items count with the budget: here 100k partition members and one delta cell give 100k of each.
     #[test]
     fn the_key_ranges_and_the_items_count() {
         let dims = [1 << 20, 3].iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();

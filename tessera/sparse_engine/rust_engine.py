@@ -385,7 +385,7 @@ class RustEngine:
         return rows, total
 
     def summarize(self, store, dims, keep, agg, restrict, cat):
-        """One pass in the engine (Store::summarize). The engine also gives the member ids of the groups."""
+        """One pass in the engine (Store::summarize)."""
         order = tuple(d for d in dims if d in keep)
         coords, values = self.core.summarize(store, [self._dim(cat, d) for d in order], self._region(cat, restrict),
                                              agg, [cat.dimension(d).ids for d in order])

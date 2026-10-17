@@ -675,7 +675,6 @@ impl Core {
         if ids.len() != g.cols.len() {
             return Err(err(format!("ids の数 {} が残す軸の数 {} と違う", ids.len(), g.cols.len())));
         }
-        // The tuples refer to the id strings of the lists: no new Python object for each group.
         let cols = g.cols.iter().zip(&ids).map(|(c, l)| {
             PyTuple::new(py, c.iter().map(|&i| l.get_item(i as usize)).collect::<PyResult<Vec<_>>>()?)
         }).collect::<PyResult<_>>()?;

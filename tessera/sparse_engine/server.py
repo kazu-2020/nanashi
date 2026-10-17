@@ -204,8 +204,7 @@ def _summary_key(m: Metric, agg: str, keep: list[str], coords: dict[str, Any]) -
 
 
 def _groups(v, m: Metric, keep: list[str], coords: dict[str, Any]) -> int:
-    """The most groups of a summary: the product of the selected member counts of the kept dimensions. A
-    repeated member id counts one time."""
+    """The most groups of a summary: the product of the selected member counts of the kept dimensions."""
     groups = 1
     for d in keep:
         if d in m.dims:

@@ -13,7 +13,7 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m native/Cargo.toml
 ```
 
 `pyproject.toml` sets the versions of the dependencies.
-At run time, the engine needs no Python packages.
+At run time, the engine needs no Python packages, except `RustEngine.from_arrays` (benchmark only), which needs numpy.
 For development, it uses maturin, psycopg, boto3 and pyflakes, and numpy to make the benchmark input.
 The last line builds the Rust engine (`nanashi_core`) and installs it in `.venv`.
 Without the Rust engine, you can calculate with only the reference implementation engine.
