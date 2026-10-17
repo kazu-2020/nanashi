@@ -275,28 +275,6 @@ class BudgetBeforeAllocation(unittest.TestCase):
                 finally:
                     m.remove_metric("Z")
 
-    def test_aggregation_checks_the_budget_before_its_buffers(self):
-        # 200,000 groups take the sort path. Its pairs and its 2 results (SUM and COUNT) are about 9.2 MiB
-        import nanashi_core
-        n = 200_000
-        for max_bytes, refused in [(8 << 20, True), (12 << 20, False)]:
-            with self.subTest(max_bytes=max_bytes):
-                m = Named(Model(engine=RustEngine(max_bytes=max_bytes, fuse=False, par_min=1 << 40)))
-                m.add_dimension("X", [f"x{i}" for i in range(n)])
-                m.add_dimension("Y", ["y0"])
-                m.add_input("A", ["X", "Y"], {(f"x{i}", "y0"): 1.0 for i in range(n)})
-                m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
-                nanashi_core.reset_heap_peak()
-                before = nanashi_core.heap()[0]
-                if refused:
-                    with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
-                        m.recalc()
-                else:
-                    m.recalc()
-                    self.assertEqual(m.get("Z", X="x7"), 1.0)
-                # The stored data counts against the budget too
-                self.assertLess(nanashi_core.heap()[1] - before + m.memory()["A"]["base"], max_bytes, "a buffer was made before the check")
-
 
 class Memory(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -351,6 +329,58 @@ class Logs(unittest.TestCase):
         self.assertEqual(len(m.eval_log), LOG_MAX)
         self.assertEqual(len(m.slice_log), LOG_MAX)
         self.assertEqual(m.eval_log[-1], "Y")
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class AggregationBudget(unittest.TestCase):
+    """Each aggregation path checks the budget before it makes its buffers. The run at the fitting budget is
+    accepted. The run below it is refused before it goes over max_bytes."""
+
+    def check(self, build, fit, below, **cfg):
+        import nanashi_core
+        for max_bytes, refused in [(below, True), (fit, False)]:
+            with self.subTest(max_bytes=max_bytes):
+                m = Named(Model(engine=RustEngine(max_bytes=max_bytes, fuse=False, par_min=1 << 40, **cfg)))
+                at, want = build(m)
+                held = sum(v.get("base", 0) for v in m.memory().values())
+                nanashi_core.reset_heap_peak()
+                base = nanashi_core.heap()[0]
+                if refused:
+                    with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+                        m.recalc()
+                else:
+                    m.recalc()
+                    self.assertEqual(m.get("Z", **at), want)
+                self.assertLessEqual(held + nanashi_core.heap()[1] - base, max_bytes, "a buffer was made before the check")
+
+    @staticmethod
+    def grid(m, nx, ny, rows):
+        m.add_dimension("X", [f"x{i}" for i in range(nx)])
+        m.add_dimension("Y", [f"y{j}" for j in range(ny)])
+        m.add_input("A", ["X", "Y"], {(f"x{i}", f"y{j}"): 1.0 for i in range(nx) for j in range(rows)})
+        m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
+        return {"X": "x7"}, float(rows)
+
+    def test_sort_path(self):
+        # 200,000 groups take the sort path. Its pairs and its 2 results (SUM and COUNT) are about 9.2 MiB
+        self.check(lambda m: self.grid(m, 200_000, 1, 1), fit=12 << 20, below=8 << 20)
+
+    def test_dense_path(self):
+        # The partitioned fill checks 3 arrays (1.2 MiB each) first. Only 1 array stays while the result is made
+        self.check(lambda m: self.grid(m, 40_000, 10, 10), fit=int(7.5 * (1 << 20)), below=7 << 20, scatter_bytes=0)
+
+    def test_table_path(self):
+        # BY SUM with a member Metric uses the mapping table (1.1 MiB) and a hash map of 3,600 groups
+        def build(m):
+            ne, nm, nd = 24_000, 12, 300
+            m.add_dimension("E", [f"e{i}" for i in range(ne)])
+            m.add_dimension("M", [f"m{i}" for i in range(nm)])
+            m.add_dimension("D", [f"d{i}" for i in range(nd)])
+            m.add_input("S", ["E", "M"], {(f"e{i}", f"m{t}"): 1.0 for i in range(ne) for t in range(nm)})
+            m.add_input("DeptOf", ["E", "M"], {(f"e{i}", f"m{t}"): f"d{i % nd}" for i in range(ne) for t in range(nm)}, kind="member:D")
+            m.add_formula("Z", ["D", "M"], "S[BY SUM: E.DeptOf]")
+            return {"D": "d7", "M": "m3"}, ne / nd
+        self.check(build, fit=int(7.5 * (1 << 20)), below=7 << 20)
 
 
 if __name__ == "__main__":
