@@ -36,6 +36,13 @@ The server also ignores a Metric that the model does not have. An unknown dimens
 For a Metric that is not a number, the server does not use `aggregation`. It gives the count of the cells (COUNT).
 In a result, a dimension is a dimension UUID, a member is a member UUID, and a value of a member-type Metric is a member UUID.
 A formula can make an infinite or NaN value (for example `1e308 * 2`). JSON has no such numbers, so a result gives `null` for them, as JavaScript `JSON.stringify` does.
+If the `Accept` header of `POST /query` names `application/vnd.apache.arrow.stream`, the answer is an Arrow IPC stream with that `Content-Type`.
+The server does not examine `q` or other parameters in `Accept`. Without this media type, the answer is JSON.
+The stream has 1 record batch. Its columns are `metric`, 1 column for each dimension of the query (the dimension UUID is the column name), and `value`.
+`metric` and the dimension columns are UTF-8 dictionary arrays with Int32 keys. A dimension column is null for a Metric that does not have the dimension.
+`value` is float64 and keeps NaN and the infinities. The schema metadata has `seq`, and the `X-Seq` header has the same number.
+Errors stay JSON. The limit of `--max-cells` and the summary cache are the same for the 2 formats.
+`nanashi_core` (`ipc.rs`) makes the stream, so a server with the reference engine also needs `nanashi_core` for it.
 An op is an object with `op` (the operation name) and the arguments by name, for example `{"op": "add_member", "dim": "<uuid>", "id": "<uuid>", "name": "A"}`.
 `WRITE_OPS` in `server.py` lists the permitted operations:
 

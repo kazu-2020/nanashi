@@ -217,6 +217,39 @@ class Api:
         self.assertEqual((status, len(out["cells"])), (200, 4))
         self.assertEqual(summarize.call_count, 1)
 
+    def test_query_as_arrow(self):
+        if RustEngine is None:
+            self.skipTest("nanashi_core がない")
+        import nanashi_core
+        ws = self.ws
+        stock, total = mid(ws, "Stock"), mid(ws, "Total")
+        product, month = did(ws, "Product"), did(ws, "Month")
+        p1, p2, jan = xid(ws, "Product", "p1"), xid(ws, "Product", "p2"), xid(ws, "Month", "Jan")
+        body = {"metrics": [stock, total], "rows": [month], "columns": [product],
+                "filters": {product: {"ids": [p1, p2]}, month: {"ids": [jan]}}}
+
+        def post(accept: str, body: dict):
+            req = urllib.request.Request(self.c.url + "/query", data=json.dumps(body).encode(), method="POST",
+                                         headers={**self.c.headers, "Content-Type": "application/json", "Accept": accept})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, r.headers, r.read()
+            except urllib.error.HTTPError as e:
+                return e.code, e.headers, e.read()
+
+        with mock.patch.object(Model, "summarize", autospec=True, side_effect=Model.summarize) as summarize:
+            status, headers, data = post("text/html, application/vnd.apache.arrow.stream;q=0.9", body)
+            self.assertEqual(self.c.post("/query", body)[0], 200)
+        self.assertEqual(summarize.call_count, 2, "JSON uses the results that the Arrow read put in the cache")
+        self.assertEqual((status, headers["Content-Type"], headers["X-Seq"]), (200, "application/vnd.apache.arrow.stream", "0"))
+        # Total has neither dimension of the query, so its member columns are null.
+        want = nanashi_core.query_arrow(0, [month, product], [(stock, [[jan, p1, 100.0], [jan, p2, 100.0]], [0, 1]),
+                                                              (total, [[8000.0]], [None, None])])
+        self.assertEqual(data, want)
+        status, headers, data = post("application/vnd.apache.arrow.stream", {"metrics": [stock], "rows": [product, month]})
+        self.assertEqual((status, headers["Content-Type"], json.loads(data)["error"]),
+                         (413, "application/json; charset=utf-8", "too_large"))
+
     def test_member_values_are_uuids(self):
         v = Named(self.ws.version)
         ops = [{"op": "add_input", "id": "m-pick", "name": "Pick", "dims": [did(self.ws, "Product")],
