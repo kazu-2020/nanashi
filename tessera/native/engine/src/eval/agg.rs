@@ -61,10 +61,11 @@ impl Acc {
 }
 
 /// Sort the (group key, value) pairs and aggregate each run of the same key. Gives one Cube for each of aggs,
-/// in key order.
-pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, aggs: &[Agg]) -> Vec<Cube> {
+/// in key order. b counts the pairs and the result before the result is made.
+pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, aggs: &[Agg], b: &Budget) -> Result<Vec<Cube>> {
     sort_cells(cfg, &mut pairs);
-    let mut cells = vec![Vec::new(); aggs.len()];
+    let groups = pairs.len().min(1) + pairs.windows(2).filter(|w| w[0].0 != w[1].0).count();
+    let mut cells = out_cells(aggs, groups, pairs.capacity(), b)?;
     let mut i = 0;
     while i < pairs.len() {
         let mut acc = Acc::new();
@@ -75,7 +76,15 @@ pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, agg
         }
         push_group(&mut cells, aggs, k, |a| acc.finish(a));
     }
-    cubes(pack, cells)
+    Ok(cubes(pack, cells))
+}
+
+/// One empty cell list for each of aggs, with room for `groups` cells. Err if the lists do not fit in b with the
+/// `live` cells that the caller still holds. A Low list gets no room, because most residuals are 0.
+fn out_cells(aggs: &[Agg], groups: usize, live: usize, b: &Budget) -> Result<Vec<Vec<(u64, f64)>>> {
+    let room = |a: &Agg| if *a == Agg::Low { 0 } else { groups };
+    b.need(live.saturating_add(aggs.iter().map(room).sum()), "集計")?;
+    Ok(aggs.iter().map(|a| Vec::with_capacity(room(a))).collect())
 }
 
 /// Push the result of each of aggs for group k. A Low (residual) of 0 is not a cell: a missing residual means 0,
@@ -145,12 +154,13 @@ impl Rows {
 
     /// Maps each row with `f` and drops the None results. On many rows the parts run in parallel and
     /// write directly into one array, so only that array is held while it is made.
-    pub(crate) fn collect(&self, cfg: &Config, f: impl Fn(u64, f64) -> Option<(u64, f64)> + Sync) -> Vec<(u64, f64)> {
+    pub(crate) fn collect(&self, cfg: &Config, b: &Budget, f: impl Fn(u64, f64) -> Option<(u64, f64)> + Sync) -> Result<Vec<(u64, f64)>> {
         let (n, chunk) = (self.len(), cfg.chunk.max(1));
+        b.need(n, "集計")?;
         if !cfg.par(n) {
-            let mut cells = Vec::new();
+            let mut cells = Vec::with_capacity(n);
             self.for_each_in(0..n, |k, v| cells.extend(f(k, v)));
-            return cells;
+            return Ok(cells);
         }
         let mut cells = vec![(0u64, 0f64); n];
         let fill = |(c, part): (usize, &mut [(u64, f64)])| {
@@ -166,7 +176,7 @@ impl Rows {
         let sizes: Vec<usize> = (0..n).step_by(chunk).map(|lo| chunk.min(n - lo)).collect();
         let written: Vec<usize> = cells.par_chunks_mut(chunk).enumerate().map(fill).collect();
         compact(&mut cells, &sizes, &written);
-        cells
+        Ok(cells)
     }
 
     pub(crate) fn into_cube(self) -> Cube {
@@ -235,15 +245,16 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, key: impl Fn(u64) -> Option
 }
 
 /// Finish each group into one cell for each of aggs, then sort the cells (16 B each, not the 64 B groups).
-pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, aggs: &[Agg]) -> Vec<Cube> {
-    let mut cells: Vec<Vec<(u64, f64)>> = aggs.iter().map(|&a| Vec::with_capacity(if a == Agg::Low { 0 } else { groups.len() })).collect();
+/// shortcut: b does not count the hash map, which few_groups keeps small; count it if stream_always is used in production.
+pub(crate) fn finish_groups(groups: FxHashMap<u64, Acc>, pack: Packing, aggs: &[Agg], b: &Budget) -> Result<Vec<Cube>> {
+    let mut cells = out_cells(aggs, groups.len(), 0, b)?;
     for (k, x) in groups {
         push_group(&mut cells, aggs, k, |a| x.finish(a));
     }
     for c in &mut cells {
         c.sort_unstable_by_key(|c| c.0);
     }
-    cubes(pack, cells)
+    Ok(cubes(pack, cells))
 }
 
 /// A run of nested REMOVE SUM nodes (the parser makes `REMOVE SUM: A, B` into nested nodes) is one aggregation
@@ -263,39 +274,39 @@ pub(crate) fn remove_run(dim: DimId, agg: Agg, child: &Node) -> (Vec<DimId>, &No
 
 /// Aggregate rows without the dimensions removed (REMOVE). r is the range of the result (to estimate the number
 /// of groups).
-pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Catalog, r: &Restrict) -> Result<Vec<Cube>> {
+pub(crate) fn remove_rows(rows: Rows, removed: &[DimId], aggs: &[Agg], cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Vec<Cube>> {
     let dims: Vec<DimId> = rows.pack().dims.iter().copied().filter(|d| !removed.contains(d)).collect();
     let out = Packing::new(&dims, cat)?;
     let proj = Proj::new(rows.pack(), &out);
-    Ok(aggregate_rows(rows, out, aggs, cat, r, move |xp, out, k| Some(proj.apply(xp, out, k))))
+    aggregate_rows(rows, out, aggs, cat, r, b, move |xp, out, k| Some(proj.apply(xp, out, k)))
 }
 
 /// key gives the group key (packed as out) from (row packing, out, row key). r is the range of the result.
 /// The array path is 2 to 3 times faster than the hash map (docs/performance.md), but it ignores r. Thus if r
 /// narrows the groups, or with stream_always, the hash map goes first.
-pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catalog, r: &Restrict, key: impl Fn(&Packing, &Packing, u64) -> Option<u64> + Sync) -> Vec<Cube> {
+pub(crate) fn aggregate_rows(rows: Rows, out: Packing, aggs: &[Agg], cat: &Catalog, r: &Restrict, b: &Budget, key: impl Fn(&Packing, &Packing, u64) -> Option<u64> + Sync) -> Result<Vec<Cube>> {
     let cfg = &cat.cfg;
     let xp = rows.pack();
     let k = |x| key(xp, &out, x);
     let groups = combos_in(&out.dims, cat, r);
     let dense_first = dense_first(cat, &out.dims, r);
     if dense_first {
-        if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, k) {
-            return c;
+        if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, b, k)? {
+            return Ok(c);
         }
     }
     if few_groups(cfg, aggs, groups, rows.len()) {
-        return finish_groups(fold_groups(cfg, &rows, k), out, aggs);
+        return finish_groups(fold_groups(cfg, &rows, k), out, aggs, b);
     }
     if !dense_first {
-        if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, k) {
-            return c;
+        if let Some(c) = dense_groups(cfg, &rows, &out, cat, aggs, b, k)? {
+            return Ok(c);
         }
     }
     // Do not copy the source: make the (group, value) pairs directly in one array, then sort them
-    let pairs = rows.collect(cfg, |x, v| k(x).map(|o| (o, v)));
+    let pairs = rows.collect(cfg, b, |x, v| k(x).map(|o| (o, v)))?;
     drop(rows);
-    group(cfg, pairs, out, aggs)
+    group(cfg, pairs, out, aggs, b)
 }
 
 /// True if aggregate_rows tries the array before the hash map: r does not narrow the groups and stream_always
@@ -312,12 +323,13 @@ pub(crate) struct Table {
 }
 
 impl Table {
-    pub(crate) fn of(v: &Store, target: DimId, cat: &Catalog) -> Option<Table> {
+    pub(crate) fn of(v: &Store, target: DimId, cat: &Catalog, b: &Budget) -> Result<Option<Table>> {
         let dense = combos_in(&v.pack.dims, cat, &Restrict::all(0));
         let rows = v.base_rows().unwrap_or_else(|| v.rows_hint()) as f64;
         if dense > (4.0 * rows).max((1u64 << 20) as f64) || dense > (1u64 << 27) as f64 {
-            return None;
+            return Ok(None);
         }
+        b.need((dense as usize).div_ceil(CELL_BYTES / 4), "集計")?;
         let mut strides = Vec::with_capacity(v.pack.dims.len());
         let mut w = 1usize;
         for &d in v.pack.dims.iter().rev() {
@@ -332,7 +344,7 @@ impl Table {
                 cells[i] = val as u32;
             }
         });
-        Some(Table { cells, strides })
+        Ok(Some(Table { cells, strides }))
     }
 }
 
@@ -340,7 +352,8 @@ impl Table {
 /// each cell of x, look up its target member of T in the mapping table and add the value to that group.
 /// removed are the dimensions of the REMOVE run. If T is one of them, the result has no T.
 /// Use it only for a full evaluation with no range limit and a mapping table in stored data. Else returns None.
-pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &Store, aggs: &[Agg], cat: &Catalog, r: &Restrict) -> Result<Option<Vec<Cube>>> {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &Store, aggs: &[Agg], cat: &Catalog, r: &Restrict, b: &Budget) -> Result<Option<Vec<Cube>>> {
     let cfg = &cat.cfg;
     let xp = x.pack();
     if removed.iter().any(|d| *d != target && xp.pos(*d).is_none()) || !v.pack.dims.iter().all(|d| xp.pos(*d).is_some()) {
@@ -351,7 +364,7 @@ pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &St
     if !few_groups(cfg, aggs, combos_in(&dims, cat, r), x.len()) {
         return Ok(None);
     }
-    let Some(table) = Table::of(v, target, cat) else { return Ok(None) };
+    let Some(table) = Table::of(v, target, cat, b)? else { return Ok(None) };
     let out = Packing::new(&dims, cat)?;
     let (proj, pt) = (Proj::new(xp, &out), out.pos(target));
     let at: Vec<(usize, usize)> = table.strides.iter().map(|&(d, s)| (xp.pos(d).unwrap(), s)).collect();
@@ -360,7 +373,8 @@ pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &St
         let t = table.cells[i];
         (t != u32::MAX).then(|| proj.apply(xp, &out, k) | pt.map_or(0, |p| out.put(p, t)))
     });
-    Ok(Some(finish_groups(groups, out, aggs)))
+    drop(table);
+    finish_groups(groups, out, aggs, b).map(Some)
 }
 
 /// 集計先の全組み合わせの数がこれ以下なら、全組み合わせの配列へ足し込む経路を考える。
@@ -370,13 +384,13 @@ const DENSE_MAX: usize = 1 << 26;
 /// arrays are larger than the (group, value) pairs (16 B a row) of the sort path, returns None. For MIN, MAX or
 /// COUNT alone, the limit is half of the pairs. key gives the group key (packed as out) of a row key. Gives one
 /// Cube for each of aggs (Min, Max and First only alone), in key order.
-pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, aggs: &[Agg], key: impl Fn(u64) -> Option<u64> + Sync) -> Option<Vec<Cube>> {
+pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catalog, aggs: &[Agg], b: &Budget, key: impl Fn(u64) -> Option<u64> + Sync) -> Result<Option<Vec<Cube>>> {
     let d = Dense { cfg, rows, out, cat, aggs, key };
     match aggs {
-        [Agg::First] => None,
-        [Agg::Min] => d.fold(i64::MAX, |x, v| *x = (*x).min(min_key(v)), |x, o| *x = (*x).min(*o), |x, _, _| from_key(*x), 8),
-        [Agg::Max] => d.fold(i64::MIN, |x, v| *x = (*x).max(max_key(v)), |x, o| *x = (*x).max(*o), |x, _, _| from_key(*x), 8),
-        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64, 8),
+        [Agg::First] => Ok(None),
+        [Agg::Min] => d.fold(i64::MAX, |x, v| *x = (*x).min(min_key(v)), |x, o| *x = (*x).min(*o), |x, _, _| from_key(*x), 8, b),
+        [Agg::Max] => d.fold(i64::MIN, |x, v| *x = (*x).max(max_key(v)), |x, o| *x = (*x).max(*o), |x, _, _| from_key(*x), 8, b),
+        [Agg::Count] => d.fold((), |_, _| {}, |_, _| {}, |_, n, _| n as f64, 8, b),
         _ => d.fold(
             ExactSum::default(),
             |s, v| s.add(v),
@@ -389,6 +403,7 @@ pub(crate) fn dense_groups(cfg: &Config, rows: &Rows, out: &Packing, cat: &Catal
                 Agg::Min | Agg::Max | Agg::First => unreachable!("only alone"),
             },
             16,
+            b,
         ),
     }
 }
@@ -433,11 +448,12 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         merge: impl Fn(&mut T, &T),
         finish: impl Fn(&T, u32, Agg) -> f64,
         row_bytes: usize,
-    ) -> Option<Vec<Cube>> {
+        b: &Budget,
+    ) -> Result<Option<Vec<Cube>>> {
         let (cfg, rows, out) = (self.cfg, self.rows, self.out);
         let n = rows.len();
         let sizes: Vec<usize> = out.dims.iter().map(|&d| self.cat.dims[d].size.max(1) as usize).collect();
-        let slots = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX))?;
+        let Some(slots) = sizes.iter().try_fold(1usize, |a, &s| a.checked_mul(s).filter(|&x| x <= DENSE_MAX)) else { return Ok(None) };
         let parts = if cfg.par(n) { rayon::current_num_threads().max(1) } else { 1 };
         // group key -> array index (the first dimension is the highest digit, so the index order is the key order)
         let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
@@ -450,9 +466,12 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         };
         // The partitioned fill has one array, and the buffers of a round have about the memory of 1.25 arrays
         let arrays = if partitioned { 3 } else { parts };
-        if !cfg.dense_always && slots.saturating_mul(arrays).saturating_mul(tuple_bytes) > n.saturating_mul(row_bytes) {
-            return None;
+        let array_bytes = slots.saturating_mul(arrays).saturating_mul(tuple_bytes);
+        if !cfg.dense_always && array_bytes > n.saturating_mul(row_bytes) {
+            return Ok(None);
         }
+        let array_cells = array_bytes.div_ceil(CELL_BYTES);
+        b.need(array_cells, "集計")?;
         let g: Vec<(T, u32)> = if partitioned {
             let mut g = vec![(init, 0u32); slots];
             let buckets = slots.div_ceil(BUCKET);
@@ -536,7 +555,8 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             }
             g
         };
-        let mut cells = vec![Vec::new(); self.aggs.len()];
+        let groups = g.iter().filter(|e| e.1 > 0).count();
+        let mut cells = out_cells(self.aggs, groups, array_cells, b)?;
         for (s, (x, cnt)) in g.iter().enumerate() {
             if *cnt == 0 {
                 continue;
@@ -548,7 +568,7 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
             }
             push_group(&mut cells, self.aggs, k, |a| finish(x, *cnt, a));
         }
-        Some(cubes(out.clone(), cells))
+        Ok(Some(cubes(out.clone(), cells)))
     }
 }
 
@@ -598,15 +618,16 @@ mod tests {
             .collect();
         let key = |k: u64| (!k.is_multiple_of(7)).then_some(k);
         let rows = Rows::Owned(Cube { pack: out.clone(), kind: Kind::Num, cells: cells.clone() });
+        let bud = Budget::new(usize::MAX, 0);
         let bits = |c: Vec<Cube>| -> Vec<Vec<(u64, u64)>> { c.iter().map(|c| c.cells.iter().map(|&(k, v)| (k, v.to_bits())).collect()).collect() };
         for aggs in [vec![Agg::Sum, Agg::Low, Agg::Count, Agg::Avg], vec![Agg::Min], vec![Agg::Max], vec![Agg::Count]] {
             let pairs = cells.iter().filter_map(|&(k, v)| key(k).map(|o| (o, v))).collect();
-            let want = bits(group(&cat.cfg, pairs, out.clone(), &aggs));
+            let want = bits(group(&cat.cfg, pairs, out.clone(), &aggs, &bud).unwrap());
             assert!(want[0].len() > 40_000, "most slots are used");
             for (par_min, scatter_bytes) in [(0, 0), (0, usize::MAX), (usize::MAX, 0), (usize::MAX, usize::MAX)] {
                 cat.cfg.par_min = par_min;
                 cat.cfg.scatter_bytes = scatter_bytes;
-                let got = bits(dense_groups(&cat.cfg, &rows, &out, &cat, &aggs, key).unwrap());
+                let got = bits(dense_groups(&cat.cfg, &rows, &out, &cat, &aggs, &bud, key).unwrap().unwrap());
                 assert_eq!(got, want, "{aggs:?} par_min={par_min} scatter_bytes={scatter_bytes}");
             }
         }

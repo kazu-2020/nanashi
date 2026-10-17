@@ -275,6 +275,28 @@ class BudgetBeforeAllocation(unittest.TestCase):
                 finally:
                     m.remove_metric("Z")
 
+    def test_aggregation_checks_the_budget_before_its_buffers(self):
+        # 200,000 groups take the sort path. Its pairs and its 2 results (SUM and COUNT) are about 9.2 MiB
+        import nanashi_core
+        n = 200_000
+        for max_bytes, refused in [(8 << 20, True), (12 << 20, False)]:
+            with self.subTest(max_bytes=max_bytes):
+                m = Named(Model(engine=RustEngine(max_bytes=max_bytes, fuse=False, par_min=1 << 40)))
+                m.add_dimension("X", [f"x{i}" for i in range(n)])
+                m.add_dimension("Y", ["y0"])
+                m.add_input("A", ["X", "Y"], {(f"x{i}", "y0"): 1.0 for i in range(n)})
+                m.add_formula("Z", ["X"], "A[REMOVE SUM: Y]")
+                nanashi_core.reset_heap_peak()
+                before = nanashi_core.heap()[0]
+                if refused:
+                    with self.assertRaisesRegex(ValueError, "メモリの予算を超える"):
+                        m.recalc()
+                else:
+                    m.recalc()
+                    self.assertEqual(m.get("Z", X="x7"), 1.0)
+                # The stored data counts against the budget too
+                self.assertLess(nanashi_core.heap()[1] - before + m.memory()["A"]["base"], max_bytes, "a buffer was made before the check")
+
 
 class Memory(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
