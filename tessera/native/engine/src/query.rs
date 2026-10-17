@@ -156,7 +156,11 @@ impl Store {
     fn summarize_with<A: Acc>(&self, keep: &[DimId], r: &Restrict, agg: ReadAgg, cat: &Catalog, b: &Budget) -> Result<Groups> {
         // The remap and member_of_rank of each kept dimension: at most 8 B a member
         let kept = self.metric_dims.iter().filter(|d| keep.contains(d)).map(|&d| cat.dims[d].size as usize * 8).sum::<usize>();
-        b.take(kept.div_ceil(CELL_BYTES), "集計")?;
+        // The key ranges and the Items: each range gives one Item, plus one Item for each block border that it crosses
+        let n = self.pack.dims.first().and_then(|&d| r.get(d)).map_or(1, |s| s.members.len());
+        let blocks = self.base.segs.iter().map(|g| g.keys.blocks()).sum::<usize>();
+        let work = n.saturating_mul(size_of::<RangeInclusive<u64>>()).saturating_add(n.saturating_add(blocks).saturating_mul(size_of::<Item>()));
+        b.take(kept.saturating_add(work).div_ceil(CELL_BYTES), "集計")?;
         let radix = radix(self, keep, r, cat);
         let tests = tests(&self.pack, r);
         let items = items(&self.base.segs, self.delta.is_empty(), &ranges(&self.pack, r));
@@ -259,7 +263,8 @@ impl Store {
     fn sorted(&self, radix: &[Radix], tests: &[Test], items: &[Item], rows: usize, agg: ReadAgg, cat: &Catalog, b: &Budget) -> Result<Groups> {
         let dims: Vec<DimId> = radix.iter().map(|x| x.dim).collect();
         let out = Packing::new(&dims, cat)?;
-        let live_rows = rows.saturating_mul(2);
+        // The parts (sized to their bounds, at most rows in all) and the concatenated pairs
+        let live_rows = rows.saturating_mul(2).saturating_add((items.len() * size_of::<Vec<(u64, f64)>>()).div_ceil(CELL_BYTES));
         b.need(live_rows, "集計")?;
         let pair = |k: u64| -> Option<u64> {
             let mut o = 0;
@@ -272,12 +277,13 @@ impl Store {
             }
             Some(o)
         };
-        let fill = |mut p: Vec<(u64, f64)>, it: &Item| {
+        // An item gives at most its base rows and its delta keys, so no part grows and the parts hold at most rows pairs
+        let fill = |it: &Item| {
+            let mut p = Vec::with_capacity(it.rows.len() + self.delta.range(it.keys.clone()).count());
             scan(self, tests, it, |k, v| p.extend(pair(k).map(|o| (o, v))));
             p
         };
-        let parts: Vec<Vec<(u64, f64)>> =
-            if self.cfg.par(rows) { items.par_iter().fold(Vec::new, fill).collect() } else { vec![items.iter().fold(Vec::new(), fill)] };
+        let parts: Vec<Vec<(u64, f64)>> = if self.cfg.par(rows) { items.par_iter().map(fill).collect() } else { items.iter().map(fill).collect() };
         let pairs = parts.concat();
         drop(parts);
         let a = match agg {
@@ -645,6 +651,19 @@ mod tests {
         let run = |bytes: usize| st.summarize(&[0], &Restrict::all(2), ReadAgg::Sum, &cat, &Budget::new(bytes, 0));
         assert_eq!(run(9 << 20).unwrap().vals.len(), 100);
         assert!(over(run(1 << 20)));
+    }
+
+    /// The key ranges and the Items count with the budget: here 100k partition members and one delta cell give 100k of each.
+    #[test]
+    fn the_key_ranges_and_the_items_count() {
+        let dims = [1 << 20, 3].iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: Config { compact_min: usize::MAX, ..Config::default() } };
+        let mut st = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        st.write(&[5, 1], Some(1.0));
+        let r = Restrict::all(2).with(0, Sel::new((0..100_000).collect(), 1 << 20));
+        let run = |bytes: usize| st.summarize(&[1], &r, ReadAgg::Count, &cat, &Budget::new(bytes, 0));
+        assert_eq!(run(usize::MAX).unwrap(), Groups { cols: vec![vec![1]], vals: vec![1.0] });
+        assert!(over(run(4 << 20)));
     }
 
     /// The Spill of a run lives for a short time, so it does not use the budget again for each run.
