@@ -453,8 +453,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json(e.status, e.body)
 
     def _run(self, fn) -> None:
+        """Answer the (status, body) that fn returns. If fn returns None, it answered in a request slot."""
         try:
-            status, body = fn()
+            answer = fn()
         except ApiError as e:
             self._fail(e)
         except (DuplicateId, FormulaError, ValueError) as e:  # A bad request (Model raises ValueError for a user error)
@@ -464,7 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("要求の処理に失敗した（error_id=%s）", error_id)
             self._fail(ApiError(500, "internal", "内部エラー", error_id=error_id))
         else:
-            self._json(status, body)
+            if answer is not None:
+                self._json(*answer)
 
     # ------------------------------------------------ 読み出し
 
@@ -478,13 +480,13 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:
-        self._serve(self._get)
+        self._serve(lambda: self._in_slot(self._get, SLOT_WAIT))
 
     def do_POST(self) -> None:
         self._serve(self._post)
 
     def _serve(self, fn) -> None:
-        """Answer 1 request on this connection in a request slot (503 busy if no slot frees up in time)."""
+        """Answer 1 request on this connection."""
         self.unread_body = "Transfer-Encoding" in self.headers or self.headers.get("Content-Length", "0") != "0"
         if self.server.stopping:
             self.close_connection = True
@@ -495,16 +497,19 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._fail(ApiError(400, "bad_request", "Transfer-Encoding と、値の違う Content-Length には対応しない"))
             return
-        if not self.server.begin_request():
+        if not self._misdirected():
+            self._run(fn)
+
+    def _in_slot(self, fn, wait: float) -> None:
+        """Run and answer fn in a request slot (503 busy if no slot frees up in wait seconds).
+        The answer is written in the slot, so responses in memory also stay below max_threads."""
+        if not self.server.begin_request(wait):
             if self.server.stopping:
                 self.close_connection = True
-                self._fail(ApiError(503, "closed", "サーバーは止まるところ"))
-            else:
-                self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
-            return
+                raise ApiError(503, "closed", "サーバーは止まるところ")
+            raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
         try:
-            if not self._misdirected():
-                self._run(fn)
+            self._run(fn)
         finally:
             self.server.end_request(probe=is_probe(self.path))
 
@@ -598,7 +603,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 書き込み
 
-    def _post(self) -> tuple[int, Any]:
+    def _post(self) -> None:
         url = urllib.parse.urlsplit(self.path)
         if [p for p in url.path.split("/") if p] != ["writes"]:
             raise ApiError(404, "not_found", f"{url.path} はない")
@@ -614,8 +619,21 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "bad_request", "Content-Length は整数") from None
         if length < 0 or length > self.server.max_body:
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
-        raw = self.rfile.read(length)
-        self.unread_body = False
+        # The body is read before the slot, so a slow client holds a body permit but no request slot.
+        # The write keeps the permit until it ends: bodies in memory stay below max_threads x max_body.
+        # The permit wait and the slot wait share 1 SLOT_WAIT, so the router attempt timeout stays valid.
+        start = time.monotonic()
+        if not self.server.begin_body(SLOT_WAIT):
+            raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
+        left = SLOT_WAIT - (time.monotonic() - start)
+        try:
+            raw = self.rfile.read(length)
+            self.unread_body = False
+            self._in_slot(lambda: self._write(user, raw), left)
+        finally:
+            self.server.end_body()
+
+    def _write(self, user: str | None, raw: bytes) -> tuple[int, Any]:
         try:
             body = json.loads(raw or b"{}", parse_float=_finite_number, parse_constant=_finite_number)
         except (ValueError, RecursionError):
@@ -815,11 +833,12 @@ class Server(ThreadingHTTPServer):
         self.model_id = model_id  # with a PgJournal: refuse requests that X-Nanashi-Model sends for another model
         self.max_threads = max_threads
         self._connections = threading.BoundedSemaphore(max_connections)  # each open connection holds a thread
+        self.bodies = threading.BoundedSemaphore(max_threads)  # write bodies that the server reads or holds
         self.summaries = SummaryCache(max_cells)
         self._thread: threading.Thread | None = None
         self.stopping = False
         # Requests in progress (probes too) and the monotonic time of the last use (probes not).
-        self._active, self._last, self._use = 0, time.monotonic(), threading.Condition()
+        self._active, self._reading, self._last, self._use = 0, 0, time.monotonic(), threading.Condition()
 
     def trusted(self, host: str) -> bool:
         """Return True if host is in one of the trusted_proxies."""
@@ -866,10 +885,10 @@ class Server(ThreadingHTTPServer):
             self._connections.release()
             self.shutdown_request(request)
 
-    def begin_request(self) -> bool:
-        """Take a request slot. Return False if no slot frees up in SLOT_WAIT seconds, or if the server stops."""
+    def begin_request(self, wait: float) -> bool:
+        """Take a request slot. Return False if no slot frees up in wait seconds, or if the server stops."""
         with self._use:
-            if not self._use.wait_for(lambda: self.stopping or self._active < self.max_threads, SLOT_WAIT) \
+            if not self._use.wait_for(lambda: self.stopping or self._active < self.max_threads, wait) \
                     or self.stopping:
                 return False
             self._active += 1
@@ -890,13 +909,27 @@ class Server(ThreadingHTTPServer):
             self._use.notify_all()  # a request that waits for a slot gets 503 closed
         super().shutdown()
 
+    def begin_body(self, wait: float) -> bool:
+        """Take a body permit. Return False if no permit frees up in wait seconds. A held permit counts as use."""
+        if not self.bodies.acquire(timeout=wait):
+            return False
+        with self._use:
+            self._reading += 1
+        return True
+
+    def end_body(self) -> None:
+        with self._use:
+            self._reading -= 1
+            self._last = time.monotonic()
+        self.bodies.release()
+
     def touch(self) -> None:
         with self._use:
             self._last = time.monotonic()
 
     def idle(self) -> float:
         with self._use:
-            return idle_for(self._active, self._last, time.monotonic())
+            return idle_for(self._active + self._reading, self._last, time.monotonic())
 
     @property
     def url(self) -> str:

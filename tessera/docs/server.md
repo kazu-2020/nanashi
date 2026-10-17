@@ -83,6 +83,7 @@ These are the limits:
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`).
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`).
 - The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 5 seconds, it gets 503 `busy`. The short wait keeps a write below the 70 seconds that the router gives an attempt.
+- The server reads the body of a write before it takes a slot. Thus a client that sends a body slowly does not block reads. Up to `--max-threads` writes can read or hold a body at the same time, so bodies use up to `--max-threads` × `--max-body` of memory. A write above this waits too. This wait and the wait for a slot share the same 5 seconds. Then the write gets 503 `busy`.
 - The server keeps up to 1024 connections open at the same time (`--max-connections`). Each open connection holds a thread. A connection above this gets 503 `busy`, and the server closes it.
 - If the read or write of a request stops for 30 seconds, the server closes the connection. The same limit closes a keep-alive connection that is idle.
 
@@ -129,7 +130,7 @@ On SIGTERM and SIGINT, the server completes the received requests, commits the w
 The standby sees the release at its next poll (0.2 seconds), gets the right, and becomes the writer.
 If the server crashes (SIGKILL), the failover occurs at the next poll after the lease expires.
 
-With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress, the count does not start. An open keep-alive connection with no request in progress does not keep the server alive. If the value is 0 (the default), the server does not stop for this reason.
+With `--idle-exit SECONDS`, the server stops on the same path when it gets no request for that time. Then it exits with code 0. Requests to `/health`, `/ready`, and `/stats` do not count, so a monitor does not keep the server alive. While a request is in progress or the server reads the body of a write, the count does not start. An open keep-alive connection with no request in progress does not keep the server alive. If the value is 0 (the default), the server does not stop for this reason.
 
 In the profit and loss plan (large), a read of 1 cell through HTTP takes 0.24 ms. A write that changes the salary of 1 employee takes 0.9 ms.
 A write while 8 readers read continuously takes 2.2 ms (`bench_http.py`, local loopback, about 2,800 reads per second).

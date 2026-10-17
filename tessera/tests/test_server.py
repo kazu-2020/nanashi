@@ -731,6 +731,25 @@ class KeepAlive(unittest.TestCase):
         self.assertEqual(s.recv(100), b"")
         self.assertEqual(self.ws.seq, 1)
 
+    @mock.patch("sparse_engine.server.SLOT_WAIT", 0.5)
+    def test_a_slow_body_does_not_hold_a_slot(self):
+        server = self.serve(max_threads=1)
+        body = json.dumps({"client_op_id": "s", "ops": [write(self.ws, "Stock", 1, Product="p0", Month="Jan")]}).encode()
+        s = self.connect(server)
+        s.sendall(f"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t-alice\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+                  + body[:1])
+        deadline = time.monotonic() + 5
+        while server.bodies.acquire(blocking=False):  # until the server holds the only body permit
+            server.bodies.release()
+            self.assertLess(time.monotonic(), deadline, "the server did not take the body permit")
+            time.sleep(0.01)
+        self.assertEqual(server.idle(), 0.0)  # --idle-exit does not stop the server during the upload
+        self.assertEqual(Client(server.url).get("/health"), (200, {"seq": 0, "role": "leader"}))
+        status, answer = Client(server.url).post("/writes", {"client_op_id": "t", "ops": [write(self.ws, "Stock", 2, Product="p0", Month="Jan")]})
+        self.assertEqual((status, answer["error"]), (503, "busy"))
+        status, _, answer = exchange(s, body[1:])
+        self.assertEqual((status, json.loads(answer)), (200, {"seq": 1}))
+
     def test_transfer_encoding_is_refused(self):
         server = self.serve()
         s = self.connect(server)
