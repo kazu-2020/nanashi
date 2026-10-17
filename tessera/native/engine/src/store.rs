@@ -732,8 +732,8 @@ impl Store {
         out
     }
 
-    /// The bytes that the segments of a base of `rows` rows add to the rows: each segment has its struct, a cell
-    /// for the index of each dimension, a part block of keys, and 16 spare key bytes.
+    /// The bytes that the segments of a base of `rows` rows add. Each segment has 256 B for its struct, a partly
+    /// filled block of keys and 16 spare key bytes. It also has 16 B for the index cell of each dimension.
     pub(crate) fn seg_bytes(&self, rows: usize) -> usize {
         (rows / self.cfg.seg_rows.max(1) + 1).saturating_mul(256 + self.pack.dims.len() * 16)
     }
@@ -801,12 +801,12 @@ impl Store {
             // Each segment has its own index
             for seg in self.base.segs.iter().filter(|s| s.postings[pos].get().is_none()) {
                 let rows = seg.len();
-                // members and offsets (u32) of the members in the segment, the packed entries (at most 8 B each)
-                // with block headers, and the struct
+                // A member and an offset (u32 each) for each member. A segment has at most `rows` members. Then the
+                // packed entries (at most 8 B each), the block headers and the struct
                 let lists = (rows.min(self.pack.masks[pos] as usize + 1) + 1) * 8;
                 let entries = rows * 8 + rows.div_ceil(BLOCK) * 16 + 16 + 128;
-                // The build also holds the count and fill arrays (u32 for each member of the dimension), the rows
-                // (u32) and the block buffer of the builder
+                // The build also holds the count and fill arrays (u32 for each dimension member), the rows (u32)
+                // and the block buffer of the builder
                 let dense = (self.pack.masks[pos] as usize + 2) * 4;
                 peak = peak.max(kept + dense * 2 + lists + entries + rows * 4 + BLOCK * 8);
                 kept += lists + entries;

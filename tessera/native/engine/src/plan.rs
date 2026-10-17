@@ -498,14 +498,15 @@ fn set_bytes(sets: &Option<Vec<Vec<u32>>>) -> usize {
 /// 1 cell for each row). With `diff`, Store::replaced_all also merges the old and the new cells. The merge uses 1.5
 /// cells for each old and new row, and a copy of the old cells if the store has a delta. Then Store::region_of keeps
 /// the changed keys (1 cell for each row) and makes a member list for each axis (4 bytes for each row).
-/// PackedKeys::new also makes 3 lists with 56 bytes for each block of keys. Count 64 bytes and 1 KiB of small parts,
-/// and the bytes of the segments (Store::seg_bytes).
+/// PackedKeys::new also makes 3 lists with 56 bytes for each block of keys. Count 64 bytes and 1 KiB of small parts.
 fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usize {
     let (n, old) = (value.cells.len(), store.rows_hint());
     let lists = (old + n).saturating_mul(4 + store.metric_dims.len()) / 4;
     let merge = if diff { ((old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 }).max(lists) } else { 0 };
     let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
-    let blocks = sides.iter().map(|c| c.cells.len()).fold(n, usize::max).div_ceil(crate::packed::BLOCK) * 4 + 64 + store.seg_bytes(n).div_ceil(CELL_BYTES);
+    let blocks = sides.iter().map(|c| c.cells.len()).fold(n, usize::max).div_ceil(crate::packed::BLOCK) * 4 + 64;
+    let segs = sides.iter().map(|c| store.seg_bytes(c.cells.len())).sum::<usize>() + store.seg_bytes(n);
+    let blocks = blocks + segs.div_ceil(CELL_BYTES);
     sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak + blocks
 }
 
