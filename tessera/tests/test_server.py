@@ -198,6 +198,8 @@ class Api:
                     {"aggregation": 5.0}, {"app_id": "", "appId": ""}, {"appId": 1}]:
             status, err = self.c.post("/query", {"metrics": [stock], **bad})
             self.assertEqual((status, err["error"]), (400, "bad_request"), bad)
+        status, body = query(rows=[product], filters={product: {"ids": [p1] * 51}})  # 1 group, not 51
+        self.assertEqual((status, body["cells"]), (200, [{"metric": stock, "coords": [p1], "value": {"number": 400.0}}]))
         status, err = query(rows=[product, month])  # 80 groups are more than max_cells (50)
         self.assertEqual((status, err["error"]), (413, "too_large"))
         status, err = self.c.post("/query", {"metrics": [stock, mid(ws, "Double")], "rows": [product], "columns": [month],
