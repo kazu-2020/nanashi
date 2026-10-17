@@ -72,7 +72,6 @@ The count starts when the router first sees the engine without a lease. The kill
 On SIGTERM and SIGINT, the router sends SIGTERM to its engines after it stops, and kills them after 15 seconds.
 
 Without `--tessera`, the router only finds engines that something else started.
-[engine-lifecycle.md](../docs/engine-lifecycle.md) gives the design.
 
 With `--tokens`, the router finds the user from `Authorization: Bearer <token>`.
 It adds the user to `X-Forwarded-User` and sends it to the engine.
@@ -103,6 +102,10 @@ router/nanashi-router --pg postgresql://... --listen 0.0.0.0:8090 \
 
 [server.md](../tessera/docs/server.md) tells which oauth2-proxy header to use for the audit.
 Without `--tokens` or `--user-header`, the router does no authentication and refuses to listen on addresses other than 127.0.0.1 (`--insecure` removes this limit).
+Without authentication, on a connection to a loopback address, the router refuses requests that a DNS rebinding page can send.
+For a `Host` other than `localhost` or a loopback address, it returns 403 `{"error": "forbidden"}`. This also applies to `/healthz`.
+For a `POST` without `Content-Type: application/json`, it returns 415 `{"error": "unsupported_media_type"}`.
+With `--insecure`, the router does not check connections to other addresses.
 `GET /healthz` shows if the router itself is alive.
 On SIGTERM and SIGINT, the router refuses new requests.
 It waits until the requests that it resends are complete, and then it stops.

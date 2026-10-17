@@ -7,7 +7,7 @@ This note gives the identifier rules for `web/`, `api/` and `tessera/`. It follo
 - The system makes each identifier that goes out of the system as a UUIDv7. `api/` accepts any UUID version in the canonical form. It does not check the version. Examples: an application, a Metric, a dimension (list), a member, a property, an item, a comment, a snapshot and a `client_op_id`.
 - Usually `web/` makes the identifier. If `api/` makes an object for the user, `api/` makes the identifier one time, in the plan of the RPC.
 - A name is an attribute. It is not an identifier.
-- Each identifier in a request must be in the canonical form (lowercase, with hyphens). If it is not, `api/` returns InvalidArgument and does not change it. `tessera/` does not parse identifiers. It compares them as strings, so each identifier has one spelling only.
+- Each identifier in a request must be in the canonical form (lowercase, with hyphens). The `nanashi.v1.id` rule in `proto/` defines this form. `tessera/` does not parse identifiers. It compares them as strings, so each identifier has one spelling only.
 - The internal numbers of the engine do not go out of the engine. These are the member numbers and the Rust dense numbers.
 - The engine does not use an identifier again after a delete. It keeps the deleted identifiers as tombstones.
 
@@ -80,7 +80,9 @@ An op is a flat object: `{"op": "<name>", <argument>: <value>, ...}`, for exampl
 
 ## The Metric catalog
 
-- `app_metric` in `api/` keeps the attributes of a Metric that the engine does not know: the description, the folder and the owner. The key is `(app_id, metric_id)`. `metric_id` is the Metric UUID.
+`api/` does not implement the catalog now (#83). `proto/nanashi/v1/plan.proto` keeps its fields. These rules are the specification for it.
+
+- `app_metric` in `api/` will keep the attributes of a Metric that the engine does not know: the description, the folder and the owner. The key is `(app_id, metric_id)`. `metric_id` is the Metric UUID.
 - The catalog does not keep the name. The engine keeps the name, so a rename changes no catalog row.
 - `CreateMetric` inserts the row in the same outbox plan as the engine operation. The owner is the user of the request. If the engine refuses the operation, the compensation deletes the row.
 - `UpdateMetric` writes the description and the folder in the same plan. If the engine refuses the operation, the compensation puts the old values back. It changes the row only if the row still has the new values, so it does not undo a later change.

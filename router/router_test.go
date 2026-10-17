@@ -148,9 +148,13 @@ func do(t *testing.T, rt *Router, method, target string, body []byte, header map
 	if err != nil {
 		t.Fatal(err)
 	}
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}
+	req.Host = cmp.Or(header["Host"], req.Host)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -494,5 +498,39 @@ func TestEngineFailingAtOnce(t *testing.T) {
 	}
 	if took := time.Since(start); took > time.Second {
 		t.Errorf("took %v, want an answer at once", took)
+	}
+}
+
+func TestNoAuthRefusesRebinding(t *testing.T) {
+	e := newEngine(t, reply{200, `{}`, nil})
+	rt := &Router{Resolve: &resolver{answers: []string{e.URL}}}
+	writes := "/models/" + testModel + "/writes"
+	for _, tt := range []struct {
+		name, method, target string
+		header               map[string]string
+		want                 int
+	}{
+		{"foreign host", "POST", writes, map[string]string{"Host": "evil.example:8090"}, 403},
+		{"foreign host on a read", "GET", "/models/" + testModel + "/", map[string]string{"Host": "evil.example"}, 403},
+		{"foreign host on healthz", "GET", "/healthz", map[string]string{"Host": "evil.example"}, 403},
+		{"form post", "POST", writes, map[string]string{"Content-Type": "text/plain"}, 415},
+		{"localhost", "POST", writes, map[string]string{"Host": "localhost:8090"}, 200},
+		{"upper-case localhost", "POST", writes, map[string]string{"Host": "LOCALHOST"}, 200},
+		{"IPv6 loopback", "POST", writes, map[string]string{"Host": "[::1]:8090"}, 200},
+		{"json with charset", "POST", writes, map[string]string{"Content-Type": "application/json; charset=utf-8"}, 200},
+	} {
+		before := len(e.requests())
+		if got := do(t, rt, tt.method, tt.target, []byte(write), tt.header); got.status != tt.want {
+			t.Errorf("%s: got %d %s, want %d", tt.name, got.status, got.body, tt.want)
+		}
+		if sent := len(e.requests()) - before; tt.want != 200 && sent != 0 {
+			t.Errorf("%s: engine got %d requests, want 0", tt.name, sent)
+		}
+	}
+	// With authentication, the router does not check the Host or the Content-Type.
+	rt.Auth = func(*http.Request) (string, error) { return "alice", nil }
+	got := do(t, rt, "POST", writes, []byte(write), map[string]string{"Host": "evil.example", "Content-Type": "text/plain"})
+	if got.status != 200 {
+		t.Errorf("auth: got %d %s, want 200", got.status, got.body)
 	}
 }

@@ -50,6 +50,7 @@ Authentication, not the request body, sets the user that the audit records (user
   connection from an address in trusted_proxies (CIDR). On other connections, it returns 401.
 - With neither, the server does no authentication and the user is None (for local development).
   Then main refuses to listen on an address other than 127.0.0.1.
+  Then the server also refuses a Host that is not loopback (403) and a write that is not application/json (415).
 
 The server limits a body to max_body bytes, and slice, rows, and summary to max_cells cells.
 It processes up to max_threads requests and keeps up to max_connections connections open at the same time.
@@ -368,6 +369,25 @@ def _finite_number(text: str) -> float:
     return number
 
 
+def _dumps(body) -> str:
+    """A formula can make a non-finite number (1e308 * 2), but JSON has no Infinity or NaN,
+    so it becomes null, as in JavaScript JSON.stringify."""
+    try:
+        return json.dumps(body, ensure_ascii=False, allow_nan=False)
+    except ValueError:
+        return json.dumps(_nan_to_null(body), ensure_ascii=False)
+
+
+def _nan_to_null(x):
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: _nan_to_null(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_nan_to_null(v) for v in x]
+    return x
+
+
 _BAD_CHAR = re.compile("[\x00\ud800-\udfff]")  # PostgreSQL refuses a NUL, and UTF-8 cannot encode a lone surrogate
 
 
@@ -420,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(body, _Text):
             data, kind = body.encode("utf-8"), "text/plain; version=0.0.4; charset=utf-8"
         else:
-            data, kind = json.dumps(body, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8"
+            data, kind = _dumps(body).encode("utf-8"), "application/json; charset=utf-8"
         self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
@@ -434,8 +454,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json(e.status, e.body)
 
     def _run(self, fn) -> None:
+        """Answer the (status, body) that fn returns. If fn returns None, it answered in a request slot."""
         try:
-            status, body = fn()
+            answer = fn()
         except ApiError as e:
             self._fail(e)
         except (DuplicateId, FormulaError, ValueError) as e:  # A bad request (Model raises ValueError for a user error)
@@ -445,7 +466,8 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("要求の処理に失敗した（error_id=%s）", error_id)
             self._fail(ApiError(500, "internal", "内部エラー", error_id=error_id))
         else:
-            self._json(status, body)
+            if answer is not None:
+                self._json(*answer)
 
     # ------------------------------------------------ 読み出し
 
@@ -459,13 +481,13 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:
-        self._serve(self._get)
+        self._serve(lambda: self._in_slot(self._get, SLOT_WAIT))
 
     def do_POST(self) -> None:
         self._serve(self._post)
 
     def _serve(self, fn) -> None:
-        """Answer 1 request on this connection in a request slot (503 busy if no slot frees up in time)."""
+        """Answer 1 request on this connection."""
         self.unread_body = "Transfer-Encoding" in self.headers or self.headers.get("Content-Length", "0") != "0"
         if self.server.stopping:
             self.close_connection = True
@@ -476,16 +498,19 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._fail(ApiError(400, "bad_request", "Transfer-Encoding と、値の違う Content-Length には対応しない"))
             return
-        if not self.server.begin_request():
+        if not self._misdirected():
+            self._run(fn)
+
+    def _in_slot(self, fn, wait: float) -> None:
+        """Run and answer fn in a request slot (503 busy if no slot frees up in wait seconds).
+        The answer is written in the slot, so responses in memory also stay below max_threads."""
+        if not self.server.begin_request(wait):
             if self.server.stopping:
                 self.close_connection = True
-                self._fail(ApiError(503, "closed", "サーバーは止まるところ"))
-            else:
-                self._fail(ApiError(503, "busy", "同時に処理できる要求の数を超えた"))
-            return
+                raise ApiError(503, "closed", "サーバーは止まるところ")
+            raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
         try:
-            if not self._misdirected():
-                self._run(fn)
+            self._run(fn)
         finally:
             self.server.end_request(probe=is_probe(self.path))
 
@@ -507,9 +532,24 @@ class Handler(BaseHTTPRequestHandler):
                     if hmac.compare_digest(known.encode(), token.strip().encode()):
                         return user
             raise ApiError(401, "unauthorized", "Authorization: Bearer <トークン> が要る")
+        self._check_host()
+        # A cross-site form or fetch without a preflight cannot send application/json.
+        if self.command == "POST" and self.headers.get_content_type() != "application/json":
+            raise ApiError(415, "unsupported_media_type", "認証なしのサーバーへの書き込みは Content-Type: application/json で送る")
         return None
 
+    def _check_host(self) -> None:
+        """Without authentication, raise 403 for a Host that is not loopback. Also for /health and /ready."""
+        srv = self.server
+        if srv.user_header is not None or srv.tokens is not None:
+            return
+        # A Host that is not loopback can be a DNS rebinding. With --insecure, the server can have other names.
+        host = self.headers.get("Host")
+        if host is not None and _loopback(srv.server_address[0]) and not _loopback_host(host):
+            raise ApiError(403, "forbidden", "認証なしのサーバーには 127.0.0.1 か localhost の名前でつなぐ（Host）")
+
     def _get(self) -> tuple[int, Any]:
+        self._check_host()
         url = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
         parts = [p for p in url.path.split("/") if p]
@@ -579,7 +619,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ 書き込み
 
-    def _post(self) -> tuple[int, Any]:
+    def _post(self) -> None:
         url = urllib.parse.urlsplit(self.path)
         if [p for p in url.path.split("/") if p] != ["writes"]:
             raise ApiError(404, "not_found", f"{url.path} はない")
@@ -596,8 +636,21 @@ class Handler(BaseHTTPRequestHandler):
         length = int(length)
         if length > self.server.max_body:
             raise ApiError(413, "too_large", f"本文は {self.server.max_body:,} バイトまで")
-        raw = self.rfile.read(length)
-        self.unread_body = False
+        # The body is read before the slot, so a slow client holds a body permit but no request slot.
+        # The write keeps the permit until it ends: bodies in memory stay below max_threads x max_body.
+        # The permit wait and the slot wait share 1 SLOT_WAIT, so the router attempt timeout stays valid.
+        start = time.monotonic()
+        if not self.server.begin_body(SLOT_WAIT):
+            raise ApiError(503, "busy", "同時に処理できる要求の数を超えた")
+        left = SLOT_WAIT - (time.monotonic() - start)
+        try:
+            raw = self.rfile.read(length)
+            self.unread_body = False
+            self._in_slot(lambda: self._write(user, raw), left)
+        finally:
+            self.server.end_body()
+
+    def _write(self, user: str | None, raw: bytes) -> tuple[int, Any]:
         try:
             body = json.loads(raw or b"{}", parse_float=_finite_number, parse_constant=_finite_number)
         except (ValueError, RecursionError):
@@ -797,11 +850,12 @@ class Server(ThreadingHTTPServer):
         self.model_id = model_id  # with a PgJournal: refuse requests that X-Nanashi-Model sends for another model
         self.max_threads = max_threads
         self._connections = threading.BoundedSemaphore(max_connections)  # each open connection holds a thread
+        self.bodies = threading.BoundedSemaphore(max_threads)  # write bodies that the server reads or holds
         self.summaries = SummaryCache(max_cells)
         self._thread: threading.Thread | None = None
         self.stopping = False
         # Requests in progress (probes too) and the monotonic time of the last use (probes not).
-        self._active, self._last, self._use = 0, time.monotonic(), threading.Condition()
+        self._active, self._reading, self._last, self._use = 0, 0, time.monotonic(), threading.Condition()
 
     def trusted(self, host: str) -> bool:
         """Return True if host is in one of the trusted_proxies."""
@@ -848,10 +902,10 @@ class Server(ThreadingHTTPServer):
             self._connections.release()
             self.shutdown_request(request)
 
-    def begin_request(self) -> bool:
-        """Take a request slot. Return False if no slot frees up in SLOT_WAIT seconds, or if the server stops."""
+    def begin_request(self, wait: float) -> bool:
+        """Take a request slot. Return False if no slot frees up in wait seconds, or if the server stops."""
         with self._use:
-            if not self._use.wait_for(lambda: self.stopping or self._active < self.max_threads, SLOT_WAIT) \
+            if not self._use.wait_for(lambda: self.stopping or self._active < self.max_threads, wait) \
                     or self.stopping:
                 return False
             self._active += 1
@@ -872,13 +926,27 @@ class Server(ThreadingHTTPServer):
             self._use.notify_all()  # a request that waits for a slot gets 503 closed
         super().shutdown()
 
+    def begin_body(self, wait: float) -> bool:
+        """Take a body permit. Return False if no permit frees up in wait seconds. A held permit counts as use."""
+        if not self.bodies.acquire(timeout=wait):
+            return False
+        with self._use:
+            self._reading += 1
+        return True
+
+    def end_body(self) -> None:
+        with self._use:
+            self._reading -= 1
+            self._last = time.monotonic()
+        self.bodies.release()
+
     def touch(self) -> None:
         with self._use:
             self._last = time.monotonic()
 
     def idle(self) -> float:
         with self._use:
-            return idle_for(self._active, self._last, time.monotonic())
+            return idle_for(self._active + self._reading, self._last, time.monotonic())
 
     @property
     def url(self) -> str:
@@ -1066,6 +1134,13 @@ def _loopback(host: str) -> bool:
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
+        return False
+
+
+def _loopback_host(host: str) -> bool:
+    try:
+        return _loopback(urllib.parse.urlsplit("//" + host).hostname or "")
+    except ValueError:  # for example "[::1"
         return False
 
 

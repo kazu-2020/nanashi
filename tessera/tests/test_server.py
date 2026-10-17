@@ -522,6 +522,12 @@ class Api:
         self.assertEqual(status, 200)
         self.assertEqual(names(ws, self.c.get("/")[1])["Product"]["members"][2], "p_renamed")
 
+    def test_a_non_finite_result_is_null(self):
+        op = write(self.ws, "Stock", 1e308, Product="p0", Month="Jan")
+        self.assertEqual(self.c.post("/writes", {"client_op_id": "big", "ops": [op]}), (200, {"seq": 1}))
+        self.assertEqual(self.c.get(path(self.ws, "Double", "cell", Product="p0", Month="Jan")), (200, {"seq": 1, "value": None}))
+        self.assertEqual(self.cells("Double", Product="p0", Month="Jan"), [["p0", "Jan", None]])
+
 
 class ReferenceApi(Api, unittest.TestCase):
     pass
@@ -555,6 +561,23 @@ class Limits(unittest.TestCase):
             self.assertEqual(self.ws.version.last_record["user"], "carol")
         finally:
             server.stop()
+
+    def test_without_authentication_a_page_on_another_site_is_refused(self):
+        server = Server(self.ws, "127.0.0.1", 0).start()
+        self.addCleanup(server.stop)
+        port = server.server_address[1]
+        body = json.dumps({"client_op_id": "x", "ops": [write(self.ws, "Stock", 5, Product="p0", Month="Jan")]}).encode()
+
+        def post(host, kind):
+            with socket.create_connection(server.server_address[:2], timeout=10) as s:
+                return exchange(s, f"POST /writes HTTP/1.1\r\nHost: {host}\r\nContent-Type: {kind}\r\n"
+                                   f"Content-Length: {len(body)}\r\n\r\n".encode() + body)[0]
+        self.assertEqual(post(f"evil.example:{port}", "application/json"), 403)
+        self.assertEqual(post(f"127.0.0.1:{port}", "text/plain"), 415)
+        for path in ("/", "/health", "/ready"):
+            self.assertEqual(Client(server.url, token=None, headers={"Host": "evil.example"}).get(path)[0], 403)
+        self.assertEqual(post(f"localhost:{port}", "application/json; charset=utf-8"), 200)
+        self.assertEqual(self.ws.seq, 1)
 
     def test_connections_beyond_max_connections_are_refused(self):
         server = Server(self.ws, "127.0.0.1", 0, max_connections=2, request_timeout=5).start()
@@ -734,6 +757,25 @@ class KeepAlive(unittest.TestCase):
                                                   f"Content-Length: {length}\r\n\r\n".encode() + body)
             self.assertEqual((status, headers.get("connection"), json.loads(answer).get("error")), (400, "close", "bad_request"), length)
         self.assertEqual(self.ws.seq, 0)
+
+    @mock.patch("sparse_engine.server.SLOT_WAIT", 0.5)
+    def test_a_slow_body_does_not_hold_a_slot(self):
+        server = self.serve(max_threads=1)
+        body = json.dumps({"client_op_id": "s", "ops": [write(self.ws, "Stock", 1, Product="p0", Month="Jan")]}).encode()
+        s = self.connect(server)
+        s.sendall(f"POST /writes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t-alice\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+                  + body[:1])
+        deadline = time.monotonic() + 5
+        while server.bodies.acquire(blocking=False):  # until the server holds the only body permit
+            server.bodies.release()
+            self.assertLess(time.monotonic(), deadline, "the server did not take the body permit")
+            time.sleep(0.01)
+        self.assertEqual(server.idle(), 0.0)  # --idle-exit does not stop the server during the upload
+        self.assertEqual(Client(server.url).get("/health"), (200, {"seq": 0, "role": "leader"}))
+        status, answer = Client(server.url).post("/writes", {"client_op_id": "t", "ops": [write(self.ws, "Stock", 2, Product="p0", Month="Jan")]})
+        self.assertEqual((status, answer["error"]), (503, "busy"))
+        status, _, answer = exchange(s, body[1:])
+        self.assertEqual((status, json.loads(answer)), (200, {"seq": 1}))
 
     def test_transfer_encoding_is_refused(self):
         server = self.serve()

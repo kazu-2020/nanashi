@@ -35,6 +35,17 @@ impl Budget {
         }
     }
 
+    pub(crate) fn take(&self, cells: usize, what: &str) -> Result<()> {
+        self.need(cells, what)?;
+        self.used.set(self.used.get() + cells * CELL_BYTES);
+        Ok(())
+    }
+
+    /// The number of new cells that `need` permits now. Parallel code uses it because a Budget is not Sync.
+    pub(crate) fn room(&self) -> usize {
+        self.limit.saturating_sub(self.held.saturating_add(self.used.get())) / CELL_BYTES
+    }
+
     /// The evaluation of a node ended. Set the used bytes back to start (this drops the child results counted
     /// after it), and count the node result out.
     pub(crate) fn settle(&self, start: Mark, out: &Cube) -> Result<()> {
@@ -55,6 +66,18 @@ impl Budget {
             human(self.limit)
         )
     }
+}
+
+/// The cells that a hash table with room for `keys` entries of `entry` bytes uses (the bucket count of hashbrown,
+/// and 1 control byte for each bucket).
+pub(crate) fn table_cells(keys: usize, entry: usize) -> usize {
+    let buckets = match keys {
+        0 => 0,
+        1..4 => 4,
+        4..8 => 8,
+        _ => (keys * 8 / 7).next_power_of_two(),
+    };
+    (buckets * (entry + 1)).div_ceil(CELL_BYTES)
 }
 
 /// The bytes of the sources. A source that two entries share (the same Arc) counts once.

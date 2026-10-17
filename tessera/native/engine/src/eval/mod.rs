@@ -12,7 +12,7 @@ pub(crate) use agg::*;
 pub(crate) use exact::ExactSum;
 pub(crate) use fuse::*;
 pub(crate) use join::*;
-pub(crate) use scan::{chain, chain_scan};
+pub(crate) use scan::{tree, tree_scan};
 
 #[inline]
 pub(crate) fn b2f(x: bool) -> f64 {
@@ -137,15 +137,15 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 }
                 Op::Add | Op::Sub => {
                     let dims = merge(a.dims(), b.dims());
-                    let (a, b) = (expand(&a, &dims, cat, r, bud)?, expand(&b, &dims, cat, r, bud)?);
+                    let (a, b) = (expand(a, &dims, cat, r, bud)?, expand(b, &dims, cat, r, bud)?);
                     let op = *op;
-                    Ok(union(cfg, a, b, Kind::Num, move |x, y| scalar(op, x.unwrap_or(0.0), y.unwrap_or(0.0))))
+                    union(cfg, bud, a, b, Kind::Num, move |x, y| scalar(op, x.unwrap_or(0.0), y.unwrap_or(0.0)))
                 }
                 Op::And | Op::Or => {
                     let dims = merge(a.dims(), b.dims());
-                    let (a, b) = (expand(&a, &dims, cat, r, bud)?, expand(&b, &dims, cat, r, bud)?);
+                    let (a, b) = (expand(a, &dims, cat, r, bud)?, expand(b, &dims, cat, r, bud)?);
                     let op = *op;
-                    Ok(union(cfg, a, b, Kind::Bool, move |x, y| kleene(op, x, y)))
+                    union(cfg, bud, a, b, Kind::Bool, move |x, y| kleene(op, x, y))
                 }
             }
         }
@@ -159,14 +159,15 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         }
 
         Node::If(cond, then, else_, _) => {
-            // TRUE のセルは THEN と、FALSE のセルは ELSE と INNER JOIN する。空の条件はどちらにも入らない
+            // A TRUE cell joins THEN and a FALSE cell joins ELSE. A blank condition joins neither, so the result has no cell there
             let c = ev(cond)?;
+            bud.take(c.cells.len(), "IF の条件")?;
             let pick = |want: bool| Cube {
                 pack: c.pack.clone(),
                 kind: Kind::Bool,
                 cells: map_cells(cfg, &c.cells, |k, v| ((v != 0.0) == want).then_some((k, v))),
             };
-            // 各分岐は、条件がその値になるセルのメンバーに絞って評価する
+            // Evaluate each branch only on the members of its part. The join drops all other cells
             let branch = |n: &Node, part: &Cube| match semi(r, part, cat) {
                 Some(r2) => eval_with(n, cat, src, &r2, bud),
                 None => eval_with(n, cat, src, r, bud),
@@ -179,11 +180,10 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 parts.push(intersect(&no, &branch(e, &no)?, kind, cat, bud, |_, y| Some(y))?);
             }
             let dims = parts.iter().fold(Vec::new(), |acc, p| merge(&acc, p.dims()));
-            let mut out = Cube { pack: Packing::new(&dims, cat)?, kind, cells: Vec::new() };
-            for p in &parts {
-                out.cells.extend(expand(p, &dims, cat, r, bud)?.cells);
-            }
-            Ok(out)
+            let parts = parts.into_iter().map(|p| expand(p, &dims, cat, r, bud)).collect::<Result<Vec<_>>>()?;
+            let cells: Vec<&[(u64, f64)]> = parts.iter().map(|p| &p.cells[..]).collect();
+            bud.need(cells.iter().map(|p| p.len()).sum(), "IF の結果")?;
+            Ok(Cube { pack: Packing::new(&dims, cat)?, kind, cells: cells.concat() })
         }
 
         Node::Filter(child, cond) => {
@@ -198,9 +198,13 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
 
         Node::Coalesce(first, second) => {
             let s = ev(second)?;
-            let f = ev(first)?.repack(cfg, &s.pack);
+            let f = ev(first)?;
+            if f.pack != s.pack {
+                bud.take(f.cells.len(), "COALESCE")?;
+            }
+            let f = f.into_repacked(cfg, &s.pack);
             let kind = s.kind;
-            Ok(union(cfg, f, s, kind, |a, b| a.or(b)))
+            union(cfg, bud, f, s, kind, |a, b| a.or(b))
         }
 
         Node::On(child, other) => {
@@ -214,7 +218,8 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
 
         Node::Expand(child, dims) => {
             let c = ev(child)?;
-            expand(&c, &[c.dims(), &dims[..]].concat(), cat, r, bud)
+            let dims = [c.dims(), &dims[..]].concat();
+            expand(c, &dims, cat, r, bud)
         }
 
         Node::IsBlank(child, _) => {
