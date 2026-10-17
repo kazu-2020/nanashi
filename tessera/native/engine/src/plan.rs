@@ -1121,11 +1121,12 @@ mod tests {
         let bytes = store.slice(&part.restrict(&cat)).memory().bytes();
         assert!(bytes > 0);
         assert_eq!(done(part.clone()).bytes(), bytes + part.bytes());
-        // A streamed result counts the bytes of its columns, with the room that the sink reserved
+        // A streamed result counts the bytes of its columns: the packed keys and 8 B for each value
         let mut sink = store.sink(4, false);
         crate::Sink::part(&mut sink, vec![(1, 1.0), (2, 2.0), (3, 3.0)]).unwrap();
         let c = sink.finish();
-        let bytes = c.keys.bytes() + 4 * 8;
+        assert_eq!(c.base.segs.len(), 1);
+        let bytes = c.base.segs[0].keys.bytes() + 3 * 8;
         let done = Done { m: 0, region: Reg::new(vec![]), delta: false, value: Write::Columns(c), count: None, low: None, old: None, kept: 0 };
         assert_eq!(done.bytes(), bytes);
     }

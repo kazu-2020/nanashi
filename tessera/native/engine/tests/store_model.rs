@@ -176,7 +176,7 @@ fn run(seed: u64, cfg: Config, index: Option<usize>) {
 
 #[test]
 fn store_matches_btreemap() {
-    let small = Config { compact_min: 3, par_min: 0, postings_min_rows: 0, ..Config::default() };
+    let small = Config { compact_min: 3, par_min: 0, postings_min_rows: 0, seg_rows: 16, ..Config::default() };
     for seed in 1..=20 {
         run(seed, Config::default(), Some(0));
         run(seed, small, Some(2));

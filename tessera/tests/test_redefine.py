@@ -379,7 +379,7 @@ class EagerHeuristics(unittest.TestCase):
     whole, calculate the Metrics of one level in parallel, and stream the fused scan in parallel batches of
     3-key parts. Here they always work, on small models, and the results stay the same."""
 
-    engine = staticmethod(lambda: RustEngine(widen_min_rows=0, par_min=0, chunk=3))
+    engine = staticmethod(lambda: RustEngine(widen_min_rows=0, par_min=0, chunk=3, seg_rows=8, compact_min=4))
 
     def test_random_rust(self):
         run_random(self, seed=43, rounds=80, engines=[ReferenceEngine, self.engine])

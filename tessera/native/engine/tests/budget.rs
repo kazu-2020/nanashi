@@ -98,7 +98,7 @@ fn by_lookup_on_one_member_counts_only_that_member() {
 
 #[test]
 fn a_streamed_result_is_budgeted_by_its_columns() {
-    let cat = catalog(usize::MAX);
+    let cat = catalog_with(Config { seg_rows: 1000, ..Config::default() });
     let rows = 3000usize;
     let src = [column(&cat, &[0], rows as u32)];
     let held = held(&src);

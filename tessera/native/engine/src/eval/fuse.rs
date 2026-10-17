@@ -43,7 +43,7 @@ impl<'a> Col<'a> {
     #[inline]
     fn n(&self) -> usize {
         match self {
-            Col::Store(s) => s.base.keys.len(),
+            Col::Store(s) => s.base.rows(),
             Col::Cells(c) => c.len(),
         }
     }
@@ -51,23 +51,15 @@ impl<'a> Col<'a> {
     #[inline]
     fn key(&self, i: usize) -> u64 {
         match self {
-            Col::Store(s) => s.base.keys.get(i),
+            Col::Store(s) => s.base.key(i),
             Col::Cells(c) => c[i].0,
-        }
-    }
-
-    #[inline]
-    fn val(&self, i: usize) -> f64 {
-        match self {
-            Col::Store(s) => s.base.vals[i],
-            Col::Cells(c) => c[i].1,
         }
     }
 
     /// key 以上の最初の行。
     fn lower_bound(&self, key: u64) -> usize {
         match self {
-            Col::Store(s) => s.base.keys.partition_point(|k| k < key),
+            Col::Store(s) => s.base.lower_bound(key),
             Col::Cells(c) => c.partition_point(|x| x.0 < key),
         }
     }
@@ -75,7 +67,7 @@ impl<'a> Col<'a> {
     /// For a `Col::Store` it decodes one packed block at a time.
     fn cursor(&self) -> Cursor<'a> {
         Cursor::new(match self {
-            Col::Store(s) => Sorted::Packed(&s.base.keys),
+            Col::Store(s) => Sorted::Base(&s.base),
             Col::Cells(c) => Sorted::Cells(c),
         })
     }
@@ -190,7 +182,7 @@ impl<'a> Access<'a> {
                 let mut rd = leaf.col.cursor();
                 for i in 0..leaf.col.n() {
                     let k = rd.key(i) as usize;
-                    vals[k] = leaf.col.val(i);
+                    vals[k] = rd.val(i);
                     has[k] = true;
                 }
                 return Access::Dense { ctx: ctx.clone(), proj, pack: leaf.pack, vals, has };
@@ -583,7 +575,7 @@ fn leaf<'s>(l: usize, a: &'s Access) -> Ev<'s> {
             Box::new(move |p, key| {
                 let rd = &mut p[l];
                 let i = rd.gallop(key);
-                (i < col.n() && rd.key(i) == key).then(|| col.val(i))
+                (i < col.n() && rd.key(i) == key).then(|| rd.val(i))
             })
         }
         Access::Dense { ctx, proj, pack, vals, has } => Box::new(move |_, key| {
@@ -596,7 +588,7 @@ fn leaf<'s>(l: usize, a: &'s Access) -> Ev<'s> {
                 let k = proj.apply(ctx, pack, key);
                 let rd = &mut p[l];
                 let i = rd.seek(k);
-                (i < col.n() && rd.key(i) == k).then(|| col.val(i))
+                (i < col.n() && rd.key(i) == k).then(|| rd.val(i))
             })
         }
     }
@@ -753,11 +745,11 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, mak
 
 /// Runs `work` on the parts, part i with room for `sizes[i]` cells, and gives the cells to `sink`. A sink
 /// that is one array (`presized`) takes all parts in parallel at their offsets. Another sink takes the parts
-/// in their order. In parallel, the parts go in batches of 2 parts for each thread. `rayon::join` gives
-/// batch i to the sink while batch i + 1 computes. So at most 2 batches of results are in flight. A part of
-/// `run_space` has at most `chunk` cells (2 x 4 threads x 64 K cells x 16 B = 16 MB). A part of `run_sorted`
-/// holds the rows of all drivers in its range. The largest driver splits the ranges at every `chunk`-th key,
-/// so a smaller driver with many rows in one range makes a part above `chunk` cells.
+/// in their order. In parallel, the parts go in batches of 2 parts for each thread. At most 2 batches of
+/// results are in flight. A part of `run_space` has at most `chunk` cells (2 x 4 threads x 64 K cells x 16 B
+/// = 16 MB). A part of `run_sorted` holds the rows of all drivers in its range. The largest driver splits the
+/// ranges at every `chunk`-th key, so a smaller driver with many rows in one range makes a part above `chunk`
+/// cells.
 fn stream<T: Sync>(par: bool, parts: &[T], sizes: &[usize], work: impl Fn(&T, &mut [(u64, f64)]) -> usize + Sync, sink: &mut impl Sink) -> Result<()> {
     if let Some(cells) = sink.presized(sizes) {
         let mut slices = Vec::with_capacity(parts.len());
@@ -789,7 +781,13 @@ fn stream<T: Sync>(par: bool, parts: &[T], sizes: &[usize], work: impl Fn(&T, &m
     let Some((ps, ns)) = batches.next() else { return Ok(()) };
     let mut ready = run(ps, ns);
     for (ps, ns) in batches {
-        let (given, computed) = rayon::join(|| ready.into_iter().try_for_each(|c| sink.part(c)), || run(ps, ns));
+        // The sink takes the parts on this thread, not on a rayon worker. A worker allocates the next segment columns
+        // in its own malloc arena from new pages: 25,000 more page faults for Revenue on retail xlarge.
+        let mut computed = Vec::new();
+        let given = rayon::in_place_scope(|s| {
+            s.spawn(|_| computed = run(ps, ns));
+            ready.into_iter().try_for_each(|c| sink.part(c))
+        });
         given?;
         ready = computed;
     }
@@ -1020,6 +1018,52 @@ mod tests {
             let Some(Whole::Cube(c)) = eval_columns(&node, &cat, &src, &Budget::new(usize::MAX, 0), &store, false).unwrap() else { panic!("a cube") };
             assert_eq!(store.with_sorted(store.sorted_cells(c).unwrap()).as_cube().cells, cells_of(&store, &cat, &src, &node));
         }
+    }
+
+    /// Volume and Price on d0 (50) x d1 (400), with their segments cut after 2,048 and 3,000 rows, and Start on d0.
+    fn segmented(cfg: Config) -> (Catalog, Vec<Src>) {
+        let dims = [50, 400].iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg };
+        let cut = |seg_rows| Catalog { cfg: Config { seg_rows, ..cfg }, ..cat.clone() };
+        let grid = |skip: u32| -> (Vec<u32>, Vec<u32>, Vec<f64>) {
+            let (d0, d1): (Vec<u32>, Vec<u32>) = (0..20_000u32).filter(|i| i % skip != 0).map(|i| (i / 400, i % 400)).unzip();
+            let vals = d0.iter().zip(&d1).map(|(a, b)| (a * 400 + b) as f64 + 1.0).collect();
+            (d0, d1, vals)
+        };
+        let (d0, d1, vals) = grid(7);
+        let volume = Store::new(&[0, 1], Some(0), Kind::Num, &cut(2048)).unwrap().with_rows(&[&d0, &d1], &vals).unwrap();
+        let (d0, d1, vals) = grid(5);
+        let price = Store::new(&[0, 1], Some(0), Kind::Num, &cut(3000)).unwrap().with_rows(&[&d0, &d1], &vals).unwrap();
+        assert!(volume.base.segs.len() > 5 && price.base.segs.len() > 4 && volume.base.segs.len() != price.base.segs.len());
+        let members: Vec<u32> = (0..50).collect();
+        let starts: Vec<f64> = (0..50).map(|m| (m * 37 % 400) as f64).collect();
+        let start = Store::new(&[0], None, Kind::Num, &cut(2048)).unwrap().with_rows(&[&members], &starts).unwrap();
+        (cat, vec![Src::Store(Arc::new(volume)), Src::Store(Arc::new(price)), Src::Store(Arc::new(start))])
+    }
+
+    #[test]
+    fn a_fused_scan_reads_across_segments() {
+        let (cat, src) = segmented(Config { par_min: 0, ..Config::default() });
+        let (plain_cat, plain_src) = segmented(Config { fuse: false, ..Config::default() });
+        let store = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        let ge_start = Node::Bin(Op::Ge, Box::new(Node::DimRef(1)), Box::new(Node::Ref(2)), vec![]);
+        let nodes = [
+            Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Ref(1)), vec![]),          // an Exact cover with 2 drivers
+            Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(ge_start.clone()), vec![]),      // Volume drives, Start is searched
+            Node::Bin(Op::Add, Box::new(Node::Ref(0)), Box::new(Node::Ref(1)), vec![]),          // the union of the rows
+            ge_start,                                                                             // a Part cover: Start x d1
+        ];
+        let mut streamed = 0;
+        for node in nodes {
+            let want = cells_of(&store, &plain_cat, &plain_src, &node);
+            assert!(want.len() > 10_000);
+            assert_eq!(cells_of(&store, &cat, &src, &node), want);
+            if let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &Budget::new(usize::MAX, 0), &store, false).unwrap() {
+                assert_eq!(store.with_columns(c).0.as_cube().cells, want);
+                streamed += 1;
+            }
+        }
+        assert!(streamed >= 3, "{streamed} of 4 formulas streamed into the segments");
     }
 
     #[test]

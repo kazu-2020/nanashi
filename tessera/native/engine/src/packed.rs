@@ -89,11 +89,12 @@ impl PackedKeys {
         self.len
     }
 
-    /// A builder for about `capacity` keys. It reserves the bytes at the density of `like`, so the byte
-    /// buffer does not grow by doubling. If `like` is empty, it reserves 2 B for each key (the density of
-    /// the large models, `docs/performance.md`), and the buffer grows if the keys pack worse.
-    pub(crate) fn builder(capacity: usize, like: &PackedKeys) -> Builder {
-        let bytes = if like.len == 0 { capacity * 2 } else { (like.bytes.len() * capacity).div_ceil(like.len).min(capacity * 8) };
+    /// A builder for about `capacity` keys. It reserves the bytes at the density of `like`, the (bytes, keys)
+    /// of similar packed keys, so the byte buffer does not grow by doubling. If `like` has no keys, it reserves
+    /// 2 B for each key (the density of the large models, `docs/performance.md`), and the buffer grows if the
+    /// keys pack worse.
+    pub(crate) fn builder(capacity: usize, like: (usize, usize)) -> Builder {
+        let bytes = if like.1 == 0 { capacity * 2 } else { (like.0 * capacity).div_ceil(like.1).min(capacity * 8) };
         PackedKeys::builder_with_bytes(capacity, bytes)
     }
 
@@ -231,6 +232,11 @@ pub(crate) struct Builder {
 }
 
 impl Builder {
+    /// The (bytes, keys) of the keys packed so far, without the block that is not yet packed.
+    pub(crate) fn density(&self) -> (usize, usize) {
+        (self.bytes.len(), self.len - self.buf.len())
+    }
+
     #[inline]
     pub(crate) fn push(&mut self, key: u64) {
         self.buf.push(key);
@@ -304,31 +310,48 @@ impl ExactSizeIterator for Keys<'_> {}
 
 #[derive(Clone, Copy)]
 pub(crate) enum Sorted<'a> {
-    Packed(&'a PackedKeys),
+    Base(&'a Base),
     Cells(&'a [(u64, f64)]),
 }
 
-/// A cursor over sorted keys. `pos` is the row of the last read. Over packed keys it caches one decoded
-/// block: a read within `BLOCK` rows of `pos` decodes the block of the row, a read farther away (a probe of a
-/// search that jumps far) uses `get` for that row only.
+/// A cursor over sorted rows. `pos` is the row of the last read. Over a base it caches one decoded block
+/// (a read inside it costs one range check) and the segment of the last read: a read within `BLOCK` rows of
+/// `pos` decodes the block of the row, a read farther away (a probe of a search that jumps far) uses `get`
+/// for that row only.
 pub(crate) struct Cursor<'a> {
     src: Sorted<'a>,
     pub(crate) pos: usize,
-    block: usize,  // the decoded block in `buf`, or usize::MAX
-    buf: Vec<u64>, // empty until the first decode
+    seg: Option<&'a Segment>, // the segment of the last read (`Sorted::Base`)
+    seg_rows: Range<usize>,   // its global rows, empty until the first read
+    vals: &'a [f64],          // its values
+    block_rows: Range<usize>, // the global rows decoded in `buf`, empty until the first decode
+    buf: Vec<u64>,
 }
 
 impl<'a> Cursor<'a> {
     pub(crate) fn new(src: Sorted<'a>) -> Cursor<'a> {
-        Cursor { src, pos: 0, block: usize::MAX, buf: Vec::new() }
+        Cursor { src, pos: 0, seg: None, seg_rows: 0..0, vals: &[], block_rows: 0..0, buf: Vec::new() }
     }
 
     #[inline]
     pub(crate) fn len(&self) -> usize {
         match self.src {
-            Sorted::Packed(p) => p.len(),
+            Sorted::Base(b) => b.rows(),
             Sorted::Cells(c) => c.len(),
         }
+    }
+
+    /// The segment of global row `i` of base `b`, cached, and the row inside it.
+    #[inline]
+    fn segment(&mut self, b: &'a Base, i: usize) -> (&'a Segment, usize) {
+        if !self.seg_rows.contains(&i) {
+            let (s, j) = b.locate(i);
+            let seg = &*b.segs[s];
+            self.seg = Some(seg);
+            self.seg_rows = i - j..i - j + seg.len();
+            self.vals = &seg.vals;
+        }
+        (self.seg.unwrap(), i - self.seg_rows.start)
     }
 
     /// The key at row `i`, and `pos` becomes `i`.
@@ -336,21 +359,45 @@ impl<'a> Cursor<'a> {
     pub(crate) fn key(&mut self, i: usize) -> u64 {
         let k = match self.src {
             Sorted::Cells(c) => c[i].0,
-            Sorted::Packed(_) if i / BLOCK == self.block => self.buf[i % BLOCK],
-            Sorted::Packed(p) if i.abs_diff(self.pos) > BLOCK => p.get(i),
-            Sorted::Packed(p) => {
-                let b = i / BLOCK;
-                if self.buf.is_empty() {
-                    self.buf = vec![0; BLOCK];
+            Sorted::Base(_) if self.block_rows.contains(&i) => self.buf[i - self.block_rows.start],
+            Sorted::Base(b) => {
+                let (seg, j) = self.segment(b, i);
+                let from = self.pos.saturating_sub(self.seg_rows.start);
+                let p = &seg.keys;
+                if j.abs_diff(from) > BLOCK {
+                    p.get(j)
+                } else {
+                    let blk = j / BLOCK;
+                    if self.buf.is_empty() {
+                        self.buf = vec![0; BLOCK];
+                    }
+                    let m = (p.len() - blk * BLOCK).min(BLOCK);
+                    p.decode(blk, 0..m, &mut self.buf[..m]);
+                    let start = self.seg_rows.start + blk * BLOCK;
+                    self.block_rows = start..start + m;
+                    self.buf[i - start]
                 }
-                let m = (p.len() - b * BLOCK).min(BLOCK);
-                p.decode(b, 0..m, &mut self.buf[..m]);
-                self.block = b;
-                self.buf[i % BLOCK]
             }
         };
         self.pos = i;
         k
+    }
+
+    /// The value at row `i`. Over a base the segment of the last read is cached.
+    #[inline]
+    pub(crate) fn val(&mut self, i: usize) -> f64 {
+        match self.src {
+            Sorted::Cells(c) => c[i].1,
+            Sorted::Base(_) if self.seg_rows.contains(&i) => self.vals[i - self.seg_rows.start],
+            Sorted::Base(b) => self.val_in_other_segment(b, i),
+        }
+    }
+
+    /// Out of line, so that `val` is small enough to inline: a read after `key(i)` finds the segment cached.
+    #[cold]
+    fn val_in_other_segment(&mut self, b: &'a Base, i: usize) -> f64 {
+        let (seg, j) = self.segment(b, i);
+        seg.vals[j]
     }
 
     /// The first row at or after `key`, searched near `pos` (an exponential search in both directions).
@@ -537,7 +584,7 @@ mod tests {
         let mut seed = 0x9E37_79B9_7F4A_7C15;
         let like = PackedKeys::new(&(0..4096).collect::<Vec<u64>>(), false);
         let keys = sorted_random(&mut seed, 5000, 1 << 40, 62);
-        let mut b = PackedKeys::builder(keys.len(), &like);
+        let mut b = PackedKeys::builder(keys.len(), (like.bytes(), like.len()));
         keys.iter().for_each(|&k| b.push(k));
         b.flush();
         assert!(b.bytes.capacity() <= keys.len() * 8 + 16, "{} bytes for {} keys", b.bytes.capacity(), keys.len());
@@ -553,7 +600,7 @@ mod tests {
         for keys in cases {
             let want = PackedKeys::new(&keys, false);
             assert_eq!(packed_bytes(keys.iter().copied()), want.bytes.len() - 16, "n={}", keys.len());
-            let mut b = PackedKeys::builder(keys.len(), &want);
+            let mut b = PackedKeys::builder(keys.len(), (want.bytes.len(), want.len));
             keys.iter().for_each(|&k| b.push(k));
             let got = b.finish();
             assert_eq!(got.len, want.len, "n={}", keys.len());
@@ -570,11 +617,17 @@ mod tests {
     fn cursor_finds_the_same_rows_as_a_binary_search() {
         let mut seed = 0x9E37_79B9_7F4A_7C15;
         let keys = sorted_random(&mut seed, 20_000, 1 << 30, 24);
-        let p = PackedKeys::new(&keys, false);
-        let cells: Vec<(u64, f64)> = keys.iter().map(|&k| (k, 0.0)).collect();
-        for src in [Sorted::Packed(&p), Sorted::Cells(&cells)] {
+        let base = Base::from_parts(&[&keys[..7000], &keys[7000..7777], &keys[7777..]]);
+        for r in [100..19_000, 7500..7800, 7000..7777] {
+            let mut rows = Vec::new();
+            base.range(r.clone()).for_each(|(k, v)| rows.push((k, v as u64)));
+            assert_eq!(rows, keys[r.clone()].iter().map(|&k| (k, k)).collect::<Vec<_>>(), "for_each over the rows {r:?}");
+        }
+        let cells: Vec<(u64, f64)> = keys.iter().map(|&k| (k, k as f64)).collect();
+        for src in [Sorted::Base(&base), Sorted::Cells(&cells)] {
             let mut rd = Cursor::new(src);
             assert_eq!((0..keys.len()).map(|i| rd.key(i)).collect::<Vec<_>>(), keys, "a sequential read");
+            assert_eq!((0..keys.len()).rev().map(|i| rd.val(i) as u64).collect::<Vec<_>>(), keys.iter().rev().copied().collect::<Vec<_>>(), "the values backwards");
             // Near and far probes: steps of 1, a jump of 3 blocks, a jump to the other end, a step back.
             let mut q = keys[0];
             for step in [1u64, 1, 1 << 12, 1 << 16, 1 << 23, 1, 1 << 23, 3, 7] {

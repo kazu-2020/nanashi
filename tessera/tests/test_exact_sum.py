@@ -74,7 +74,8 @@ class SameBitsOnEveryPath(unittest.TestCase):
         want = None
         engines = [ReferenceEngine(), RustEngine(), RustEngine(par_min=0), RustEngine(par_min=0, chunk=3), RustEngine(par_min=0, stream_always=True),
                    RustEngine(par_min=0, dense_always=True), RustEngine(dense_always=True),
-                   RustEngine(par_min=0, dense_always=True, scatter_bytes=0), RustEngine(dense_always=True, scatter_bytes=0)]
+                   RustEngine(par_min=0, dense_always=True, scatter_bytes=0), RustEngine(dense_always=True, scatter_bytes=0),
+                   RustEngine(seg_rows=8, compact_min=4)]
         for engine in engines:
             m = model(engine)
             m.recalc()
