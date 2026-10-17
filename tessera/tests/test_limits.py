@@ -448,6 +448,27 @@ class AggregationBudget(unittest.TestCase):
             return {"D": "d0", "T": "t5"}, float(ns // nd - 1)
         self.check(build, fit=int(4.875 * (1 << 20)), below=int(3.75 * (1 << 20)), scatter_bytes=0)
 
+    def test_hash_merge(self):
+        # 65,536 groups in the hash maps of the threads. With 2 or more threads, a merge holds the source map, the
+        # destination map and its old table. With 1 thread, 16 MiB fits. Thus 16 MiB is refused or stays in it
+        import nanashi_core
+        nanashi_core.heap_exact(True)
+        self.addCleanup(nanashi_core.heap_exact, False)
+        for mib, must_fit in [(16, False), (20, True)]:
+            with self.subTest(mib=mib):
+                m = Named(Model(engine=RustEngine(max_bytes=mib << 20, fuse=False, par_min=0, stream_always=True)))
+                at, want = self.grid(m, 65_536, 2, 1)
+                held = sum(v.get("base", 0) for v in m.memory().values())
+                nanashi_core.reset_heap_peak()
+                base = nanashi_core.heap()[0]
+                try:
+                    m.recalc()
+                    self.assertEqual(m.get("Z", **at), want)
+                except ValueError as e:
+                    self.assertFalse(must_fit, e)
+                    self.assertRegex(str(e), "メモリの予算を超える")
+                self.assertLessEqual(held + nanashi_core.heap()[1] - base, mib << 20, "the merge went over max_bytes")
+
     def test_table_path(self):
         # BY SUM with a member Metric uses the mapping table (1.1 MiB) and a hash map of 3,600 groups
         def build(m):

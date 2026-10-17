@@ -66,11 +66,15 @@ pub(crate) fn group(cfg: &Config, mut pairs: Vec<(u64, f64)>, pack: Packing, agg
     sort_cells(cfg, &mut pairs);
     let runs = pairs.chunk_by(|x, y| x.0 == y.0);
     let mut cells = out_cells(aggs, runs.clone().count(), pairs.capacity(), b)?;
-    let m = Meter::new(usize::MAX); // only one Acc lives at a time
     for run in runs {
+        // Only one Acc lives at a time, so each run gets its own Meter
+        let live = pairs.capacity().saturating_add(cells.iter().map(Vec::capacity).sum());
+        let m = Meter::new(b.room().saturating_sub(live));
         let mut acc = Acc::new();
         run.iter().for_each(|&(_, v)| acc.add(v, &m));
-        push_group(&mut cells, aggs, run[0].0, pairs.capacity(), b, |a| acc.finish(a))?;
+        // Err if the Meter refused a Spill: then the sum is wrong
+        b.need(live.saturating_add(m.cells()), "集計")?;
+        push_group(&mut cells, aggs, run[0].0, pairs.capacity().saturating_add(m.cells()), b, |a| acc.finish(a))?;
     }
     Ok(cubes(pack, cells))
 }
@@ -238,9 +242,11 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b
     let min_len = (blocks / rayon::current_num_threads()).max(1); // one table of intermediate values per thread
     let maps = if cfg.par(n) { blocks.div_ceil(min_len) } else { 1 };
     // A map with e entries has at most 16e/7 buckets (7/8 full, a power of 2, at least 4). While it grows, its
-    // old table (half of the buckets) is also live
+    // old table (half of the buckets) is also live: 24e/7. A merge puts the smaller map b into the larger map a,
+    // and b stays live until the end. Thus b (at most half of all entries) is live two times: 32e/7
     let entries = (groups * maps as f64).min(n as f64) as usize;
-    let bytes = entries.saturating_add(4 * maps).saturating_mul(24 * GROUP_BYTES) / 7;
+    let per = if maps == 1 { 24 } else { 32 };
+    let bytes = entries.saturating_add(4 * maps).saturating_mul(per * GROUP_BYTES) / 7;
     let live = live.saturating_add(bytes.div_ceil(CELL_BYTES));
     b.need(live, "集計")?;
     let m = Meter::new(b.room().saturating_sub(live));
@@ -255,7 +261,11 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b
     let g = if maps == 1 {
         (0..blocks).fold(FxHashMap::default(), add)
     } else {
-        (0..blocks).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, b| {
+        (0..blocks).into_par_iter().with_min_len(min_len).fold(FxHashMap::default, add).reduce(FxHashMap::default, |mut a, mut b| {
+            // Also the empty identity map then takes the other map, and does not copy it
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
             for (k, x) in &b {
                 a.entry(*k).or_insert_with(Acc::new).merge(x, &m);
             }
@@ -652,6 +662,21 @@ mod tests {
         assert!(!scattered(each(&[0, 128]), 32, 8192));
         assert!(scattered(each(&[0, 1, 2, 300]), 32, 4096), "pages 0 and 2");
         assert!(scattered(each(&[0, 1, 2, 300]), 32, 0), "scatter_bytes=0 partitions always");
+    }
+
+    /// The sort path counts the Spill of the Acc that it fills. 16 non-overlapping values make 16 partials.
+    #[test]
+    fn sort_path_counts_the_spill() {
+        let dims = vec![DimInfo { size: 4, ordered: false, name: "d0".into() }];
+        let cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        let out = Packing::new(&[0], &cat).unwrap();
+        let pairs = || (0..16).map(|i| (0u64, 2f64.powi(-60 * i))).collect::<Vec<_>>();
+        // The pairs and one result cell fit, but the Spill does not
+        let tight = Budget::new(17 * CELL_BYTES, 0);
+        assert!(group(&cat.cfg, pairs(), out.clone(), &[Agg::Sum], &tight).is_err());
+        let room = Budget::new(64 * CELL_BYTES, 0);
+        let got = group(&cat.cfg, pairs(), out, &[Agg::Sum], &room).unwrap();
+        assert_eq!(got[0].cells, vec![(0, (0..16).map(|i| 2f64.powi(-60 * i)).sum::<f64>())]);
     }
 
     /// The partitioned fill, the fill with one array for each thread, and the sort path give the same bits.
