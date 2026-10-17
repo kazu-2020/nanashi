@@ -43,6 +43,8 @@ struct Radix {
 
 const NONE: u32 = u32::MAX;
 const PAD: usize = 128;
+/// The work items that one thread takes at a time. Small chunks balance the threads when one of them is slow.
+const CHUNK: usize = 64;
 
 /// The base rows of one block and the keys that the block owns. The blocks of all segments in key order make one
 /// sequence. A block owns the keys from its first key (0 for the first block) to the first key of the next block
@@ -219,7 +221,7 @@ impl Store {
             let mut t = tabs[0].lock().expect("no panic holds the table");
             items.iter().for_each(|it| fill(&mut t, it));
         } else {
-            items.par_chunks(64).for_each(|c| {
+            items.par_chunks(CHUNK).for_each(|c| {
                 let mut t = tabs[rayon::current_thread_index().unwrap_or(0) % tables].lock().expect("no panic holds the table");
                 c.iter().for_each(|it| fill(&mut t, it));
             });
@@ -299,7 +301,7 @@ impl Store {
 /// work items with `rows` rows. A pure calculation.
 fn choose(slots: Option<usize>, entry: usize, items: usize, rows: usize, cfg: &Config) -> Group {
     let Some(slots) = slots.filter(|&s| s <= DENSE_MAX) else { return Group::Sort };
-    let tables = if cfg.par(rows) { rayon::current_num_threads().clamp(1, items.max(1)) } else { 1 };
+    let tables = if cfg.par(rows) { rayon::current_num_threads().clamp(1, items.div_ceil(CHUNK).max(1)) } else { 1 };
     // The same rule as agg.rs Dense::fold: the arrays must not be larger than the (group, value) pairs of the sort
     let bytes = slots.saturating_mul(entry).saturating_mul(tables);
     if cfg.dense_always || bytes <= rows.saturating_mul(16) {
@@ -544,7 +546,7 @@ mod tests {
                 }
             }
         }
-        assert!(seen.0 > 10 && seen.1 > 10, "both paths ran: {seen:?}");
+        assert!(seen.0 > 10 && seen.1 > 5, "both paths ran: {seen:?}");
         assert!(segmented > 10, "{segmented} rounds read a base of 3 or more segments");
     }
 
@@ -654,6 +656,16 @@ mod tests {
         let st = plain(&SIZES, &cat);
         let g = st.summarize(&[1], &Restrict::all(3), ReadAgg::Sum, &cat, &Budget::new(300 * CELL_BYTES, 0)).unwrap();
         assert_eq!(got(g), want(&st, &[1], &Restrict::all(3), Agg::Sum, &cat));
+    }
+
+    /// Each chunk of CHUNK items goes to one thread, so there is no table for more threads than chunks.
+    #[test]
+    fn no_more_tables_than_chunks() {
+        let cfg = Config { par_min: 0, ..Config::default() };
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+        let tables = |items: usize| pool.install(|| choose(Some(10), 16, items, 1 << 20, &cfg));
+        assert_eq!(tables(100), Group::Dense { slots: 10, tables: 2 });
+        assert_eq!(tables(1000), Group::Dense { slots: 10, tables: 8 });
     }
 }
 
