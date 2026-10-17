@@ -493,6 +493,70 @@ class WriteBudget(unittest.TestCase):
         self.assertIn(True, accepted)
         self.assertTrue(all(accepted[accepted.index(True):]), accepted)
 
+    def test_part_writes_after_a_fork_and_in_one_level_stay_in_the_budget(self):
+        """A part write into a shared delta tree copies its nodes. The part writes of one level wait in sequence."""
+        import nanashi_core
+        n, mib = 40_000, 1 << 20
+
+        def build(k):
+            m = Named(Model(engine=RustEngine(max_bytes=1 << 50, fuse=False, par_min=1 << 40)))
+            m.add_dimension("X", [f"x{i}" for i in range(n)])
+            m.add_input("A", ["X"], {(f"x{i}",): float(i) for i in range(n)})
+            for j in range(k):
+                m.add_formula(f"Z{j}", ["X"], f"A * {j + 2}")
+            m.recalc()
+            return m
+
+        def edit(m, keys):
+            for i in range(n // keys // 2, n, n // keys):
+                m.set_cell("A", 7.0, X=f"x{i}")
+
+        def held(m):
+            return sum(r["base"] + r["delta"] + r["index"] + r.get("counts", 0) for r in m.memory().values())
+
+        def work(m, max_bytes):
+            m.engine.core.configure(max_bytes=max_bytes)
+            gc.collect()
+            start, base = held(m), nanashi_core.heap()[0]
+            nanashi_core.reset_heap_peak()
+            try:
+                m.recalc()
+                error = None
+            except ValueError as e:
+                error = str(e)
+            return error, start + nanashi_core.heap()[1] - base
+
+        def smallest(trial):
+            """The smallest budget (in steps of 4 KiB) that trial accepts, and the bytes of that work."""
+            lo, hi = 0, 64 * mib
+            while hi - lo > 4096:
+                mid = (lo + hi) // 2
+                lo, hi = (lo, mid) if trial(mid)[0] is None else (mid, hi)
+            return hi, trial(hi)
+
+        # The delta tree of each Z gets 4,000 rows. Then a fork shares it, and an edit of 60 keys changes it
+        shared = build(4)
+        for r in range(5):
+            for i in range(r, n, n // 800):
+                shared.set_cell("A", float(-i - r), X=f"x{i}")
+            shared.recalc()
+
+        def fork(max_bytes):
+            f = shared.fork()
+            edit(f, 60)
+            return work(f, max_bytes)
+
+        def level(max_bytes):
+            m = build(8)
+            edit(m, 2000)
+            return work(m, max_bytes)
+
+        for label, trial in [("a fork", fork), ("8 Metrics in one level", level)]:
+            with self.subTest(label):
+                budget, (error, total) = smallest(trial)
+                self.assertIsNone(error)
+                self.assertLessEqual(total, budget, "the work went over max_bytes")
+
 
 if __name__ == "__main__":
     unittest.main()
