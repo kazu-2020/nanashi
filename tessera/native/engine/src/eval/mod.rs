@@ -159,6 +159,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         }
 
         Node::If(cond, then, else_, _) => {
+            // A TRUE cell joins THEN and a FALSE cell joins ELSE. A blank condition joins neither, so the result has no cell there
             let c = ev(cond)?;
             bud.take(c.cells.len(), "IF の条件")?;
             let pick = |want: bool| Cube {
@@ -166,6 +167,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 kind: Kind::Bool,
                 cells: map_cells(cfg, &c.cells, |k, v| ((v != 0.0) == want).then_some((k, v))),
             };
+            // Evaluate each branch only on the members of its part. The join drops all other cells
             let branch = |n: &Node, part: &Cube| match semi(r, part, cat) {
                 Some(r2) => eval_with(n, cat, src, &r2, bud),
                 None => eval_with(n, cat, src, r, bud),

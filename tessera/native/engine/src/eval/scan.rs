@@ -176,8 +176,8 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
     let size = cat.dims[dim].size as usize;
     let (shift, tmask) = (pack.shifts[p], pack.masks[p]);
     let mut operands = Vec::with_capacity(tree.operands.len());
-    const ENTRY: usize = size_of::<(u64, f64)>();
-    b.take(before.cells.capacity(), "scan の加数")?;
+    const WHAT: &str = "scan の作業領域";
+    b.take(before.cells.capacity(), WHAT)?;
     for &(node, u) in &tree.operands {
         let c = eval_with(node, cat, src, r, b)?;
         let fits = match u {
@@ -190,28 +190,26 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
         operands.push(match u {
             Use::Lookup if same_set(c.dims(), &pack.dims) => {
                 if &c.pack != pack {
-                    b.take(c.cells.len(), "scan の加数")?;
+                    b.take(c.cells.len(), WHAT)?;
                 }
                 Operand::Aligned(by_row(cfg, c.into_repacked(cfg, pack).cells, shift))
             }
             Use::Lookup => {
                 let proj = Proj::new(pack, &c.pack);
-                b.take(table_cells(c.cells.len(), ENTRY), "scan の加数")?;
+                b.take(table_cells(c.cells.len(), size_of::<(u64, f64)>()), WHAT)?;
                 Operand::Lookup(c.cells.into_iter().collect(), c.pack, proj)
             }
             Use::Union | Use::Coalesce => {
                 let e = expand(c, &pack.dims, cat, r, b)?;
                 if &e.pack != pack {
-                    b.take(e.cells.len(), "scan の加数")?;
+                    b.take(e.cells.len(), WHAT)?;
                 }
                 Operand::ByRow(by_row(cfg, e.into_repacked(cfg, pack).cells, shift))
             }
         });
     }
-    if &before.pack != pack {
-        b.take(before.cells.len(), "scan の加数")?;
-    }
-    let before = by_row(cfg, before.into_repacked(cfg, pack).cells, shift);
+    debug_assert!(&before.pack == pack);
+    let before = by_row(cfg, before.cells, shift);
     let row = |k: u64| k & !tmask;
     // A cell gets a value only from an operand that adds keys or from an earlier value of its row. These are all such rows
     let mut rows = Vec::new();
@@ -227,7 +225,7 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
     rows.sort_unstable();
     rows.dedup();
     // A row key takes half a cell
-    b.take(rows.capacity().div_ceil(2), "scan の加数")?;
+    b.take(rows.capacity().div_ceil(2), WHAT)?;
     // The cells of each operand by row, and `before` as the last. A Lookup operand has no cells here and no buffer
     let mut srcs: Vec<Option<&[(u64, f64)]>> = operands
         .iter()
@@ -239,7 +237,7 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
     srcs.push(Some(&before));
     let parts = if cfg.par(srcs.iter().flatten().map(|s| s.len()).sum()) { rayon::current_num_threads() * 4 } else { 1 };
     // Each chunk that runs at the same time has a buffer of `size` slots for each source
-    b.take(srcs.iter().flatten().count() * size * parts.min(rayon::current_num_threads()), "scan の加数")?;
+    b.take(srcs.iter().flatten().count() * size * parts.min(rayon::current_num_threads()), WHAT)?;
     // A Budget is not Sync. The chunks count the capacity of their results here, and a chunk stops when it does not fit
     let room = b.room();
     let made = AtomicUsize::new(0);
@@ -269,7 +267,7 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
             let (hist, vals) = bufs.split_last_mut().expect("srcs has before");
             let base = w.rotate_left(shift);
             if out.capacity() - out.len() < ts.len() {
-                // Double the capacity, and count the old buffer too: it lives while the realloc copies it
+                // Count the old buffer too: it lives while the realloc copies it
                 let (old, grow) = (out.capacity(), out.capacity().max(ts.len()));
                 if made.fetch_add(old + grow, Relaxed) + old + grow > room {
                     return None;
@@ -294,18 +292,14 @@ pub(crate) fn tree_scan(tree: &Tree, before: Cube, pack: &Packing, dim: DimId, t
         unreachable!("room + 1 cells never fit");
     };
     let cells = if outs.len() == 1 {
-        // The capacity doubled. Give back the unused part: the store copies the result, and the copy lives with it
+        // The capacity can be larger than the length. Free the unused capacity: `replace` copies the result, and both copies exist at the same time
         let mut cells = outs.pop().expect("one chunk");
         cells.shrink_to_fit();
         cells
     } else {
-        let n = outs.iter().map(Vec::len).sum();
+        let n: usize = outs.iter().map(Vec::len).sum();
         b.need(made.load(Relaxed) + n, "scan の結果")?;
-        let mut cells = Vec::with_capacity(n);
-        for mut o in outs {
-            cells.append(&mut o);
-        }
-        cells
+        outs.concat()
     };
     Ok(Cube { pack: pack.clone(), kind: Kind::Num, cells })
 }

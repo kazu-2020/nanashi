@@ -221,11 +221,17 @@ pub(crate) fn expand(c: Cube, dims: &[DimId], cat: &Catalog, r: &Restrict, b: &B
     b.need(cells_out.saturating_add(n.saturating_add(n / last).div_ceil(2)).saturating_add(members), WHAT)?;
     b.take(cells_out, WHAT)?;
     let combos = product(&out, &missing);
-    let combos = &combos;
-    let cells = flat_map_cells(cfg, &c.cells, cells_out, |k, v| {
+    // Each input cell gives exactly combos.len() cells, so fill a buffer of the exact size. A parallel collect can make more.
+    let fill = |(chunk, &(k, v)): (&mut [(u64, f64)], &(u64, f64))| {
         let base = proj.apply(&c.pack, &out, k);
-        combos.iter().map(move |&extra| (base | extra, v))
-    });
+        chunk.iter_mut().zip(&combos).for_each(|(o, &extra)| *o = (base | extra, v));
+    };
+    let mut cells = vec![(0, 0.0); cells_out];
+    if cfg.par(c.cells.len()) {
+        cells.par_chunks_mut(combos.len()).zip(&c.cells).for_each(fill);
+    } else {
+        cells.chunks_mut(combos.len()).zip(&c.cells).for_each(fill);
+    }
     Ok(Cube { pack: out, kind: c.kind, cells })
 }
 

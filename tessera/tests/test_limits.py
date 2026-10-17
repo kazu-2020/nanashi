@@ -319,6 +319,23 @@ class BudgetBeforeAllocation(unittest.TestCase):
                             m.recalc()
                     self.assertLessEqual(nanashi_core.heap()[1] - base, budget, "the work went over max_bytes")
 
+    def test_parallel_expand_stays_in_the_budget(self):
+        import nanashi_core
+        n, k, budget = 20_000, 100, 70 << 20
+        m = Named(Model(engine=RustEngine(max_bytes=budget, par_min=0), max_cells=None))
+        m.add_dimension("X", [f"x{i}" for i in range(n)])
+        m.add_dimension("T", [f"t{i}" for i in range(k)], ordered=True)
+        m.add_input("G", ["X"], {(f"x{i}",): 0.0 for i in range(n)})
+        m.add_input("H", ["T"], {(f"t{i}",): 1.0 for i in range(k)})
+        m.add_input("B", ["X", "T"], {("x0", "t0"): 1.0})
+        m.recalc()
+        gc.collect()
+        base = nanashi_core.heap()[0]
+        m.add_formula("Z", ["X", "T"], "IF(G > 0, H[EXPAND: X] + PREVIOUS(T), B)")
+        nanashi_core.reset_heap_peak()
+        m.recalc()
+        self.assertLessEqual(nanashi_core.heap()[1] - base, budget, "the work went over max_bytes")
+
 
 class Memory(unittest.TestCase):
     @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
