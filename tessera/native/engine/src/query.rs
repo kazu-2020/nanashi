@@ -38,10 +38,12 @@ struct Radix {
     shift: u32,
     mask: u64,
     remap: Vec<u32>,
-    members: Vec<u32>, // rank -> member number
+    member_of_rank: Vec<u32>,
 }
 
 const NONE: u32 = u32::MAX;
+/// The bytes before and after the entries of a Dense table. They keep the small tables of 2 threads out of one
+/// cache line.
 const PAD: usize = 128;
 /// The work items that one thread takes at a time. Small chunks balance the threads when one of them is slow.
 const CHUNK: usize = 64;
@@ -53,7 +55,7 @@ const CHUNK: usize = 64;
 #[derive(Clone, Debug, PartialEq)]
 struct Item {
     seg: usize,
-    block: usize,       // in the segment
+    block_in_segment: usize,
     rows: Range<usize>, // positions in the block
     keys: RangeInclusive<u64>,
 }
@@ -152,24 +154,23 @@ impl Store {
     }
 
     fn summarize_with<A: Acc>(&self, keep: &[DimId], r: &Restrict, agg: ReadAgg, cat: &Catalog, b: &Budget) -> Result<Groups> {
-        // The remap and members of each kept dimension: at most 8 B a member
+        // The remap and member_of_rank of each kept dimension: at most 8 B a member
         let kept = self.metric_dims.iter().filter(|d| keep.contains(d)).map(|&d| cat.dims[d].size as usize * 8).sum::<usize>();
         b.take(kept.div_ceil(CELL_BYTES), "集計")?;
         let radix = radix(self, keep, r, cat);
         let tests = tests(&self.pack, r);
         let items = items(&self.base.segs, self.delta.is_empty(), &ranges(&self.pack, r));
         let rows = items.iter().map(|it| it.rows.len()).sum::<usize>() + self.delta.len();
-        let slots = radix.iter().try_fold(1usize, |a, x| a.checked_mul(x.members.len()));
-        let entry = size_of::<(A, u32)>();
-        match choose(slots, entry, items.len(), rows, &self.cfg) {
-            Group::Dense { slots, tables } => self.dense::<A>(&radix, &tests, &items, (slots, tables), agg, b),
+        let slots = radix.iter().try_fold(1usize, |a, x| a.checked_mul(x.member_of_rank.len()));
+        match choose(slots, size_of::<(A, u32)>(), items.len(), rows, &self.cfg) {
+            Group::Dense { slots, tables } => self.dense::<A>(&radix, &tests, &items, slots, tables, agg, b),
             Group::Sort => self.sorted(&radix, &tests, &items, rows, agg, cat, b),
         }
     }
 
-    fn dense<A: Acc>(&self, radix: &[Radix], tests: &[Test], items: &[Item], (slots, tables): (usize, usize), agg: ReadAgg, b: &Budget) -> Result<Groups> {
+    #[allow(clippy::too_many_arguments)]
+    fn dense<A: Acc>(&self, radix: &[Radix], tests: &[Test], items: &[Item], slots: usize, tables: usize, agg: ReadAgg, b: &Budget) -> Result<Groups> {
         let entry = size_of::<(A, u32)>();
-        // PAD bytes before and after the entries keep the small tables of 2 threads out of one cache line
         let pad = PAD.div_ceil(entry);
         let table_cells = ((slots + 2 * pad) * entry).saturating_mul(tables).div_ceil(CELL_BYTES);
         b.need(table_cells, "集計")?;
@@ -177,10 +178,7 @@ impl Store {
         // A run holds at most one Spill for a short time, so the Meter of the table does not count it
         let short = Meter::unbounded();
         let fill = |t: &mut [(A, u32)], it: &Item| {
-            // Rows of one group often come one after the other (the group is a prefix of the key). The rows of
-            // such a run after the first add up in `run`, a local that stays in registers, and go to the table one
-            // time. A read-add-write of the table entry for each row costs about 3 times more (the store waits
-            // for the load). A row whose group differs from the row before goes to the table directly.
+            // A run of rows of one group adds up in a local: one table write per row costs about 3 times more
             let (mut cur, mut run) = (NONE as usize, (A::default(), 0u32));
             scan(self, tests, it, |k, v| {
                 let mut s = 0usize;
@@ -189,7 +187,7 @@ impl Store {
                     if rank == NONE {
                         return;
                     }
-                    s = s * x.members.len() + rank as usize;
+                    s = s * x.member_of_rank.len() + rank as usize;
                 }
                 if s == cur {
                     run.0.add(v, &short);
@@ -213,20 +211,21 @@ impl Store {
                 e.1 += run.1;
             }
         };
-        // One table for each thread. Small chunks of items balance the threads when one of them is slow (a
-        // busy core); a thread locks only its own table, so the locks never wait.
-        let new = || Mutex::new(vec![(A::default(), 0u32); slots + 2 * pad]);
-        let tabs: Vec<Mutex<Vec<(A, u32)>>> = if tables == 1 { vec![new()] } else { (0..tables).into_par_iter().map(|_| new()).collect() };
-        if tables == 1 {
-            let mut t = tabs[0].lock().expect("no panic holds the table");
+        // A thread locks only its own table, so the locks never wait
+        let new = || vec![(A::default(), 0u32); slots + 2 * pad];
+        let tabs: Vec<Vec<(A, u32)>> = if tables == 1 {
+            let mut t = new();
             items.iter().for_each(|it| fill(&mut t, it));
+            vec![t]
         } else {
+            let tabs: Vec<Mutex<Vec<(A, u32)>>> = (0..tables).into_par_iter().map(|_| Mutex::new(new())).collect();
             items.par_chunks(CHUNK).for_each(|c| {
                 let mut t = tabs[rayon::current_thread_index().unwrap_or(0) % tables].lock().expect("no panic holds the table");
                 c.iter().for_each(|it| fill(&mut t, it));
             });
-        }
-        let mut tabs = tabs.into_iter().map(|t| t.into_inner().expect("no panic holds the table"));
+            tabs.into_iter().map(|t| t.into_inner().expect("no panic holds the table")).collect()
+        };
+        let mut tabs = tabs.into_iter();
         let mut t = tabs.next().expect("tables > 0");
         for o in tabs {
             for (x, y) in t.iter_mut().zip(&o) {
@@ -237,20 +236,19 @@ impl Store {
             }
         }
         let t = &t[pad..pad + slots];
-        // Err if the Meter refused a Spill: then the sums are wrong
-        b.need(table_cells + m.cells(), "集計")?;
         let groups = t.iter().filter(|e| e.1 > 0).count();
+        // m.cells() is over the room if the Meter refused a Spill: then the sums are wrong
         b.need(table_cells + m.cells() + (groups * (4 * radix.len() + 8)).div_ceil(CELL_BYTES), "集計")?;
         let mut out = Groups { cols: radix.iter().map(|_| Vec::with_capacity(groups)).collect(), vals: Vec::with_capacity(groups) };
         let mut ranks = vec![0usize; radix.len()];
         for (s, e) in t.iter().enumerate().filter(|(_, e)| e.1 > 0) {
             let mut rest = s;
             for (j, x) in radix.iter().enumerate().rev() {
-                ranks[j] = rest % x.members.len();
-                rest /= x.members.len();
+                ranks[j] = rest % x.member_of_rank.len();
+                rest /= x.member_of_rank.len();
             }
             for ((c, x), &rank) in out.cols.iter_mut().zip(radix).zip(&ranks) {
-                c.push(x.members[rank]);
+                c.push(x.member_of_rank[rank]);
             }
             out.vals.push(e.0.value(e.1, agg));
         }
@@ -261,8 +259,8 @@ impl Store {
     fn sorted(&self, radix: &[Radix], tests: &[Test], items: &[Item], rows: usize, agg: ReadAgg, cat: &Catalog, b: &Budget) -> Result<Groups> {
         let dims: Vec<DimId> = radix.iter().map(|x| x.dim).collect();
         let out = Packing::new(&dims, cat)?;
-        // The parts and their concatenation are live together
-        b.need(rows.saturating_mul(2), "集計")?;
+        let live_rows = rows.saturating_mul(2);
+        b.need(live_rows, "集計")?;
         let pair = |k: u64| -> Option<u64> {
             let mut o = 0;
             for (j, x) in radix.iter().enumerate() {
@@ -270,7 +268,7 @@ impl Store {
                 if rank == NONE {
                     return None;
                 }
-                o |= out.put(j, x.members[rank as usize]);
+                o |= out.put(j, x.member_of_rank[rank as usize]);
             }
             Some(o)
         };
@@ -298,7 +296,7 @@ impl Store {
 }
 
 /// Pick the aggregation for `slots` groups (None: more than usize) with `entry` bytes each, over `items`
-/// work items with `rows` rows. A pure calculation.
+/// work items with `rows` rows.
 fn choose(slots: Option<usize>, entry: usize, items: usize, rows: usize, cfg: &Config) -> Group {
     let Some(slots) = slots.filter(|&s| s <= DENSE_MAX) else { return Group::Sort };
     let tables = if cfg.par(rows) { rayon::current_num_threads().clamp(1, items.div_ceil(CHUNK).max(1)) } else { 1 };
@@ -320,15 +318,15 @@ fn radix(st: &Store, keep: &[DimId], r: &Restrict, cat: &Catalog) -> Vec<Radix> 
         }
         let pos = st.pack.slot_of(&st.metric_dims, j).expect("a metric dimension is in the packing");
         let size = cat.dims[d].size;
-        let members: Vec<u32> = match r.get(d) {
+        let member_of_rank: Vec<u32> = match r.get(d) {
             Some(sel) => sel.members.iter().copied().filter(|&m| m < size).collect(),
             None => (0..size).collect(),
         };
         let mut remap = vec![NONE; size as usize];
-        for (rank, &m) in members.iter().enumerate() {
+        for (rank, &m) in member_of_rank.iter().enumerate() {
             remap[m as usize] = rank as u32;
         }
-        out.push(Radix { dim: d, shift: st.pack.shifts[pos], mask: st.pack.masks[pos], remap, members });
+        out.push(Radix { dim: d, shift: st.pack.shifts[pos], mask: st.pack.masks[pos], remap, member_of_rank });
     }
     out
 }
@@ -352,14 +350,14 @@ fn ranges(pack: &Packing, r: &Restrict) -> Vec<RangeInclusive<u64>> {
 }
 
 /// The work items of the key ranges (sorted, not overlapping). If the Store has no delta, an item with no base
-/// rows is dropped. A pure calculation.
+/// rows is dropped.
 fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) -> Vec<Item> {
     let mut out = Vec::new();
     for r in ranges {
         let (lo, hi) = (*r.start(), *r.end());
         if segs.is_empty() {
             if !no_delta {
-                out.push(Item { seg: 0, block: 0, rows: 0..0, keys: r.clone() });
+                out.push(Item { seg: 0, block_in_segment: 0, rows: 0..0, keys: r.clone() });
             }
             continue;
         }
@@ -374,7 +372,7 @@ fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) 
                 let (a, e) = (start.max(b * BLOCK), end.min((b + 1) * BLOCK));
                 let rows = if a < e { a - b * BLOCK..e - b * BLOCK } else { 0..0 };
                 if !rows.is_empty() || !no_delta {
-                    out.push(Item { seg: s, block: b, rows, keys: lo.max(own_lo)..=next.map_or(hi, |f| hi.min(f - 1)) });
+                    out.push(Item { seg: s, block_in_segment: b, rows, keys: lo.max(own_lo)..=next.map_or(hi, |f| hi.min(f - 1)) });
                 }
                 if next.is_none_or(|f| f > hi) {
                     break 'segs;
@@ -399,8 +397,8 @@ fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(u64, f64)) 
     let mut vals = &[][..];
     if !keys.is_empty() {
         let seg = &st.base.segs[it.seg];
-        seg.keys.decode(it.block, it.rows.clone(), keys);
-        let at = it.block * BLOCK;
+        seg.keys.decode(it.block_in_segment, it.rows.clone(), keys);
+        let at = it.block_in_segment * BLOCK;
         vals = &seg.vals[at + it.rows.start..at + it.rows.end];
     }
     let pass = |k: u64| tests.iter().all(|t| t.sel.has(((k >> t.shift) & t.mask) as u32));
@@ -581,20 +579,20 @@ mod tests {
         assert_eq!(all[2].keys, keys[2048]..=u64::MAX);
         assert_eq!(all.iter().map(|it| it.rows.len()).sum::<usize>(), 3000);
         let part = items(&one.segs, true, &[keys[1000]..=keys[1030], keys[2999] + 1..=u64::MAX]);
-        assert_eq!(part, vec![Item { seg: 0, block: 0, rows: 1000..1024, keys: keys[1000]..=keys[1024] - 1 }, Item { seg: 0, block: 1, rows: 0..7, keys: keys[1024]..=keys[1030] }]);
+        assert_eq!(part, vec![Item { seg: 0, block_in_segment: 0, rows: 1000..1024, keys: keys[1000]..=keys[1024] - 1 }, Item { seg: 0, block_in_segment: 1, rows: 0..7, keys: keys[1024]..=keys[1030] }]);
 
         let two = Base::from_parts(&[&keys[..1500], &keys[1500..]]);
         let all = items(&two.segs, false, &[RangeInclusive::new(0, u64::MAX)]);
-        let owners: Vec<(usize, usize, RangeInclusive<u64>)> = all.iter().map(|it| (it.seg, it.block, it.keys.clone())).collect();
+        let owners: Vec<(usize, usize, RangeInclusive<u64>)> = all.iter().map(|it| (it.seg, it.block_in_segment, it.keys.clone())).collect();
         assert_eq!(
             owners,
             [(0, 0, 0..=keys[1024] - 1), (0, 1, keys[1024]..=keys[1500] - 1), (1, 0, keys[1500]..=keys[2524] - 1), (1, 1, keys[2524]..=u64::MAX)]
         );
         assert_eq!(all.iter().map(|it| it.rows.len()).sum::<usize>(), 3000);
         let part = items(&two.segs, true, &[RangeInclusive::new(keys[1400], keys[1600])]);
-        assert_eq!(part, vec![Item { seg: 0, block: 1, rows: 376..476, keys: keys[1400]..=keys[1500] - 1 }, Item { seg: 1, block: 0, rows: 0..101, keys: keys[1500]..=keys[1600] }]);
+        assert_eq!(part, vec![Item { seg: 0, block_in_segment: 1, rows: 376..476, keys: keys[1400]..=keys[1500] - 1 }, Item { seg: 1, block_in_segment: 0, rows: 0..101, keys: keys[1500]..=keys[1600] }]);
         let gap = [RangeInclusive::new(keys[1499] + 1, keys[1500] - 1)];
-        assert_eq!(items(&two.segs, false, &gap), vec![Item { seg: 0, block: 1, rows: 0..0, keys: gap[0].clone() }]);
+        assert_eq!(items(&two.segs, false, &gap), vec![Item { seg: 0, block_in_segment: 1, rows: 0..0, keys: gap[0].clone() }]);
         assert!(items(&two.segs, true, &gap).is_empty());
     }
 

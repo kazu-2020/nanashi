@@ -416,7 +416,8 @@ pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &St
     finish_groups(groups, out, aggs, b).map(Some)
 }
 
-/// 集計先の全組み合わせの数がこれ以下なら、全組み合わせの配列へ足し込む経路を考える。
+/// If the number of all the group combinations is this value or less, the rows can go into an array of all the
+/// combinations.
 pub(crate) const DENSE_MAX: usize = 1 << 26;
 
 /// Add the rows into an array of all the group combinations (all members of each dimension of out). If the

@@ -235,11 +235,11 @@ impl FixSum {
     #[inline]
     pub(crate) fn add(&mut self, x: f64, m: &Meter) {
         let bits = x.to_bits();
-        let e = ((bits >> 52) & 0x7ff) as i32 - 1075; // the exponent of the lowest mantissa bit
+        let low_exp = ((bits >> 52) & 0x7ff) as i32 - 1075;
         if self.n == 0 {
-            self.base = (e - BELOW).clamp(*BASE.start(), *BASE.end());
+            self.base = (low_exp - BELOW).clamp(*BASE.start(), *BASE.end());
         }
-        let shift = e - self.base;
+        let shift = low_exp - self.base;
         if !(0..=WINDOW).contains(&shift) {
             return self.rest.add(x, m);
         }
@@ -257,8 +257,7 @@ impl FixSum {
         if self.n == 0 {
             (self.acc, self.base, self.n) = (o.acc, o.base, o.n);
         } else if o.n > 0 {
-            // Align the two sums to the lower base. A value shifted up by d bits counts 2^d in n, so n stays a
-            // bound of |acc| in units of 2^(WINDOW + 53), and acc cannot overflow while n <= FLUSH.
+            // A value shifted up by d bits counts 2^d in n, so |acc| stays below n * 2^(WINDOW + 53)
             let d = (o.base - self.base).unsigned_abs();
             let (lo, hi) = if o.base >= self.base { (self.n, o.n) } else { (o.n, self.n) };
             let n = (lo as u64).saturating_add((hi as u64) << d.min(32));
@@ -269,6 +268,7 @@ impl FixSum {
                     (self.acc, self.base) = ((self.acc << d) + o.acc, o.base);
                 }
                 self.n = n as u32;
+                debug_assert!(self.acc.unsigned_abs() < (self.n as u128) << (WINDOW + 53));
             } else {
                 put(&mut self.rest, o.acc, o.base, m);
             }
@@ -277,8 +277,7 @@ impl FixSum {
     }
 
     pub(crate) fn finish(&self) -> f64 {
-        // The copy lives only in this call, so its Spill is not counted
-        let (mut s, m) = (self.rest.clone(), Meter::new(usize::MAX));
+        let (mut s, m) = (self.rest.clone(), Meter::unbounded());
         put(&mut s, self.acc, self.base, &m);
         s.finish()
     }
