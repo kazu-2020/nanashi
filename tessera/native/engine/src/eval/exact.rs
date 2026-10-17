@@ -37,6 +37,11 @@ impl Meter {
         self.made.fetch_add(bytes, Relaxed).saturating_add(bytes) <= self.room
     }
 
+    /// A Meter with no limit, for a Spill that lives only for a short time.
+    pub(crate) fn unbounded() -> Meter {
+        Meter::new(usize::MAX)
+    }
+
     /// The cells of the Spills made (or refused) until now.
     pub(crate) fn cells(&self) -> usize {
         self.made.load(Relaxed).div_ceil(CELL_BYTES)

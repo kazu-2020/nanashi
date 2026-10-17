@@ -172,6 +172,8 @@ impl Store {
         let table_cells = ((slots + 2 * pad) * entry).saturating_mul(tables).div_ceil(CELL_BYTES);
         b.need(table_cells, "集計")?;
         let m = Meter::new(b.room().saturating_sub(table_cells));
+        // A run holds at most one Spill for a short time, so the Meter of the table does not count it
+        let short = Meter::unbounded();
         let fill = |t: &mut [(A, u32)], it: &Item| {
             // Rows of one group often come one after the other (the group is a prefix of the key). The rows of
             // such a run after the first add up in `run`, a local that stays in registers, and go to the table one
@@ -188,7 +190,7 @@ impl Store {
                     s = s * x.members.len() + rank as usize;
                 }
                 if s == cur {
-                    run.0.add(v, &m);
+                    run.0.add(v, &short);
                     run.1 += 1;
                     return;
                 }
@@ -643,6 +645,15 @@ mod tests {
         let run = |bytes: usize| st.summarize(&[0], &Restrict::all(2), ReadAgg::Sum, &cat, &Budget::new(bytes, 0));
         assert_eq!(run(9 << 20).unwrap().vals.len(), 100);
         assert!(over(run(1 << 20)));
+    }
+
+    /// The Spill of a run lives for a short time, so it does not use the budget again for each run.
+    #[test]
+    fn runs_do_not_use_up_the_budget() {
+        let cat = catalog(Config { compact_min: usize::MAX, par_min: usize::MAX, dense_always: true, ..Config::default() });
+        let st = plain(&SIZES, &cat);
+        let g = st.summarize(&[1], &Restrict::all(3), ReadAgg::Sum, &cat, &Budget::new(300 * CELL_BYTES, 0)).unwrap();
+        assert_eq!(got(g), want(&st, &[1], &Restrict::all(3), Agg::Sum, &cat));
     }
 }
 
