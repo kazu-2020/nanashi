@@ -296,7 +296,7 @@ class Summary:
     """The result of summarize: one row for each group, as columns (no Python object for each cell).
 
     dims are the kept dimensions in the order of the Metric. coords has one numpy object array of members for
-    each dimension, and values is a float64 array. cells gives {key: value} for a small result or old code.
+    each dimension, and values is a float64 array. cells makes a {key: value} dict on the first use.
     """
     dims: tuple[str, ...]
     coords: tuple[np.ndarray, ...]

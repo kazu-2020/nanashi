@@ -9,7 +9,7 @@ description = "計画ツールのための、疎な多次元計算エンジン"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["numpy>=2.0,<3"]  # summarize gives its result as numpy columns
+dependencies = ["numpy>=2.0,<3"]
 
 [project.optional-dependencies]
 rust = ["nanashi_core"]            # native/ を maturin でビルドしたもの（README の手順）

@@ -241,7 +241,7 @@ class Named:
         m = self.metric(name)
         s = self.model.summarize(m.id, self._coords(m, coords), keep=[self._dim(d) for d in keep], agg=agg)
         dims = [self.model.dimensions[d] for d in s.dims]
-        names = tuple(np.array([d.members[d._by_id[x]] for x in c], dtype=object) for d, c in zip(dims, s.coords))
+        names = tuple(np.array([d.member_of(x) for x in c], dtype=object) for d, c in zip(dims, s.coords))
         return Summary(tuple(d.name for d in dims), names, s.values)
 
     def memory(self) -> dict[str, dict[str, int]]:

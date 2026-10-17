@@ -213,10 +213,9 @@ def _groups(v, m: Metric, keep: list[str], coords: dict[str, Any]) -> int:
     return groups
 
 
-# proto Aggregation (enum names and numbers) -> the agg of Model.summarize
 AGGREGATIONS = {"AGGREGATION_UNSPECIFIED": "sum", "AGGREGATION_SUM": "sum", "AGGREGATION_AVG": "avg",
                 "AGGREGATION_MIN": "min", "AGGREGATION_MAX": "max", "AGGREGATION_COUNT": "count"}
-AGGREGATION_NUMBERS = dict(enumerate(AGGREGATIONS.values()))
+AGGREGATION_NUMBERS = {0: "sum", 1: "sum", 2: "avg", 3: "min", 4: "max", 5: "count"}
 QUERY_FIELDS = frozenset({"app_id", "appId", "metrics", "rows", "columns", "filters", "aggregation"})
 
 
@@ -700,8 +699,8 @@ class Handler(BaseHTTPRequestHandler):
         if route not in (["writes"], ["query"]):
             raise ApiError(404, "not_found", f"{url.path} はない")
         user = self._user()
-        read = route == ["query"]  # a read: also on a standby and on a Replica
-        if not read and isinstance(self.server.workspace, Replica):
+        allowed_on_standby = route == ["query"]
+        if not allowed_on_standby and isinstance(self.server.workspace, Replica):
             raise ApiError(405, "read_only", "このサーバーは記録先に追従する読み出し専用（書き込みは書き手のサーバーへ送る）")
         length = self.headers.get("Content-Length")
         if length is None:
@@ -723,7 +722,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             self.unread_body = False
-            self._in_slot(lambda: self._query(raw) if read else self._write(user, raw), left)
+            self._in_slot(lambda: self._query(raw) if allowed_on_standby else self._write(user, raw), left)
         finally:
             self.server.end_body()
 
