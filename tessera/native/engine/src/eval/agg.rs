@@ -161,7 +161,8 @@ impl Rows {
     /// write directly into one array, so only that array is held while it is made.
     pub(crate) fn collect(&self, cfg: &Config, b: &Budget, f: impl Fn(u64, f64) -> Option<(u64, f64)> + Sync) -> Result<Vec<(u64, f64)>> {
         let (n, chunk) = (self.len(), cfg.chunk.max(1));
-        b.need(n, "集計")?;
+        // The parallel branch also holds sizes and written: 2 usize (one cell) for each chunk
+        b.need(n.saturating_add(if cfg.par(n) { n.div_ceil(chunk) } else { 0 }), "集計")?;
         if !cfg.par(n) {
             let mut cells = Vec::with_capacity(n);
             self.for_each_in(0..n, |k, v| cells.extend(f(k, v)));
@@ -353,7 +354,10 @@ impl Table {
         if dense > (4.0 * rows).max((1u64 << 20) as f64) || dense > (1u64 << 27) as f64 {
             return Ok(None);
         }
-        b.need((dense as usize).div_ceil(CELL_BYTES / size_of::<u32>()), "集計")?;
+        // The join can need less than the table, for example if the Metric has few rows
+        if b.need((dense as usize).div_ceil(CELL_BYTES / size_of::<u32>()), "集計").is_err() {
+            return Ok(None);
+        }
         let mut strides = Vec::with_capacity(v.pack.dims.len());
         let mut w = 1usize;
         for &d in v.pack.dims.iter().rev() {
@@ -446,17 +450,35 @@ struct Dense<'a, K> {
 const BUCKET: usize = 1 << 14;
 
 /// The buffers of one part in one round of the partitioned fill.
-#[derive(Clone, Default)]
 struct Round {
-    idx: Vec<u32>,            // the slot of each row (u32::MAX if the row has no group)
-    start: Vec<usize>,        // the start of each bucket in pairs
-    pairs: Vec<(u32, f64)>,   // the (slot, value) pairs in bucket order
+    idx: Vec<u32>,          // the slot of each row (u32::MAX if the row has no group)
+    start: Vec<usize>,      // the start of each bucket in pairs
+    at: Vec<usize>,         // the next free position of each bucket in pairs
+    pairs: Vec<(u32, f64)>, // the (slot, value) pairs in bucket order
 }
 
-/// True if the sampled slot indices touch more bytes of the array than scatter_bytes, in 4 KiB pages. Then
-/// each row misses the cache, and the partitioned fill is faster.
-fn scattered(sample: impl Iterator<Item = usize>, tuple_bytes: usize, scatter_bytes: usize) -> bool {
-    let pages: FxHashSet<usize> = sample.map(|s| s * tuple_bytes / 4096).collect();
+impl Round {
+    /// Buffers with room for `rows` rows and `buckets` buckets. They never grow, so `bytes` is all their memory.
+    fn new(rows: usize, buckets: usize) -> Round {
+        let s = Vec::with_capacity(buckets + 1);
+        Round { idx: Vec::with_capacity(rows), start: s.clone(), at: s, pairs: Vec::with_capacity(rows) }
+    }
+
+    fn bytes(rows: usize, buckets: usize) -> usize {
+        rows * (size_of::<u32>() + size_of::<(u32, f64)>()) + 2 * (buckets + 1) * size_of::<usize>()
+    }
+}
+
+/// True if the slot indices that `sample` gives touch more bytes of the array than scatter_bytes, in 4 KiB
+/// pages. Then each row misses the cache, and the partitioned fill is faster. The page set stops at
+/// scatter_bytes, so it stays small.
+fn scattered(sample: impl FnOnce(&mut dyn FnMut(usize)), tuple_bytes: usize, scatter_bytes: usize) -> bool {
+    let mut pages = FxHashSet::default();
+    sample(&mut |s| {
+        if pages.len() * 4096 <= scatter_bytes {
+            pages.insert(s * tuple_bytes / 4096);
+        }
+    });
     pages.len() * 4096 > scatter_bytes
 }
 
@@ -484,14 +506,17 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         let index = |k: u64| -> usize { (0..sizes.len()).fold(0, |i, j| i * sizes[j] + out.get(k, j) as usize) };
         let slot = |k: u64| (self.key)(k).map(index);
         let tuple_bytes = std::mem::size_of::<(T, u32)>();
-        let partitioned = slots * tuple_bytes > cfg.scatter_bytes && {
-            let mut sample = Vec::new();
-            rows.for_each_in(0..n.min(1 << 16), |k, _| sample.extend(slot(k)));
-            scattered(sample.into_iter(), tuple_bytes, cfg.scatter_bytes)
+        let partitioned = slots * tuple_bytes > cfg.scatter_bytes
+            && scattered(|f| rows.for_each_in(0..n.min(1 << 16), |k, _| slot(k).into_iter().for_each(&mut *f)), tuple_bytes, cfg.scatter_bytes);
+        // The partitioned fill has one array and the buffers of each part. A round has one 16 B pair and one 4 B
+        // slot index for each row, in buffers of a fixed size: about the memory of 1.25 arrays
+        let (round, buckets) = ((slots * tuple_bytes / 16).max(1), slots.div_ceil(BUCKET));
+        let part_rows = round.min(n).div_ceil(parts);
+        let array_bytes = if partitioned {
+            (slots * tuple_bytes).saturating_add(parts.saturating_mul(Round::bytes(part_rows, buckets)))
+        } else {
+            slots.saturating_mul(parts).saturating_mul(tuple_bytes)
         };
-        // The partitioned fill has one array, and the buffers of a round have about the memory of 1.25 arrays
-        let arrays = if partitioned { 3 } else { parts };
-        let array_bytes = slots.saturating_mul(arrays).saturating_mul(tuple_bytes);
         if !cfg.dense_always && array_bytes > n.saturating_mul(row_bytes) {
             return Ok(None);
         }
@@ -500,11 +525,8 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
         let m = Meter::new(b.room().saturating_sub(array_cells));
         let g: Vec<(T, u32)> = if partitioned {
             let mut g = vec![(init, 0u32); slots];
-            let buckets = slots.div_ceil(BUCKET);
-            // A round has one 16 B pair and one 4 B slot index for each row, in buffers of a fixed size
-            let round = (slots * tuple_bytes / 16).max(1);
-            let mut bufs = vec![Round::default(); parts];
-            let scatter = |lo: usize, hi: usize, Round { idx, start, pairs }: &mut Round| {
+            let mut bufs: Vec<Round> = (0..parts).map(|_| Round::new(part_rows, buckets)).collect();
+            let scatter = |lo: usize, hi: usize, Round { idx, start, at, pairs }: &mut Round| {
                 idx.clear();
                 rows.for_each_in(lo..hi, |k, _| idx.push(slot(k).map_or(u32::MAX, |s| s as u32)));
                 start.clear();
@@ -517,7 +539,8 @@ impl<K: Fn(u64) -> Option<u64> + Sync> Dense<'_, K> {
                 }
                 pairs.clear();
                 pairs.resize(start[buckets], (0, 0.0));
-                let mut at = start.clone();
+                at.clear();
+                at.extend_from_slice(start);
                 let mut i = 0;
                 rows.for_each_in(lo..hi, |_, v| {
                     let s = idx[i];
@@ -619,13 +642,16 @@ mod tests {
 
     #[test]
     fn scattered_counts_distinct_pages() {
+        fn each(s: &[usize]) -> impl FnOnce(&mut dyn FnMut(usize)) + '_ {
+            move |f| s.iter().for_each(|&x| f(x))
+        }
         // 32 B a slot: 128 slots fill one 4 KiB page
-        assert!(!scattered([].into_iter(), 32, 0), "no rows, no pages");
-        assert!(!scattered([0, 127, 5].into_iter(), 32, 4096), "1 page is not more than 4096 B");
-        assert!(scattered([0, 128].into_iter(), 32, 4096), "2 pages are 8192 B");
-        assert!(!scattered([0, 128].into_iter(), 32, 8192));
-        assert!(scattered([0, 1, 2, 300].into_iter(), 32, 4096), "pages 0 and 2");
-        assert!(scattered([0, 1, 2, 300].into_iter(), 32, 0), "scatter_bytes=0 partitions always");
+        assert!(!scattered(each(&[]), 32, 0), "no rows, no pages");
+        assert!(!scattered(each(&[0, 127, 5]), 32, 4096), "1 page is not more than 4096 B");
+        assert!(scattered(each(&[0, 128]), 32, 4096), "2 pages are 8192 B");
+        assert!(!scattered(each(&[0, 128]), 32, 8192));
+        assert!(scattered(each(&[0, 1, 2, 300]), 32, 4096), "pages 0 and 2");
+        assert!(scattered(each(&[0, 1, 2, 300]), 32, 0), "scatter_bytes=0 partitions always");
     }
 
     /// The partitioned fill, the fill with one array for each thread, and the sort path give the same bits.

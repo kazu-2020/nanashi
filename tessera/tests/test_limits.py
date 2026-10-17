@@ -400,7 +400,7 @@ class AggregationBudget(unittest.TestCase):
         import nanashi_core
         for max_bytes, refused in [(below, True), (fit, False)]:
             with self.subTest(max_bytes=max_bytes):
-                m = Named(Model(engine=RustEngine(max_bytes=max_bytes, fuse=False, par_min=1 << 40, **cfg)))
+                m = Named(Model(engine=RustEngine(**({"max_bytes": max_bytes, "fuse": False, "par_min": 1 << 40} | cfg))))
                 at, want = build(m)
                 held = sum(v.get("base", 0) for v in m.memory().values())
                 nanashi_core.reset_heap_peak()
@@ -425,9 +425,28 @@ class AggregationBudget(unittest.TestCase):
         # 200,000 groups take the sort path. Its pairs and its 2 results (SUM and COUNT) are about 9.2 MiB
         self.check(lambda m: self.grid(m, 200_000, 1, 1), fit=12 << 20, below=8 << 20)
 
+    def test_sort_path_parallel(self):
+        # With one row in each chunk, the parallel copy also holds 16 B of chunk sizes for each row
+        self.check(lambda m: self.grid(m, 200_000, 1, 1), fit=12 << 20, below=6 << 20, par_min=0, chunk=1)
+
     def test_dense_path(self):
-        # The partitioned fill checks 3 arrays (1.2 MiB each) first. Only 1 array stays while the result is made
-        self.check(lambda m: self.grid(m, 40_000, 10, 10), fit=int(7.5 * (1 << 20)), below=7 << 20, scatter_bytes=0)
+        # The partitioned fill checks the array (1.2 MiB) and the round buffers (1.5 MiB) first. Only the array
+        # stays while the result is made
+        self.check(lambda m: self.grid(m, 40_000, 10, 10), fit=7 << 20, below=6 << 20, scatter_bytes=0)
+
+    def test_partitioned_buffers(self):
+        # 32,768 slots of 32 B and 3 rounds of 65,536 rows. s0 has no department, so the first round has fewer
+        # pairs. The pair buffer must not grow to 2 times its size in the second round
+        def build(m):
+            ns, nt, nd = 48, 4096, 8
+            m.add_dimension("S", [f"s{i}" for i in range(ns)])
+            m.add_dimension("T", [f"t{j}" for j in range(nt)])
+            m.add_dimension("D", [f"d{i}" for i in range(nd)])
+            m.add_property("S", "P", "D", {f"s{i}": f"d{i % nd}" for i in range(1, ns)})
+            m.add_input("A", ["S", "T"], {(f"s{i}", f"t{j}"): 1.0 for i in range(ns) for j in range(nt)})
+            m.add_formula("Z", ["D", "T"], "A[BY SUM: S.P]")
+            return {"D": "d0", "T": "t5"}, float(ns // nd - 1)
+        self.check(build, fit=int(4.875 * (1 << 20)), below=int(3.75 * (1 << 20)), scatter_bytes=0)
 
     def test_table_path(self):
         # BY SUM with a member Metric uses the mapping table (1.1 MiB) and a hash map of 3,600 groups
@@ -440,7 +459,20 @@ class AggregationBudget(unittest.TestCase):
             m.add_input("DeptOf", ["E", "M"], {(f"e{i}", f"m{t}"): f"d{i % nd}" for i in range(ne) for t in range(nm)}, kind="member:D")
             m.add_formula("Z", ["D", "M"], "S[BY SUM: E.DeptOf]")
             return {"D": "d7", "M": "m3"}, ne / nd
-        self.check(build, fit=int(7.5 * (1 << 20)), below=7 << 20)
+        self.check(build, fit=int(7.5 * (1 << 20)), below=7 << 20, stream_always=True)
+
+    def test_table_falls_back_to_the_join(self):
+        # The member Metric has 1,000 cells over 1,044,000 combinations. Its mapping table (4.2 MB) does not fit,
+        # but the join of the 1,000 cells does
+        m = Named(Model(engine=RustEngine(max_bytes=2 << 20, fuse=False, par_min=1 << 40, stream_always=True)))
+        m.add_dimension("E", [f"e{i}" for i in range(87_000)])
+        m.add_dimension("M", [f"m{i}" for i in range(12)])
+        m.add_dimension("D", [f"d{i}" for i in range(30)])
+        m.add_input("S", ["E", "M"], {(f"e{i}", "m0"): 1.0 for i in range(1000)})
+        m.add_input("DeptOf", ["E", "M"], {(f"e{i}", "m0"): f"d{i % 30}" for i in range(1000)}, kind="member:D")
+        m.add_formula("Z", ["D", "M"], "S[BY SUM: E.DeptOf]")
+        m.recalc()
+        self.assertEqual(m.get("Z", D="d7", M="m0"), 34.0)
 
     def test_spill(self):
         # Each group spills (3 partials) and then cancels back to 1.0, so its residual is 0. The 20,000 Spills
