@@ -3,9 +3,9 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
+use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
 use bytes::Bytes;
-use numpy::PyReadonlyArray1;
+use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
@@ -646,6 +646,31 @@ impl Core {
     fn filter(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region) -> PyResult<StoreHandle> {
         let (s, r) = (read(store)?, self.restrict(&region)?);
         Ok(StoreHandle { store: Arc::new(py.detach(move || s.slice(&r))) })
+    }
+
+    /// Aggregate the region of the store to the dimensions in keep (sum, avg, min, max or count), with the GIL
+    /// released. Returns the member numbers of each kept dimension (in metric_dims order) and the values.
+    #[allow(clippy::type_complexity)]
+    fn summarize<'py>(
+        &self,
+        py: Python<'py>,
+        store: &Bound<'_, StoreHandle>,
+        keep: Vec<DimId>,
+        region: Region,
+        agg: &str,
+    ) -> PyResult<(Vec<Bound<'py, PyArray1<u32>>>, Bound<'py, PyArray1<f64>>)> {
+        let agg = match agg {
+            "sum" => ReadAgg::Sum,
+            "avg" => ReadAgg::Avg,
+            "min" => ReadAgg::Min,
+            "max" => ReadAgg::Max,
+            "count" => ReadAgg::Count,
+            _ => return Err(err(format!("集計 {agg} は使えない（sum、avg、min、max、count）"))),
+        };
+        self.dims(&keep)?;
+        let (s, r, cat) = (read(store)?, self.restrict(&region)?, self.cat.clone());
+        let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes()))).map_err(err)?;
+        Ok((g.cols.into_iter().map(|c| PyArray1::from_vec(py, c)).collect(), PyArray1::from_vec(py, g.vals)))
     }
 
     fn replace(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region, new: &Bound<'_, PyAny>) -> PyResult<()> {

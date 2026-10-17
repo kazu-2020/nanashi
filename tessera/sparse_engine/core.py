@@ -9,7 +9,10 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Iterable, Mapping
+
+import numpy as np
 
 Key = tuple[str, ...]  # the member ids of one cell, in the order of the dimensions
 
@@ -286,3 +289,29 @@ class Cube:
         head = " | ".join(self.dims) or "(scalar)"
         rows = [" | ".join(k) + f" = {_show(v)}" for k, v in sorted(self.cells.items(), key=sort_key)]
         return "\n".join([head, *rows]) if rows else f"{head}\n(空)"
+
+
+@dataclass(frozen=True, eq=False)
+class Summary:
+    """The result of summarize: one row for each group, as columns (no Python object for each cell).
+
+    dims are the kept dimensions in the order of the Metric. coords has one numpy object array of members for
+    each dimension, and values is a float64 array. cells gives {key: value} for a small result or old code.
+    """
+    dims: tuple[str, ...]
+    coords: tuple[np.ndarray, ...]
+    values: np.ndarray
+
+    @classmethod
+    def of(cls, cube: Cube) -> Summary:
+        keys = list(cube.cells)
+        coords = tuple(np.array([k[i] for k in keys], dtype=object) for i in range(len(cube.dims)))
+        return cls(cube.dims, coords, np.array(list(cube.cells.values()), dtype=np.float64))
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    @cached_property
+    def cells(self) -> dict[Key, float]:
+        keys = zip(*(c.tolist() for c in self.coords)) if self.coords else [()] * len(self.values)
+        return dict(zip(keys, self.values.tolist()))

@@ -30,7 +30,7 @@ from statistics import mean
 from collections.abc import MutableMapping
 from typing import Any, Iterable, Mapping
 
-from .core import Cube, Dimension, Key, uuid7
+from .core import Cube, Dimension, Key, Summary, uuid7
 from .delta import DeltaPlan
 from .engine import Store, default_engine
 from .evaluate import Edge, FormulaError, Kind, Restrict, Type, bind, combos, member_kind, union_region
@@ -1209,11 +1209,13 @@ class Model:
         return [(k, self._decode(m, v)) for k, v in rows], total
 
     def summarize(self, id: str, coords: Coords | None = None, *, keep: Iterable[str] = (),
-                  agg: str = "sum") -> Cube:
+                  agg: str = "sum") -> Summary:
         """Aggregate the range in coords and keep only the dimensions in keep (ids; SUM, AVG, MIN, MAX, COUNT).
 
             m.summarize(revenue, {product: [p0001, p0002]}, keep=[month])  # the monthly sum of 2 products
-            m.summarize(revenue).cells[()]                                  # the grand total
+            m.summarize(revenue).values[0]                                  # the grand total
+
+        The result has columns (Summary.coords, Summary.values). Summary.cells makes a dict on the first use.
         """
         self.recalc()
         m = self.metric(id)
@@ -1224,7 +1226,7 @@ class Model:
             numeric = [a for a in PUBLIC_AGGREGATIONS if not AGGREGATIONS[a].numeric]
             raise ValueError(f"{m.name} は {m.kind} なので {agg} で集計できない（{'、'.join(numeric)} は使える）")
         keep = tuple(self._dim_in(m, d) for d in keep)
-        return self.engine.aggregate(self._values[m.id], m.dims, keep, agg, self._restrict(m, coords or {}), self)
+        return self.engine.summarize(self._values[m.id], m.dims, keep, agg, self._restrict(m, coords or {}), self)
 
     @staticmethod
     def _missing(name: str, dim: str):
