@@ -242,7 +242,7 @@ impl FixSum {
         let sign = (bits as i64 >> 63) as i128; // -1 for a negative value
         self.acc += (v ^ sign) - sign;
         self.n += 1;
-        if self.n == FLUSH {
+        if self.n >= FLUSH {
             put(&mut self.rest, self.acc, self.base, m);
             (self.acc, self.n) = (0, 0);
         }
@@ -251,10 +251,22 @@ impl FixSum {
     pub(crate) fn merge(&mut self, o: &FixSum, m: &Meter) {
         if self.n == 0 {
             (self.acc, self.base, self.n) = (o.acc, o.base, o.n);
-        } else if o.base == self.base && self.n + o.n <= FLUSH {
-            (self.acc, self.n) = (self.acc + o.acc, self.n + o.n);
-        } else {
-            put(&mut self.rest, o.acc, o.base, m);
+        } else if o.n > 0 {
+            // Align the two sums to the lower base. A value shifted up by d bits counts 2^d in n, so n stays a
+            // bound of |acc| in units of 2^(WINDOW + 53), and acc cannot overflow while n <= FLUSH.
+            let d = (o.base - self.base).unsigned_abs();
+            let (lo, hi) = if o.base >= self.base { (self.n, o.n) } else { (o.n, self.n) };
+            let n = (lo as u64).saturating_add((hi as u64) << d.min(32));
+            if d <= 32 && n <= FLUSH as u64 {
+                if o.base >= self.base {
+                    self.acc += o.acc << d;
+                } else {
+                    (self.acc, self.base) = ((self.acc << d) + o.acc, o.base);
+                }
+                self.n = n as u32;
+            } else {
+                put(&mut self.rest, o.acc, o.base, m);
+            }
         }
         self.rest.merge(&o.rest, m);
     }
@@ -406,6 +418,28 @@ mod tests {
             e.add(top, &m);
         }
         assert_eq!(f.finish().to_bits(), e.finish().to_bits());
+    }
+
+    /// A merge of sums with different bases shifts acc, and n keeps the bound: 2^19 merges of 2^8 values at the
+    /// top of the window, shifted up by 8 bits, flush before acc overflows.
+    #[test]
+    fn fix_sum_merge_shifts_to_the_lower_base() {
+        let m = Meter::new(usize::MAX);
+        let top = ((1u64 << 53) - 1) as f64 * 2f64.powi(-52 - BELOW + WINDOW);
+        let (mut f, mut e) = (FixSum::default(), sum(&[top / 256.0]));
+        f.add(top / 256.0, &m); // the lower base
+        let mut part = FixSum::default();
+        (0..256).for_each(|_| part.add(top, &m));
+        for _ in 0..(1 << 19) + 3 {
+            f.merge(&part, &m);
+            (0..256).for_each(|_| e.add(top, &m));
+        }
+        assert_eq!(f.finish().to_bits(), e.finish().to_bits());
+        let (mut g, mut h) = (FixSum::default(), FixSum::default());
+        g.add(top, &m);
+        h.add(top / 256.0, &m);
+        g.merge(&h, &m); // the higher base takes the lower one
+        assert_eq!(g.finish().to_bits(), sum(&[top, top / 256.0]).finish().to_bits());
     }
 
     #[test]

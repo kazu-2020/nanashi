@@ -57,9 +57,8 @@ struct Item {
 
 #[derive(Debug, PartialEq)]
 enum Group {
-    /// An array of all the group combinations, one for each thread. `lanes` entries for each group break the
-    /// latency chain of ExactSum when the same group gets many rows one after the other.
-    Dense { slots: usize, lanes: usize, tables: usize },
+    /// An array of all the group combinations, one for each thread.
+    Dense { slots: usize, tables: usize },
     /// Collect (group key, value) pairs, then sort them (agg::group).
     Sort,
 }
@@ -157,20 +156,25 @@ impl Store {
         let slots = radix.iter().try_fold(1usize, |a, x| a.checked_mul(x.members.len()));
         let entry = size_of::<(A, u32)>();
         match choose(slots, entry, items.len(), rows, &self.cfg) {
-            Group::Dense { slots, lanes, tables } => self.dense::<A>(&radix, &tests, &items, (slots, lanes, tables), agg, b),
+            Group::Dense { slots, tables } => self.dense::<A>(&radix, &tests, &items, (slots, tables), agg, b),
             Group::Sort => self.sorted(&radix, &tests, &items, rows, agg, cat, b),
         }
     }
 
-    fn dense<A: Acc>(&self, radix: &[Radix], tests: &[Test], items: &[Item], (slots, lanes, tables): (usize, usize, usize), agg: ReadAgg, b: &Budget) -> Result<Groups> {
+    fn dense<A: Acc>(&self, radix: &[Radix], tests: &[Test], items: &[Item], (slots, tables): (usize, usize), agg: ReadAgg, b: &Budget) -> Result<Groups> {
         let entry = size_of::<(A, u32)>();
         // PAD bytes before and after the entries keep the small tables of 2 threads out of one cache line
         let pad = PAD.div_ceil(entry);
-        let table_cells = ((slots * lanes + 2 * pad) * entry).saturating_mul(tables).div_ceil(CELL_BYTES);
+        let table_cells = ((slots + 2 * pad) * entry).saturating_mul(tables).div_ceil(CELL_BYTES);
         b.need(table_cells, "集計")?;
         let m = Meter::new(b.room().saturating_sub(table_cells));
-        let fill = |mut t: Vec<(A, u32)>, it: &Item| {
-            scan(self, tests, it, |j, k, v| {
+        let fill = |t: &mut [(A, u32)], it: &Item| {
+            // Rows of one group often come one after the other (the group is a prefix of the key). The rows of
+            // such a run after the first add up in `run`, a local that stays in registers, and go to the table one
+            // time. A read-add-write of the table entry for each row costs about 3 times more (the store waits
+            // for the load). A row whose group differs from the row before goes to the table directly.
+            let (mut cur, mut run) = (NONE as usize, (A::default(), 0u32));
+            scan(self, tests, it, |k, v| {
                 let mut s = 0usize;
                 for x in radix {
                     let rank = x.remap.get(((k >> x.shift) & x.mask) as usize).copied().unwrap_or(NONE);
@@ -179,18 +183,39 @@ impl Store {
                     }
                     s = s * x.members.len() + rank as usize;
                 }
-                let e = &mut t[pad + s * lanes + (j & (lanes - 1))];
+                if s == cur {
+                    run.0.add(v, &m);
+                    run.1 += 1;
+                    return;
+                }
+                if run.1 > 0 {
+                    let e = &mut t[pad + cur];
+                    e.0.merge(&run.0, &m);
+                    e.1 += run.1;
+                    run = (A::default(), 0);
+                }
+                cur = s;
+                let e = &mut t[pad + s];
                 e.0.add(v, &m);
                 e.1 += 1;
             });
-            t
+            if run.1 > 0 {
+                let e = &mut t[pad + cur];
+                e.0.merge(&run.0, &m);
+                e.1 += run.1;
+            }
         };
-        let new = || vec![(A::default(), 0u32); slots * lanes + 2 * pad];
-        let mut t = if tables == 1 {
-            items.iter().fold(new(), fill)
+        let new = || vec![(A::default(), 0u32); slots + 2 * pad];
+        let t = if tables == 1 {
+            let mut t = new();
+            items.iter().for_each(|it| fill(&mut t, it));
+            t
         } else {
             let min_len = items.len().div_ceil(tables);
-            items.par_iter().with_min_len(min_len).fold(new, fill).reduce(Vec::new, |mut a, b| {
+            items.par_iter().with_min_len(min_len).fold(new, |mut t, it| {
+                fill(&mut t, it);
+                t
+            }).reduce(Vec::new, |mut a, b| {
                 if a.is_empty() {
                     return b;
                 }
@@ -203,21 +228,14 @@ impl Store {
                 a
             })
         };
-        let t = &mut t[pad..pad + slots * lanes];
-        for ch in t.chunks_mut(lanes) {
-            let (head, rest) = ch.split_first_mut().expect("lanes > 0");
-            for o in rest.iter().filter(|o| o.1 > 0) {
-                head.0.merge(&o.0, &m);
-                head.1 += o.1;
-            }
-        }
+        let t = &t[pad..pad + slots];
         // Err if the Meter refused a Spill: then the sums are wrong
         b.need(table_cells + m.cells(), "集計")?;
-        let groups = t.iter().step_by(lanes).filter(|e| e.1 > 0).count();
+        let groups = t.iter().filter(|e| e.1 > 0).count();
         b.need(table_cells + m.cells() + (groups * (4 * radix.len() + 8)).div_ceil(CELL_BYTES), "集計")?;
         let mut out = Groups { cols: radix.iter().map(|_| Vec::with_capacity(groups)).collect(), vals: Vec::with_capacity(groups) };
         let mut ranks = vec![0usize; radix.len()];
-        for (s, e) in t.iter().step_by(lanes).enumerate().filter(|(_, e)| e.1 > 0) {
+        for (s, e) in t.iter().enumerate().filter(|(_, e)| e.1 > 0) {
             let mut rest = s;
             for (j, x) in radix.iter().enumerate().rev() {
                 ranks[j] = rest % x.members.len();
@@ -249,7 +267,7 @@ impl Store {
             Some(o)
         };
         let fill = |mut p: Vec<(u64, f64)>, it: &Item| {
-            scan(self, tests, it, |_, k, v| p.extend(pair(k).map(|o| (o, v))));
+            scan(self, tests, it, |k, v| p.extend(pair(k).map(|o| (o, v))));
             p
         };
         let parts: Vec<Vec<(u64, f64)>> =
@@ -273,12 +291,11 @@ impl Store {
 /// work items with `rows` rows. A pure calculation.
 fn choose(slots: Option<usize>, entry: usize, items: usize, rows: usize, cfg: &Config) -> Group {
     let Some(slots) = slots.filter(|&s| s <= DENSE_MAX) else { return Group::Sort };
-    let lanes = if slots <= 4096 { 4 } else { 1 };
     let tables = if cfg.par(rows) { rayon::current_num_threads().clamp(1, items.max(1)) } else { 1 };
     // The same rule as agg.rs Dense::fold: the arrays must not be larger than the (group, value) pairs of the sort
-    let bytes = slots.saturating_mul(lanes).saturating_mul(entry).saturating_mul(tables);
+    let bytes = slots.saturating_mul(entry).saturating_mul(tables);
     if cfg.dense_always || bytes <= rows.saturating_mul(16) {
-        Group::Dense { slots, lanes, tables }
+        Group::Dense { slots, tables }
     } else {
         Group::Sort
     }
@@ -363,10 +380,10 @@ fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) 
     out
 }
 
-/// Give each cell of the item that passes the tests to visit (lane, key, value). Base rows go in key order; a delta
-/// value goes first, with lane 0. A delta key replaces (or removes) the base row with the same key.
+/// Give each cell of the item that passes the tests to visit (key, value). Base rows go in key order; a delta
+/// value goes first. A delta key replaces (or removes) the base row with the same key.
 #[inline]
-fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(usize, u64, f64)) {
+fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(u64, f64)) {
     let mut buf = [0u64; BLOCK];
     let keys = &mut buf[..it.rows.len()];
     let mut vals = &[][..];
@@ -379,9 +396,9 @@ fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(usize, u64,
     let pass = |k: u64| tests.iter().all(|t| t.sel.has(((k >> t.shift) & t.mask) as u32));
     let mut delta = st.delta.range(it.keys.clone()).peekable();
     if delta.peek().is_none() {
-        for (j, (&k, &v)) in keys.iter().zip(vals).enumerate() {
+        for (&k, &v) in keys.iter().zip(vals) {
             if pass(k) {
-                visit(j, k, v);
+                visit(k, v);
             }
         }
         return;
@@ -392,12 +409,12 @@ fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(usize, u64,
             skip[j] = true;
         }
         if let Some(v) = v.filter(|_| pass(k)) {
-            visit(0, k, v);
+            visit(k, v);
         }
     }
     for (j, (&k, &v)) in keys.iter().zip(vals).enumerate() {
         if !skip[j] && pass(k) {
-            visit(j, k, v);
+            visit(k, v);
         }
     }
 }
