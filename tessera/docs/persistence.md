@@ -166,6 +166,7 @@ At the first write, the process gets the lease and increases the generation numb
 A commit is 1 database transaction. It succeeds only if the sequence number is the same as the process read, and the generation number is the number of this process.
 If the lease expires and a different process gets the lease, the engine refuses commits from the old process (`Fenced`). This is also true when the new process has not written yet.
 If a different process wrote after the load, the local model is old. Thus the engine refuses to give the lease.
+If the engine refuses the lease because the model is old, the lease and the generation number do not change. Thus the next writer does not wait for the lease to expire.
 
 While there are no writes, a different thread extends the lease at each 1/3 of the lease time (`heartbeat=False` stops this).
 If this thread finds that a different process took the lease, the next commit fails with `Fenced`. This is also true when that lease expired and nobody wrote. Thus a writer that lost the lease does not get it again without notice. The commit after that gets the lease again.
