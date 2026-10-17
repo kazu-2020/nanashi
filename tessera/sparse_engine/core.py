@@ -8,7 +8,9 @@ from __future__ import annotations
 import secrets
 import time
 import uuid
+from array import array
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Iterable, Mapping
 
 Key = tuple[str, ...]  # the member ids of one cell, in the order of the dimensions
@@ -286,3 +288,29 @@ class Cube:
         head = " | ".join(self.dims) or "(scalar)"
         rows = [" | ".join(k) + f" = {_show(v)}" for k, v in sorted(self.cells.items(), key=sort_key)]
         return "\n".join([head, *rows]) if rows else f"{head}\n(空)"
+
+
+@dataclass(frozen=True, eq=False)
+class Summary:
+    """The result of summarize: one row for each group, as columns (no Python object for each cell).
+
+    dims are the kept dimensions in the order of the Metric. coords has one tuple of members for each
+    dimension, and values is an array of float64 ('d'). cells makes a {key: value} dict on the first use.
+    """
+    dims: tuple[str, ...]
+    coords: tuple[tuple[str, ...], ...]
+    values: array
+
+    @classmethod
+    def of(cls, cube: Cube) -> Summary:
+        keys = list(cube.cells)
+        coords = tuple(tuple(k[i] for k in keys) for i in range(len(cube.dims)))
+        return cls(cube.dims, coords, array("d", cube.cells.values()))
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    @cached_property
+    def cells(self) -> dict[Key, float]:
+        keys = zip(*self.coords) if self.coords else [()] * len(self.values)
+        return dict(zip(keys, self.values))

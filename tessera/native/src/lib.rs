@@ -3,7 +3,7 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store};
+use nanashi_engine::{eval, graph, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -646,6 +646,43 @@ impl Core {
     fn filter(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region) -> PyResult<StoreHandle> {
         let (s, r) = (read(store)?, self.restrict(&region)?);
         Ok(StoreHandle { store: Arc::new(py.detach(move || s.slice(&r))) })
+    }
+
+    /// Aggregate the region of the store to the dimensions in keep (sum, avg, min, max or count), with the GIL
+    /// released. ids has the member ids of each kept dimension, in metric_dims order. Returns one tuple of
+    /// member ids for each kept dimension and the values as f64 bytes in native byte order (for array.array).
+    #[allow(clippy::type_complexity)]
+    fn summarize<'py>(
+        &self,
+        py: Python<'py>,
+        store: &Bound<'_, StoreHandle>,
+        keep: Vec<DimId>,
+        region: Region,
+        agg: &str,
+        ids: Vec<Bound<'py, PyList>>,
+    ) -> PyResult<(Vec<Bound<'py, PyTuple>>, Bound<'py, PyBytes>)> {
+        let agg = match agg {
+            "sum" => ReadAgg::Sum,
+            "avg" => ReadAgg::Avg,
+            "min" => ReadAgg::Min,
+            "max" => ReadAgg::Max,
+            "count" => ReadAgg::Count,
+            _ => return Err(err(format!("集計 {agg} は使えない（sum、avg、min、max、count）"))),
+        };
+        self.dims(&keep)?;
+        let (s, r, cat) = (read(store)?, self.restrict(&region)?, self.cat.clone());
+        let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes()))).map_err(err)?;
+        if ids.len() != g.cols.len() {
+            return Err(err(format!("ids の数 {} が残す軸の数 {} と違う", ids.len(), g.cols.len())));
+        }
+        let cols = g.cols.iter().zip(&ids).map(|(c, l)| {
+            PyTuple::new(py, c.iter().map(|&i| l.get_item(i as usize)).collect::<PyResult<Vec<_>>>()?)
+        }).collect::<PyResult<_>>()?;
+        let vals = PyBytes::new_with(py, g.vals.len() * 8, |b| {
+            b.as_chunks_mut::<8>().0.iter_mut().zip(&g.vals).for_each(|(o, x)| *o = x.to_ne_bytes());
+            Ok(())
+        })?;
+        Ok((cols, vals))
     }
 
     fn replace(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region, new: &Bound<'_, PyAny>) -> PyResult<()> {

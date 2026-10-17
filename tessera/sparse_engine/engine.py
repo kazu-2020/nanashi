@@ -11,7 +11,7 @@ import os
 from collections import defaultdict
 from typing import Any, Iterable, Mapping, Protocol
 
-from .core import Cube, Key
+from .core import Cube, Key, Summary
 from .evaluate import Catalog, Kind, Restrict, _filter, evaluate, inside
 from .expr import AGGREGATORS, Expr
 from .planner import Planner, PyPlanner
@@ -80,9 +80,9 @@ class Store(Protocol):
              limit: int | None = None) -> tuple[list[tuple[Key, Any]], int]:
         """restrict の範囲の行を、宣言した軸の順のメンバー順に並べ、offset 件目から limit 件だけ返す
         （行の列と、範囲の全行数）。"""
-    def aggregate(self, storage: Any, dims: tuple[str, ...], keep: tuple[str, ...], agg: str,
-                  restrict: Restrict, cat: Catalog) -> Cube:
-        """restrict の範囲を keep の軸だけ残して agg で集計した Cube。"""
+    def summarize(self, storage: Any, dims: tuple[str, ...], keep: tuple[str, ...], agg: str,
+                  restrict: Restrict, cat: Catalog) -> Summary:
+        """Aggregate the range restrict with agg, and keep only the dimensions in keep."""
     def fork(self, cat: Catalog) -> Store:
         """複製したモデル cat 用のエンジン。"""
     def fresh(self) -> Store:
@@ -237,8 +237,8 @@ class ReferenceEngine:
         page = keys[offset:] if limit is None else keys[offset:offset + limit]
         return [(k, cube.cells[k]) for k in page], total
 
-    def aggregate(self, storage: Cube, dims, keep, agg, restrict, cat):
-        return aggregate_cube(_filter(storage, restrict or None), keep, agg)
+    def summarize(self, storage: Cube, dims, keep, agg, restrict, cat):
+        return Summary.of(aggregate_cube(_filter(storage, restrict or None), keep, agg))
 
     def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
         nanashi_core = native()

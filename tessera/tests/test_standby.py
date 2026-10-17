@@ -123,7 +123,7 @@ class PgStandby(Standby, unittest.TestCase):
     def test_server_answers_421_with_the_leader(self):
         from sparse_engine.server import Server
 
-        from .test_server import Client, write
+        from .test_server import Client, mid, write
         server = Server(self.b, "127.0.0.1", 0).start()
         try:
             c = Client(server.url, token=None)
@@ -131,6 +131,7 @@ class PgStandby(Standby, unittest.TestCase):
             self.assertEqual(c.get("/health"), (200, {"seq": 0, "role": "standby"}))
             status, err = c.post("/writes", {"client_op_id": "x", "ops": [write(self.b, "Stock", 1, Product="p0", Month="Jan")]})
             self.assertEqual((status, err["error"], err["leader"]), (421, "not_leader", "http://a"))
+            self.assertEqual(c.post("/query", {"metrics": [mid(self.b, "Total")]})[1]["cells"][0]["value"], {"number": 8000.0})
             with urllib.request.urlopen(server.url + "/stats", timeout=5) as r:  # Prometheus のテキスト
                 self.assertIn("nanashi_leader 0\n", r.read().decode())
         finally:

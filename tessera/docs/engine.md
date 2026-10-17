@@ -86,6 +86,12 @@ In other cases, the engine converts the rows to (target, value) pairs, sorts the
 The exact sum keeps 2 partials inline (24 bytes). If it needs more, it moves them to the heap.
 A finite value of 2^960 or more makes the sum NaN. Below this limit the partials cannot overflow, so an overflow does not depend on the order of the rows.
 
+A read query (`Model.summarize`, `POST /query`) does not evaluate a formula. `Store::summarize` (`query.rs`) reads the stored data one time and aggregates it.
+Each base block owns a range of keys, so the threads read the base and the delta in parallel, and each delta key is read one time. The engine does not copy the stored data.
+A filter on the partition dimension reads only the key ranges of its members. A filter on another dimension is a bit set test for each key.
+If the arrays of all group combinations (one for each thread) are not larger than the (group, value) pairs, the values go into the arrays. Otherwise the engine sorts the pairs (`agg::group`).
+SUM and AVG use `FixSum`. A value whose exponent is near the exponent of the first value goes into a 128-bit integer. The other values go to the exact sum. At the end, the integer goes into the exact sum with no rounding. Thus the result has the same bits as the exact sum. For amounts with 2 decimals, it was 1.5 to 4 times faster than the exact sum alone, because those sums need more than 2 partials.
+
 Rust also does the schedule of the incremental recalculation. This includes the propagation of the affected range, the evaluation and write-back of a range, the filter by changed values, the incremental aggregation, and scan.
 The Model sends the changed range of the inputs in one call. The engine propagates the affected range as sets of member numbers, not member names.
 Thus, if one change causes the recalculation of hundreds of Metrics, there is only one call between Python and Rust.

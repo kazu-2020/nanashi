@@ -109,6 +109,20 @@ impl PackedKeys {
         }
     }
 
+    pub(crate) fn blocks(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// The first key of block `b`.
+    pub(crate) fn first(&self, b: usize) -> u64 {
+        self.blocks[b].base
+    }
+
+    /// The last block whose first key is `key` or less (block 0 if there is none). The keys must not be empty.
+    pub(crate) fn owner(&self, key: u64) -> usize {
+        self.blocks.partition_point(|b| b.base <= key).saturating_sub(1)
+    }
+
     /// The key at `i`. `i` must be less than `len()`.
     #[inline]
     pub(crate) fn get(&self, i: usize) -> u64 {

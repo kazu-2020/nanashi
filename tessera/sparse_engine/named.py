@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Callable, Iterable
 
-from .core import Cube, Dimension, Key
+from .core import Cube, Dimension, Key, Summary
 from .engine import Store
 from .expr import Expr
 from .model import Metric, Model
@@ -235,10 +235,12 @@ class Named:
         names = self._names(m.dims)
         return [(names(k), self._value_out(m, v)) for k, v in rows], total
 
-    def summarize(self, name: str, keep: Iterable[str] = (), agg: str = "sum", **coords) -> Cube:
+    def summarize(self, name: str, keep: Iterable[str] = (), agg: str = "sum", **coords) -> Summary:
         m = self.metric(name)
-        cube = self.model.summarize(m.id, self._coords(m, coords), keep=[self._dim(d) for d in keep], agg=agg)
-        return self._cube(m, cube)
+        s = self.model.summarize(m.id, self._coords(m, coords), keep=[self._dim(d) for d in keep], agg=agg)
+        dims = [self.model.dimensions[d] for d in s.dims]
+        names = tuple(tuple(map(d.member_of, c)) for d, c in zip(dims, s.coords))
+        return Summary(tuple(d.name for d in dims), names, s.values)
 
     def memory(self) -> dict[str, dict[str, int]]:
         return {self.model.metrics[i].name: row for i, row in self.model.memory().items()}

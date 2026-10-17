@@ -14,7 +14,7 @@ For a large Metric, `value` converts the full Metric to a Python dict. Thus, for
 m.get("Revenue", Product="p0001", Version="予算", Month="m01")   # One cell. None if blank
 m.slice("Revenue", Product="p0001")                              # A range as a Cube (each dimension takes a member name or a set of names)
 m.rows("Payroll", Department="営業", offset=0, limit=50)          # A list of rows and the total row count (in the order of the declared dimensions)
-m.summarize("Revenue", keep=["Month"], Product=["p0001", "p0002"])  # Aggregate and keep only the keep dimensions (SUM, AVG, MIN, MAX, COUNT)
+m.summarize("Revenue", keep=["Month"], Product=["p0001", "p0002"])  # Aggregate and keep only the keep dimensions (SUM, AVG, MIN, MAX, COUNT). Columns: .coords, .values; a dict: .cells
 ```
 
 In the Rust engine, these interfaces do not read all of the stored data. All of them except the one-cell `get` also release the GIL when they read.

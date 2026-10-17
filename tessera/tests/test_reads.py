@@ -117,6 +117,13 @@ class Reads:
         with self.assertRaisesRegex(ValueError, "軸 Region がない"):
             m.summarize("Price", keep=["Region"])
 
+    def test_summarize_gives_columns_of_member_names(self):
+        s = self.m.summarize("Home", keep=["Employee"], agg="count")  # a count of a member-type Metric is a number
+        self.assertEqual(s.dims, ("Employee",))
+        self.assertEqual(sorted(zip(s.coords[0], s.values)), [("e1", 1.0), ("e4", 1.0)])
+        self.assertEqual(s.values.typecode, "d")
+        self.assertEqual(self.m.summarize("Home", agg="count").cells, {(): 2.0})
+
     def test_reads_see_pending_changes(self):
         m = self.m
         m.set_cell("Price", 100, Product="A")

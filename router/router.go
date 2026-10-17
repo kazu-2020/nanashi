@@ -137,6 +137,12 @@ type outgoing struct {
 	header http.Header
 }
 
+// write reports whether the engine can commit the request. POST /query is a read.
+func (o outgoing) write() bool {
+	path, _, _ := strings.Cut(o.rest, "?")
+	return o.method == http.MethodPost && strings.Trim(path, "/") != "query"
+}
+
 // forward tries the model's leader until an attempt is worth delivering or ctx ends.
 // It returns the response to write: an upstream attempt, or the router's own error.
 func (rt *Router) forward(ctx context.Context, model string, out outgoing) writer {
@@ -161,7 +167,7 @@ func (rt *Router) forward(ctx context.Context, model string, out outgoing) write
 		pause := true
 		if target != "" {
 			last = send(ctx, target, out)
-			d := decide(out.method, last.status(), last.head)
+			d := decide(out.write(), last.status(), last.head)
 			switch d.action {
 			case deliver:
 				return last
@@ -339,7 +345,7 @@ type decision struct {
 // decide maps one attempt's outcome to what the router does next. status 0 means no complete response.
 // Every resend is safe because the body is unchanged and the engine deduplicates client_op_id.
 // A 500 is resent only for writes, where the commit may have succeeded; on a read it is the answer.
-func decide(method string, status int, head []byte) decision {
+func decide(write bool, status int, head []byte) decision {
 	var body struct {
 		Error  string  `json:"error"`
 		Leader *string `json:"leader"`
@@ -349,7 +355,7 @@ func decide(method string, status int, head []byte) decision {
 	case 0, http.StatusGatewayTimeout:
 		return decision{action: reresolve}
 	case http.StatusInternalServerError:
-		if method == http.MethodPost {
+		if write {
 			return decision{action: reresolve}
 		}
 	case http.StatusMisdirectedRequest:

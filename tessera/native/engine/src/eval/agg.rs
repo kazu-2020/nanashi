@@ -17,11 +17,11 @@ pub(crate) struct Acc {
 
 /// A NaN is the least key, so that MIN gives NaN as SUM does. f64::min ignores a NaN and can give either zero, so its
 /// result depends on the order of the values.
-fn min_key(v: f64) -> i64 {
+pub(crate) fn min_key(v: f64) -> i64 {
     if v.is_nan() { i64::MIN } else { order(v.to_bits() as i64) }
 }
 
-fn max_key(v: f64) -> i64 {
+pub(crate) fn max_key(v: f64) -> i64 {
     if v.is_nan() { i64::MAX } else { order(v.to_bits() as i64) }
 }
 
@@ -30,7 +30,7 @@ fn order(b: i64) -> i64 {
     b ^ (((b >> 63) as u64) >> 1) as i64
 }
 
-fn from_key(k: i64) -> f64 {
+pub(crate) fn from_key(k: i64) -> f64 {
     if k == i64::MIN || k == i64::MAX { f64::NAN } else { f64::from_bits(order(k) as u64) }
 }
 
@@ -416,8 +416,9 @@ pub(crate) fn remove_by_table(x: &Rows, removed: &[DimId], target: DimId, v: &St
     finish_groups(groups, out, aggs, b).map(Some)
 }
 
-/// 集計先の全組み合わせの数がこれ以下なら、全組み合わせの配列へ足し込む経路を考える。
-const DENSE_MAX: usize = 1 << 26;
+/// If the number of all the group combinations is this value or less, the rows can go into an array of all the
+/// combinations.
+pub(crate) const DENSE_MAX: usize = 1 << 26;
 
 /// Add the rows into an array of all the group combinations (all members of each dimension of out). If the
 /// arrays are larger than the (group, value) pairs (16 B a row) of the sort path, returns None. For MIN, MAX or

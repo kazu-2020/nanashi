@@ -15,7 +15,7 @@ import weakref
 
 import nanashi_core
 
-from .core import Cube
+from .core import Cube, Summary
 from .delta import COUNTED, DeltaPlan
 from .engine import parquet_columns, parquet_value
 from .planner import Step
@@ -384,33 +384,12 @@ class RustEngine:
                 for i in range(len(values))]
         return rows, total
 
-    def aggregate(self, store, dims, keep, agg, restrict, cat):
-        """範囲を切り出してから、残さない軸を REMOVE で集計する（式の変換結果はキャッシュしない）。
-        REMOVE は軸を 1 つずつ外すので、avg は sum と count を別々に集計してから割り、count は最初の軸だけ
-        count で数えて残りは sum で足す（min、max、sum はそのまま重ねられる）。"""
-        sliced = self.core.filter(store, self._region(cat, restrict))
-        gone = [self._dim(cat, d) for d in dims if d not in keep]
+    def summarize(self, store, dims, keep, agg, restrict, cat):
+        """One pass in the engine (Store::summarize)."""
         order = tuple(d for d in dims if d in keep)
-        if not gone:  # 外す軸がなければ、各セルがそのまま 1 件のグループ
-            cube = self.to_cube(sliced, cat).reorder(order)
-            return Cube(order, {k: 1.0 for k in cube.cells}) if agg == "count" else cube
-
-        source = ([self._dim(cat, d) for d in dims], "boolean" if self._is_bool(store) else "number", -1)
-
-        def run(first: str, rest: str) -> Cube:
-            tree = ("ref", 0)
-            for i, d in enumerate(gone):
-                tree = ("remove", tree, d, first if i == 0 else rest)
-            compiled, *_ = self.core.compile(tree, ["__q"], [source])
-            cube = self.core.evaluate(compiled, [sliced], [])
-            return self.to_cube(self.core.store_from(cube, None), cat).reorder(order)
-
-        if agg == "avg":
-            total, count = run("sum", "sum"), run("count", "sum")
-            return Cube(order, {k: v / count.cells[k] for k, v in total.cells.items()})
-        if agg == "count":
-            return run("count", "sum")
-        return run(agg, agg)
+        coords, values = self.core.summarize(store, [self._dim(cat, d) for d in order], self._region(cat, restrict),
+                                             agg, [cat.dimension(d).ids for d in order])
+        return Summary(order, tuple(coords), array("d", values))
 
     def _is_bool(self, store) -> bool:
         return bool(self.core.is_bool(store))
