@@ -1,6 +1,7 @@
 """Compare the read query (Model.summarize) with DuckDB and Polars on the same cells.
 
     python bench_query.py --k 8        # the profit and loss plan (large) with k times the employees and products
+    python bench_query.py --k 8 --sql  # the SQL of POST /sql (Model.select) with JSON and Arrow, against DuckDB
 
 DuckDB and Polars get the member numbers as u32 columns and the values as f64 (one table for each Metric).
 Each round runs tessera, DuckDB and Polars one after the other, in a different order each round, and the table
@@ -11,6 +12,7 @@ the last bits.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import statistics
 import sys
@@ -20,6 +22,7 @@ import numpy as np
 
 from examples.fpa import SIZES, build
 from sparse_engine.rust_engine import RustEngine
+from sparse_engine.sql import plan
 
 try:
     import duckdb
@@ -82,6 +85,70 @@ def cases(m, frames):
     ]
 
 
+def sql_cases(m):
+    """(label, tessera SQL on names, DuckDB SQL on member numbers) for each query of --sql. The GROUP BY
+    dimensions come first in each SELECT list."""
+    bud = m.dimension("Version")._index["予算"]
+    first = ", ".join(f"'{e}'" for e in m.dimension("Employee").members[:1000])  # the numbers 0 to 999
+    return [
+        ("sum by Month, Version=予算",
+         f"SELECT Month, SUM({PAYROLL}) FROM model WHERE Version = '予算' GROUP BY Month",
+         f"SELECT Month, sum(v) FROM {PAYROLL} WHERE Version={bud} GROUP BY Month"),
+        ("sum by Employee (all)",
+         f"SELECT Employee, SUM({PAYROLL}) FROM model GROUP BY Employee",
+         f"SELECT Employee, sum(v) FROM {PAYROLL} GROUP BY Employee"),
+        ("top 100 Employees by sum",
+         f"SELECT Employee, SUM({PAYROLL}) AS s FROM model GROUP BY Employee ORDER BY s DESC LIMIT 100",
+         f"SELECT Employee, sum(v) AS s FROM {PAYROLL} GROUP BY Employee ORDER BY s DESC LIMIT 100"),
+        ("sum by Version,Month, 1000 Employees",
+         f"SELECT Version, Month, SUM({PAYROLL}) FROM model WHERE Employee IN ({first}) GROUP BY Version, Month",
+         f"SELECT Version, Month, sum(v) FROM {PAYROLL} WHERE Employee < 1000 GROUP BY Version, Month"),
+        ("avg by Version",
+         f"SELECT Version, AVG({PAYROLL}) FROM model GROUP BY Version",
+         f"SELECT Version, avg(v) FROM {PAYROLL} GROUP BY Version"),
+        ("2 Metrics: sum by Month, Version=予算",
+         f"SELECT Month, SUM({PAYROLL}), SUM({REVENUE}) FROM model WHERE Version = '予算' GROUP BY Month",
+         f"SELECT Month, p, r FROM (SELECT Month, sum(v) p FROM {PAYROLL} WHERE Version={bud} GROUP BY Month) "
+         f"FULL JOIN (SELECT Month, sum(v) r FROM {REVENUE} WHERE Version={bud} GROUP BY Month) USING (Month)"),
+    ]
+
+
+def check_sql(m, con, label, text, duck) -> int:
+    """Exit if tessera and DuckDB do not give the same rows. Returns the number of rows."""
+    model = m.model
+    p = plan(model, text)
+    got = json.loads(model.select(p, "json", 10**9))["rows"]
+    names = [model.dimension(d).members for d in p.group]
+    want = [[n[x] for n, x in zip(names, r)] + list(r[len(names):]) for r in con.execute(duck).fetchall()]
+    g = len(names)
+    k = 0 if "LIMIT" in text else g  # DuckDB breaks LIMIT ties in another order, so compare only the values
+    cells = lambda rows: {(i, *d, j): x for i, (d, v) in enumerate(sorted((tuple(r[:k]), r[g:]) for r in rows))
+                          for j, x in enumerate(v)}
+    if not same(cells(got), cells(want)):
+        sys.exit(f"{label}: the results are different\n{got[:5]}\n{want[:5]}")
+    return len(got)
+
+
+def bench_sql(m, con, rounds: int) -> None:
+    model = m.model
+    qs = sql_cases(m)
+    rows = [check_sql(m, con, *q) for q in qs]
+    times = {q[0]: ([], [], [], []) for q in qs}
+    for r in range(rounds):
+        for label, text, duck in qs:
+            sides = [lambda: model.select(plan(model, text), "json", 10**9), lambda: con.execute(duck).fetchall(),
+                     lambda: model.select(plan(model, text), "arrow", 10**9), lambda: con.execute(duck).to_arrow_table()]
+            for i in [(r + j) % 4 for j in range(4)]:
+                t = time.perf_counter()
+                sides[i]()
+                times[label][i].append((time.perf_counter() - t) * 1e3)
+    show = lambda ts: f"{statistics.median(ts):.1f} ({min(ts):.1f} to {max(ts):.1f})"
+    print(f"\nmedian of {rounds} rounds, ms (range). tessera: plan + Model.select (parse, names, run, encode)\n")
+    print("| query | rows | tessera JSON | DuckDB fetchall | tessera Arrow | DuckDB Arrow |\n|---|---|---|---|---|---|")
+    for (label, *_), n in zip(qs, rows):
+        print(f"| {label} | {n:,} | " + " | ".join(show(ts) for ts in times[label]) + " |")
+
+
 def groups_of_tessera(m, summaries) -> list[dict]:
     """{member numbers: value} for each Summary."""
     out = []
@@ -112,6 +179,7 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=1, help="k times the employees and products of large")
     ap.add_argument("--rounds", type=int, default=7)
     ap.add_argument("--threads", type=int, default=4, help="DuckDB threads")
+    ap.add_argument("--sql", action="store_true", help="the SQL of POST /sql in place of Model.summarize")
     args = ap.parse_args()
     e, p, mo = SIZES["large"]
     t0 = time.perf_counter()
@@ -127,6 +195,8 @@ def main() -> None:
     print(f"k={args.k}: {frames[PAYROLL].height:,} cells in {PAYROLL}, {frames[REVENUE].height:,} in {REVENUE}"
           f" (build {time.perf_counter() - t0:.0f} s), duckdb {duckdb.__version__}, polars {pl.__version__},"
           f" pyarrow {pyarrow.__version__}")
+    if args.sql:
+        return bench_sql(m, con, args.rounds)
     qs = cases(m, frames)
     groups = [check(m, con, *q) for q in qs]
     times = {q[0]: ([], [], []) for q in qs}

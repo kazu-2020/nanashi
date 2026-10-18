@@ -14,6 +14,7 @@ pub struct Budget {
     used: Cell<usize>,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Mark(usize);
 
 impl Budget {

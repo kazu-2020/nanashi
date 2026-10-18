@@ -19,7 +19,7 @@ The router also sends reads to the writer, so that a user can immediately read t
 The router resends as follows for each engine response.
 It sends the same bytes in the body each time.
 Because of `client_op_id`, a write is not committed two times when the router resends after a response with an unknown commit result (500, 504, or a broken connection).
-A 500 for a read is not related to a commit, and a resend gives the same answer. `POST /query` is a read.
+A 500 for a read is not related to a commit, and a resend gives the same answer. `POST /query` and `POST /sql` are reads.
 Thus, the router returns it as it is.
 
 | Engine response | Router |

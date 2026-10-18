@@ -83,6 +83,9 @@ class Store(Protocol):
     def summarize(self, storage: Any, dims: tuple[str, ...], keep: tuple[str, ...], agg: str,
                   restrict: Restrict, cat: Catalog) -> Summary:
         """Aggregate the range restrict with agg, and keep only the dimensions in keep."""
+    def select(self, stores: list[Any], p: Any, cat: Catalog, seq: int, fmt: str, max_cells: int) -> bytes:
+        """The body of POST /sql for the sql.Plan p (fmt "json" or "arrow"). stores has the stored data of each
+        aggregate of p. SqlError sql_too_large if the result has more than max_cells cells (rows x columns)."""
     def fork(self, cat: Catalog) -> Store:
         """複製したモデル cat 用のエンジン。"""
     def fresh(self) -> Store:
@@ -239,6 +242,13 @@ class ReferenceEngine:
 
     def summarize(self, storage: Cube, dims, keep, agg, restrict, cat):
         return Summary.of(aggregate_cube(_filter(storage, restrict or None), keep, agg))
+
+    def select(self, stores, p, cat, seq, fmt, max_cells):
+        """JSON only: the reference engine has no Arrow encoder (the server answers 501)."""
+        from .sql import reference_json  # sql imports this module
+        if fmt != "json":
+            raise NotImplementedError("参照実装のエンジンは SQL の結果を Arrow で返せない")
+        return reference_json(cat, p, seq, max_cells)
 
     def to_parquet(self, storage: Cube, dims, kind, cat, meta: Mapping[str, str]) -> bytes:
         nanashi_core = native()

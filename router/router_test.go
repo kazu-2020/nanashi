@@ -247,10 +247,12 @@ func TestFinalStatusDeliveredUnchanged(t *testing.T) {
 }
 
 func TestQueryInternalErrorDelivered(t *testing.T) {
-	e := newEngine(t, reply{500, `{"error": "internal", "message": "x"}`, nil}, reply{200, `{"cells": []}`, nil})
-	got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/"+testModel+"/query", []byte(`{}`), nil)
-	if got.status != 500 || len(e.requests()) != 1 {
-		t.Fatalf("got %d %s after %d requests, want the 500 of a read after 1 request", got.status, got.body, len(e.requests()))
+	for _, read := range []string{"query", "sql"} {
+		e := newEngine(t, reply{500, `{"error": "internal", "message": "x"}`, nil}, reply{200, `{"cells": []}`, nil})
+		got := do(t, &Router{Resolve: &resolver{answers: []string{e.URL}}}, "POST", "/models/"+testModel+"/"+read, []byte(`{}`), nil)
+		if got.status != 500 || len(e.requests()) != 1 {
+			t.Fatalf("%s: got %d %s after %d requests, want the 500 of a read after 1 request", read, got.status, got.body, len(e.requests()))
+		}
 	}
 }
 

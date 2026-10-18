@@ -23,6 +23,10 @@ members = ["engine"]
 [profile.release]
 lto = "thin"
 
+# The SQL parser runs once for each query on a short text, so size is more important than speed
+[profile.release.package.sqlparser]
+opt-level = "s"
+
 [profile.quick]
 inherits = "release"
 lto = false

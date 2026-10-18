@@ -103,6 +103,7 @@ from .evaluate import FormulaError
 from .journal import AlreadyCommitted, Stale
 from .model import DuplicateId, Metric
 from .parser import to_formula
+from . import sql
 from .workspace import Conflict, NotLeader, Overloaded, Rejected, Replica, Role, Workspace, rejection_of
 
 log = logging.getLogger(__name__)
@@ -218,6 +219,7 @@ AGGREGATIONS = {"AGGREGATION_UNSPECIFIED": "sum", "AGGREGATION_SUM": "sum", "AGG
                 "AGGREGATION_MIN": "min", "AGGREGATION_MAX": "max", "AGGREGATION_COUNT": "count"}
 AGGREGATION_NUMBERS = {0: "sum", 1: "sum", 2: "avg", 3: "min", 4: "max", 5: "count"}
 QUERY_FIELDS = frozenset({"app_id", "appId", "metrics", "rows", "columns", "filters", "aggregation"})
+SQL_FIELDS = frozenset({"app_id", "appId", "sql"})
 
 
 def _ids(body: dict, key: str) -> list[str]:
@@ -229,6 +231,21 @@ def _ids(body: dict, key: str) -> list[str]:
     return x
 
 
+def _app_id(body: dict) -> None:
+    if {"app_id", "appId"} <= set(body):
+        raise ApiError(400, "bad_request", "app_id と appId を両方指定している")
+    if not isinstance(body.get("app_id", body.get("appId", "")), str):
+        raise ApiError(400, "bad_request", "app_id は文字列")
+
+
+def sql_in(body) -> str:
+    """Check the body of POST /sql: {"sql": "SELECT ..."}, and app_id like a QueryRequest. Returns the text."""
+    if not isinstance(body, dict) or set(body) - SQL_FIELDS or not isinstance(body.get("sql"), str):
+        raise ApiError(400, "bad_request", '本文は {"sql": "SELECT ..."} の JSON オブジェクト')
+    _app_id({k: x for k, x in body.items() if x is not None})  # proto3 JSON: null is the default value
+    return body["sql"]
+
+
 def query_in(n: Names, body) -> tuple[list[str], list[str], dict[str, list[str]], str]:
     """Check a QueryRequest (proto3 JSON). Returns (Metric ids, dimension ids, filters, agg). An unknown
     dimension or member is 400. An unknown Metric is not an error: the response does not have it."""
@@ -237,10 +254,7 @@ def query_in(n: Names, body) -> tuple[list[str], list[str], dict[str, list[str]]
     if unknown := sorted(set(body) - QUERY_FIELDS):
         raise ApiError(400, "bad_request", f"QueryRequest にないフィールド {unknown}")
     body = {k: x for k, x in body.items() if x is not None}  # proto3 JSON: null is the default value
-    if {"app_id", "appId"} <= set(body):
-        raise ApiError(400, "bad_request", "app_id と appId を両方指定している")
-    if not isinstance(body.get("app_id", body.get("appId", "")), str):
-        raise ApiError(400, "bad_request", "app_id は文字列")
+    _app_id(body)
     metrics = _ids(body, "metrics")
     dims = [n.dim(d).id for d in _ids(body, "rows") + _ids(body, "columns")]
     if len(set(dims)) != len(dims):
@@ -262,11 +276,6 @@ def query_in(n: Names, body) -> tuple[list[str], list[str], dict[str, list[str]]
     if agg is None:
         raise ApiError(400, "bad_request", f"aggregation は {'、'.join(AGGREGATIONS)} のいずれか")
     return metrics, dims, out, agg
-
-
-def _number_out(x: float):
-    """A double in proto3 JSON: NaN and the infinities are strings."""
-    return x if math.isfinite(x) else "NaN" if math.isnan(x) else "Infinity" if x > 0 else "-Infinity"
 
 
 def _rows_out(rows) -> list:
@@ -523,6 +532,8 @@ class Handler(BaseHTTPRequestHandler):
             data, kind = body.encode("utf-8"), "text/plain; version=0.0.4; charset=utf-8"
         elif isinstance(body, _Arrow):
             data, kind = bytes(body), ARROW_STREAM
+        elif isinstance(body, _JsonBytes):
+            data, kind = bytes(body), "application/json; charset=utf-8"
         else:
             data, kind = _dumps(body).encode("utf-8"), "application/json; charset=utf-8"
         self.send_response(status)
@@ -699,11 +710,13 @@ class Handler(BaseHTTPRequestHandler):
     def _post(self) -> None:
         url = urllib.parse.urlsplit(self.path)
         route = [p for p in url.path.split("/") if p]
-        if route not in (["writes"], ["query"]):
+        handlers = {"writes": lambda raw: self._write(user, raw), "query": self._query, "sql": self._sql}
+        handle = handlers.get(route[0]) if len(route) == 1 else None
+        if handle is None:
             raise ApiError(404, "not_found", f"{url.path} はない")
         user = self._user()
-        allowed_on_standby = route == ["query"]
-        if not allowed_on_standby and isinstance(self.server.workspace, Replica):
+        is_read = route != ["writes"]
+        if not is_read and isinstance(self.server.workspace, Replica):
             raise ApiError(405, "read_only", "このサーバーは記録先に追従する読み出し専用（書き込みは書き手のサーバーへ送る）")
         length = self.headers.get("Content-Length")
         if length is None:
@@ -725,7 +738,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             self.unread_body = False
-            self._in_slot(lambda: self._query(raw) if allowed_on_standby else self._write(user, raw), left)
+            self._in_slot(lambda: handle(raw), left)
         finally:
             self.server.end_body()
 
@@ -755,8 +768,29 @@ class Handler(BaseHTTPRequestHandler):
         for mid, rows, at in parts:
             for row in rows:
                 cells.append({"metric": mid, "coords": ["" if i is None else row[i] for i in at],
-                              "value": {"number": _number_out(row[-1])}})
+                              "value": {"number": sql.json_number(row[-1])}})
         return 200, {"seq": v.seq, "dimensions": dims, "cells": cells}
+
+    def _sql(self, raw: bytes) -> tuple[int, Any]:
+        """POST /sql (docs/sql.md). The SummaryCache keeps the encoded body of each Plan."""
+        body = _json_body(raw)
+        if (problem := _body_problem(body)) is not None:
+            raise ApiError(400, "bad_request", problem)
+        text = sql_in(body)
+        v = self.server.workspace.version
+        fmt = "arrow" if wants_arrow(self.headers.get("Accept")) else "json"
+        try:
+            p = sql.plan(v, text)
+            members = sum(len(ms) for _, ms in p.region)
+            out = self.server.summaries.get(v, ("sql", fmt, p), lambda: v.select(p, fmt, self.server.max_cells),
+                                            lambda body: len(body) // BODY_CELL_BYTES + members)
+        except sql.SqlError as e:
+            if e.code == "sql_too_large":
+                raise ApiError(413, "too_large", str(e), code=e.code) from None
+            raise ApiError(400, "sql", str(e), code=e.code) from None
+        except NotImplementedError as e:
+            raise ApiError(501, "not_implemented", str(e)) from None
+        return 200, _Arrow(out) if fmt == "arrow" else _JsonBytes(out)
 
     def _write(self, user: str | None, raw: bytes) -> tuple[int, Any]:
         body = _json_body(raw)
@@ -837,6 +871,10 @@ class _Arrow(bytes):
     """An Arrow IPC stream body."""
 
 
+class _JsonBytes(bytes):
+    """A JSON body that is already encoded."""
+
+
 ARROW_STREAM = "application/vnd.apache.arrow.stream"
 
 
@@ -895,13 +933,16 @@ def stats_text(ws) -> str:
     return "\n".join(out) + "\n"
 
 
+BODY_CELL_BYTES = 16  # the bytes of an encoded body that count as 1 cell in the SummaryCache
+
+
 class SummaryCache:
     """The results of summary reads of the published version, up to max_size in total.
 
     Nothing changes a published version, so a result stays correct while that version is published.
     A read of a newer version removes all entries. A read of another version does not use the cache.
     If many clients ask for the same summary at the same time, only 1 of them calculates it.
-    The size of an entry is its number of cells plus the length of its key.
+    The size of an entry is size(result) (by default its number of cells) plus the length of its key.
     """
 
     def __init__(self, max_size: int):
@@ -912,7 +953,8 @@ class SummaryCache:
         self._size = 0
         self._running: dict[tuple, Future] = {}
 
-    def get(self, version, key: tuple, compute: Callable[[], dict]) -> dict:
+    def get(self, version, key: tuple, compute: Callable[[], Any],
+            size: Callable[[Any], int] = lambda r: len(r["cells"])) -> Any:
         with self._lock:
             cached = self._version and self._version()
             if cached is not version and cached is not None and version.seq <= cached.seq:
@@ -936,7 +978,7 @@ class SummaryCache:
         entry = None
         try:
             result = compute()
-            entry = (result, len(result["cells"]) + len(key))
+            entry = (result, size(result) + len(key))
             future.set_result(result)
             return result
         except BaseException as e:

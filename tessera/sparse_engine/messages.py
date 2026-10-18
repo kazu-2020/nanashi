@@ -74,6 +74,28 @@ MESSAGES: dict[str, str] = {
     "cycle_future": "循環参照: {src} が {target} の未来の値を参照している",
     "cycle_same_time": "循環参照: {members} が同じ時点で循環している",
 
+    # SQL
+    "sql_syntax": "SQL の構文が正しくない: {detail}",
+    "sql_statements": "SQL は SELECT 文 1 つだけを書く",
+    "sql_too_complex": "SQL のキーワードと記号が {count:,} 個あり、上限 {max:,} 個を超える",
+    "sql_columns": "SELECT の列が {count:,} 個あり、上限 {max:,} 個を超える",
+    "sql_unsupported": "SQL の {what} は使えない",
+    "sql_from": "FROM には model だけを書く（{name}）",
+    "sql_unknown": "軸か Metric の名前 {name} がない",
+    "sql_ambiguous": "ORDER BY の {name} に合う SELECT の列が 2 つ以上ある",
+    "sql_not_dim": "{name} は軸ではない（Metric は SUM などの集計で囲む）",
+    "sql_not_metric": "{name} は Metric ではない（集計できるのは Metric）",
+    "sql_not_grouped": "軸 {name} が GROUP BY にない",
+    "sql_position": "位置 {pos} が SELECT の列（{n} 個）の範囲にない",
+    "sql_group_position": "GROUP BY の位置 {pos} は軸の列ではない",
+    "sql_no_aggregate": "SELECT に集計（SUM、AVG、MIN、MAX、COUNT）が 1 つ以上要る",
+    "sql_kind": "{metric} は {kind} なので {agg} で集計できない（COUNT は使える）",
+    "sql_member": "{dim} にメンバー {member!r} がない",
+    "sql_missing_dim": "Metric {metric} に軸 {dim} がない（GROUP BY と WHERE の軸は、すべての集計の Metric に要る）",
+    "sql_order": "ORDER BY の {name} が SELECT の列にも GROUP BY の軸にもない",
+    "sql_too_large": "結果が {rows:,} 行 {cells:,} セルになり、上限 {max:,} セルを超える（LIMIT を付けるか、列を減らす）",
+    "sql_budget": "{detail}",
+
     # 警告
     "densify": "{what}が {missing} 方向に全メンバーへ展開される（密化）",
     "isblank_dense": "ISBLANK が {dims} の全組み合わせに展開される（密化）",

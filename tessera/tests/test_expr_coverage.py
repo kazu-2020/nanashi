@@ -309,7 +309,7 @@ class Messages(unittest.TestCase):
         rust = "".join(p.read_text() for p in (root / "native" / "engine" / "src").rglob("*.rs"))
         python = "".join(p.read_text() for p in (root / "sparse_engine").glob("*.py"))
         used = set(re.findall(r'Diag::new\("(\w+)"\)', rust))
-        used |= set(re.findall(r'(?:FormulaError|msg|render|__init__)\(\s*"(\w+)"', python))
+        used |= set(re.findall(r'(?:FormulaError|SqlError|msg|render|__init__)\(\s*"(\w+)"', python))
         used |= set(re.findall(r'\("(if_then|if_else)"', rust))
         self.assertGreater(len(used), 40)
         self.assertEqual(sorted(used - MESSAGES.keys()), [])

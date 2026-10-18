@@ -17,6 +17,23 @@ pub enum ReadAgg {
     Count,
 }
 
+impl ReadAgg {
+    /// The lower-case name, as in SQL and in the Python API.
+    pub fn name(self) -> &'static str {
+        match self {
+            ReadAgg::Sum => "sum",
+            ReadAgg::Avg => "avg",
+            ReadAgg::Min => "min",
+            ReadAgg::Max => "max",
+            ReadAgg::Count => "count",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ReadAgg> {
+        [ReadAgg::Sum, ReadAgg::Avg, ReadAgg::Min, ReadAgg::Max, ReadAgg::Count].into_iter().find(|a| a.name() == name)
+    }
+}
+
 /// One row for each group that has cells, in the order of the member numbers. `cols[j]` has the member numbers
 /// of kept dimension j, in `metric_dims` order.
 #[derive(Debug, PartialEq)]

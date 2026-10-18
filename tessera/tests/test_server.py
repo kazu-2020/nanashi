@@ -250,6 +250,48 @@ class Api:
         self.assertEqual((status, headers["Content-Type"], json.loads(data)["error"]),
                          (413, "application/json; charset=utf-8", "too_large"))
 
+    def test_sql(self):
+        text = ("SELECT Month, SUM(Stock) AS s FROM model WHERE Product IN ('p1', 'p2') "
+                "GROUP BY Month ORDER BY Month DESC LIMIT 2")
+        with mock.patch.object(Model, "select", autospec=True, side_effect=Model.select) as select:
+            self.assertEqual(self.c.post("/sql", {"sql": text, "app_id": None, "appId": "a"}),
+                             (200, {"seq": 0, "columns": ["Month", "s"], "rows": [["Apr", 200.0], ["Mar", 200.0]]}))
+            self.assertEqual(self.c.post("/sql", {"sql": text.replace("SELECT", "select").replace(" ", "  ")})[0], 200)
+        self.assertEqual(select.call_count, 1, "the second spelling of the same Plan reads the cache")
+        self.assertEqual(self.c.post("/sql", {"sql": "SELECT Prodct, SUM(Stock) FROM model GROUP BY Prodct"}),
+                         (400, {"error": "sql", "message": "軸か Metric の名前 Prodct がない", "code": "sql_unknown"}))
+        self.assertEqual(self.c.post("/sql", {"sql": "SELECT SUM(Stock) FROM model HAVING SUM(Stock) > 0"}),
+                         (400, {"error": "sql", "message": "SQL の HAVING は使えない", "code": "sql_unsupported"}))
+        for bad in [{"query": "SELECT 1"}, {"sql": 1}, {"sql": None}, {"sql": text, "typo": None}, ["SELECT 1"]]:
+            status, err = self.c.post("/sql", bad)
+            self.assertEqual((status, err["error"]), (400, "bad_request"), bad)
+        status, err = self.c.post("/sql", {"sql": "SELECT Product, Month, SUM(Stock) FROM model GROUP BY Product, Month"})
+        self.assertEqual((status, err), (413, {"error": "too_large", "code": "sql_too_large",
+                                               "message": "結果が 80 行 240 セルになり、上限 50 セルを超える（LIMIT を付けるか、列を減らす）"}))
+
+    def test_sql_as_arrow(self):
+        req = urllib.request.Request(self.c.url + "/sql", method="POST", data=json.dumps(
+            {"sql": "SELECT Month, SUM(Stock), MIN(Double) FROM model WHERE Product = 'p3' GROUP BY Month"}).encode(),
+            headers={**self.c.headers, "Content-Type": "application/json", "Accept": "application/vnd.apache.arrow.stream"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                status, kind, data = r.status, r.headers["Content-Type"], r.read()
+        except urllib.error.HTTPError as e:
+            status, kind, data = e.code, e.headers["Content-Type"], e.read()
+        if self.engine is ReferenceEngine:
+            self.assertEqual((status, json.loads(data)["error"]), (501, "not_implemented"))
+            return
+        self.assertEqual((status, kind), (200, "application/vnd.apache.arrow.stream"))
+        try:
+            import pyarrow.ipc
+        except ImportError:
+            self.skipTest("needs pyarrow (select.rs decodes the stream in its unit tests)")
+        t = pyarrow.ipc.open_stream(data).read_all()
+        self.assertEqual(t.schema.metadata, {b"seq": b"0"})
+        self.assertEqual(t.to_pydict(), {"Month": ["Jan", "Feb", "Mar", "Apr"], "sum(Stock)": [100.0] * 4,
+                                         "min(Double)": [200.0] * 4})
+        self.assertEqual(str(t.schema.field("Month").type), "dictionary<values=string, indices=int32, ordered=0>")
+
     def test_member_values_are_uuids(self):
         v = Named(self.ws.version)
         ops = [{"op": "add_input", "id": "m-pick", "name": "Pick", "dims": [did(self.ws, "Product")],
@@ -1146,6 +1188,9 @@ class SummaryCacheTest(unittest.TestCase):
         for key, n in [("a", 2), ("b", 2), ("a", 2), ("c", 2), ("b", 2), ("big", 7), ("big", 7)]:
             get(key, n)
         self.assertEqual(calls, ["a", "b", "c", "b", "big", "big"])  # c pushed out b (a was used later); big never fits
+        for _ in range(2):
+            cache.get(v, ("body",), lambda: calls.append("body") or b"", lambda body: 7)
+        self.assertEqual(calls[6:], ["body", "body"], "size gives the size of a result")
 
     def test_clients_that_ask_at_the_same_time_share_one_calculation(self):
         cache, v, release, calls = SummaryCache(max_size=10), Version(1), threading.Event(), []

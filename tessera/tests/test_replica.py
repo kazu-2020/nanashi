@@ -102,6 +102,9 @@ class Follow(JournalCase):
             filters = {d: {"ids": [x]} for d, x in coords(self.replica, Product="p1", Month="Jan").items()}
             status, body = c.post("/query", {"metrics": [mid(self.replica, "Stock")], "filters": filters})
             self.assertEqual((status, body["cells"][0]["value"]), (200, {"number": 105.0}))
+            text = "SELECT Product, MAX(Stock) FROM model WHERE Month = 'Jan' AND Product IN ('p0', 'p1') GROUP BY 1"
+            self.assertEqual(c.post("/sql", {"sql": text}),
+                             (200, {"seq": 1, "columns": ["Product", "max(Stock)"], "rows": [["p0", 95.0], ["p1", 105.0]]}))
             self.assertEqual(c.get("/operations/x")[0], 404)  # a follower reads the journal only
         finally:
             server.stop()

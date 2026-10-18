@@ -13,3 +13,4 @@ arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = { version = "60", default-features = false }
 bytes = "1"
+sqlparser = { version = "=0.62.0", default-features = false, features = ["std"] }
