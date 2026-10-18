@@ -662,6 +662,39 @@ class Journal(JournalCase, unittest.TestCase):
             check_same_state(self, m, reader)
             check_same_state(self, reader, self.reopen())
 
+    def test_survivor_of_a_dropped_scan_step_aggregates_incrementally(self):
+        """Agg sums Prev, Prev reads the previous Month of Back, and Back reads Agg. The writer breaks the scan at
+        Prev and removes Back before a recalc. Agg left the scan, so the writer and a reader that catches up
+        aggregate it incrementally after a later edit."""
+        m = self.m
+        reader = Named(self.journals.journal().open(self.engine()))
+        dims = ["Product", "Region", "Month"]
+        m.add_input("Back", dims)
+        m.add_input("Prev", dims)
+        m.add_formula("Agg", ["Product", "Month"], "Prev[REMOVE SUM: Region]")
+        m.add_formula("Prev", dims, "Back[SELECT: Month - 1] + Volume", id=m.metric("Prev").id)
+        m.add_formula("Back", dims, "Agg[EXPAND: Region]", id=m.metric("Back").id)
+        m.recalc()
+        self.journals.journal().catch_up(reader.model)
+        reader.recalc()
+        with m.transaction():
+            m.add_formula("Prev", dims, "Volume", id=m.metric("Prev").id)
+            m.remove_metric("Back")
+        m.recalc()
+        self.assertTrue(self.journals.journal().catch_up(reader.model))
+        reader.recalc()
+        m.delta_log.clear()
+        reader.delta_log.clear()
+        m.set_cell("Volume", 9, Product="A", Region="N", Month="Feb")
+        m.recalc()
+        self.assertTrue(self.journals.journal().catch_up(reader.model))
+        reader.recalc()
+        self.assertIn("Agg", m.delta_log)
+        self.assertIn("Agg", reader.delta_log)
+        check_same_state(self, m, reader)
+        check_full(self, m)
+        check_full(self, reader)
+
     def test_renames_and_a_formula_in_one_transaction_replay(self):
         """A replay defines the objects by id. The order of the renames in a record does not matter: two Metrics
         change names with each other, and a formula uses the new names of a dimension, a property and a member."""

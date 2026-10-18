@@ -334,10 +334,11 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             model._member_added(d.id)
             model._pending.added.setdefault(d.id, set()).update(added[d.id])
     _apply_orders(model, ch.get("member_order", []))
-    olds = _define(model, ch.get("metrics", []), keep=incremental)
-    if incremental:
-        for i, old in olds.items():
-            model._redefine(i, old)
+    if specs := ch.get("metrics"):  # _define scans every Metric, so a cell-only record skips it
+        olds = _define(model, specs, keep=incremental)
+        if incremental:
+            for i, old in olds.items():
+                model._redefine(i, old)
 
     for p in ch.get("properties", []):
         d, pid = model.dimensions[p["dim"]], p["id"]

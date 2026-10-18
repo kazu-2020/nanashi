@@ -757,8 +757,9 @@ class Model:
                 regions.pop(i, None)
         self._pending.forget(gone)
         if self._plan is not None:  # no formula refers to it, so only its step leaves the plan
-            # A scan step can also hold a Metric whose new formula left the scan. It is dirty, so it gets a new step
+            # A scan step can also hold other Metrics. Make them dirty, so they get a new step and incremental aggregation plan
             keep = lambda s: set(s.names).isdisjoint(gone)
+            self._pending.dirty.update(n for s in self._plan if not keep(s) for n in s.names if n not in gone)
             self._plan = [s for s in self._plan if keep(s)]
             self._levels = [[s for s in level if keep(s)] for level in self._levels]
 
