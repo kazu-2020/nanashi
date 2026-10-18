@@ -1521,6 +1521,16 @@ impl CellBlock {
         })
     }
 
+    /// Tell if the coordinates of a row hold one of the member ids.
+    fn has_member(&self, py: Python<'_>, ids: Vec<String>) -> bool {
+        py.detach(|| {
+            self.c.ids.iter().zip(&self.c.cols).any(|(table, col)| {
+                let hits: FxHashSet<u32> = positions(&ids, table).into_iter().flatten().collect();
+                !hits.is_empty() && col.iter().any(|p| hits.contains(p))
+            })
+        })
+    }
+
     /// Tell if the block has a cell that other also has.
     fn overlaps(&self, py: Python<'_>, other: &CellBlock) -> bool {
         py.detach(|| {

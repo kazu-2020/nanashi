@@ -110,26 +110,33 @@ class _Request:
 
 
 class Written:
-    """記録で書き換えた入力セル。行の列で持つものは (Metric の ID, 座標のメンバーの ID の組) の集合に、
-    変更の塊で持つものは塊のまま（Python のオブジェクトにせずに）持つ。"""
+    """The input cells that a record changed, for the conflict check. Cells in rows go as a set of (Metric id,
+    the member ids of the coordinates). A block of changes stays a block (not Python objects). A removed member
+    counts as every cell whose coordinates hold it, because the record has no rows for those cells."""
 
     def __init__(self, record: dict):
         self.cells: set[tuple] = set()
         self.blocks: list[tuple[str, Any]] = []
+        self.removed: set[str] = set()  # member ids are UUIDs, so an id names one member of one dimension
         for c in record["changes"].get("cells", []):
             if isinstance(c["rows"], list):
                 self.cells.update((c["metric"], tuple(ids)) for ids, _, _ in c["rows"])
             else:
                 self.blocks.append((c["metric"], c["rows"]))
+        for e in record["changes"].get("members", []):
+            self.removed.update(e["removed"])
 
     def __bool__(self) -> bool:
-        return bool(self.cells or self.blocks)
+        return bool(self.cells or self.blocks or self.removed)
 
     def overlaps(self, other: Written) -> bool:
-        """同じセルを書き換えているか。"""
+        """Tell if the two records changed the same cell."""
         if self.cells & other.cells:
             return True
         for a, b in ((self, other), (other, self)):
+            if a.removed and (any(u in a.removed for _, key in b.cells for u in key)
+                              or any(block.has_member(list(a.removed)) for _, block in b.blocks)):
+                return True
             for metric, block in a.blocks:
                 keys = [list(k) for m, k in b.cells if m == metric]
                 if keys and block.contains_any(keys):

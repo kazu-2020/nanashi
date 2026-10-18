@@ -4,7 +4,7 @@ import threading
 import unittest
 
 from sparse_engine import Model, Named
-from sparse_engine.engine import ReferenceEngine
+from sparse_engine.engine import ReferenceEngine, default_engine
 from sparse_engine.workspace import Conflict, Workspace
 
 from .journals import JournalCase, PgStore
@@ -381,6 +381,13 @@ class LargeWriteConflicts(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.ws.write(lambda m: Named(m).spread("V", 4500.0, how="even"), user="etl3", expect=read)
 
+    def test_removal_after_large_write(self):
+        read = self.ws.seq
+        self.ws.write(lambda m: Named(m).spread("V", 3000.0, how="even"), user="etl")
+        with self.assertRaises(Conflict) as e:
+            self.ws.write(lambda m: Named(m).remove_member("K", "k7"), user="bob", expect=read)
+        self.assertEqual(e.exception.user, "etl")
+
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class FileLargeWriteConflicts(JournalCase, LargeWriteConflicts):
@@ -389,6 +396,42 @@ class FileLargeWriteConflicts(JournalCase, LargeWriteConflicts):
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class PgLargeWriteConflicts(JournalCase, LargeWriteConflicts):
+    store = PgStore
+
+
+class RemovalConflicts(JournalCase, unittest.TestCase):
+    """A stale removal of a member conflicts with a newer edit of a cell of that member. The record of the
+    removal has no cell rows for the member, so the check must use the removed member ids."""
+
+    def setUp(self):
+        self.ws = workspace(self, model(default_engine()))
+
+    def tearDown(self):
+        self.ws.close()
+
+    def test_stale_removal_after_an_edit_of_the_member(self):
+        read = self.ws.seq
+        self.ws.write(lambda m: Named(m).set_cell("Stock", 7.0, Product="p3", Month="Feb"), user="alice")
+        with self.assertRaises(Conflict) as e:
+            self.ws.write(lambda m: Named(m).remove_member("Product", "p3"), user="bob", expect=read)
+        self.assertEqual((e.exception.user, e.exception.seq), ("alice", 1))
+        self.assertEqual(Named(self.ws.version).get("Stock", Product="p3", Month="Feb"), 7.0)
+        # Another member can go
+        self.assertEqual(self.ws.write(lambda m: Named(m).remove_member("Product", "p4"), user="bob", expect=read), 2)
+
+    def test_stale_removal_in_the_same_batch(self):
+        read = self.ws.seq
+        release = hold(self.ws)
+        edit = self.ws.submit(lambda m: Named(m).set_cell("Stock", 7.0, Product="p3", Month="Feb"), user="alice")
+        removal = self.ws.submit(lambda m: Named(m).remove_member("Product", "p3"), user="bob", expect=read)
+        release()
+        edit.result()
+        with self.assertRaises(Conflict):
+            removal.result()
+        self.assertEqual(Named(self.ws.version).get("Stock", Product="p3", Month="Feb"), 7.0)
+
+
+class PgRemovalConflicts(RemovalConflicts):
     store = PgStore
 
 
