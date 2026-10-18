@@ -1281,18 +1281,19 @@ impl Store {
     }
 
     /// Remove the cells of member m of dim, and close up the numbers of the members after it by 1. If values,
-    /// the values are member numbers of dim too: a value that points to m goes, and the numbers after it close up.
-    /// If last, m is the last number of dim, so no number closes up. Then only the cells of m go, and the
-    /// segments without them stay shared with the other versions.
+    /// the values are member numbers of dim too: a value that points to m is removed, and the numbers after it
+    /// close up. If last, m is the last number of dim, so no number closes up. Then only the cells of m are
+    /// removed, and the segments without them stay shared with the other versions.
     ///
     /// The surviving members keep their order, so the keys keep their order and no sort is necessary.
     pub fn remove_member(&mut self, dim: DimId, m: u32, values: bool, last: bool) {
         let pack = &self.pack;
         let pos: Vec<usize> = (0..pack.dims.len()).filter(|&p| pack.dims[p] == dim).collect();
-        if last && !values {
-            if pos.is_empty() {
-                return;
-            }
+        if last && !values && pos.is_empty() {
+            return;
+        }
+        // A Restrict selects m at every position of dim at one time, so a repeated dimension takes the path below
+        if last && !values && pos.len() == 1 {
             let r = Restrict::all(dim + 1).with(dim, Sel::new(vec![m], m + 1));
             let mut keys = Vec::new();
             self.for_each_in(&r, |k, _| keys.push(k));
@@ -1687,6 +1688,17 @@ mod tests {
         assert!(sink.part(vec![(4, 1.0)]).unwrap_err().contains("キー順"));
         let mut sink = s.sink(2, false);
         assert!(sink.part(vec![(5, 1.0), (5, 2.0)]).is_err());
+    }
+
+    #[test]
+    fn removing_the_last_member_of_a_repeated_dimension_drops_the_cells_at_both_positions() {
+        let dims = vec![DimInfo { size: 4, ordered: false, name: "d".into() }];
+        let cat = Catalog { dims, maps: Vec::new(), cfg: Config::default() };
+        let mut s = Store::new(&[0, 0], Some(0), Kind::Num, &cat).unwrap();
+        let cells = [(&[3, 0][..], 1.0), (&[0, 3][..], 2.0), (&[1, 2][..], 3.0)].map(|(c, v)| (s.encode(c), v));
+        s.set_sorted(sorted(&cat.cfg, cells.to_vec()));
+        s.remove_member(0, 3, false, true);
+        assert_eq!(s.rows(), (vec![vec![1], vec![2]], vec![3.0]));
     }
 
     #[test]
