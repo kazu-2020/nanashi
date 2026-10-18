@@ -299,32 +299,31 @@ def _rename(model, renamed: list) -> None:
 
 
 def apply(model, record: dict, *, incremental: bool = False) -> None:
-    """Write the result of a record to model (nothing is calculated here, except for a removed member).
+    """Write the result of a record to model.
 
-    Without incremental, everything is calculated again after the replay (an open replays many records). With
-    incremental (to catch up with the writes of another process), the record goes to the Pending of the Model as
-    the operations of the writer put it there, so the next recalc calculates only the affected range. A removed
-    member goes as in remove_member, which recalculates the affected range at that time. Some records cause a full
-    recalculation also with incremental (see _incremental)."""
+    Without incremental, nothing is calculated here, and everything is calculated again after the replay. Use
+    incremental to catch up with the writes of another process. Then the record goes to the Pending of model as
+    the operations of the writer put it there. The next recalc calculates only the affected range. A removed
+    member goes as in remove_member, which calculates its affected range at that time. Some records cause a full
+    recalculation (see _incremental)."""
     ch = record["changes"]
     model.tombstones.update(ch.get("tombstones", []))
     incremental = incremental and _incremental(model, ch)
     added = {e["dim"]: {i for i, _ in e["added"]} for e in ch.get("members", [])}
 
-    if incremental:
-        # First, because the formulas from before the record do not mention the members (see _incremental)
-        for e in ch.get("members", []):
-            for i in e["removed"]:
+    # Removals go first. removal_regions uses the plan and the maps from before the record, and a rename or an
+    # added object can take the name of a removed object
+    for e in ch.get("members", []):
+        for i in e["removed"]:
+            if incremental:
                 model._remove_member(e["dim"], i)
+            else:
+                model._drop_member(e["dim"], i)  # the tombstone comes from "tombstones"
+    if removed := ch.get("metrics_removed"):
+        model._forget_metrics(removed)  # a new plan list empties the plan cache of RustPlanner
     for d in ch.get("dimensions", []):
         model.dimensions[d["id"]] = Dimension(d["name"], [n for _, n in d["members"]], ordered=d["ordered"],
                                               ids=[i for i, _ in d["members"]], id=d["id"])
-    # A rename can take the name of a removed object, and an added object can take an old name
-    if not incremental:
-        for e in ch.get("members", []):
-            for i in e["removed"]:
-                model._drop_member(e["dim"], i)  # the tombstone comes from "tombstones"
-    model._forget_metrics(ch.get("metrics_removed", []))
     _rename(model, ch.get("renamed", []))
     model._dim_ids = {d.name: i for i, d in model.dimensions.items()}
     for e in ch.get("members", []):
@@ -343,20 +342,21 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
     for p in ch.get("properties", []):
         d, pid = model.dimensions[p["dim"]], p["id"]
         old = d.properties.get(pid)
-        mapping = dict({} if old is None else old[1])
+        mapping = dict(old[1] if old else {})
         for i in p["unset"]:
             mapping.pop(i, None)
         for i, j in p["set"]:
             mapping[i] = j
-        if old is not None and old == (p["target"], mapping):
+        if old == (p["target"], mapping):
             continue  # a removed member already left the mapping
         d.properties[pid] = (p["target"], mapping)
         d.property_names[pid] = p["name"]
         d._props = {n: i for i, n in d.property_names.items()}
         model.engine.dimension_changed(model, d.id)
         # As in add_member: the values of new members do not need the users of the property calculated again
-        if incremental and not (old is not None and old[0] == p["target"] and not p["unset"]
-                                and all(i in added.get(d.id, ()) for i, _ in p["set"])):
+        changed = {i for i in old[1].keys() | mapping.keys() if old[1].get(i) != mapping.get(i)} if old else set()
+        only_new_members = old is not None and old[0] == p["target"] and changed <= added.get(d.id, set())
+        if incremental and not only_new_members:
             for m in model.metrics.values():
                 if m.written is not None and uses_property(m.written, d.id, pid):
                     model._redefine(m.id)
@@ -386,10 +386,12 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
 
 
 def _incremental(model, ch: dict) -> bool:
-    """Whether the record ch can go to the Pending of model. It cannot if model has no plan (a full recalculation
-    waits), if a formula from before the record mentions a removed member (the writer changed the formula first),
-    or if a Metric changes between input and formula or changes its dimensions or kind (the writer also
-    calculates everything again for a new type)."""
+    """Return True if the record ch can go to the Pending of model. It cannot in these conditions:
+
+    - model has no plan (a full recalculation waits).
+    - A formula from before the record mentions a removed member (the writer changed the formula first).
+    - A Metric changes between input and formula, or changes its dimensions or kind (the writer also calculates
+      everything again)."""
     if model._plan is None:
         return False
     for e in ch.get("members", []):
@@ -517,7 +519,7 @@ class Journal:
     def catch_up(self, model) -> bool:
         """Move model (at seq model.seq) to the latest state of the journal. The records go to the Pending of the
         model (apply with incremental), so the next recalc calculates only the affected range. Return True if
-        model moved."""
+        model moved. Call it on a disposable copy (a fork), because a failure leaves the model half changed."""
         self.refresh()
         if self.head <= model.seq:
             return False

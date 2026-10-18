@@ -606,6 +606,7 @@ class Journal(JournalCase, unittest.TestCase):
             ("add member and cells", employee,
              txn(lambda: m.add_member("Employee", "e5", Department="Eng"), lambda: m.set_cell("Salary", 50, Employee="e5"))),
             ("property value", product, lambda: m.set_property_values("Product", "Category", {"A": "Y"})),
+            ("unset property value", product, lambda: m.set_property_values("Product", "Category", {"A": None})),
             ("remove member", product, lambda: m.remove_member("Product", "B")),
             ("remove member of another dimension", employee, lambda: m.remove_member("Employee", "e2")),
             ("formula", product, lambda: m.add_formula("Plus1", ["Product"], "Price + 2", id=m.metric("Plus1").id)),
@@ -632,7 +633,7 @@ class Journal(JournalCase, unittest.TestCase):
         txn(lambda: m.add_formula("OnlyA", [], 'Price[SELECT: Product."D"]', id=m.metric("OnlyA").id),
             lambda: m.remove_member("Product", "A"))()
         reader.model.eval_log.clear()
-        self.journals.journal().catch_up(reader.model)
+        self.assertTrue(self.journals.journal().catch_up(reader.model))
         reader.recalc()
         self.assertIn("DeptSalary", list(reader.eval_log))
         check_same_state(self, m, reader)
