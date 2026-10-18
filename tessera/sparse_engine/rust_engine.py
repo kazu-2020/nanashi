@@ -407,8 +407,8 @@ class RustEngine:
     def same(self, a, b) -> bool:
         return self.core.same_store(a, b)
 
-    def diff_block(self, old, new):
-        return self.core.diff_block(old, new)
+    def diff_block(self, old, new, maps=None, value_map=None):
+        return self.core.diff_block(old, new, maps, value_map)
 
     def apply_block(self, store, block, dim_ids, value_ids):
         self.core.apply_block(store, block, dim_ids, value_ids)

@@ -121,13 +121,15 @@ def changes(before, after) -> dict:
     """The changes from before (the copy from before the transaction) to after (the model to commit): the
     structure (see structure) and the changed input cells ("cells")."""
     out = structure(before, after)
+    renumbered = {d.id: _renumbering(before.dimensions[d.id], d) for d in after.dimensions.values()
+                  if d.id in before.dimensions}
     cells = []
     for m in after.metrics.values():
         if m.formula is not None:
             continue
         o = before.metrics.get(m.id)
         old_store = before._values.get(o.id) if o is not None and o.formula is None else None
-        rows = _cell_changes(before, o, old_store, after, m, after._values[m.id])
+        rows = _cell_changes(before, o, old_store, after, m, after._values[m.id], renumbered)
         if len(rows):
             cells.append({"metric": m.id, "dims": list(m.dims), "rows": rows})
     if cells:
@@ -234,9 +236,21 @@ def _engine_value(m, value_dim, new):
     return bool(new) if m.kind == "boolean" else new
 
 
-def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
+def _renumbering(old, new) -> list[int | None] | None | bool:
+    """The new number of each old number of a dimension (None for a member that went), from the dimension before
+    (old) and after (new) a transaction. None if no number changed (members were only added). False if the
+    surviving members changed their order, so an engine cannot compare the cells by position."""
+    if old.ids == new.ids[:len(old.ids)]:
+        return None
+    table = [new._by_id.get(u) for u in old.ids]
+    kept = [x for x in table if x is not None]
+    return table if all(a < b for a, b in zip(kept, kept[1:])) else False
+
+
+def _cell_changes(before, o, old_store, after, m, new_store, renumbered: dict) -> Any:
     """The changed cells of the input Metric m as [the member ids of the coordinates, the old value, the new
-    value] (a block of changes if there are many). A member-type value is a member id."""
+    value] (a block of changes if there are many). A member-type value is a member id. renumbered is
+    _renumbering of each dimension."""
     eng = after.engine
     if old_store is not None and eng.same(old_store, new_store):
         return []
@@ -248,18 +262,20 @@ def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
         to_value = lambda v: None if v is None else bool(v)
     else:
         to_value = lambda v: v
-    comparable = False
-    if old_store is not None and o.dims == m.dims and o.kind == m.kind:
-        # If the positions did not change (members were only added), the engine compares by position
-        olds = [before.dimension(d) for d in m.dims] + ([_value_dim(before, o)] if vdim is not None else [])
-        news = dims + ([vdim] if vdim is not None else [])
-        comparable = all(a.ids == b.ids[:len(a.ids)] for a, b in zip(olds, news))
-    diff = eng.diff_block(old_store, new_store) if old_store is None or comparable else None
+    diff = None
+    if old_store is None:
+        diff = eng.diff_block(None, new_store)
+    elif o.dims == m.dims and o.kind == m.kind:
+        # The engine compares by position. If members went, it maps the old numbers to the new numbers
+        maps = [renumbered[d] for d in m.dims] + ([renumbered[vdim.id]] if vdim is not None else [])
+        if all(x is not False for x in maps):
+            value_map = maps.pop() if vdim is not None else None
+            diff = eng.diff_block(old_store, new_store, maps if any(x is not None for x in maps) else None, value_map)
     if diff is not None:
         if len(diff) >= BLOCK_MIN:
             return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
         return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
-    # Compare by id (a member was removed, or the engine cannot compare by position)
+    # Compare by id (the engine cannot compare by position)
     new = _by_id(after, m, new_store)
     # A replay empties the store when the dims or the kind change (_define), so all new cells are changes
     same_type = old_store is not None and (o.dims, o.kind) == (m.dims, m.kind)

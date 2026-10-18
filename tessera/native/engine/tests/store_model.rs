@@ -153,7 +153,7 @@ fn run(seed: u64, cfg: Config, index: Option<usize>) {
                 // 軸 d のメンバーを消し、後ろの番号を詰める（軸の大きさは変えないので、最後の番号は空になる）
                 let d = rng.below(SIZES.len() as u64) as usize;
                 let victim = rng.below(SIZES[d] as u64) as u32;
-                s.remove_member(d, victim, false);
+                s.remove_member(d, victim, false, victim + 1 == SIZES[d]);
                 m = m
                     .into_iter()
                     .filter(|(k, _)| k[d] != victim)

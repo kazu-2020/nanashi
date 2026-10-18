@@ -1005,50 +1005,73 @@ impl Store {
     /// The cells with different bits in self (before) and other (after), as (key, before, after). A blank cell is None.
     /// If the key packings are different, it returns None (the caller compares in a different way).
     /// If the two share the base, it compares only the delta trees and skips their shared parts.
+    ///
+    /// If members went between self and other, `maps[p]` gives the new number of each old number at packing
+    /// position p (`u32::MAX`: the member went, so the cell is not a change). `value_map` does the same for a
+    /// member-type value. The surviving members keep their order, so the mapped keys stay in key order. A map of
+    /// None, or an old number beyond the map, keeps the number.
     #[allow(clippy::type_complexity)]
-    pub fn diff_cells(&self, other: &Store) -> Option<Vec<(u64, Option<f64>, Option<f64>)>> {
+    pub fn diff_cells(&self, other: &Store, maps: &[Option<Vec<u32>>], value_map: Option<&[u32]>) -> Option<Vec<(u64, Option<f64>, Option<f64>)>> {
         if self.pack != other.pack {
             return None;
         }
         let mut out = Vec::new();
+        let remap_key = |mut k: u64| -> Option<u64> {
+            for (p, map) in maps.iter().enumerate() {
+                if let Some(n) = map.as_ref().and_then(|t| t.get(self.pack.get(k, p) as usize)) {
+                    if *n == u32::MAX {
+                        return None;
+                    }
+                    k = self.pack.clear(k, p) | self.pack.put(p, *n);
+                }
+            }
+            Some(k)
+        };
+        let remap_value = |v: f64| -> Option<f64> {
+            match value_map.and_then(|t| t.get(v as usize)) {
+                Some(&u32::MAX) => None,
+                Some(&n) => Some(n as f64),
+                None => Some(v),
+            }
+        };
+        let remap = |k: u64, v: f64| Some((remap_key(k)?, remap_value(v)?));
         if self.base.same_as(&other.base) {
+            // A shared base holds no cell of a member that went, and no number closed up (see remove_member), so
+            // the maps change only the values and the cells of the member in the delta
             for item in self.delta.diff(&other.delta) {
                 let k = *match item {
                     DiffItem::Add(k, _) | DiffItem::Remove(k, _) | DiffItem::Update { new: (k, _), .. } => k,
                 };
-                let (a, b) = (self.value_at(k), other.value_at(k));
+                let Some(k2) = remap_key(k) else { continue };
+                let (a, b) = (self.value_at(k).and_then(remap_value), other.value_at(k2));
                 if a.map(f64::to_bits) != b.map(f64::to_bits) {
-                    out.push((k, a, b));
+                    out.push((k2, a, b));
                 }
             }
             return Some(out);
         }
-        let (mut a, mut b) = (Vec::new(), Vec::new());
-        self.merged(0, None, |k, v| a.push((k, v)));
-        other.merged(0, None, |k, v| b.push((k, v)));
-        let (mut i, mut j) = (0, 0);
-        while i < a.len() || j < b.len() {
-            let ka = a.get(i).map(|c| c.0);
-            let kb = b.get(j).map(|c| c.0);
-            match (ka, kb) {
-                (Some(x), Some(y)) if x == y => {
-                    if a[i].1.to_bits() != b[j].1.to_bits() {
-                        out.push((x, Some(a[i].1), Some(b[j].1)));
+        // Merge the two in key order without a copy of either store: the result holds only the changed cells
+        let (mut a, mut b) = (self.merged_iter().filter_map(|(k, v)| remap(k, v)).peekable(), other.merged_iter().peekable());
+        loop {
+            match (a.peek().copied(), b.peek().copied()) {
+                (Some((x, va)), Some((y, vb))) if x == y => {
+                    if va.to_bits() != vb.to_bits() {
+                        out.push((x, Some(va), Some(vb)));
                     }
-                    i += 1;
-                    j += 1;
+                    a.next();
+                    b.next();
                 }
-                (Some(x), Some(y)) if x < y => {
-                    out.push((x, Some(a[i].1), None));
-                    i += 1;
+                (Some((x, va)), Some((y, _))) if x < y => {
+                    out.push((x, Some(va), None));
+                    a.next();
                 }
-                (Some(x), None) => {
-                    out.push((x, Some(a[i].1), None));
-                    i += 1;
+                (Some((x, va)), None) => {
+                    out.push((x, Some(va), None));
+                    a.next();
                 }
-                (_, Some(y)) => {
-                    out.push((y, None, Some(b[j].1)));
-                    j += 1;
+                (_, Some((y, vb))) => {
+                    out.push((y, None, Some(vb)));
+                    b.next();
                 }
                 (None, None) => break,
             }
@@ -1256,13 +1279,31 @@ impl Store {
         self.read(&Restrict::all(0))
     }
 
-    /// 軸 dim のメンバー m のセルを消し、後ろのメンバーの番号を 1 つずつ詰める。values なら値も
-    /// dim のメンバー番号として扱い、m を指す値は消し、後ろの番号を詰める。
+    /// Remove the cells of member m of dim, and close up the numbers of the members after it by 1. If values,
+    /// the values are member numbers of dim too: a value that points to m goes, and the numbers after it close up.
+    /// If last, m is the last number of dim, so no number closes up. Then only the cells of m go, and the
+    /// segments without them stay shared with the other versions.
     ///
-    /// 番号の詰め方は残るメンバーの順序を保つので、キーの順序も保たれ、並べ直さずに済む。
-    pub fn remove_member(&mut self, dim: DimId, m: u32, values: bool) {
+    /// The surviving members keep their order, so the keys keep their order and no sort is necessary.
+    pub fn remove_member(&mut self, dim: DimId, m: u32, values: bool, last: bool) {
         let pack = &self.pack;
         let pos: Vec<usize> = (0..pack.dims.len()).filter(|&p| pack.dims[p] == dim).collect();
+        if last && !values {
+            if pos.is_empty() {
+                return;
+            }
+            let r = Restrict::all(dim + 1).with(dim, Sel::new(vec![m], m + 1));
+            let mut keys = Vec::new();
+            self.for_each_in(&r, |k, _| keys.push(k));
+            if keys.is_empty() {
+                return;
+            }
+            let mut touched = vec![false; self.base.segs.len()];
+            self.base.touched(&self.pack, keys.iter().copied().chain(self.delta.keys().copied()), &mut touched);
+            let (hint, cs) = (self.rows_hint() - keys.len(), checks(&self.pack, &r));
+            self.rewrite(hint, &touched, Vec::new(), Some(&cs));
+            return;
+        }
         let target = m as f64;
         let mut cells = Vec::with_capacity(self.rows_hint());
         self.merged(0, None, |mut k, mut v| {
