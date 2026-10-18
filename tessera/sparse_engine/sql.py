@@ -58,7 +58,7 @@ def plan(m, text: str) -> Plan:
             raise SqlError("sql_unknown", name=name)
         found, id = objects[name]
         if found != kind:
-            raise SqlError("sql_not_dim" if kind == "dim" else "sql_not_metric", name=name)
+            raise SqlError("sql_not_dim", name=name) if kind == "dim" else SqlError("sql_not_metric", name=name)
         return id
 
     items = [(kind, find(name, "dim" if kind == "dim" else "metric"), alias) for kind, name, alias in select]
