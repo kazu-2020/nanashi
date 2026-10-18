@@ -632,7 +632,7 @@ class Journal(JournalCase, unittest.TestCase):
         m.add_input("Lead", ["Product"], {("A",): "e2", ("B",): "e2"}, kind="member:Employee")
         e1, e2 = m.member_id("Employee", "e1"), m.member_id("Employee", "e2")
         a, b = m.member_id("Product", "A"), m.member_id("Product", "B")
-        ws = Workspace(m.model, self.journals.journal())
+        ws = Workspace(m.model, m.model.journal)  # the journal of m holds the lease
         self.addCleanup(ws.close)
         read = ws.seq
 
