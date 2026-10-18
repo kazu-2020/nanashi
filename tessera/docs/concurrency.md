@@ -60,7 +60,9 @@ For `PgJournal`, it reads `head_seq` and the lease state in `nanashi_model` at e
 For `FileJournal`, it monitors the file length.
 It writes the entries that other processes committed to a copy of the published version as input changes.
 Then it calculates again only the affected range and publishes the result as a new version.
-For journal entries that change the definitions of dimensions, members or Metrics, it does a full recalculation.
+Entries that change the structure also go in as the writer made them (added and removed members, property values, Metric definitions, new dimensions).
+Thus the next recalculation also calculates only the affected range.
+A full recalculation occurs in these conditions: the entry changes a Metric from input to formula or the other way, the entry changes the dimensions or the kind of a Metric, or a formula from before the entry mentions a removed member.
 With `--follow`, the HTTP server is a read-only server that does not accept writes (405).
 
 Use `Workspace(standby=True)` if many processes open the same model and a different process must continue the writes when the writer stops (failover).

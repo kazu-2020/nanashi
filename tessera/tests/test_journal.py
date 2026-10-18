@@ -584,6 +584,57 @@ class Journal(JournalCase, unittest.TestCase):
         reopened.rename_metric("Reward", "Prize")
         self.assertEqual(reopened.metric(hidden).name, "__override__Prize")
 
+    def test_structural_records_catch_up_incrementally(self):
+        """A reader that catches up on a structural record calculates only the affected range, as the writer did.
+        The values are the same as on the writer and after a new open (a full recalculation)."""
+        m = self.m
+        m.add_formula("OnlyA", [], 'Price[SELECT: Product."A"]')
+        reader = Named(self.journals.journal().open(self.engine()))
+        reader.recalc()
+
+        def txn(*changes):
+            def run():
+                with m.transaction():
+                    for change in changes:
+                        change()
+            return run
+        product, employee = "DeptSalary", "Total"  # a Metric that a change of the other dimension does not touch
+        steps = [
+            ("add member", product, lambda: m.add_member("Product", "E", Category="X")),
+            ("add member and cells", employee,
+             txn(lambda: m.add_member("Employee", "e5", Department="Eng"), lambda: m.set_cell("Salary", 50, Employee="e5"))),
+            ("property value", product, lambda: m.set_property_values("Product", "Category", {"A": "Y"})),
+            ("remove member", product, lambda: m.remove_member("Product", "B")),
+            ("remove member of another dimension", employee, lambda: m.remove_member("Employee", "e2")),
+            ("formula", product, lambda: m.add_formula("Plus1", ["Product"], "Price + 2", id=m.metric("Plus1").id)),
+            ("new Metrics", product, txn(lambda: m.add_input("Discount", ["Product"], {("C",): 1.0}),
+                                         lambda: m.add_formula("Net", ["Product"], "Price - Discount"))),
+            ("remove Metric", product, lambda: m.remove_metric("Net")),
+            ("new dimension", product, txn(lambda: m.add_dimension("Store", ["s1", "s2"]),
+                                           lambda: m.add_input("Visits", ["Store"], {("s1",): 3.0}),
+                                           lambda: m.add_formula("AllVisits", [], "Visits[REMOVE SUM: Store]"))),
+            ("names move to new members", product,
+             txn(lambda: m.remove_member("Product", "C"), lambda: m.rename_member("Product", "D", "C"),
+                 lambda: m.add_member("Product", "D", Category="Y"), lambda: m.set_cell("Price", 7, Product="D"))),
+        ]
+        for label, untouched, change in steps:
+            change()
+            reader.model.eval_log.clear()
+            self.assertTrue(self.journals.journal().catch_up(reader.model), label)
+            reader.recalc()
+            self.assertNotIn(untouched, list(reader.eval_log), label)
+            check_same_state(self, m, reader)
+            check_same_state(self, reader, self.reopen())
+
+        # The writer changes the formula first so that the member can go: the reader calculates everything again
+        txn(lambda: m.add_formula("OnlyA", [], 'Price[SELECT: Product."D"]', id=m.metric("OnlyA").id),
+            lambda: m.remove_member("Product", "A"))()
+        reader.model.eval_log.clear()
+        self.journals.journal().catch_up(reader.model)
+        reader.recalc()
+        self.assertIn("DeptSalary", list(reader.eval_log))
+        check_same_state(self, m, reader)
+
     def test_renames_and_a_formula_in_one_transaction_replay(self):
         """A replay defines the objects by id. The order of the renames in a record does not matter: two Metrics
         change names with each other, and a formula uses the new names of a dimension, a property and a member."""
@@ -665,6 +716,8 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) 
     with tempfile.TemporaryDirectory() as tmp:
         m = build_with(engine())
         make(tmp).start(m.model)
+        follower = Named(make(tmp).open(engine()))  # catches up incrementally, as a standby does
+        follower.recalc()
         counters = [[0], [0], [0]]
         for round_ in range(rounds):
             if rng.random() < 0.3:  # いくつかの操作を 1 つのトランザクションにまとめる（ときどき取り消す）
@@ -686,6 +739,10 @@ def run_random(test, seed: int, rounds: int, engine, reopen_engines, make=None) 
                 for e in reopen_engines:
                     with test.subTest(round=round_, engine=e.__name__):
                         check_same_state(test, m, Named(make(tmp).open(e())))
+                with test.subTest(round=round_, follower=True):
+                    make(tmp).catch_up(follower.model)
+                    follower.recalc()
+                    check_same_state(test, m, follower)
 
 
 @unittest.skipIf(nanashi_core is None, "nanashi_core が必要")

@@ -67,6 +67,7 @@ A journal entry has these 2 parts:
   The member order (`member_order`) is a list of member IDs in the member order.
   The engine records it only for dimensions where the order changes in a different way than "remove the deleted members and put the added members at the end".
   A journal entry that changes only names (`renamed`) or the order is not a structural change. Thus `Replica` and other followers do not recalculate when they catch up.
+  When a follower catches up on a structural change, it calculates again only the affected range ([Concurrent reads and writes](concurrency.md)).
 
 The restore replays only the results, and then does 1 full recalculation at the end.
 If the engine replays the operations, values such as the floating-point values of a spread can be different between engine versions.
