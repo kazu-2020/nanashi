@@ -278,11 +278,6 @@ def query_in(n: Names, body) -> tuple[list[str], list[str], dict[str, list[str]]
     return metrics, dims, out, agg
 
 
-def _number_out(x: float):
-    """A double in proto3 JSON: NaN and the infinities are strings."""
-    return x if math.isfinite(x) else "NaN" if math.isnan(x) else "Infinity" if x > 0 else "-Infinity"
-
-
 def _rows_out(rows) -> list:
     """[(coordinates, value), ...] -> [[member uuid..., value], ...]."""
     return [[*k, v] for k, v in rows]
@@ -715,11 +710,13 @@ class Handler(BaseHTTPRequestHandler):
     def _post(self) -> None:
         url = urllib.parse.urlsplit(self.path)
         route = [p for p in url.path.split("/") if p]
-        if route not in (["writes"], ["query"], ["sql"]):
+        handlers = {"writes": lambda raw: self._write(user, raw), "query": self._query, "sql": self._sql}
+        handle = handlers.get(route[0]) if len(route) == 1 else None
+        if handle is None:
             raise ApiError(404, "not_found", f"{url.path} はない")
         user = self._user()
-        allowed_on_standby = route != ["writes"]
-        if not allowed_on_standby and isinstance(self.server.workspace, Replica):
+        is_read = route != ["writes"]
+        if not is_read and isinstance(self.server.workspace, Replica):
             raise ApiError(405, "read_only", "このサーバーは記録先に追従する読み出し専用（書き込みは書き手のサーバーへ送る）")
         length = self.headers.get("Content-Length")
         if length is None:
@@ -741,8 +738,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             self.unread_body = False
-            read = self._query if route == ["query"] else self._sql
-            self._in_slot(lambda: read(raw) if allowed_on_standby else self._write(user, raw), left)
+            self._in_slot(lambda: handle(raw), left)
         finally:
             self.server.end_body()
 
@@ -772,7 +768,7 @@ class Handler(BaseHTTPRequestHandler):
         for mid, rows, at in parts:
             for row in rows:
                 cells.append({"metric": mid, "coords": ["" if i is None else row[i] for i in at],
-                              "value": {"number": _number_out(row[-1])}})
+                              "value": {"number": sql.json_number(row[-1])}})
         return 200, {"seq": v.seq, "dimensions": dims, "cells": cells}
 
     def _sql(self, raw: bytes) -> tuple[int, Any]:

@@ -285,7 +285,7 @@ class Api:
         try:
             import pyarrow.ipc
         except ImportError:
-            return  # select.rs decodes the stream in its unit tests
+            self.skipTest("needs pyarrow (select.rs decodes the stream in its unit tests)")
         t = pyarrow.ipc.open_stream(data).read_all()
         self.assertEqual(t.schema.metadata, {b"seq": b"0"})
         self.assertEqual(t.to_pydict(), {"Month": ["Jan", "Feb", "Mar", "Apr"], "sum(Stock)": [100.0] * 4,

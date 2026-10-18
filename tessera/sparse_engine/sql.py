@@ -167,15 +167,17 @@ def reference_select(m, p: Plan) -> list[list]:
             for r in rows]
 
 
+def json_number(x):
+    """A float in proto3 JSON: NaN and the infinities are strings. Other values stay the same."""
+    if not isinstance(x, float) or math.isfinite(x):
+        return x
+    return "NaN" if math.isnan(x) else "Infinity" if x > 0 else "-Infinity"
+
+
 def reference_json(m, p: Plan, seq: int, max_cells: int) -> bytes:
     """The JSON body of POST /sql from reference_select. NaN and the infinities are strings (proto3 JSON)."""
     rows = reference_select(m, p)
     if (cells := len(rows) * len(p.columns)) > max_cells:
         raise SqlError("sql_too_large", rows=len(rows), cells=cells, max=max_cells)
-
-    def out(x):
-        if not isinstance(x, float) or math.isfinite(x):
-            return x
-        return "NaN" if math.isnan(x) else "Infinity" if x > 0 else "-Infinity"
-    body = {"seq": seq, "columns": [c[0] for c in p.columns], "rows": [[out(x) for x in r] for r in rows]}
+    body = {"seq": seq, "columns": [c[0] for c in p.columns], "rows": [[json_number(x) for x in r] for r in rows]}
     return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()

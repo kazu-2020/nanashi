@@ -1,16 +1,15 @@
 """The SQL subset of POST /sql (sparse_engine/sql.py, Core.select)."""
 import json
-import math
 import random
 import unittest
 
 from sparse_engine import Model, Named
 from sparse_engine.engine import ReferenceEngine
-from sparse_engine.sql import SqlError, plan, reference_select
+from sparse_engine.sql import SqlError, json_number, plan, reference_select
 
 try:
     from sparse_engine.rust_engine import RustEngine
-except ImportError:  # nanashi_core をビルドしていない環境
+except ImportError:  # nanashi_core is not built
     RustEngine = None
 
 
@@ -127,7 +126,7 @@ class ReferenceBehavior(Behavior, unittest.TestCase):
     pass
 
 
-@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+@unittest.skipIf(RustEngine is None, "needs a build of nanashi_core")
 class RustBehavior(Behavior, unittest.TestCase):
     engine = staticmethod(RustEngine)
 
@@ -193,11 +192,7 @@ def random_sql(rng: random.Random) -> str:
     return text
 
 
-def as_json(x):
-    return x if not isinstance(x, float) or math.isfinite(x) else "NaN" if math.isnan(x) else "Infinity" if x > 0 else "-Infinity"
-
-
-@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+@unittest.skipIf(RustEngine is None, "needs a build of nanashi_core")
 class RustAgreesWithTheReference(unittest.TestCase):
     def test_random_queries(self):
         for seed, engine in [(1, RustEngine), (2, lambda: RustEngine(par_min=0)), (3, lambda: RustEngine(dense_always=True))]:
@@ -206,7 +201,7 @@ class RustAgreesWithTheReference(unittest.TestCase):
             nonempty = 0
             for _ in range(150):
                 text = random_sql(rng)
-                want = [[as_json(x) for x in r] for r in reference_select(ref, plan(ref, text))]
+                want = [[json_number(x) for x in r] for r in reference_select(ref, plan(ref, text))]
                 got = json.loads(rust.select(plan(rust, text), "json", 10_000))["rows"]
                 self.assertEqual(got, want, text)
                 nonempty += len(want) > 1
