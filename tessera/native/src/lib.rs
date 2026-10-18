@@ -3,7 +3,7 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, ipc, pq, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
+use nanashi_engine::{eval, graph, ipc, pq, select, sql, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -53,6 +53,17 @@ fn diag_err(py: Python<'_>, d: Diag) -> PyErr {
         Ok(t) => Diagnostic::new_err(t.unbind()),
         Err(e) => e,
     }
+}
+
+fn read_agg(agg: &str) -> PyResult<ReadAgg> {
+    Ok(match agg {
+        "sum" => ReadAgg::Sum,
+        "avg" => ReadAgg::Avg,
+        "min" => ReadAgg::Min,
+        "max" => ReadAgg::Max,
+        "count" => ReadAgg::Count,
+        _ => return Err(err(format!("集計 {agg} は使えない（sum、avg、min、max、count）"))),
+    })
 }
 
 fn kind_of(is_bool: bool) -> Kind {
@@ -212,6 +223,18 @@ impl Core {
             return Err(err(format!("キーの長さ {} が軸の数 {} と合わない", key.len(), s.metric_dims.len())));
         }
         s.metric_dims.iter().zip(key).try_for_each(|(&d, &m)| self.members(d, &[m]))
+    }
+
+    /// The rank table t of dimension d (number -> rank) is a permutation of the members.
+    fn ranks(&self, d: DimId, t: Option<&[u32]>) -> PyResult<()> {
+        let size = self.cat.dims[d].size as usize;
+        if let Some(t) = t {
+            let mut seen = vec![false; size];
+            if t.len() != size || !t.iter().all(|&x| (x as usize) < size && !std::mem::replace(&mut seen[x as usize], true)) {
+                return Err(err(format!("軸 {} の並び順の表が、メンバー数 {size} の並べ替えになっていない", self.cat.dims[d].name)));
+            }
+        }
+        Ok(())
     }
 
     fn added(&self, added: &[(DimId, Vec<u32>)]) -> PyResult<()> {
@@ -661,14 +684,7 @@ impl Core {
         agg: &str,
         ids: Vec<Bound<'py, PyList>>,
     ) -> PyResult<(Vec<Bound<'py, PyTuple>>, Bound<'py, PyBytes>)> {
-        let agg = match agg {
-            "sum" => ReadAgg::Sum,
-            "avg" => ReadAgg::Avg,
-            "min" => ReadAgg::Min,
-            "max" => ReadAgg::Max,
-            "count" => ReadAgg::Count,
-            _ => return Err(err(format!("集計 {agg} は使えない（sum、avg、min、max、count）"))),
-        };
+        let agg = read_agg(agg)?;
         self.dims(&keep)?;
         let (s, r, cat) = (read(store)?, self.restrict(&region)?, self.cat.clone());
         let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes()))).map_err(err)?;
@@ -683,6 +699,57 @@ impl Core {
             Ok(())
         })?;
         Ok((cols, vals))
+    }
+
+    /// Run a resolved SQL plan (select::run) with the GIL released and return the JSON or Arrow body. A column
+    /// or a sort key is ("dim", index into keep) or ("agg", index into stores). Err: Diagnostic (sql_too_large,
+    /// sql_budget) or ValueError for numbers that do not agree with the catalog.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (stores, aggs, keep, region, columns, order, limit, names, ranks, seq, fmt, max_rows))]
+    fn select<'py>(
+        &self,
+        py: Python<'py>,
+        stores: Vec<Bound<'py, StoreHandle>>,
+        aggs: Vec<String>,
+        keep: Vec<DimId>,
+        region: Region,
+        columns: Vec<(String, String, usize)>,
+        order: Vec<(String, usize, bool, bool)>,
+        limit: Option<usize>,
+        names: Vec<Vec<PyBackedStr>>,
+        ranks: Vec<Option<Vec<u32>>>,
+        seq: u64,
+        fmt: &str,
+        max_rows: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        self.dims(&keep)?;
+        if stores.len() != aggs.len() || names.len() != keep.len() || ranks.len() != keep.len() {
+            return Err(err("stores と aggs、names と ranks と keep の数が合わない".into()));
+        }
+        for (j, &d) in keep.iter().enumerate() {
+            if names[j].len() != self.cat.dims[d].size as usize {
+                return Err(err(format!("軸 {} の名前の数 {} がメンバー数と違う", self.cat.dims[d].name, names[j].len())));
+            }
+            self.ranks(d, ranks[j].as_deref())?;
+        }
+        let aggs = stores.iter().zip(&aggs).map(|(s, a)| Ok((read(s)?, read_agg(a)?))).collect::<PyResult<Vec<_>>>()?;
+        let col = |kind: &str, i: usize| match kind {
+            "dim" if i < keep.len() => Ok(select::Col::Dim(i)),
+            "agg" if i < aggs.len() => Ok(select::Col::Agg(i)),
+            _ => Err(err(format!("列 ({kind}, {i}) がない"))),
+        };
+        let columns = columns.into_iter().map(|(n, k, i)| Ok((n, col(&k, i)?))).collect::<PyResult<_>>()?;
+        let order = order.into_iter().map(|(k, i, desc, nulls_first)| Ok(select::Key { col: col(&k, i)?, desc, nulls_first })).collect::<PyResult<_>>()?;
+        let format = match fmt {
+            "json" => select::Format::Json,
+            "arrow" => select::Format::Arrow,
+            _ => return Err(err(format!("形式 {fmt} は使えない（json、arrow）"))),
+        };
+        let sel = select::Select { keep, aggs, region: self.restrict(&region)?, columns, order, limit, names, ranks, max_rows, seq, format };
+        let cat = self.cat.clone();
+        // Borrow sel, so that the names drop after detach (a drop without the thread state puts each decref in a global pool)
+        let body = py.detach(|| select::run(&sel, &cat)).map_err(|d| diag_err(py, d))?;
+        Ok(PyBytes::new(py, &body))
     }
 
     fn replace(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, region: Region, new: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -747,15 +814,7 @@ impl Core {
         if !ranks.is_empty() && ranks.len() != s.metric_dims.len() {
             return Err(err(format!("並び順の表の数 {} が軸の数 {} と合わない", ranks.len(), s.metric_dims.len())));
         }
-        for (&d, t) in s.metric_dims.iter().zip(&ranks) {
-            let size = self.cat.dims[d].size as usize;
-            if let Some(t) = t {
-                let mut seen = vec![false; size];
-                if t.len() != size || !t.iter().all(|&x| (x as usize) < size && !std::mem::replace(&mut seen[x as usize], true)) {
-                    return Err(err(format!("軸 {} の並び順の表が、メンバー数 {size} の並べ替えになっていない", self.cat.dims[d].name)));
-                }
-            }
-        }
+        s.metric_dims.iter().zip(&ranks).try_for_each(|(&d, t)| self.ranks(d, t.as_deref()))?;
         let is_bool = s.kind == Kind::Bool;
         let (cols, values, total) = py.detach(move || s.rows_in(&r, &ranks, offset, limit));
         Ok((cols, values, is_bool, total))
@@ -1610,6 +1669,35 @@ fn query_arrow<'py>(
     Ok(PyBytes::new(py, &buf))
 }
 
+/// Parse the SQL text of POST /sql (sql::parse). Returns (select, filters, group_by, order_by, limit):
+///   select:   [("dim", name, alias | None) | (agg, metric name, alias | None)], agg is "sum", "avg", ...
+///   filters:  [(dimension name, [member names])]
+///   group_by: [name | position]
+///   order_by: [(name | position, desc, nulls_first)]
+/// Err: Diagnostic (sql_syntax, sql_statements, sql_unsupported, sql_from).
+#[allow(clippy::type_complexity)]
+#[pyfunction]
+fn parse_sql<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyTuple>> {
+    let q = sql::parse(text).map_err(|d| diag_err(py, d))?;
+    let reference = |r: sql::Ref| -> PyResult<Bound<'py, PyAny>> {
+        match r {
+            sql::Ref::Name(n) => Ok(n.into_pyobject(py)?.into_any()),
+            sql::Ref::Pos(p) => Ok(p.into_pyobject(py)?.into_any()),
+        }
+    };
+    let select = q
+        .select
+        .into_iter()
+        .map(|i| match i {
+            sql::Item::Dim { name, alias } => ("dim", name, alias).into_pyobject(py),
+            sql::Item::Agg { agg, metric, alias } => (format!("{agg:?}").to_lowercase(), metric, alias).into_pyobject(py),
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let group_by = q.group_by.into_iter().map(reference).collect::<PyResult<Vec<_>>>()?;
+    let order_by = q.order_by.into_iter().map(|(r, desc, nulls)| (reference(r)?, desc, nulls).into_pyobject(py)).collect::<PyResult<Vec<_>>>()?;
+    (select, q.filters, group_by, order_by, q.limit).into_pyobject(py)
+}
+
 /// Parquet のフッターのキーと値（本体は読まない）。
 #[pyfunction]
 fn parquet_metadata(py: Python<'_>, data: PyBackedBytes) -> PyResult<Vec<(String, String)>> {
@@ -1625,6 +1713,7 @@ fn nanashi_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(query_arrow, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_sql, m)?)?;
     m.add("Diagnostic", m.py().get_type::<Diagnostic>())?;
     m.add_class::<Core>()?;
     m.add_class::<Expr>()?;
