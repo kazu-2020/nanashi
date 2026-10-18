@@ -29,8 +29,10 @@ pub enum Format {
     Json,
 }
 
-/// A resolved plan. The caller checked that each Store has every dimension of `keep` and `region`, that
-/// `columns` and `order` index into `keep` and `aggs`, and that `names[j]` has one name for each member of `keep[j]`.
+/// A resolved plan. The caller makes sure that:
+/// - each Store has every dimension of `keep` and `region`,
+/// - `columns` and `order` index into `keep` and `aggs`,
+/// - `names[j]` has one name for each member of `keep[j]`.
 pub struct Select<S> {
     /// The GROUP BY dimensions, in SQL order (the key order of the join).
     pub keep: Vec<DimId>,
@@ -79,7 +81,7 @@ pub fn run<S: AsRef<str> + Sync>(sel: &Select<S>, cat: &Catalog) -> std::result:
         b.settle_bytes(start, pairs.capacity() * CELL_BYTES)?;
         Ok(pairs)
     };
-    // The aggregates share one Budget, which is not Sync. Without a limit, each one gets its own and they run in parallel
+    // A Budget is not Sync, so with a limit the aggregates run one at a time
     let lists: Vec<Vec<(u64, f64)>> = if cat.cfg.max_bytes == usize::MAX {
         sel.aggs.par_iter().map(|a| one(a, &Budget::new(usize::MAX, 0))).collect::<Result<_>>()
     } else {
@@ -455,7 +457,7 @@ mod tests {
         assert!(run(&select(three(&cat)[..1].to_vec(), &COLS[..3], vec![], None, Format::Json), &cat).is_ok());
         cat.cfg.max_bytes = low - 1;
         assert_eq!(run(&select(three(&cat)[..1].to_vec(), &COLS[..3], vec![], None, Format::Json), &cat).unwrap_err().code, "sql_budget");
-        // The same Store twice holds the same bytes and gives the same body, but the second aggregate needs room for its groups
+        // The same Store twice holds no more bytes and gives the same body, but the second aggregate needs room for its groups
         let revenue = three(&cat).swap_remove(0).0;
         cat.cfg.max_bytes = low;
         let twice = vec![(revenue.clone(), ReadAgg::Sum), (revenue, ReadAgg::Max)];

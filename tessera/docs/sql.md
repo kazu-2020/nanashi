@@ -33,13 +33,13 @@ If 2 output columns have the same name, `ORDER BY` with that name gives `sql_amb
 ## Rules
 
 - Each dimension in `SELECT` must be in `GROUP BY`. A `GROUP BY` dimension that is not in `SELECT` still makes separate groups.
-- The Metric of each aggregate must have all the `GROUP BY` and `WHERE` dimensions. If not, the answer is 400 `sql_missing_dim`. `POST /query` ignores such a dimension, but then a total is not filtered, which is wrong in a wide table.
-- A Metric that is not a number allows only `COUNT`.
-- The groups are the groups of all the aggregates in `SELECT` (an outer join). An aggregate with no cells in a group is NULL. `COUNT` is 0. A group that only a Metric outside `SELECT` has is not in the result.
+- The Metric of each aggregate must have all the `GROUP BY` and `WHERE` dimensions. If not, the answer is 400 `sql_missing_dim`. `POST /query` ignores such a dimension. Then a total includes all the members of that dimension, which is wrong in a wide table.
+- If a Metric is not a number, you can use only `COUNT` on it.
+- The groups are the groups of all the aggregates in `SELECT` (an outer join). An aggregate with no cells in a group is NULL. `COUNT` is 0. If only a Metric that is not in `SELECT` has a group, the result does not have that group.
 - Without `GROUP BY`, the result has exactly 1 row (SUM is NULL and COUNT is 0 if there are no cells).
 - `ORDER BY` on a dimension uses the member order of the dimension (like a DuckDB ENUM), not the text order of the names.
 - NULLs are last for `ASC` and `DESC` unless the SQL says `NULLS FIRST`. NaN is above all numbers. A tie keeps the order of the member numbers, so `LIMIT` gives the same rows each time.
-- Without `ORDER BY`, the rows are in the order of the member numbers of the `GROUP BY` dimensions. This order is not specified, but it is the same for the same version.
+- Without `ORDER BY`, the rows are in the order of the member numbers of the `GROUP BY` dimensions. This order can change in a later release, but it does not change for one version.
 
 ## Result
 
@@ -49,7 +49,7 @@ A dimension value is a member name. NULL is `null`. NaN and the infinities are t
 
 If `Accept` names `application/vnd.apache.arrow.stream` (with a q above 0), the answer is an Arrow IPC stream with 1 record batch and `seq` in the schema metadata.
 A dimension column is `dictionary<int32, utf8>` and is not null. Its dictionary has all the members of the dimension, and its keys are the member numbers.
-An aggregate column is a nullable `float64`. The reference engine does not make Arrow: it answers 501 `not_implemented`.
+An aggregate column is a nullable `float64`. The reference engine does not make Arrow: it answers 501 `not_implemented`. The reference engine also needs `nanashi_core`, because Rust parses the SQL.
 
 ## Errors
 
@@ -59,11 +59,5 @@ A result with more cells (rows x columns, after `LIMIT`) than `--max-cells` is 4
 
 ## Implementation
 
-1. Rust parses the text (`native/engine/src/sql.rs`, the `sqlparser` crate with the DuckDB dialect) to names. The parser has a recursion limit of 50, so a deep expression is a syntax error.
-2. `sparse_engine/sql.py` (`plan`) changes the names to ids and checks the rules. The result is a `Plan` of ids.
-3. `Core.select` (`native/engine/src/select.rs`) runs the plan with the GIL released: one `Store::summarize` for each aggregate, the outer join on a u64 key of the GROUP BY member numbers, ORDER BY, LIMIT and the encode.
-4. The summary cache of the server keeps the encoded body for each (format, `Plan`). Thus 2 texts with the same `Plan` share 1 entry.
-
-The u64 key is safe: each aggregate's Metric has all the GROUP BY dimensions, and the key of a Metric fits in 64 bits.
-`sql.reference_select` gives the same rows in pure Python from `Model.summarize`. The tests compare it with the Rust path on random models and queries.
-The reference engine also needs `nanashi_core` for `POST /sql`, because Rust parses the SQL.
+Rust parses the text to names (`native/engine/src/sql.rs`), `sql.plan` changes them to a `Plan` of ids, and `Core.select` runs the `Plan` (`native/engine/src/select.rs`).
+The tests compare `Core.select` with `sql.reference_select`, which uses pure Python.

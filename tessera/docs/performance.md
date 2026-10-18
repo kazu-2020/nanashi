@@ -112,8 +112,9 @@ Before this path (a filtered copy of the stored data and a compiled `REMOVE`), t
 A filter on the partition dimension is faster than DuckDB, because it reads only the rows of the selected members.
 In the 2 runs, a full scan took 0.9 to 1.4 times the time of DuckDB. The total and the AVG by Version were the slowest. The cause is the exact sum: `FixSum` uses about 4 ns for each value on 1 thread, and a plain f64 sum uses less than 1 ns. DuckDB and Polars add in f64, so their sums can change with the order of the rows.
 
-`bench_query.py --k 8 --sql` runs the same kind of queries as SQL through `plan` and `Model.select` (the work of `POST /sql` without HTTP: parse, names, run, join, ORDER BY, LIMIT and encode). DuckDB runs the same SQL on the u32 member-number tables, and gives Python tuples (`fetchall`) or an Arrow table. tessera gives member names (JSON) or a dictionary of names (Arrow).
-The measurement used the same cloud VM (4 vCPUs, DuckDB 4 threads, median of 9 rounds, ms, and the range). The table gives the second of 2 runs. The first run was in the same range.
+`bench_query.py --k 8 --sql` runs the same kind of queries as SQL through `plan` and `Model.select`. This is the work of `POST /sql` without HTTP: the parse, the names, the run, the join, ORDER BY, LIMIT and the encode.
+DuckDB runs the same SQL on the u32 tables of member numbers. It gives Python tuples (`fetchall`) or an Arrow table. tessera gives member names (JSON) or a dictionary of names (Arrow).
+The measurement used the same cloud VM (4 vCPUs, DuckDB with 4 threads). A value is the median of 9 rounds in ms, with the range. The table gives the second of 2 runs. The first run was in the same range.
 
 | Query | Rows | tessera JSON | DuckDB fetchall | tessera Arrow | DuckDB Arrow |
 |---|---|---|---|---|---|

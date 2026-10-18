@@ -120,14 +120,11 @@ def check_sql(m, con, label, text, duck) -> int:
     got = json.loads(model.select(p, "json", 10**9))["rows"]
     names = [model.dimension(d).members for d in p.group]
     want = [[n[x] for n, x in zip(names, r)] + list(r[len(names):]) for r in con.execute(duck).fetchall()]
-    if "LIMIT" in text:  # DuckDB breaks ties in another order, so compare only the values
-        got, want = [r[len(names):] for r in got], [r[len(names):] for r in want]
-        names = []
-    key = lambda r: tuple(map(str, r))
-    ok = len(got) == len(want) and all(
-        a[:len(names)] == b[:len(names)] and same(dict(enumerate(a[len(names):])), dict(enumerate(b[len(names):])))
-        for a, b in zip(sorted(got, key=key), sorted(want, key=key)))
-    if not ok:
+    g = len(names)
+    k = 0 if "LIMIT" in text else g  # DuckDB breaks LIMIT ties in another order, so compare only the values
+    cells = lambda rows: {(i, *d, j): x for i, (d, v) in enumerate(sorted((tuple(r[:k]), r[g:]) for r in rows))
+                          for j, x in enumerate(v)}
+    if not same(cells(got), cells(want)):
         sys.exit(f"{label}: the results are different\n{got[:5]}\n{want[:5]}")
     return len(got)
 
