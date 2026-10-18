@@ -1,4 +1,4 @@
-// nanashi-api starts the application server. It has no RPC yet.
+// nanashi-api starts the application server. It sends the engine requests to nanashi-router, which starts the engines.
 package main
 
 import (
@@ -8,17 +8,21 @@ import (
 	"log"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kazu-2020/nanashi/api"
+	"github.com/kazu-2020/nanashi/api/gen/nanashi/v1/nanashiv1connect"
 )
 
 func main() {
 	dsn := flag.String("pg", "postgresql://postgres@127.0.0.1:55432/nanashi", "DSN of PostgreSQL")
 	listen := flag.String("listen", "127.0.0.1:8080", "address to listen on")
+	router := flag.String("router", "http://127.0.0.1:8090", "URL of nanashi-router")
 	var proxies []string
 	flag.Func("trusted-proxy", "CIDR or address of the authenticating proxy that sets X-Nanashi-User (repeat for more)",
 		func(v string) error { proxies = append(proxies, v); return nil })
@@ -43,10 +47,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Register the Connect handlers here.
+	server := &api.PlanServer{Router: strings.TrimSuffix(*router, "/"), HTTP: &http.Client{Timeout: 100 * time.Second}}
 	mux := http.NewServeMux()
+	mux.Handle(nanashiv1connect.NewPlanServiceHandler(server, connect.WithInterceptors(api.Interceptor()),
+		connect.WithReadMaxBytes(16<<20)))
 	// The Vite dev server sends /nanashi.v1.* to this server, so the API does not need CORS.
-	var handler http.Handler = mux
+	handler := api.LocalHostOnly(mux)
 	if len(networks) > 0 {
 		handler = api.TrustedOnly(networks, mux)
 	}

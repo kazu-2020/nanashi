@@ -2,6 +2,7 @@
 
 `api/` is the application server (`nanashi-api`). It gives the Connect API to the frontend (`web/`).
 It uses `connect-go` on `net/http` of the Go standard library. It does not use a different web framework.
+It sends the engine requests to `nanashi-router` (`--router`, default `http://127.0.0.1:8090`).
 
 ## Commands
 
