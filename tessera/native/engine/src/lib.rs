@@ -21,6 +21,7 @@ pub mod plan;
 pub mod ipc;
 pub mod pq;
 mod restrict;
+pub mod sql;
 mod store;
 
 pub use ast::*;
