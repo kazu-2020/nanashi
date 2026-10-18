@@ -139,7 +139,7 @@ Thus, the actual rule is this: a dimension with `ordered=True` rejects a reorder
 ### Cells already use a removal mark
 
 The Store puts a delta in a persistent tree (`OrdMap<u64, Option<f64>>`) on top of a base that does not change.
-If the delta becomes larger than 1/8 of the base, the Store merges them again.
+If the delta becomes larger than the delta limit (`engine.md`), the Store merges them again.
 A `None` in the delta is a removal mark.
 Thus, a cell removal already puts a mark and merges at a later time.
 Step 1 of a member removal also uses this path: it makes the inputs of that member blank and does an incremental recalculation.

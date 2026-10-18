@@ -1172,9 +1172,9 @@ impl Store {
         self.after_delta();
     }
 
-    /// まとめて書き込む。cols は宣言した軸の順のメンバー番号の列、values の None は消す。
-    /// 同じセルが複数あれば後のものが勝つ。差分に入れると本体にまとめ直すことになる量なら
-    /// （write_back と同じ基準）、差分に 1 件ずつ入れずに本体を作り直す。
+    /// Writes many cells. `cols` holds the member numbers in the declared dimension order. A `None` value deletes the cell.
+    /// If the same cell occurs more than one time, the last value wins.
+    /// If the delta and the cells are more than `delta_limit`, the engine makes a new base directly and does not use the delta.
     pub fn write_many(&mut self, cols: &[&[u32]], values: &[Option<f64>]) {
         let limit = self.delta_limit();
         if self.delta.len() + values.len() <= limit {
