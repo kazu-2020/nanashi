@@ -1175,9 +1175,9 @@ impl Store {
     /// Writes many cells. `cols` holds the member numbers in the declared dimension order. A `None` value deletes the cell.
     /// If the same cell occurs more than one time, the last value wins.
     /// If the cells are more than the delta limit and 1/8 of the base, the engine makes a new base directly.
-    /// A smaller batch goes through the delta, so a compaction rewrites only the touched segments.
+    /// A smaller batch goes through the delta in key order, so each compaction rewrites only the segments of one key range.
     pub fn write_many(&mut self, cols: &[&[u32]], values: &[Option<f64>]) {
-        if values.len() <= self.delta_limit().max(self.base.rows() / 8) {
+        if self.delta.len() + values.len() <= self.delta_limit() {
             let mut key = vec![0; cols.len()];
             for (i, v) in values.iter().enumerate() {
                 for (k, c) in key.iter_mut().zip(cols) {
@@ -1206,6 +1206,13 @@ impl Store {
                 Some(last) if last.0 == c.0 => *last = c,
                 _ => updates.push(c),
             }
+        }
+        if updates.len() <= self.delta_limit().max(self.base.rows() / 8) {
+            for (k, v) in updates {
+                self.delta.insert(k, Slot(v));
+                self.after_delta();
+            }
+            return;
         }
         let mut out = Vec::with_capacity(self.rows_hint() + updates.len());
         let mut i = 0;
