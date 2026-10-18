@@ -93,7 +93,7 @@ MESSAGES: dict[str, str] = {
     "sql_member": "{dim} にメンバー {member!r} がない",
     "sql_missing_dim": "Metric {metric} に軸 {dim} がない（GROUP BY と WHERE の軸は、すべての集計の Metric に要る）",
     "sql_order": "ORDER BY の {name} が SELECT の列にも GROUP BY の軸にもない",
-    "sql_too_large": "結果が {rows:,} 行になり、上限 {max:,} を超える（LIMIT を付ける）",
+    "sql_too_large": "結果が {rows:,} 行 {cells:,} セルになり、上限 {max:,} セルを超える（LIMIT を付けるか、列を減らす）",
     "sql_budget": "{detail}",
 
     # 警告

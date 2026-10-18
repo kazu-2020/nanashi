@@ -44,13 +44,13 @@ pub struct Select<S> {
     pub names: Vec<Vec<S>>,
     /// For each kept dimension: member number -> rank, or None for the order of the numbers.
     pub ranks: Vec<Option<Vec<u32>>>,
-    pub max_rows: usize,
+    /// The most cells (rows x columns) in the result.
+    pub max_cells: usize,
     pub seq: u64,
     pub format: Format,
 }
 
 /// The joined groups, in ascending key order. Row i is one group.
-#[derive(Debug, PartialEq)]
 struct Table {
     keys: Vec<u64>,
     vals: Vec<Vec<f64>>,
@@ -58,60 +58,82 @@ struct Table {
     valid: Vec<Option<Vec<bool>>>,
 }
 
-/// Run the plan and return the encoded body. Err: sql_too_large {rows, max}, or sql_budget {detail} if the work
-/// does not fit in the memory budget.
+/// Run the plan and return the encoded body. Err: sql_too_large {rows, cells, max}, or sql_budget {detail}.
+/// One Budget holds the stores and every buffer of the query.
 pub fn run<S: AsRef<str> + Sync>(sel: &Select<S>, cat: &Catalog) -> std::result::Result<Vec<u8>, Diag> {
     let budget = |e: String| Diag::new("sql_budget").arg("detail", e);
     let sizes: Vec<u64> = sel.keep.iter().map(|&d| cat.dims[d].size as u64).collect();
-    // Each aggregate's Metric has all kept dimensions, and the key of a Metric fits in 64 bits, so the product fits
+    // The key of each Metric fits in 64 bits and has all kept dimensions, so this product cannot overflow
     let mut strides = vec![1u64; sizes.len()];
     for j in (0..sizes.len().saturating_sub(1)).rev() {
-        strides[j] = strides[j + 1].checked_mul(sizes[j + 1]).ok_or_else(|| budget("GROUP BY の軸が 64 ビットのキーに収まらない".into()))?;
+        strides[j] = strides[j + 1] * sizes[j + 1];
     }
-    let one = |(s, a): &(Arc<Store>, ReadAgg)| s.summarize(&sel.keep, &sel.region, *a, cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes()));
-    // With a memory budget, run one aggregate at a time, so that each one can use all of it (the evaluate_many rule)
-    let groups: Vec<Result<Groups>> = if cat.cfg.max_bytes == usize::MAX { sel.aggs.par_iter().map(one).collect() } else { sel.aggs.iter().map(one).collect() };
-    let mut lists = Vec::with_capacity(groups.len());
-    for (g, (s, _)) in groups.into_iter().zip(&sel.aggs) {
-        lists.push(pack(g.map_err(budget)?, s, &sel.keep, &strides).map_err(budget)?);
+    let b = Budget::new(cat.cfg.max_bytes, held(&sel.aggs.iter().map(|(s, _)| Src::Store(s.clone())).collect::<Vec<_>>()));
+    let zero = b.mark();
+    let one = |(s, a): &(Arc<Store>, ReadAgg), b: &Budget| -> Result<Vec<(u64, f64)>> {
+        let start = b.mark();
+        let g = s.summarize(&sel.keep, &sel.region, *a, cat, b)?;
+        b.settle_bytes(start, g.vals.len() * (8 + 4 * g.cols.len()))?;
+        b.need(g.vals.len(), "SQL の結合")?;
+        let pairs = pack(g, s, &sel.keep, &strides);
+        b.settle_bytes(start, pairs.capacity() * CELL_BYTES)?;
+        Ok(pairs)
+    };
+    // The aggregates share one Budget, which is not Sync. Without a limit, each one gets its own and they run in parallel
+    let lists: Vec<Vec<(u64, f64)>> = if cat.cfg.max_bytes == usize::MAX {
+        sel.aggs.par_iter().map(|a| one(a, &Budget::new(usize::MAX, 0))).collect::<Result<_>>()
+    } else {
+        sel.aggs.iter().map(|a| one(a, &b)).collect::<Result<_>>()
     }
+    .map_err(budget)?;
+    let width = 8 + 9 * sel.aggs.len();
+    let groups = lists.iter().map(Vec::len).sum::<usize>();
+    b.need((groups.saturating_mul(width + 16)).div_ceil(CELL_BYTES), "SQL の結合").map_err(budget)?;
     let t = join(lists, sel.keep.is_empty(), &sel.aggs.iter().map(|a| a.1).collect::<Vec<_>>());
     let n = t.keys.len();
-    if sel.order.is_empty() && sel.limit.is_none_or(|l| l >= n) && n > sel.max_rows {
-        return Err(too_large(n, sel.max_rows));
+    b.settle_bytes(zero, n * width).map_err(budget)?;
+    let take = sel.limit.map_or(n, |l| l.min(n));
+    let cells = take.saturating_mul(sel.columns.len());
+    if cells > sel.max_cells {
+        return Err(Diag::new("sql_too_large").arg("rows", Arg::Int(take as i64)).arg("cells", Arg::Int(cells as i64)).arg("max", Arg::Int(sel.max_cells as i64)));
     }
+    let dim_keys = sel.order.iter().filter(|k| matches!(k.col, Col::Dim(_))).count();
+    b.need((n * 4 * (1 + dim_keys)).div_ceil(CELL_BYTES), "SQL の ORDER BY").map_err(budget)?;
     let member = |j: usize, k: u64| ((k / strides[j]) % sizes[j]) as u32;
-    let rows = order(&t, &sel.order, sel.limit, |j, r| {
+    let rows = order(&t, &sel.order, take, |j, r| {
         let m = member(j, t.keys[r]);
         sel.ranks[j].as_ref().map_or(m, |rank| rank[m as usize])
     });
-    if rows.len() > sel.max_rows {
-        return Err(too_large(rows.len(), sel.max_rows));
-    }
+    b.settle_bytes(zero, n * width + rows.capacity() * 4).map_err(budget)?;
+    let size = encoded_size(sel, take);
+    b.need((if sel.format == Format::Arrow { 2 * size } else { size }).div_ceil(CELL_BYTES), "SQL の結果").map_err(budget)?;
     match sel.format {
-        Format::Json => Ok(json(sel, &t, &rows, member)),
+        Format::Json => Ok(json(sel, &t, &rows, member, size)),
         Format::Arrow => arrow(sel, &t, &rows, member).map_err(budget),
     }
 }
 
-fn too_large(rows: usize, max: usize) -> Diag {
-    Diag::new("sql_too_large").arg("rows", Arg::Int(rows as i64)).arg("max", Arg::Int(max as i64))
+/// About the bytes of the JSON body, or of the Arrow batch (the IPC stream is a second copy).
+fn encoded_size<S: AsRef<str>>(sel: &Select<S>, rows: usize) -> usize {
+    let text = |j: usize| sel.names[j].iter().map(|s| s.as_ref().len()).sum::<usize>();
+    let cols = sel.columns.iter().map(|(_, c)| match *c {
+        Col::Dim(j) if sel.format == Format::Arrow => (4 * rows).saturating_add(text(j) + 4 * (sel.names[j].len() + 1)),
+        Col::Dim(j) => rows.saturating_mul(text(j) / sel.names[j].len().max(1) + 3),
+        Col::Agg(_) => rows.saturating_mul(12),
+    });
+    cols.fold(64, usize::saturating_add)
 }
 
 /// The groups of one aggregate as (key, value) pairs in ascending key order. The key is a mixed radix of the
 /// member numbers in `keep` order, first dimension most significant, so key order is the member-number order.
-fn pack(g: Groups, s: &Store, keep: &[DimId], strides: &[u64]) -> Result<Vec<(u64, f64)>> {
-    // summarize gives the kept dimensions in metric_dims order
+fn pack(g: Groups, s: &Store, keep: &[DimId], strides: &[u64]) -> Vec<(u64, f64)> {
     let order: Vec<DimId> = s.metric_dims.iter().copied().filter(|d| keep.contains(d)).collect();
-    if order.len() != keep.len() || g.cols.len() != keep.len() {
-        return Err("Metric の軸が GROUP BY の軸と合わない".into());
-    }
-    let at: Vec<usize> = keep.iter().map(|d| order.iter().position(|x| x == d).expect("checked above")).collect();
+    let at: Vec<usize> = keep.iter().map(|d| order.iter().position(|x| x == d).expect("the Metric has each kept dimension")).collect();
     let mut pairs: Vec<(u64, f64)> = (0..g.vals.len()).map(|i| (at.iter().zip(strides).map(|(&p, &st)| g.cols[p][i] as u64 * st).sum(), g.vals[i])).collect();
     if !pairs.is_sorted_by_key(|p| p.0) {
         pairs.par_sort_unstable_by_key(|p| p.0);
     }
-    Ok(pairs)
+    pairs
 }
 
 /// The outer join of the sorted lists: one row for each key of any list. An absent value is NULL, but an absent
@@ -179,28 +201,30 @@ fn cmp_f64(a: f64, b: f64) -> Ordering {
     }
 }
 
-/// The rows in ORDER BY order, at most `limit`. `rank(j, row)` is the sort value of kept dimension j. Ties
-/// keep the key order, so the result is the same for each run.
-fn order(t: &Table, keys: &[Key], limit: Option<usize>, rank: impl Fn(usize, usize) -> u32 + Sync) -> Vec<u32> {
+/// The first `take` rows in ORDER BY order. `rank(j, row)` is the sort value of kept dimension j. Ties keep the
+/// key order, so the result is the same for each run.
+fn order(t: &Table, keys: &[Key], take: usize, rank: impl Fn(usize, usize) -> u32 + Sync) -> Vec<u32> {
+    enum Sort {
+        Ranks(Vec<u32>),
+        Agg(usize),
+    }
     let n = t.keys.len();
-    let take = limit.map_or(n, |l| l.min(n));
-    if keys.is_empty() {
+    if keys.is_empty() || take == 0 {
         return (0..take as u32).collect();
     }
-    // A dimension key reads its ranks from one column, made once
-    let dims: Vec<Option<Vec<u32>>> = keys
+    let sorts: Vec<Sort> = keys
         .iter()
         .map(|k| match k.col {
-            Col::Dim(j) => Some((0..n).into_par_iter().map(|r| rank(j, r)).collect()),
-            Col::Agg(_) => None,
+            Col::Dim(j) => Sort::Ranks((0..n).into_par_iter().map(|r| rank(j, r)).collect()),
+            Col::Agg(i) => Sort::Agg(i),
         })
         .collect();
     let cmp = |&a: &u32, &b: &u32| -> Ordering {
         let (a, b) = (a as usize, b as usize);
-        for (k, d) in keys.iter().zip(&dims) {
-            let o = match (k.col, d) {
-                (_, Some(d)) => dir(d[a].cmp(&d[b]), k.desc),
-                (Col::Agg(i), None) => {
+        for (k, sort) in keys.iter().zip(&sorts) {
+            let o = match *sort {
+                Sort::Ranks(ref d) => dir(d[a].cmp(&d[b]), k.desc),
+                Sort::Agg(i) => {
                     let null = |r: usize| t.valid[i].as_ref().is_some_and(|v| !v[r]);
                     match (null(a), null(b)) {
                         (true, true) => Ordering::Equal,
@@ -209,7 +233,6 @@ fn order(t: &Table, keys: &[Key], limit: Option<usize>, rank: impl Fn(usize, usi
                         (false, false) => dir(cmp_f64(t.vals[i][a], t.vals[i][b]), k.desc),
                     }
                 }
-                (Col::Dim(_), None) => unreachable!("a dimension key has its ranks"),
             };
             if o != Ordering::Equal {
                 return o;
@@ -218,9 +241,6 @@ fn order(t: &Table, keys: &[Key], limit: Option<usize>, rank: impl Fn(usize, usi
         a.cmp(&b)
     };
     let mut rows: Vec<u32> = (0..n as u32).collect();
-    if take == 0 {
-        return Vec::new();
-    }
     if take < n {
         rows.select_nth_unstable_by(take - 1, cmp);
         rows.truncate(take);
@@ -266,8 +286,8 @@ fn arrow<S: AsRef<str>>(sel: &Select<S>, t: &Table, rows: &[u32], member: impl F
 }
 
 /// `{"seq": n, "columns": [...], "rows": [[...], ...]}`. NaN and the infinities are strings (proto3 JSON).
-fn json<S: AsRef<str>>(sel: &Select<S>, t: &Table, rows: &[u32], member: impl Fn(usize, u64) -> u32) -> Vec<u8> {
-    let mut out = String::with_capacity(64 + rows.len() * sel.columns.len() * 12);
+fn json<S: AsRef<str>>(sel: &Select<S>, t: &Table, rows: &[u32], member: impl Fn(usize, u64) -> u32, size: usize) -> Vec<u8> {
+    let mut out = String::with_capacity(size);
     write!(out, "{{\"seq\":{},\"columns\":[", sel.seq).expect("a String write does not fail");
     for (i, (name, _)) in sel.columns.iter().enumerate() {
         if i > 0 {
@@ -287,7 +307,6 @@ fn json<S: AsRef<str>>(sel: &Select<S>, t: &Table, rows: &[u32], member: impl Fn
                 Col::Dim(j) => quote(&mut out, sel.names[j][member(j, t.keys[r]) as usize].as_ref()),
                 Col::Agg(a) if t.valid[a].as_ref().is_some_and(|v| !v[r]) => out.push_str("null"),
                 Col::Agg(a) => match t.vals[a][r] {
-                    // {:?} is the shortest text that reads back to the same f64, with an exponent for large values
                     x if x.is_finite() => write!(out, "{x:?}").expect("a String write does not fail"),
                     x if x.is_nan() => out.push_str("\"NaN\""),
                     x if x > 0.0 => out.push_str("\"Infinity\""),
@@ -349,7 +368,7 @@ mod tests {
             limit,
             names: vec![MONTHS.to_vec(), PRODUCTS.to_vec()],
             ranks: vec![None, Some(vec![2, 0, 1])],
-            max_rows: 100,
+            max_cells: 100,
             seq: 7,
             format,
         }
@@ -360,7 +379,6 @@ mod tests {
     }
 
     fn three(cat: &Catalog) -> Vec<(Arc<Store>, ReadAgg)> {
-        // (product, month, value). Revenue has (A, Jan), (B, Feb), (C, Feb); Cost has (A, Jan), (A, Mar)
         let revenue = store(cat, &[(0, 0, 10.0), (1, 1, 5.0), (2, 1, f64::INFINITY)]);
         let cost = store(cat, &[(0, 0, 3.0), (0, 2, 4.0)]);
         vec![(revenue.clone(), ReadAgg::Sum), (cost.clone(), ReadAgg::Max), (cost, ReadAgg::Count)]
@@ -384,7 +402,6 @@ mod tests {
         let desc = |col| Key { col, desc: true, nulls_first: false };
         let body = run(&select(three(&cat), &COLS[..3], vec![desc(Col::Agg(0))], None, Format::Json), &cat).unwrap();
         assert_eq!(text(body), r#"{"seq":7,"columns":["Month","Product","rev"],"rows":[["Feb","C","Infinity"],["Jan","A",10.0],["Feb","B",5.0],["Mar","A",null]]}"#);
-        // Product ranks: A 2, B 0, C 1. Ties on Product keep the key order (Jan before Mar)
         let asc = Key { col: Col::Dim(1), desc: false, nulls_first: false };
         let body = run(&select(three(&cat), &COLS[..2], vec![asc], None, Format::Json), &cat).unwrap();
         assert_eq!(text(body), r#"{"seq":7,"columns":["Month","Product"],"rows":[["Feb","B"],["Feb","C"],["Jan","A"],["Mar","A"]]}"#);
@@ -422,13 +439,37 @@ mod tests {
     }
 
     #[test]
-    fn too_many_rows_is_an_error() {
+    fn the_aggregates_share_one_memory_budget() {
+        let mut cat = catalog();
+        let (mut low, mut high) = (0, 1 << 30);
+        while low < high {
+            let mid = (low + high) / 2;
+            cat.cfg.max_bytes = mid;
+            if run(&select(three(&cat)[..1].to_vec(), &COLS[..3], vec![], None, Format::Json), &cat).is_ok() {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        cat.cfg.max_bytes = low;
+        assert!(run(&select(three(&cat)[..1].to_vec(), &COLS[..3], vec![], None, Format::Json), &cat).is_ok());
+        cat.cfg.max_bytes = low - 1;
+        assert_eq!(run(&select(three(&cat)[..1].to_vec(), &COLS[..3], vec![], None, Format::Json), &cat).unwrap_err().code, "sql_budget");
+        // The same Store twice holds the same bytes and gives the same body, but the second aggregate needs room for its groups
+        let revenue = three(&cat).swap_remove(0).0;
+        cat.cfg.max_bytes = low;
+        let twice = vec![(revenue.clone(), ReadAgg::Sum), (revenue, ReadAgg::Max)];
+        assert_eq!(run(&select(twice, &COLS[..3], vec![], None, Format::Json), &cat).unwrap_err().code, "sql_budget");
+    }
+
+    #[test]
+    fn too_many_cells_is_an_error() {
         let cat = catalog();
         let mut sel = select(three(&cat), &COLS, vec![], None, Format::Json);
-        sel.max_rows = 3;
-        assert_eq!(run(&sel, &cat).unwrap_err(), Diag::new("sql_too_large").arg("rows", Arg::Int(4)).arg("max", Arg::Int(3)));
+        sel.max_cells = 19;
+        assert_eq!(run(&sel, &cat).unwrap_err(), Diag::new("sql_too_large").arg("rows", Arg::Int(4)).arg("cells", Arg::Int(20)).arg("max", Arg::Int(19)));
         sel.limit = Some(3);
-        assert!(run(&sel, &cat).is_ok());
+        assert_eq!(text(run(&sel, &cat).unwrap()).matches('[').count(), 5, "columns and 3 rows");
     }
 
     #[test]

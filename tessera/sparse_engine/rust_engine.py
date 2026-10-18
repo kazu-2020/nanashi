@@ -392,7 +392,7 @@ class RustEngine:
                                              agg, [cat.dimension(d).ids for d in order])
         return Summary(order, tuple(coords), array("d", values))
 
-    def select(self, stores, p, cat, seq, fmt, max_rows):
+    def select(self, stores, p, cat, seq, fmt, max_cells):
         """One Core.select: the aggregates, the join, ORDER BY, LIMIT and the encode run in Rust."""
         group = [cat.dimension(d) for d in p.group]
         ranked = {i for kind, i, _, _ in p.order if kind == "dim"}
@@ -401,7 +401,7 @@ class RustEngine:
                                     self._region(cat, dict(p.region)), list(p.columns), list(p.order), p.limit,
                                     [d.members for d in group],
                                     [d.rank_table() if j in ranked else None for j, d in enumerate(group)],
-                                    seq, fmt, max_rows)
+                                    seq, fmt, max_cells)
         except nanashi_core.Diagnostic as e:
             raise sql_error(e) from None
 

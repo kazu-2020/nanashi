@@ -34,8 +34,8 @@ class Behavior:
     def setUp(self):
         self.m = model(self.engine()).model
 
-    def run_sql(self, text: str, max_rows: int = 100) -> dict:
-        return json.loads(self.m.select(plan(self.m, text), "json", max_rows))
+    def run_sql(self, text: str) -> dict:
+        return json.loads(self.m.select(plan(self.m, text), "json", 100))
 
     def rows(self, text: str) -> list:
         return self.run_sql(text)["rows"]
@@ -105,12 +105,13 @@ class Behavior:
             plan(self.m, "SELEC 1")
         self.assertEqual(str(cm.exception), "SQL の構文が正しくない: Expected: SELECT, VALUES, or a subquery in the query body, found: SELEC at Line: 1, Column: 1")
 
-    def test_too_many_rows(self):
+    def test_too_many_cells(self):
         p = plan(self.m, "SELECT Product, Month, SUM(Sales) FROM model GROUP BY Product, Month")
         with self.assertRaises(SqlError) as cm:
-            self.m.select(p, "json", 4)
-        self.assertEqual((cm.exception.code, str(cm.exception)), ("sql_too_large", "結果が 5 行になり、上限 4 を超える（LIMIT を付ける）"))
-        self.assertEqual(len(json.loads(self.m.select(p, "json", 5))["rows"]), 5)
+            self.m.select(p, "json", 14)
+        self.assertEqual((cm.exception.code, str(cm.exception)),
+                         ("sql_too_large", "結果が 5 行 15 セルになり、上限 14 セルを超える（LIMIT を付けるか、列を減らす）"))
+        self.assertEqual(len(json.loads(self.m.select(p, "json", 15))["rows"]), 5)
 
     def test_the_plan_holds_ids(self):
         p = plan(self.m, "SELECT Month AS m, SUM(Sales) FROM model WHERE Version IN ('予算') GROUP BY Month")

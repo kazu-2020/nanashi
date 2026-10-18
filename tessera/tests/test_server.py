@@ -267,7 +267,7 @@ class Api:
             self.assertEqual((status, err["error"]), (400, "bad_request"), bad)
         status, err = self.c.post("/sql", {"sql": "SELECT Product, Month, SUM(Stock) FROM model GROUP BY Product, Month"})
         self.assertEqual((status, err), (413, {"error": "too_large", "code": "sql_too_large",
-                                               "message": "結果が 80 行になり、上限 50 を超える（LIMIT を付ける）"}))
+                                               "message": "結果が 80 行 240 セルになり、上限 50 セルを超える（LIMIT を付けるか、列を減らす）"}))
 
     def test_sql_as_arrow(self):
         req = urllib.request.Request(self.c.url + "/sql", method="POST", data=json.dumps(

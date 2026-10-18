@@ -701,11 +701,12 @@ impl Core {
         Ok((cols, vals))
     }
 
-    /// Run a resolved SQL plan (select::run) with the GIL released and return the JSON or Arrow body. A column
-    /// or a sort key is ("dim", index into keep) or ("agg", index into stores). Err: Diagnostic (sql_too_large,
-    /// sql_budget) or ValueError for numbers that do not agree with the catalog.
+    /// Run a resolved SQL plan (select::run) without the GIL and return the JSON or Arrow body.
+    /// A column or a sort key is ("dim", index into keep) or ("agg", index into stores).
+    /// Err: Diagnostic (sql_too_large, sql_budget), or ValueError if a number does not agree with the catalog.
+    /// RuntimeError if a Metric does not have each kept dimension (Python checks it first).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (stores, aggs, keep, region, columns, order, limit, names, ranks, seq, fmt, max_rows))]
+    #[pyo3(signature = (stores, aggs, keep, region, columns, order, limit, names, ranks, seq, fmt, max_cells))]
     fn select<'py>(
         &self,
         py: Python<'py>,
@@ -720,7 +721,7 @@ impl Core {
         ranks: Vec<Option<Vec<u32>>>,
         seq: u64,
         fmt: &str,
-        max_rows: usize,
+        max_cells: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
         self.dims(&keep)?;
         if stores.len() != aggs.len() || names.len() != keep.len() || ranks.len() != keep.len() {
@@ -733,6 +734,9 @@ impl Core {
             self.ranks(d, ranks[j].as_deref())?;
         }
         let aggs = stores.iter().zip(&aggs).map(|(s, a)| Ok((read(s)?, read_agg(a)?))).collect::<PyResult<Vec<_>>>()?;
+        if aggs.is_empty() || aggs.iter().any(|(s, _)| !keep.iter().all(|d| s.metric_dims.contains(d))) {
+            return Err(PyRuntimeError::new_err("集計がないか、Metric に GROUP BY の軸がない"));
+        }
         let col = |kind: &str, i: usize| match kind {
             "dim" if i < keep.len() => Ok(select::Col::Dim(i)),
             "agg" if i < aggs.len() => Ok(select::Col::Agg(i)),
@@ -745,9 +749,9 @@ impl Core {
             "arrow" => select::Format::Arrow,
             _ => return Err(err(format!("形式 {fmt} は使えない（json、arrow）"))),
         };
-        let sel = select::Select { keep, aggs, region: self.restrict(&region)?, columns, order, limit, names, ranks, max_rows, seq, format };
+        let sel = select::Select { keep, aggs, region: self.restrict(&region)?, columns, order, limit, names, ranks, max_cells, seq, format };
         let cat = self.cat.clone();
-        // Borrow sel, so that the names drop after detach (a drop without the thread state puts each decref in a global pool)
+        // Borrow sel, so that the names drop with the thread state, after detach
         let body = py.detach(|| select::run(&sel, &cat)).map_err(|d| diag_err(py, d))?;
         Ok(PyBytes::new(py, &body))
     }

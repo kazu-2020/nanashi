@@ -167,11 +167,11 @@ def reference_select(m, p: Plan) -> list[list]:
             for r in rows]
 
 
-def reference_json(m, p: Plan, seq: int, max_rows: int) -> bytes:
+def reference_json(m, p: Plan, seq: int, max_cells: int) -> bytes:
     """The JSON body of POST /sql from reference_select. NaN and the infinities are strings (proto3 JSON)."""
     rows = reference_select(m, p)
-    if len(rows) > max_rows:
-        raise SqlError("sql_too_large", rows=len(rows), max=max_rows)
+    if (cells := len(rows) * len(p.columns)) > max_cells:
+        raise SqlError("sql_too_large", rows=len(rows), cells=cells, max=max_cells)
 
     def out(x):
         if not isinstance(x, float) or math.isfinite(x):
