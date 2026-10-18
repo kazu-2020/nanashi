@@ -25,6 +25,7 @@ import collections
 import dataclasses
 import datetime
 import fcntl
+import functools
 import hashlib
 import json
 import logging
@@ -121,13 +122,14 @@ def changes(before, after) -> dict:
     """The changes from before (the copy from before the transaction) to after (the model to commit): the
     structure (see structure) and the changed input cells ("cells")."""
     out = structure(before, after)
+    renumbering = functools.cache(lambda d: _renumbering(before.dimensions[d], after.dimensions[d]))
     cells = []
     for m in after.metrics.values():
         if m.formula is not None:
             continue
         o = before.metrics.get(m.id)
         old_store = before._values.get(o.id) if o is not None and o.formula is None else None
-        rows = _cell_changes(before, o, old_store, after, m, after._values[m.id])
+        rows = _cell_changes(before, o, old_store, after, m, after._values[m.id], renumbering)
         if len(rows):
             cells.append({"metric": m.id, "dims": list(m.dims), "rows": rows})
     if cells:
@@ -155,6 +157,8 @@ def structure(before, after) -> dict:
             continue
         if o.name != d.name:
             renamed.append([d.id, d.name])
+        if o.ids == d.ids and o.members == d.members and o._order is d._order:
+            continue  # the same members, numbers and order (Dimension.copy shares _order, and a change replaces it)
         if o.ids != d.ids or o.members != d.members:
             old_names = dict(zip(o.ids, o.members))
             renamed += [[u, n] for u, n in zip(d.ids, d.members) if u in old_names and old_names[u] != n]
@@ -162,7 +166,9 @@ def structure(before, after) -> dict:
                 members.append({"dim": d.id, "removed": [u for u in o.ids if u not in d._by_id],
                                 "added": [[u, n] for u, n in zip(d.ids, d.members) if u not in old_names]})
         # The order is not recorded if it is the old order without the removed members, then the added members
-        # (a replay gives the same order)
+        # (a replay gives the same order). Without an order list, the order is the number order on both sides
+        if o._order is None and d._order is None:
+            continue
         expected = [u for u in _ids_in_order(o) if u in d._by_id] + [u for u in d.ids if u not in o._by_id]
         if _ids_in_order(d) != expected:
             orders.append({"dim": d.id, "order": _ids_in_order(d)})
@@ -234,36 +240,63 @@ def _engine_value(m, value_dim, new):
     return bool(new) if m.kind == "boolean" else new
 
 
-def _cell_changes(before, o, old_store, after, m, new_store) -> Any:
+def _renumbering(old, new) -> list[int | None] | None | bool:
+    """The new number of each old number of a dimension (None for a removed member), from the dimension before
+    (old) and after (new) a transaction. None if no number changed (members were only added). False if the
+    surviving members changed their order, so an engine cannot compare the cells by position."""
+    if old.ids == new.ids[:len(old.ids)]:
+        return None
+    table = [new._by_id.get(u) for u in old.ids]
+    kept = [x for x in table if x is not None]
+    return table if all(a < b for a, b in zip(kept, kept[1:])) else False
+
+
+def _cell_changes(before, o, old_store, after, m, new_store, renumbering) -> Any:
     """The changed cells of the input Metric m as [the member ids of the coordinates, the old value, the new
-    value] (a block of changes if there are many). A member-type value is a member id."""
+    value] (a block of changes if there are many). A member-type value is a member id. renumbering(dimension id)
+    is _renumbering of that dimension.
+
+    A cell whose coordinates hold a removed member is not in the result (a replay removes the member first). A
+    cell whose value pointed to a removed member stays in the result, because the conflict check of Workspace
+    and the cell history read its old value."""
     eng = after.engine
     if old_store is not None and eng.same(old_store, new_store):
         return []
     dims = [after.dimension(d) for d in m.dims]
     vdim = _value_dim(after, m)
-    if vdim is not None:
-        to_value = lambda v: None if v is None else vdim.ids[int(v)]
-    elif m.kind == "boolean":
-        to_value = lambda v: None if v is None else bool(v)
-    else:
-        to_value = lambda v: v
-    comparable = False
-    if old_store is not None and o.dims == m.dims and o.kind == m.kind:
-        # If the positions did not change (members were only added), the engine compares by position
-        olds = [before.dimension(d) for d in m.dims] + ([_value_dim(before, o)] if vdim is not None else [])
-        news = dims + ([vdim] if vdim is not None else [])
-        comparable = all(a.ids == b.ids[:len(a.ids)] for a, b in zip(olds, news))
-    diff = eng.diff_block(old_store, new_store) if old_store is None or comparable else None
+    value_ids = None if vdim is None else list(vdim.ids)
+    diff = None
+    if old_store is None:
+        diff = eng.diff_block(None, new_store)
+    elif o.dims == m.dims and o.kind == m.kind:
+        # The engine compares by position. If members were removed, it maps the old numbers to the new numbers
+        maps = [renumbering(d) for d in m.dims]
+        value_map = None
+        old_ids = None if vdim is None else _value_dim(before, o).ids
+        if old_ids is not None and old_ids != value_ids[:len(old_ids)]:
+            # The removed members get the numbers after the live ones, so the old values keep their ids
+            value_ids += [u for u in old_ids if u not in vdim._by_id]
+            number = {u: i for i, u in enumerate(value_ids)}
+            value_map = [number[u] for u in old_ids]
+        if all(x is not False for x in maps):
+            diff = eng.diff_block(old_store, new_store, maps, value_map)
     if diff is not None:
         if len(diff) >= BLOCK_MIN:
-            return diff.to_block([d.ids for d in dims], None if vdim is None else vdim.ids, parquet_value(m.kind))
+            return diff.to_block([d.ids for d in dims], value_ids, parquet_value(m.kind))
+        if vdim is not None:
+            to_value = lambda v: None if v is None else value_ids[int(v)]
+        elif m.kind == "boolean":
+            to_value = lambda v: None if v is None else bool(v)
+        else:
+            to_value = lambda v: v
         return [[[d.ids[p] for d, p in zip(dims, pos)], to_value(a), to_value(b)] for pos, a, b in diff.rows()]
-    # Compare by id (a member was removed, or the engine cannot compare by position)
+    # Compare by id (the engine cannot compare by position)
     new = _by_id(after, m, new_store)
     # A replay empties the store when the dims or the kind change (_define), so all new cells are changes
     same_type = old_store is not None and (o.dims, o.kind) == (m.dims, m.kind)
     old = _by_id(before, o, old_store) if same_type else {}
+    live = [d._by_id for d in dims]
+    old = {k: v for k, v in old.items() if all(u in by for u, by in zip(k, live))}
     return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if not same_value(old.get(k), new.get(k))]
 
 

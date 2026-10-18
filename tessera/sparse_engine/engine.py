@@ -100,10 +100,16 @@ class Store(Protocol):
         base（本体）、delta_rows（差分の件数）、delta（差分）、index（索引）も返す。"""
     def same(self, a: Any, b: Any) -> bool:
         """a と b が同じ格納データ（複製しただけで、どちらにも書き込んでいない）か。わからなければ False。"""
-    def diff_block(self, old: Any | None, new: Any) -> Any | None:
-        """old（変更前）と new（変更後）で値が違うセル。長さ、rows()（(軸ごとの位置の組, 変更前, 変更後) の列）、
-        to_block(軸ごとの ID の表, 値の軸の ID の表, 値の種類) を持つ。old が None なら new の全セル。
-        位置で安く比べられなければ None（呼び出し側がメンバーの ID で比べる）。"""
+    def diff_block(self, old: Any | None, new: Any, maps: list[list[int | None] | None] | None = None,
+                   value_map: list[int] | None = None) -> Any | None:
+        """The cells with different values in old (before) and new (after). The result has a length, rows() (a
+        list of (the positions in each dimension, before, after)) and to_block(the id table of each dimension,
+        the id table of the value dimension, the kind of the value). If old is None, all cells of new.
+
+        If members were removed between old and new, maps gives for each dimension the new number of each old
+        number (None: the member was removed). A dimension whose numbers did not change has None. value_map gives
+        the new number of each old member-type value (a removed member has a number too). If the engine cannot
+        compare by position, None (the caller compares by id)."""
     def apply_block(self, storage: Any, block: Any, dim_ids: list[list[int]], value_ids: list[int] | None) -> Any | None:
         """記録の変更の塊をまとめて書き込み、格納データを返す。今の軸にない ID のセルは飛ばす。
         まとめて書けなければ None（呼び出し側が 1 セルずつ書く）。"""
@@ -285,7 +291,7 @@ class ReferenceEngine:
     def same(self, a, b) -> bool:
         return a is b
 
-    def diff_block(self, old, new):
+    def diff_block(self, old, new, maps=None, value_map=None):
         return None  # a Cube has member ids as keys, so the caller compares by id
 
     def apply_block(self, storage, block, dim_ids, value_ids):

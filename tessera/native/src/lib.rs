@@ -476,12 +476,14 @@ impl Core {
         Ok(())
     }
 
-    /// 格納データから軸 dim のメンバー m を消し、後ろの番号を詰める（values なら値の番号も）。
+    /// Remove member m of dim from the stored data and close up the numbers after it (also the value numbers if
+    /// values).
     fn remove_member(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, dim: DimId, m: u32, values: bool) -> PyResult<()> {
-        self.dim(dim)?; // 軸は先に縮めてあるので、m は今の大きさと等しくてよい（範囲の外は何も消さない）
+        self.dim(dim)?; // The dimension is already smaller, so m can be equal to its size (then m was the last member)
+        let last = m >= self.cat.dims[dim].size;
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.remove_member(dim, m, values));
+        py.detach(|| target.remove_member(dim, m, values, last));
         Ok(())
     }
 
@@ -879,19 +881,42 @@ impl Core {
         Ok(a.same_as(&b))
     }
 
-    /// old（変更前）と new（変更後）で値が違うセル。old が None なら new の全セル（変更前はすべて空）。
-    /// キーの詰め方が違えば None（呼び出し側が別の方法で比べる）。GIL を外して行う。
-    #[pyo3(signature = (old, new))]
-    fn diff_block(&self, py: Python<'_>, old: Option<&Bound<'_, StoreHandle>>, new: &Bound<'_, StoreHandle>) -> PyResult<Option<Diff>> {
+    /// The cells with different values in old (before) and new (after). If old is None, all cells of new (all
+    /// were blank before). If the key packings differ, None (the caller compares in a different way).
+    ///
+    /// maps gives, for each declared dimension, the new number of each old number (None: the member was removed).
+    /// A dimension whose numbers did not change has None. value_map gives the new number of each old member-type
+    /// value; the caller gives a removed member a number too. Runs without the GIL.
+    #[pyo3(signature = (old, new, maps = None, value_map = None))]
+    fn diff_block(
+        &self,
+        py: Python<'_>,
+        old: Option<&Bound<'_, StoreHandle>>,
+        new: &Bound<'_, StoreHandle>,
+        maps: Option<Vec<Option<Vec<Option<u32>>>>>,
+        value_map: Option<Vec<u32>>,
+    ) -> PyResult<Option<Diff>> {
         let a = old.map(read).transpose()?;
         let b = read(new)?;
+        let gone = |t: Vec<Option<u32>>| -> Vec<u32> { t.into_iter().map(|m| m.unwrap_or(u32::MAX)).collect() };
+        let maps = maps.unwrap_or_default();
+        if !maps.is_empty() && maps.len() != b.metric_dims.len() {
+            return Err(err(format!("番号の対応表の数 {} が軸の数 {} と合わない", maps.len(), b.metric_dims.len())));
+        }
+        // One map for each packing position (a repeated dimension uses its map at each of its positions)
+        let mut slot_maps: Vec<Option<Vec<u32>>> = vec![None; b.pack.dims.len()];
+        for (j, t) in maps.into_iter().enumerate() {
+            if let Some(t) = t {
+                slot_maps[b.pack.slot_of(&b.metric_dims, j).unwrap()] = Some(gone(t));
+            }
+        }
         Ok(py.detach(move || {
             let Some(a) = a else {
                 let (cols, values) = b.rows();
                 let old = vec![None; values.len()];
                 return Some(Diff { cols, old, new: values.into_iter().map(Some).collect() });
             };
-            let cells = a.diff_cells(&b)?;
+            let cells = a.diff_cells(&b, &slot_maps, value_map.as_deref())?;
             let mut cols = vec![Vec::with_capacity(cells.len()); b.metric_dims.len()];
             let (mut old, mut new) = (Vec::with_capacity(cells.len()), Vec::with_capacity(cells.len()));
             for (k, x, y) in cells {
