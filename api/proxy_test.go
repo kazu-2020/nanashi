@@ -72,3 +72,18 @@ func TestTrustedOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalHostOnly(t *testing.T) {
+	h := LocalHostOnly(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	for host, want := range map[string]int{"127.0.0.1:8080": http.StatusOK, "[::1]:8080": http.StatusOK,
+		"LocalHost:5173": http.StatusOK, "localhost": http.StatusOK, "evil.example:8080": http.StatusForbidden,
+		"evil.example": http.StatusForbidden, "10.0.1.5:8080": http.StatusForbidden} {
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/nanashi.v1.PlanService/QuerySql", nil)
+		r.Host = host
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Errorf("%s: got %d, want %d", host, w.Code, want)
+		}
+	}
+}

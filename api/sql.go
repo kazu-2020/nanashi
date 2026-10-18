@@ -13,8 +13,6 @@ const arrowStream = "application/vnd.apache.arrow.stream"
 
 // The actions follow.
 
-// QuerySql sends the SQL text to the engine without a change and gives the Arrow IPC stream.
-//
 //nolint:revive // nanashiv1connect gives the name.
 func (s *PlanServer) QuerySql(ctx context.Context, req *connect.Request[nanashiv1.QuerySqlRequest]) (*connect.Response[nanashiv1.QuerySqlResponse], error) {
 	b, err := s.post(ctx, req.Header().Get("X-Nanashi-User"), req.Msg.GetAppId(), "/sql", arrowStream,

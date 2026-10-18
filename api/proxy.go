@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strings"
 )
 
 // ParseNetworks reads the --trusted-proxy values. A single address is a network of 1 address.
@@ -46,6 +48,10 @@ func Loopback(listen string) bool {
 	if err != nil {
 		return false
 	}
+	return loopbackHost(host)
+}
+
+func loopbackHost(host string) bool {
 	a, err := netip.ParseAddr(host)
 	return (err == nil && a.IsLoopback()) || host == "localhost"
 }
@@ -57,6 +63,18 @@ func TrustedOnly(networks []netip.Prefix, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !Trusted(networks, r.RemoteAddr) {
 			http.Error(w, "信頼するプロキシ（--trusted-proxy）からの接続ではない", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// LocalHostOnly refuses each request whose Host is not a loopback name. Without it, a DNS rebinding page
+// can send requests to the API with any X-Nanashi-User.
+func LocalHostOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackHost(strings.ToLower((&url.URL{Host: r.Host}).Hostname())) {
+			http.Error(w, "--trusted-proxy なしの API には 127.0.0.1 か localhost の名前でつなぐ（Host）", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

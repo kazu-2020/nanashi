@@ -1,7 +1,5 @@
 package api
 
-// All engine requests go through the router. The router starts the engine of a model when a request comes for it.
-
 import (
 	"bytes"
 	"context"
@@ -10,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 
 	"connectrpc.com/connect"
 )
@@ -18,7 +17,6 @@ import (
 // members, so the --max-cells of the engine does not limit the bytes.
 const maxEngineReply = 64 << 20
 
-// engineStatus gives the Connect code for each router or engine status that has a message for the user.
 // Each router and engine error body is {"error": <kind>, "message": <Japanese text>}.
 var engineStatus = map[int]connect.Code{
 	http.StatusBadRequest:            connect.CodeInvalidArgument,
@@ -28,13 +26,12 @@ var engineStatus = map[int]connect.Code{
 	http.StatusServiceUnavailable:    connect.CodeUnavailable,
 }
 
-// engineError changes a reply that is not 200 to a Connect error. It keeps the message for a status in
-// engineStatus. For other statuses it hides the body, because the user cannot act on it.
+// engineError hides the body for a status not in engineStatus, because the user cannot act on it.
 func engineError(status int, body []byte) error {
 	var reply struct {
 		Message string `json:"message"`
 	}
-	_ = json.Unmarshal(body, &reply) // A body that is not JSON has no message.
+	_ = json.Unmarshal(body, &reply)
 	code, ok := engineStatus[status]
 	if !ok || reply.Message == "" {
 		return connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンが応答しない"))
@@ -44,14 +41,12 @@ func engineError(status int, body []byte) error {
 
 // The actions follow.
 
-// post sends a JSON body to /models/<app>/<path> on the router and gives the 200 body.
-// checkRequest makes sure that app is a canonical UUID, so the path needs no escape.
 func (s *PlanServer) post(ctx context.Context, user, app, path, accept string, body any) ([]byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Router+"/models/"+app+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Router+"/models/"+url.PathEscape(app)+path, bytes.NewReader(b))
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -61,10 +56,21 @@ func (s *PlanServer) post(ctx context.Context, user, app, path, accept string, b
 	req.Header.Set("X-Nanashi-User", user)
 	res, err := s.HTTP.Do(req)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+		}
+		if ctx.Err() != nil {
+			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
+		}
 		log.Printf("engine %s %s: %v", app, path, err)
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンに接続できない"))
 	}
 	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		reply, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+		log.Printf("engine %s %s: %d %s", app, path, res.StatusCode, reply)
+		return nil, engineError(res.StatusCode, reply)
+	}
 	reply, err := io.ReadAll(io.LimitReader(res.Body, maxEngineReply+1))
 	if err != nil {
 		log.Printf("engine %s %s: %v", app, path, err)
@@ -73,10 +79,6 @@ func (s *PlanServer) post(ctx context.Context, user, app, path, accept string, b
 	if len(reply) > maxEngineReply {
 		return nil, connect.NewError(connect.CodeResourceExhausted,
 			errors.New("計算エンジンの応答が 64 MiB を超える（LIMIT を付けるか、列を減らす）"))
-	}
-	if res.StatusCode != http.StatusOK {
-		log.Printf("engine %s %s: %d %s", app, path, res.StatusCode, reply)
-		return nil, engineError(res.StatusCode, reply)
 	}
 	return reply, nil
 }

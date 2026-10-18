@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/go-cmp/cmp"
@@ -19,12 +20,10 @@ import (
 
 const testApp = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
 
-// routerCall is a request that the fake router got.
 type routerCall struct {
 	Method, Path, ContentType, Accept, User, Body string
 }
 
-// fakeRouter replies with status and body to each request and records the requests.
 type fakeRouter struct {
 	mu    sync.Mutex
 	calls []routerCall
@@ -36,7 +35,6 @@ func (f *fakeRouter) got() []routerCall {
 	return f.calls
 }
 
-// newClient starts the fake router and the api, and gives a client of the api.
 func newClient(t *testing.T, status int, body []byte) (nanashiv1connect.PlanServiceClient, *fakeRouter) {
 	t.Helper()
 	f := &fakeRouter{}
@@ -71,7 +69,6 @@ func querySQL(c nanashiv1connect.PlanServiceClient, user, app, sql string) (*con
 	return c.QuerySql(context.Background(), req)
 }
 
-// errorOf gives the code and the message of a Connect error.
 func errorOf(err error) [2]string {
 	cerr := new(connect.Error)
 	if !errors.As(err, &cerr) {
@@ -141,5 +138,17 @@ func TestQuerySqlReplyTooLarge(t *testing.T) {
 	_, err := querySQL(c, "alice", testApp, "SELECT 1")
 	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
 		t.Errorf("code = %v, want resource_exhausted", got)
+	}
+}
+
+func TestQuerySqlDeadline(t *testing.T) {
+	router := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { time.Sleep(time.Second) }))
+	t.Cleanup(router.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), -time.Second)
+	defer cancel()
+	server := &PlanServer{Router: router.URL, HTTP: http.DefaultClient}
+	_, err := server.post(ctx, "alice", testApp, "/sql", arrowStream, nil)
+	if got := connect.CodeOf(err); got != connect.CodeDeadlineExceeded {
+		t.Errorf("code = %v, want deadline_exceeded", got)
 	}
 }

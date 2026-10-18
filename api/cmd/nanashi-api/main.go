@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,11 +47,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	server := &api.PlanServer{Router: *router, HTTP: &http.Client{Timeout: 100 * time.Second}}
+	server := &api.PlanServer{Router: strings.TrimSuffix(*router, "/"), HTTP: &http.Client{Timeout: 100 * time.Second}}
 	mux := http.NewServeMux()
-	mux.Handle(nanashiv1connect.NewPlanServiceHandler(server, connect.WithInterceptors(api.Interceptor())))
+	mux.Handle(nanashiv1connect.NewPlanServiceHandler(server, connect.WithInterceptors(api.Interceptor()),
+		connect.WithReadMaxBytes(16<<20)))
 	// The Vite dev server sends /nanashi.v1.* to this server, so the API does not need CORS.
-	var handler http.Handler = mux
+	handler := api.LocalHostOnly(mux)
 	if len(networks) > 0 {
 		handler = api.TrustedOnly(networks, mux)
 	}
