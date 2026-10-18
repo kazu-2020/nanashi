@@ -137,10 +137,11 @@ type outgoing struct {
 	header http.Header
 }
 
-// write reports whether the engine can commit the request. POST /query is a read.
+// write reports whether the engine can commit the request. POST /query and POST /sql are reads.
 func (o outgoing) write() bool {
 	path, _, _ := strings.Cut(o.rest, "?")
-	return o.method == http.MethodPost && strings.Trim(path, "/") != "query"
+	path = strings.Trim(path, "/")
+	return o.method == http.MethodPost && path != "query" && path != "sql"
 }
 
 // forward tries the model's leader until an attempt is worth delivering or ctx ends.
