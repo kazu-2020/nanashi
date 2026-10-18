@@ -58,6 +58,12 @@ class Behavior:
                                    "ORDER BY 3 DESC LIMIT 2"), [["A", "Jan", 180.0], ["A", "Feb", 130.0]])
         self.assertEqual(self.rows("SELECT SUM(Sales) FROM model GROUP BY Month LIMIT 0"), [])
 
+    def test_a_repeated_order_by_column_keeps_only_its_first_key(self):
+        q = ("SELECT Product, SUM(Sales) AS s FROM model GROUP BY Product "
+             "ORDER BY Product DESC, 1, Product ASC, s, 2 DESC NULLS FIRST, s ASC")
+        self.assertEqual(plan(self.m, q).order, (("dim", 0, True, False), ("agg", 0, False, False)))
+        self.assertEqual(self.rows(q), [["B", 60.0], ["A", 310.0], ["C", 10.0]])
+
     def test_no_group_by_gives_one_row(self):
         self.assertEqual(self.rows("SELECT SUM(Sales), COUNT(Sales) FROM model"), [[310.0 + 60.0 + 10.0, 6.0]])
         self.assertEqual(self.rows("SELECT SUM(Sales), COUNT(Sales) FROM model WHERE Product = 'A' AND Product = 'B'"),

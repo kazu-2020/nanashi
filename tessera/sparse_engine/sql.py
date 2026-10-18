@@ -127,7 +127,8 @@ def plan(m, text: str) -> Plan:
             kind, i = "dim", group.index(objects[r][1])
         else:
             raise SqlError("sql_order", name=r)
-        order.append((kind, i, desc, nulls_first))
+        if not any(o[:2] == (kind, i) for o in order):  # a later key of the same column cannot change the order
+            order.append((kind, i, desc, nulls_first))
     return Plan(tuple(group), tuple(aggs), tuple(sorted((d, tuple(sorted(ms))) for d, ms in region.items())),
                 tuple(columns), tuple(order), limit)
 
