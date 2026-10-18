@@ -105,7 +105,7 @@ These are the limits:
 
 - The request body can be up to 16 MiB (`--max-body`).
 - A write must have a `Content-Length` of 1 to 16 digits, without a leading zero (`0` is correct). The server refuses `Transfer-Encoding`, 2 different `Content-Length` values, and other values such as `+5`, `05` or `5` with a space after it with 400. Then a proxy cannot frame the body in a different way.
-- slice, rows, and summary can return up to 100 thousand cells (`--max-cells`). For `POST /query`, the limit is for the sum of the most groups of all its Metrics. For `POST /sql`, the limit is for the rows of the result after `LIMIT`.
+- slice, rows, and summary can return up to 100 thousand cells (`--max-cells`). For `POST /query`, the limit is for the sum of the most groups of all its Metrics. For `POST /sql`, the limit is for the cells of the result (rows x columns, after `LIMIT`).
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`).
 - The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 5 seconds, it gets 503 `busy`. The short wait keeps a write below the 70 seconds that the router gives an attempt.
 - The server reads the body of a write before it takes a slot. Thus a client that sends a body slowly does not block reads. Up to `--max-threads` writes can read or hold a body at the same time, so bodies use up to `--max-threads` × `--max-body` of memory. A write above this waits too. This wait and the wait for a slot share the same 5 seconds. Then the write gets 503 `busy`.
