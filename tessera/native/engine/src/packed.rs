@@ -355,10 +355,10 @@ pub(crate) enum Sorted<'a> {
     Cells(&'a [(u64, f64)]),
 }
 
-/// A cursor over sorted rows. `pos` is the row of the last read. Over a base it caches one decoded block
-/// and its values (a read inside it costs one range check) and the segment of the last read: a read within
-/// `BLOCK` rows of `pos` decodes the block of the row, a read farther away (a probe of a search that jumps
-/// far) uses `get` for that row only.
+/// A cursor over sorted rows. `pos` is the row of the last read. Over a base, the cursor caches the segment of
+/// the last read and one decoded block with its values. A read inside the cached block costs one range check.
+/// A read within `BLOCK` rows of `pos` decodes the block of that row. A read farther away uses `get` for that
+/// row only.
 pub(crate) struct Cursor<'a> {
     src: Sorted<'a>,
     pub(crate) pos: usize,

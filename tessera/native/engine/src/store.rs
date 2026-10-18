@@ -6,9 +6,6 @@ use crate::packed::BLOCK;
 use std::iter::Peekable;
 use std::ops::Range;
 
-/// The rows of one sequential read of the base: 64 blocks, the same as the default `Config::chunk`.
-const WINDOW: usize = 64 * BLOCK;
-
 /// Metric の格納。分割軸（index）を先頭（最上位ビット）に詰めた整数キーで持つ。
 ///
 /// The base is sorted in key order, so one sort stores the result of a full recalculation. A small change
@@ -89,14 +86,14 @@ impl Segment {
         self.keys.bytes() + self.vals.len() * 8
     }
 
-    /// Block `b` of the segment. Readers reach the keys and values of a segment through this accessor.
+    /// Block `b` of the segment.
     #[inline]
     pub(crate) fn block(&self, b: usize) -> SegBlock<'_> {
         let at = b * BLOCK;
         SegBlock { fence: self.keys.fences().block(b), packed: self.keys.packed(), vals: &self.vals[at..(at + BLOCK).min(self.vals.len())] }
     }
 
-    /// The rows in `r`, decoded one block at a time (see `BaseRange`).
+    /// The rows in `r`, decoded one block at a time.
     pub(crate) fn range(&self, r: Range<usize>) -> BaseRange<'_> {
         debug_assert!(r.end <= self.len());
         BaseRange { seg: self, i: r.start, end: r.end, decode_at: r.start, keys: [0; BLOCK], vals: [0.0; BLOCK] }
@@ -300,22 +297,17 @@ impl Iterator for BaseRange<'_> {
         Some((self.keys[j], self.vals[j]))
     }
 
-    /// Folds each block with its own loop over the two arrays.
     fn fold<B, F: FnMut(B, (u64, f64)) -> B>(mut self, mut acc: B, mut f: F) -> B {
         while self.i < self.end {
             if self.i == self.decode_at {
                 self.decode();
             }
-            let (j, hi) = (self.i % BLOCK, (self.decode_at - 1) % BLOCK + 1);
+            let j = self.i % BLOCK;
+            let hi = self.decode_at - (self.i - j);
             acc = self.keys[j..hi].iter().zip(&self.vals[j..hi]).fold(acc, |a, (&k, &v)| f(a, (k, v)));
             self.i = self.decode_at;
         }
         acc
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let n = self.end - self.i;
-        (n, Some(n))
     }
 }
 
@@ -677,18 +669,18 @@ impl Store {
 
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
-            // Each block is decoded once, in parallel on a large base. One part reads one window of rows.
+            // Each block is decoded once, in parallel on a large base.
             let mut cells = vec![(0u64, 0f64); self.base.rows()];
-            let fill = |(w, out): (usize, &mut [(u64, f64)])| {
-                let rows = self.base.range(w * WINDOW..w * WINDOW + out.len());
+            let fill = |(b, out): (usize, &mut [(u64, f64)])| {
+                let rows = self.base.range(b * BLOCK..b * BLOCK + out.len());
                 for (c, row) in out.iter_mut().zip(rows) {
                     *c = row;
                 }
             };
             if self.cfg.par(cells.len()) {
-                cells.par_chunks_mut(WINDOW).enumerate().for_each(fill);
+                cells.par_chunks_mut(BLOCK).enumerate().for_each(fill);
             } else {
-                cells.chunks_mut(WINDOW).enumerate().for_each(fill);
+                cells.chunks_mut(BLOCK).enumerate().for_each(fill);
             }
             return Cube { pack: self.pack.clone(), kind: self.kind, cells };
         }
@@ -1514,12 +1506,12 @@ mod tests {
     }
 
     #[test]
-    fn read_of_all_rows_crosses_windows_and_segments() {
+    fn read_of_all_rows_crosses_segments() {
         let cat = two_dims_with(1024, Config { seg_rows: 50_000, par_min: 0, ..Config::default() });
         let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
         let cells: Vec<(u64, f64)> = (0..150_000u64).map(|k| (k * 5 + k % 3, k as f64)).collect();
         s.set_sorted(sorted(&cat.cfg, cells.clone()));
-        assert!(s.base.segs.len() > 2 && s.base.rows() > 2 * WINDOW);
+        assert!(s.base.segs.len() > 2);
         assert_eq!(s.read(&Restrict::all(2)).cells, cells);
     }
 
