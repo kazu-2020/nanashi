@@ -18,6 +18,7 @@ mod key;
 mod packed;
 mod query;
 pub mod plan;
+pub mod ipc;
 pub mod pq;
 mod restrict;
 mod store;
