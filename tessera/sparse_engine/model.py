@@ -744,8 +744,12 @@ class Model:
         if users:
             raise ValueError(f"{m.name} は {', '.join(users)} の式が参照しているので消せない")
         gone = {m.id} | ({m.override} if m.override is not None else set())
+        self.tombstones.update(gone)
+        self._forget_metrics(gone)
+
+    def _forget_metrics(self, gone) -> None:
+        """Remove the Metrics (ids) that no remaining formula refers to, and only their steps from the plan."""
         for i in gone:
-            self.tombstones.add(i)
             del self._metric_ids[self.metrics[i].name]
             del self.metrics[i]
             self._state.pop(i, None)
@@ -753,8 +757,11 @@ class Model:
                 regions.pop(i, None)
         self._pending.forget(gone)
         if self._plan is not None:  # no formula refers to it, so only its step leaves the plan
-            self._plan = [s for s in self._plan if s.names[0] not in gone]
-            self._levels = [[s for s in level if s.names[0] not in gone] for level in self._levels]
+            # A scan step can also hold other Metrics. Make them dirty, so they get a new step and incremental aggregation plan
+            keep = lambda s: set(s.names).isdisjoint(gone)
+            self._pending.dirty.update(n for s in self._plan if not keep(s) for n in s.names if n not in gone)
+            self._plan = [s for s in self._plan if keep(s)]
+            self._levels = [[s for s in level if keep(s)] for level in self._levels]
 
     @_operation
     def rename_metric(self, id: str, new: str) -> None:
@@ -1027,8 +1034,12 @@ class Model:
         for m in self.metrics.values():
             if m.written is not None and mentions_member(m.written, dim, member):
                 raise ValueError(f'{m.name} の式が {d.name}."{d.member_of(member)}" を参照しているので消せない')
+        self._remove_member(dim, member)
+
+    def _remove_member(self, dim: str, member: str) -> None:
+        """remove_member without the checks."""
         self.recalc()
-        index = d._by_id[member]
+        index = self.dimensions[dim]._by_id[member]
         point = {dim: frozenset([member])}
         values_kind = member_kind(dim)
         eng = self.engine
@@ -1064,7 +1075,6 @@ class Model:
         # 2. Find the ranges that change when the member goes, with the dimension and the maps from before the
         #    removal. Send downstream only the cells of the Metrics that have the member, and the ranges to recalculate
         todo = self.engine.planner.removal_regions(self.compiled(), self._values, self, dim, member)
-        self.slice_log._flush()  # the log can hold member numbers: make them ids before the numbers close up
         self.tombstones.add(member)
         self._drop_member(dim, member)
         self._pending.forced.update(todo)  # always calculate the ranges again (sent downstream as an input change)
@@ -1073,6 +1083,7 @@ class Model:
     def _drop_member(self, dim: str, member: str) -> None:
         """Apply the removal of a member (an id) to the dimension (an id), the property mappings and the stored
         data (the positions close up). Nothing is calculated again."""
+        self.slice_log._flush()  # the log can hold member numbers: make them ids before the numbers close up
         d = self.dimensions[dim]
         index = d._by_id[member]
         values_kind = member_kind(dim)

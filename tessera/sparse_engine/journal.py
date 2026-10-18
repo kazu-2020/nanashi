@@ -38,7 +38,7 @@ from .core import Dimension
 from .engine import native, parquet_value, same_value
 
 BLOCK_MIN = 1000  # 書き換えたセルがこれ以上なら、行の列でなく変更の塊で持つ（Rust のエンジン）
-from .expr import Expr, from_json, to_json
+from .expr import Expr, from_json, mentions_member, to_json, uses_property
 from .objects import LocalObjects
 from .parser import to_formula
 
@@ -278,9 +278,6 @@ def _by_id(model, m, store) -> dict:
 
 # ---------------------------------------------------------------- 再生
 
-STRUCTURAL = ("dimensions", "members", "properties", "metrics", "metrics_removed")  # not renamed or member_order
-
-
 def _rename(model, renamed: list) -> None:
     """Set the names of a record ([id, new name] for a dimension, a member, a property or a Metric). All names
     are set first and the name indexes are made again after, so names can change places."""
@@ -302,31 +299,31 @@ def _rename(model, renamed: list) -> None:
 
 
 def apply(model, record: dict, *, incremental: bool = False) -> None:
-    """Write the result of a record to model (nothing is calculated here).
+    """Write the result of a record to model.
 
-    Without incremental, everything is calculated again after the replay (an open replays many records). With
-    incremental, a record that changed only input cells is written as an input change, and the next recalc
-    calculates only the affected range (to catch up with the writes of another process). A rename does not
-    change a value. A record that added or removed a dimension, a member or a Metric, or changed a property
-    map or a Metric definition, causes a full recalculation in both modes."""
+    Without incremental, nothing is calculated here, and everything is calculated again after the replay. Use
+    incremental to catch up with the writes of another process. Then the record goes to the Pending of model as
+    the operations of the writer put it there. The next recalc calculates only the affected range. A removed
+    member goes as in remove_member, which calculates its affected range at that time. Some records cause a full
+    recalculation (see _incremental)."""
     ch = record["changes"]
     model.tombstones.update(ch.get("tombstones", []))
-    if incremental and model._plan is not None and not any(k in ch for k in STRUCTURAL):
-        _rename(model, ch.get("renamed", []))
-        _apply_orders(model, ch.get("member_order", []))
-        _apply_cells(model, ch.get("cells", []))
-        return
+    incremental = incremental and _incremental(model, ch)
+    added = {e["dim"]: {i for i, _ in e["added"]} for e in ch.get("members", [])}
 
+    # Removals go first. removal_regions uses the plan and the maps from before the record, and a rename or an
+    # added object can take the name of a removed object
+    for e in ch.get("members", []):
+        for i in e["removed"]:
+            if incremental:
+                model._remove_member(e["dim"], i)
+            else:
+                model._drop_member(e["dim"], i)  # the tombstone comes from "tombstones"
+    if removed := ch.get("metrics_removed"):
+        model._forget_metrics(removed)  # a new plan list empties the plan cache of RustPlanner
     for d in ch.get("dimensions", []):
         model.dimensions[d["id"]] = Dimension(d["name"], [n for _, n in d["members"]], ordered=d["ordered"],
                                               ids=[i for i, _ in d["members"]], id=d["id"])
-    # A rename can take the name of a removed object, and an added object can take an old name
-    for e in ch.get("members", []):
-        for i in e["removed"]:
-            model._drop_member(e["dim"], i)  # the tombstone comes from "tombstones"
-    for i in ch.get("metrics_removed", []):
-        del model.metrics[i]
-        model._state.pop(i, None)
     _rename(model, ch.get("renamed", []))
     model._dim_ids = {d.name: i for i, d in model.dimensions.items()}
     for e in ch.get("members", []):
@@ -335,21 +332,39 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
             d.add_member(n, i)
         if e["added"]:
             model._member_added(d.id)
+            model._pending.added.setdefault(d.id, set()).update(added[d.id])
     _apply_orders(model, ch.get("member_order", []))
-    _define(model, ch.get("metrics", []))
+    if specs := ch.get("metrics"):  # _define scans every Metric, so a cell-only record skips it
+        olds = _define(model, specs, keep=incremental)
+        if incremental:
+            for i, old in olds.items():
+                model._redefine(i, old)
 
     for p in ch.get("properties", []):
         d, pid = model.dimensions[p["dim"]], p["id"]
-        mapping = dict(d.properties.get(pid, (p["target"], {}))[1])
+        old = d.properties.get(pid)
+        mapping = dict(old[1] if old else {})
         for i in p["unset"]:
             mapping.pop(i, None)
         for i, j in p["set"]:
             mapping[i] = j
+        if old == (p["target"], mapping):
+            continue  # a removed member already left the mapping
         d.properties[pid] = (p["target"], mapping)
         d.property_names[pid] = p["name"]
         d._props = {n: i for i, n in d.property_names.items()}
         model.engine.dimension_changed(model, d.id)
+        # As in add_member: the values of new members do not need the users of the property calculated again
+        changed = {i for i in old[1].keys() | mapping.keys() if old[1].get(i) != mapping.get(i)} if old else set()
+        only_new_members = old is not None and old[0] == p["target"] and changed <= added.get(d.id, set())
+        if incremental and not only_new_members:
+            for m in model.metrics.values():
+                if m.written is not None and uses_property(m.written, d.id, pid):
+                    model._redefine(m.id)
 
+    if incremental:
+        _apply_cells(model, ch.get("cells", []))
+        return
     for c in ch.get("cells", []):
         m = model.metrics[c["metric"]]
         dims = [model.dimension(d) for d in m.dims]
@@ -369,6 +384,27 @@ def apply(model, record: dict, *, incremental: bool = False) -> None:
         model._values[m.id] = store
 
     model._invalidate()
+
+
+def _incremental(model, ch: dict) -> bool:
+    """Return True if the record ch can go to the Pending of model. It cannot in these conditions:
+
+    - model has no plan (a full recalculation waits).
+    - A formula from before the record mentions a removed member (the writer changed the formula first).
+    - A Metric changes between input and formula, or changes its dimensions or kind (the writer also calculates
+      everything again)."""
+    if model._plan is None:
+        return False
+    for e in ch.get("members", []):
+        for i in e["removed"]:
+            if any(m.written is not None and mentions_member(m.written, e["dim"], i) for m in model.metrics.values()):
+                return False
+    for spec in ch.get("metrics", []):
+        old = model.metrics.get(spec["id"])
+        if old is not None and ((old.formula is None) != (spec["formula"] is None) or old.dims != tuple(spec["dims"])
+                                or old.kind != _kind_of(spec["kind"])):
+            return False
+    return True
 
 
 def _apply_cells(model, cells: list[dict]) -> None:
@@ -399,15 +435,19 @@ def _apply_cells(model, cells: list[dict]) -> None:
             model._write_many(m.id, cols, values)
 
 
-def _define(model, specs: list[dict]) -> None:
+def _kind_of(kind) -> str:
+    """The kind of a Metric from its form in a record (see _kind)."""
+    return "member:" + kind["member"] if isinstance(kind, dict) else kind
+
+
+def _define(model, specs: list[dict], *, keep: bool = False) -> dict:
     """Make the Metric definitions of a record (a new Metric is made). The names and shapes come first, then the
-    formulas (id ASTs, so no parse and no bind)."""
+    formulas (id ASTs, so no parse and no bind). If keep, a formula Metric keeps its values (an incremental
+    recalculation compares them with the new values). Return the old definitions (None for a new Metric)."""
     from .model import Metric
     olds = {}
     for spec in specs:
-        kind = spec["kind"]
-        if isinstance(kind, dict):
-            kind = "member:" + kind["member"]
+        kind = _kind_of(spec["kind"])
         olds[spec["id"]] = model.metrics.get(spec["id"])
         model.metrics[spec["id"]] = Metric(spec["name"], tuple(spec["dims"]), kind, partition=spec["partition"],
                                            overridable=spec["overridable"], id=spec["id"])
@@ -417,11 +457,13 @@ def _define(model, specs: list[dict]) -> None:
         old = olds[m.id]
         if spec["formula"] is not None:
             m.written = m.formula = from_json(spec["formula"])
-            model._values.pop(m.id, None)  # the values of a formula Metric are calculated again after the replay
+            if not keep:
+                model._values.pop(m.id, None)  # the values of a formula Metric are calculated again after the replay
         elif (old is None or old.formula is not None or m.id not in model._values
               or (old.dims, old.kind) != (m.dims, m.kind)):
             model._values[m.id] = model.engine.from_cells(m.dims, m.kind, (), model, m.partition)
         m.override = model._metric_ids.get(m.override_name)  # the link stays also while not overridable
+    return olds
 
 
 # ---------------------------------------------------------------- ファイルへの記録
@@ -476,8 +518,9 @@ class Journal:
         raise NotImplementedError
 
     def catch_up(self, model) -> bool:
-        """model（通し番号 model.seq の時点）を、記録先の最新の状態まで進める。入力セルだけを変えた記録は
-        入力の変更として書き込むので、次の recalc は影響範囲だけを計算し直す。進めたら True。"""
+        """Move model (at seq model.seq) to the latest state of the journal. The records go to the Pending of the
+        model (apply with incremental), so the next recalc calculates only the affected range. Return True if
+        model moved. Call it on a disposable copy (a fork), because a failure leaves the model half changed."""
         self.refresh()
         if self.head <= model.seq:
             return False
