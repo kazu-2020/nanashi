@@ -54,6 +54,8 @@ service PlanService {
 
   // Data.
   rpc Query(QueryRequest) returns (QueryResponse) {}
+  // QuerySql reads the model with a subset of DuckDB SQL (tessera/docs/sql.md). The SQL uses names, not ids.
+  rpc QuerySql(QuerySqlRequest) returns (QuerySqlResponse) {}
   // WriteCells sets a cell, or spreads a value if the coordinates do not give all dimensions.
   rpc WriteCells(WriteCellsRequest) returns (Ack) {}
   rpc Import(ImportRequest) returns (ImportResponse) {}
@@ -522,6 +524,19 @@ message QueryResponse {
   // The list ids of QueryCell.coords: the rows, then the columns.
   repeated string dimensions = 2 [(buf.validate.field).repeated.items.string.(nanashi.v1.id) = true];
   repeated QueryCell cells = 3;
+}
+
+// QuerySqlRequest is a read in SQL. The api sends the text to the engine without a change.
+message QuerySqlRequest {
+  // No IGNORE_IF_ZERO_VALUE: an empty app_id breaks the id rule.
+  string app_id = 1 [(buf.validate.field).string.(nanashi.v1.id) = true];
+  // The engine checks the text and gives a Japanese message for each error.
+  string sql = 2;
+}
+
+message QuerySqlResponse {
+  // An Arrow IPC stream with 1 record batch (tessera/docs/sql.md). Its schema metadata has seq.
+  bytes arrow = 1;
 }
 
 message CellWrite {

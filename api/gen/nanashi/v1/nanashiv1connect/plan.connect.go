@@ -72,6 +72,8 @@ const (
 	PlanServiceDeleteMetricProcedure = "/nanashi.v1.PlanService/DeleteMetric"
 	// PlanServiceQueryProcedure is the fully-qualified name of the PlanService's Query RPC.
 	PlanServiceQueryProcedure = "/nanashi.v1.PlanService/Query"
+	// PlanServiceQuerySqlProcedure is the fully-qualified name of the PlanService's QuerySql RPC.
+	PlanServiceQuerySqlProcedure = "/nanashi.v1.PlanService/QuerySql"
 	// PlanServiceWriteCellsProcedure is the fully-qualified name of the PlanService's WriteCells RPC.
 	PlanServiceWriteCellsProcedure = "/nanashi.v1.PlanService/WriteCells"
 	// PlanServiceImportProcedure is the fully-qualified name of the PlanService's Import RPC.
@@ -136,6 +138,8 @@ type PlanServiceClient interface {
 	DeleteMetric(context.Context, *connect.Request[v1.DeleteMetricRequest]) (*connect.Response[v1.Ack], error)
 	// Data.
 	Query(context.Context, *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error)
+	// QuerySql reads the model with a subset of DuckDB SQL (tessera/docs/sql.md). The SQL uses names, not ids.
+	QuerySql(context.Context, *connect.Request[v1.QuerySqlRequest]) (*connect.Response[v1.QuerySqlResponse], error)
 	// WriteCells sets a cell, or spreads a value if the coordinates do not give all dimensions.
 	WriteCells(context.Context, *connect.Request[v1.WriteCellsRequest]) (*connect.Response[v1.Ack], error)
 	Import(context.Context, *connect.Request[v1.ImportRequest]) (*connect.Response[v1.ImportResponse], error)
@@ -257,6 +261,12 @@ func NewPlanServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(planServiceMethods.ByName("Query")),
 			connect.WithClientOptions(opts...),
 		),
+		querySql: connect.NewClient[v1.QuerySqlRequest, v1.QuerySqlResponse](
+			httpClient,
+			baseURL+PlanServiceQuerySqlProcedure,
+			connect.WithSchema(planServiceMethods.ByName("QuerySql")),
+			connect.WithClientOptions(opts...),
+		),
 		writeCells: connect.NewClient[v1.WriteCellsRequest, v1.Ack](
 			httpClient,
 			baseURL+PlanServiceWriteCellsProcedure,
@@ -361,6 +371,7 @@ type planServiceClient struct {
 	renameMetric      *connect.Client[v1.RenameMetricRequest, v1.Ack]
 	deleteMetric      *connect.Client[v1.DeleteMetricRequest, v1.Ack]
 	query             *connect.Client[v1.QueryRequest, v1.QueryResponse]
+	querySql          *connect.Client[v1.QuerySqlRequest, v1.QuerySqlResponse]
 	writeCells        *connect.Client[v1.WriteCellsRequest, v1.Ack]
 	_import           *connect.Client[v1.ImportRequest, v1.ImportResponse]
 	createTable       *connect.Client[v1.CreateTableRequest, v1.Ack]
@@ -450,6 +461,11 @@ func (c *planServiceClient) DeleteMetric(ctx context.Context, req *connect.Reque
 // Query calls nanashi.v1.PlanService.Query.
 func (c *planServiceClient) Query(ctx context.Context, req *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error) {
 	return c.query.CallUnary(ctx, req)
+}
+
+// QuerySql calls nanashi.v1.PlanService.QuerySql.
+func (c *planServiceClient) QuerySql(ctx context.Context, req *connect.Request[v1.QuerySqlRequest]) (*connect.Response[v1.QuerySqlResponse], error) {
+	return c.querySql.CallUnary(ctx, req)
 }
 
 // WriteCells calls nanashi.v1.PlanService.WriteCells.
@@ -553,6 +569,8 @@ type PlanServiceHandler interface {
 	DeleteMetric(context.Context, *connect.Request[v1.DeleteMetricRequest]) (*connect.Response[v1.Ack], error)
 	// Data.
 	Query(context.Context, *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error)
+	// QuerySql reads the model with a subset of DuckDB SQL (tessera/docs/sql.md). The SQL uses names, not ids.
+	QuerySql(context.Context, *connect.Request[v1.QuerySqlRequest]) (*connect.Response[v1.QuerySqlResponse], error)
 	// WriteCells sets a cell, or spreads a value if the coordinates do not give all dimensions.
 	WriteCells(context.Context, *connect.Request[v1.WriteCellsRequest]) (*connect.Response[v1.Ack], error)
 	Import(context.Context, *connect.Request[v1.ImportRequest]) (*connect.Response[v1.ImportResponse], error)
@@ -668,6 +686,12 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 		PlanServiceQueryProcedure,
 		svc.Query,
 		connect.WithSchema(planServiceMethods.ByName("Query")),
+		connect.WithHandlerOptions(opts...),
+	)
+	planServiceQuerySqlHandler := connect.NewUnaryHandler(
+		PlanServiceQuerySqlProcedure,
+		svc.QuerySql,
+		connect.WithSchema(planServiceMethods.ByName("QuerySql")),
 		connect.WithHandlerOptions(opts...),
 	)
 	planServiceWriteCellsHandler := connect.NewUnaryHandler(
@@ -786,6 +810,8 @@ func NewPlanServiceHandler(svc PlanServiceHandler, opts ...connect.HandlerOption
 			planServiceDeleteMetricHandler.ServeHTTP(w, r)
 		case PlanServiceQueryProcedure:
 			planServiceQueryHandler.ServeHTTP(w, r)
+		case PlanServiceQuerySqlProcedure:
+			planServiceQuerySqlHandler.ServeHTTP(w, r)
 		case PlanServiceWriteCellsProcedure:
 			planServiceWriteCellsHandler.ServeHTTP(w, r)
 		case PlanServiceImportProcedure:
@@ -881,6 +907,10 @@ func (UnimplementedPlanServiceHandler) DeleteMetric(context.Context, *connect.Re
 
 func (UnimplementedPlanServiceHandler) Query(context.Context, *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.Query is not implemented"))
+}
+
+func (UnimplementedPlanServiceHandler) QuerySql(context.Context, *connect.Request[v1.QuerySqlRequest]) (*connect.Response[v1.QuerySqlResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("nanashi.v1.PlanService.QuerySql is not implemented"))
 }
 
 func (UnimplementedPlanServiceHandler) WriteCells(context.Context, *connect.Request[v1.WriteCellsRequest]) (*connect.Response[v1.Ack], error) {
