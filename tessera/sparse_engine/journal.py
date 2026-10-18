@@ -166,7 +166,9 @@ def structure(before, after) -> dict:
                 members.append({"dim": d.id, "removed": [u for u in o.ids if u not in d._by_id],
                                 "added": [[u, n] for u, n in zip(d.ids, d.members) if u not in old_names]})
         # The order is not recorded if it is the old order without the removed members, then the added members
-        # (a replay gives the same order)
+        # (a replay gives the same order). Without an order list, the order is the number order on both sides
+        if o._order is None and d._order is None:
+            continue
         expected = [u for u in _ids_in_order(o) if u in d._by_id] + [u for u in d.ids if u not in o._by_id]
         if _ids_in_order(d) != expected:
             orders.append({"dim": d.id, "order": _ids_in_order(d)})
