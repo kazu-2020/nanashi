@@ -22,3 +22,8 @@ members = ["engine"]
 
 [profile.release]
 lto = "thin"
+
+[profile.quick]
+inherits = "release"
+lto = false
+incremental = true
