@@ -152,3 +152,17 @@ func TestQuerySqlDeadline(t *testing.T) {
 		t.Errorf("code = %v, want deadline_exceeded", got)
 	}
 }
+
+func TestQuerySqlClientTimeoutInBody(t *testing.T) {
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(time.Second)
+	}))
+	t.Cleanup(router.Close)
+	server := &PlanServer{Router: router.URL, HTTP: &http.Client{Timeout: 100 * time.Millisecond}}
+	_, err := server.post(context.Background(), "alice", testApp, "/sql", arrowStream, nil)
+	if got := connect.CodeOf(err); got != connect.CodeDeadlineExceeded {
+		t.Errorf("code = %v, want deadline_exceeded", got)
+	}
+}

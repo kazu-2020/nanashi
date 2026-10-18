@@ -41,6 +41,20 @@ func engineError(status int, body []byte) error {
 
 // The actions follow.
 
+// transportError keeps a cancel or a timeout (of the request context or of the client) as its own code.
+// It logs other errors and gives Unavailable with message.
+func transportError(err error, app, path, message string) error {
+	var timeout interface{ Timeout() bool }
+	switch {
+	case errors.Is(err, context.Canceled):
+		return connect.NewError(connect.CodeCanceled, err)
+	case errors.As(err, &timeout) && timeout.Timeout():
+		return connect.NewError(connect.CodeDeadlineExceeded, err)
+	}
+	log.Printf("engine %s %s: %v", app, path, err)
+	return connect.NewError(connect.CodeUnavailable, errors.New(message))
+}
+
 func (s *PlanServer) post(ctx context.Context, user, app, path, accept string, body any) ([]byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -56,14 +70,7 @@ func (s *PlanServer) post(ctx context.Context, user, app, path, accept string, b
 	req.Header.Set("X-Nanashi-User", user)
 	res, err := s.HTTP.Do(req)
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
-		}
-		if ctx.Err() != nil {
-			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
-		}
-		log.Printf("engine %s %s: %v", app, path, err)
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンに接続できない"))
+		return nil, transportError(err, app, path, "計算エンジンに接続できない")
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
@@ -73,8 +80,7 @@ func (s *PlanServer) post(ctx context.Context, user, app, path, accept string, b
 	}
 	reply, err := io.ReadAll(io.LimitReader(res.Body, maxEngineReply+1))
 	if err != nil {
-		log.Printf("engine %s %s: %v", app, path, err)
-		return nil, connect.NewError(connect.CodeUnavailable, errors.New("計算エンジンの応答を読めない"))
+		return nil, transportError(err, app, path, "計算エンジンの応答を読めない")
 	}
 	if len(reply) > maxEngineReply {
 		return nil, connect.NewError(connect.CodeResourceExhausted,
