@@ -282,6 +282,10 @@ def _cell_changes(before, o, old_store, after, m, new_store, renumbered: dict) -
     # A replay empties the store when the dims or the kind change (_define), so all new cells are changes
     same_type = old_store is not None and (o.dims, o.kind) == (m.dims, m.kind)
     old = _by_id(before, o, old_store) if same_type else {}
+    # A cell of a member that went, or a value that pointed to it, is not a change (the member goes first in a replay)
+    live = [d._by_id for d in dims]
+    old = {k: (v if vdim is None or v in vdim._by_id else None) for k, v in old.items()
+           if all(u in by for u, by in zip(k, live))}
     return [[list(k), old.get(k), new.get(k)] for k in old.keys() | new.keys() if not same_value(old.get(k), new.get(k))]
 
 
