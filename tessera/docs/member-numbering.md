@@ -60,7 +60,8 @@ This is possible because only 2 operations change numbers:
 
 - An addition adds a member only at the end. The existing numbers do not change.
 - A removal decreases each number after the removed member by 1. The order stays the same, thus the engine does not sort the keys again (`Store::remove_member`).
-  If the removed member was the last one, no number changes. Then only its cells go, and the segments without them stay shared with the other versions.
+  If the removed member was the last one, no number changes. Then the engine only removes its cells, and the segments without them stay shared with the other versions.
+  A Metric of kind `member:dim` (`values=true`) still rebuilds its base: the engine must also look at each value.
 
 Because one value is both the number and the rank, the key order is also the default display order.
 Thus, `rows()` only reads in key order and applies the offset and the limit.
@@ -148,7 +149,7 @@ Nothing more is necessary at the cell level.
 
 Step 2 of a removal is the slow part.
 `Store::remove_member` reads the base of all Metrics that have the dimension, compacts the numbers, and makes the base again.
-It does this for each removed member that is not the last one (the last number does not move, so only its cells go).
+It does this for each removed member that is not the last one (the last number does not move, so the engine only removes its cells).
 
 We can only mark a number as removed and compact at a later time.
 Then, if you remove 1000 members, the engine makes the base again only 1 time.
