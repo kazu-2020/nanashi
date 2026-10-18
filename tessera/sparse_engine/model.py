@@ -1228,6 +1228,12 @@ class Model:
         keep = tuple(self._dim_in(m, d) for d in keep)
         return self.engine.summarize(self._values[m.id], m.dims, keep, agg, self._restrict(m, coords or {}), self)
 
+    def select(self, p, fmt: str, max_rows: int) -> bytes:
+        """The body of POST /sql for the sql.Plan p (fmt "json" or "arrow"; docs/sql.md). SqlError
+        sql_too_large if the result has more than max_rows rows."""
+        self.recalc()
+        return self.engine.select([self._values[id] for id, _ in p.aggs], p, self, self.seq, fmt, max_rows)
+
     @staticmethod
     def _missing(name: str, dim: str):
         raise ValueError(f"{name}: 軸 {dim} のメンバーを指定していない")

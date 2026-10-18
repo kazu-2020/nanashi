@@ -23,6 +23,7 @@ from .evaluate import Catalog, Edge, FormulaError, Type, member_kind, resolve
 from .expr import (AsAxis, BinOp, By, Coalesce, Const, DimRef, Expand, Expr, Filter, If, IfBlank,
                    IsBlank, Member, Not, On, Ref, Remove, Select, Shift)
 from .messages import from_rust
+from .sql import sql_error
 
 
 def _formula_error(e: nanashi_core.Diagnostic) -> FormulaError:
@@ -390,6 +391,19 @@ class RustEngine:
         coords, values = self.core.summarize(store, [self._dim(cat, d) for d in order], self._region(cat, restrict),
                                              agg, [cat.dimension(d).ids for d in order])
         return Summary(order, tuple(coords), array("d", values))
+
+    def select(self, stores, p, cat, seq, fmt, max_rows):
+        """One Core.select: the aggregates, the join, ORDER BY, LIMIT and the encode run in Rust."""
+        group = [cat.dimension(d) for d in p.group]
+        ranked = {i for kind, i, _, _ in p.order if kind == "dim"}
+        try:
+            return self.core.select(stores, [a for _, a in p.aggs], [self._dim(cat, d) for d in p.group],
+                                    self._region(cat, dict(p.region)), list(p.columns), list(p.order), p.limit,
+                                    [d.members for d in group],
+                                    [d.rank_table() if j in ranked else None for j, d in enumerate(group)],
+                                    seq, fmt, max_rows)
+        except nanashi_core.Diagnostic as e:
+            raise sql_error(e) from None
 
     def _is_bool(self, store) -> bool:
         return bool(self.core.is_bool(store))
