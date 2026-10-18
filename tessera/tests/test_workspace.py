@@ -402,12 +402,14 @@ class PgLargeWriteConflicts(JournalCase, LargeWriteConflicts):
     store = PgStore
 
 
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
 class RemovalConflicts(JournalCase, unittest.TestCase):
     """A stale removal of a member conflicts with a newer edit of a cell of that member. The record of the
     removal has no cell rows, so the check uses the ids of the removed members and Metrics."""
     engine = staticmethod(ReferenceEngine)
 
     def setUp(self):
+        super().setUp()
         self.ws = workspace(self, model(self.engine()))
 
     def tearDown(self):
