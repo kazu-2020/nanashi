@@ -69,7 +69,7 @@ pub fn parse(text: &str) -> Result<Query, Diag> {
     }
     match p.peek_token() {
         t if t.token == Token::EOF => {}
-        _ if semicolon => return Err(Diag::new("sql_statements")),
+        t if semicolon && matches!(&t.token, Token::Word(w) if w.keyword != Keyword::NoKeyword) => return Err(Diag::new("sql_statements")),
         t => return Err(syntax(p.expected::<()>("end of statement", t).unwrap_err())),
     }
     let sql::Query { with, body, order_by, limit_clause, fetch, locks, for_clause, settings, format_clause, pipe_operators } = q;
@@ -337,6 +337,7 @@ mod tests {
         assert_eq!(code("SELECT a FROM model m JOIN model n ON true"), what("JOIN"));
         assert_eq!(code("SELECT a FROM sales"), ("sql_from", vec![("name", crate::Arg::Str("sales".into()))]));
         assert_eq!(code("SELECT 1; SELECT 2").0, "sql_statements");
+        assert_eq!(code("SELECT a FROM model; x"), ("sql_syntax", vec![("detail", crate::Arg::Str("Expected: end of statement, found: x at Line: 1, Column: 22".into()))]));
         assert_eq!(code("SELECT a FROM model x y"), ("sql_syntax", vec![("detail", crate::Arg::Str("Expected: end of statement, found: y at Line: 1, Column: 23".into()))]));
         let (c, args) = code("SELECT FROM WHERE");
         assert_eq!((c, args.len()), ("sql_syntax", 1));
