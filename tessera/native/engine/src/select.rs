@@ -107,7 +107,7 @@ pub fn run<S: AsRef<str> + Sync>(sel: &Select<S>, cat: &Catalog) -> std::result:
         sel.ranks[j].as_ref().map_or(m, |rank| rank[m as usize])
     });
     b.settle_bytes(zero, n * width + rows.capacity() * 4).map_err(budget)?;
-    let size = encoded_size(sel, take);
+    let size = encoded_size(sel, &t, &rows, member);
     b.need((if sel.format == Format::Arrow { 2 * size } else { size }).div_ceil(CELL_BYTES), "SQL の結果").map_err(budget)?;
     match sel.format {
         Format::Json => Ok(json(sel, &t, &rows, member, size)),
@@ -115,15 +115,31 @@ pub fn run<S: AsRef<str> + Sync>(sel: &Select<S>, cat: &Catalog) -> std::result:
     }
 }
 
-/// About the bytes of the JSON body, or of the Arrow batch (the IPC stream is a second copy).
-fn encoded_size<S: AsRef<str>>(sel: &Select<S>, rows: usize) -> usize {
-    let text = |j: usize| sel.names[j].iter().map(|s| s.as_ref().len()).sum::<usize>();
-    let cols = sel.columns.iter().map(|(_, c)| match *c {
-        Col::Dim(j) if sel.format == Format::Arrow => (4 * rows).saturating_add(text(j) + 4 * (sel.names[j].len() + 1)),
-        Col::Dim(j) => rows.saturating_mul(text(j) / sel.names[j].len().max(1) + 3),
-        Col::Agg(_) => rows.saturating_mul(12),
-    });
-    cols.fold(64, usize::saturating_add)
+/// The most bytes of the JSON body, or about the bytes of the Arrow batch (the IPC stream is a second copy).
+fn encoded_size<S: AsRef<str>>(sel: &Select<S>, t: &Table, rows: &[u32], member: impl Fn(usize, u64) -> u32) -> usize {
+    let names = sel.columns.iter().map(|(name, _)| escaped_len(name) + 3).fold(0, usize::saturating_add);
+    if sel.format == Format::Arrow {
+        let text = |j: usize| sel.names[j].iter().map(|s| s.as_ref().len()).sum::<usize>();
+        let cols = sel.columns.iter().map(|(_, c)| match *c {
+            Col::Dim(j) => (4 * rows.len()).saturating_add(text(j) + 4 * (sel.names[j].len() + 1) + 256),
+            Col::Agg(_) => rows.len().saturating_mul(12).saturating_add(256),
+        });
+        return cols.fold(256usize.saturating_add(names), usize::saturating_add);
+    }
+    // 24 bytes is the longest `{:?}` text of an f64, for example -2.2250738585072014e-308
+    let row = sel.columns.iter().map(|(_, c)| if matches!(c, Col::Agg(_)) { 25 } else { 3 }).sum::<usize>() + 3;
+    let dims = sel.columns.iter().filter_map(|(_, c)| if let Col::Dim(j) = *c { Some(j) } else { None });
+    let text = dims.map(|j| rows.iter().map(|&r| escaped_len(sel.names[j][member(j, t.keys[r as usize]) as usize].as_ref())).fold(0, usize::saturating_add));
+    text.fold(rows.len().saturating_mul(row), usize::saturating_add).saturating_add(64 + names)
+}
+
+/// The bytes that `quote` writes between the quotes.
+fn escaped_len(s: &str) -> usize {
+    s.len() + s.bytes().map(|b| match b {
+        b'"' | b'\\' => 1,
+        0..0x20 => 5,
+        _ => 0,
+    }).sum::<usize>()
 }
 
 /// The groups of one aggregate as (key, value) pairs in ascending key order. The key is a mixed radix of the
@@ -462,6 +478,57 @@ mod tests {
         cat.cfg.max_bytes = low;
         let twice = vec![(revenue.clone(), ReadAgg::Sum), (revenue, ReadAgg::Max)];
         assert_eq!(run(&select(twice, &COLS[..3], vec![], None, Format::Json), &cat).unwrap_err().code, "sql_budget");
+    }
+
+    #[test]
+    fn the_budget_counts_a_long_escaped_alias_also_with_limit_0() {
+        let mut cat = catalog();
+        let aggs = three(&cat)[..1].to_vec();
+        let sel = |alias: &str| {
+            let mut s = select(aggs.clone(), &COLS[..3], vec![], Some(0), Format::Json);
+            s.columns[2].0 = alias.to_string();
+            s
+        };
+        let (mut low, mut high) = (0, 1 << 30);
+        while low < high {
+            let mid = (low + high) / 2;
+            cat.cfg.max_bytes = mid;
+            if run(&sel("rev"), &cat).is_ok() {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        let alias = "\"".repeat(1 << 20);
+        cat.cfg.max_bytes = low + (3 << 19);
+        assert_eq!(run(&sel(&alias), &cat).unwrap_err().code, "sql_budget");
+        cat.cfg.max_bytes = low + (5 << 19);
+        assert_eq!(run(&sel(&alias), &cat).unwrap().len(), 52 + (2 << 20));
+    }
+
+    #[test]
+    fn the_size_estimate_is_not_less_than_the_body() {
+        assert_eq!(format!("{:?}", -2.2250738585072014e-308f64).len(), 24);
+        let t = Table {
+            keys: vec![0, 4, 11],
+            vals: vec![vec![-2.2250738585072014e-308, f64::NEG_INFINITY, 0.0], vec![f64::NAN, -0.00012345678901234567, 0.0]],
+            valid: vec![None, Some(vec![true, true, false])],
+        };
+        let member = |j: usize, k: u64| if j == 0 { (k / 3) as u32 } else { (k % 3) as u32 };
+        let rows: Vec<u32> = vec![2, 0, 1];
+        let columns = [("\u{1}\"\\", Col::Dim(0)), ("é", Col::Dim(1)), ("a", Col::Agg(0)), ("b", Col::Agg(1)), ("m", Col::Dim(0))];
+        for format in [Format::Json, Format::Arrow] {
+            let mut sel = select(vec![], &columns, vec![], None, format);
+            sel.seq = u64::MAX;
+            sel.names[0] = vec!["\u{1}\u{1}", "\"\"", "\\", "é"];
+            let size = encoded_size(&sel, &t, &rows, member);
+            let body = match format {
+                Format::Json => json(&sel, &t, &rows, member, size),
+                Format::Arrow => arrow(&sel, &t, &rows, member).unwrap(),
+            };
+            let limit = if format == Format::Arrow { 2 * size } else { size };
+            assert!(body.len() <= limit, "{format:?}: {} > {limit}", body.len());
+        }
     }
 
     #[test]
