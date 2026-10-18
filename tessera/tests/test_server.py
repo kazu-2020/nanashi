@@ -254,7 +254,7 @@ class Api:
         text = ("SELECT Month, SUM(Stock) AS s FROM model WHERE Product IN ('p1', 'p2') "
                 "GROUP BY Month ORDER BY Month DESC LIMIT 2")
         with mock.patch.object(Model, "select", autospec=True, side_effect=Model.select) as select:
-            self.assertEqual(self.c.post("/sql", {"sql": text, "app_id": "a"}),
+            self.assertEqual(self.c.post("/sql", {"sql": text, "app_id": None, "appId": "a"}),
                              (200, {"seq": 0, "columns": ["Month", "s"], "rows": [["Apr", 200.0], ["Mar", 200.0]]}))
             self.assertEqual(self.c.post("/sql", {"sql": text.replace("SELECT", "select").replace(" ", "  ")})[0], 200)
         self.assertEqual(select.call_count, 1, "the second spelling of the same Plan reads the cache")
