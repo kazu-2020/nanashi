@@ -1037,15 +1037,16 @@ impl Store {
         let remap = |k: u64, v: f64| Some((remap_key(k)?, remap_value(v)?));
         if self.base.same_as(&other.base) {
             // A shared base holds no cell of a member that went, and no number closed up (see remove_member), so
-            // the maps change only the values and the cells of the member in the delta
+            // the maps change no key. A cell of the member that went is blank after. A new member can have its
+            // number, so its cells in the delta of other are changes
             for item in self.delta.diff(&other.delta) {
                 let k = *match item {
                     DiffItem::Add(k, _) | DiffItem::Remove(k, _) | DiffItem::Update { new: (k, _), .. } => k,
                 };
-                let Some(k2) = remap_key(k) else { continue };
-                let (a, b) = (self.value_at(k).and_then(remap_value), other.value_at(k2));
+                let a = if remap_key(k).is_some() { self.value_at(k).and_then(remap_value) } else { None };
+                let b = other.value_at(k);
                 if a.map(f64::to_bits) != b.map(f64::to_bits) {
-                    out.push((k2, a, b));
+                    out.push((k, a, b));
                 }
             }
             return Some(out);
@@ -1300,7 +1301,7 @@ impl Store {
             }
             let mut touched = vec![false; self.base.segs.len()];
             self.base.touched(&self.pack, keys.iter().copied().chain(self.delta.keys().copied()), &mut touched);
-            let (hint, cs) = (self.rows_hint() - keys.len(), checks(&self.pack, &r));
+            let (hint, cs) = (self.rows_hint().saturating_sub(keys.len()), checks(&self.pack, &r));
             self.rewrite(hint, &touched, Vec::new(), Some(&cs));
             return;
         }

@@ -553,6 +553,38 @@ class Journal(JournalCase, unittest.TestCase):
         history = m.cell_history(self.journals.journal(), "Lead", Product="A")
         self.assertEqual([(h["old"], h["new"]) for h in history], [(None, "e1"), ("e1", "Eve")])
 
+    def test_record_has_only_the_changed_cells_when_a_member_goes(self):
+        """When a member goes, the numbers after it close up in the keys and in the member-type values. The record
+        has only the cells that the transaction changed, as ids, and a new open gives the same state."""
+        m = self.m
+        m.add_input("Lead", ["Product"], {("A",): "e1", ("B",): "e3"}, kind="member:Employee")
+        with m.transaction() as txn:
+            m.remove_member("Employee", "e2")  # the number of e3 closes up
+            m.set_cell("Lead", "e3", Product="C")
+            m.set_cell("Salary", 70, Employee="e3")
+        rows = {c["metric"]: c["rows"] for c in txn.record["changes"]["cells"]}
+        self.assertEqual(rows, {m.metric("Lead").id: [[[m.member_id("Product", "C")], None, m.member_id("Employee", "e3")]],
+                                m.metric("Salary").id: [[[m.member_id("Employee", "e3")], 300.0, 70.0]]})
+        check_same_state(self, m, self.reopen())
+
+    def test_a_new_member_can_take_the_number_of_the_last_member_that_went(self):
+        """If the last member goes and a new member comes in one transaction, the new member gets the same number.
+        The record has the cells of the new member, and the cells of the member that went are not in it."""
+        m = self.m
+        m.set_cell("Salary", 40, Employee="e4")
+        with m.transaction() as txn:
+            m.remove_member("Employee", "e4")
+            m.add_member("Employee", "e5", Department="Eng")
+            m.set_cell("Salary", 50, Employee="e5")
+        (c,) = txn.record["changes"]["cells"]
+        self.assertEqual(c["rows"], [[[m.member_id("Employee", "e5")], None, 50.0]])
+        check_same_state(self, m, self.reopen())
+        with m.transaction() as empty:
+            m.add_member("Employee", "e6")
+            m.remove_member("Employee", "e6")  # an empty last member: nothing changes
+        self.assertNotIn("cells", empty.record["changes"])
+        check_same_state(self, m, self.reopen())
+
     def test_renames_are_followed_without_recalculating(self):
         """A reader that catches up on a rename only changes the name. A new open gives the same names."""
         m = self.m
