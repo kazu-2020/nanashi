@@ -112,6 +112,20 @@ Before this path (a filtered copy of the stored data and a compiled `REMOVE`), t
 A filter on the partition dimension is faster than DuckDB, because it reads only the rows of the selected members.
 In the 2 runs, a full scan took 0.9 to 1.4 times the time of DuckDB. The total and the AVG by Version were the slowest. The cause is the exact sum: `FixSum` uses about 4 ns for each value on 1 thread, and a plain f64 sum uses less than 1 ns. DuckDB and Polars add in f64, so their sums can change with the order of the rows.
 
+`bench_query.py --k 8 --sql` runs the same kind of queries as SQL through `plan` and `Model.select` (the work of `POST /sql` without HTTP: parse, names, run, join, ORDER BY, LIMIT and encode). DuckDB runs the same SQL on the u32 member-number tables, and gives Python tuples (`fetchall`) or an Arrow table. tessera gives member names (JSON) or a dictionary of names (Arrow).
+The measurement used the same cloud VM (4 vCPUs, DuckDB 4 threads, median of 9 rounds, ms, and the range). The table gives the second of 2 runs. The first run was in the same range.
+
+| Query | Rows | tessera JSON | DuckDB fetchall | tessera Arrow | DuckDB Arrow |
+|---|---|---|---|---|---|
+| sum by Month, Version=予算 | 36 | 17.4 (15.6 to 20.8) | 17.6 (17.0 to 30.3) | 17.2 (15.9 to 21.7) | 17.4 (16.7 to 31.1) |
+| sum by Employee (all) | 157,922 | 69.5 (64.5 to 83.4) | 91.6 (83.1 to 105.2) | 51.2 (48.8 to 55.9) | 54.2 (49.1 to 59.0) |
+| top 100 Employees by sum | 100 | 51.4 (50.6 to 60.6) | 52.6 (49.7 to 58.8) | 56.3 (50.5 to 57.4) | 52.4 (48.6 to 59.6) |
+| sum by Version, Month, 1000 Employees | 81 | 2.9 (2.3 to 3.6) | 2.3 (1.8 to 3.9) | 3.1 (2.6 to 4.0) | 2.3 (1.9 to 3.2) |
+| avg by Version | 3 | 22.8 (21.0 to 25.3) | 17.2 (16.0 to 18.8) | 23.0 (21.2 to 27.3) | 16.6 (15.7 to 19.5) |
+| 2 Metrics: sum by Month, Version=予算 | 36 | 22.4 (21.1 to 26.0) | 23.4 (22.0 to 25.4) | 22.2 (19.6 to 28.8) | 24.5 (22.1 to 26.8) |
+
+The 1000 Employees query has an IN list of 1000 names. In a separate measurement (large, k=1), `plan` (the parse and the name lookup) took 1.3 ms and `Model.select` took 0.8 ms. AVG is slower for the reason above (the exact sum).
+
 Write while 8 readers read continuously (change the salary of 1 employee, 0.6 ms when it is the only operation).
 In standard Python, this write takes 84 ms (median), also when the readers use `get`.
 The cause is not the cost of the reads. Each time the writer gets the GIL again, it waits for the Python thread switch interval (5 ms by default).

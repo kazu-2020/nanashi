@@ -18,6 +18,7 @@ A thin server publishes `Workspace` as a JSON API. It uses only the standard lib
 | `GET /metrics/<uuid>/overrides?<dimension uuid>=a,b` | The cells that override the formula of an overridable Metric (`set_cell` on the Metric). The body is the same as slice. |
 | `GET /operations/<client_op_id>` | The result of a write: `{"state": "committed", "seq"}` or `{"state": "rejected", "status", "body"}`. If the server does not know the operation, it returns 404 `unknown_operation` |
 | `POST /query` | A read of several Metrics in one request. The text after this table gives the body and the answer. |
+| `POST /sql` | A read with a subset of DuckDB SQL: `{"sql": "SELECT Month, SUM(Revenue) FROM model GROUP BY Month"}`. [sql.md](sql.md) gives the SQL, the result and the errors. |
 | `POST /writes` | `{"client_op_id", "reason", "expect", "ops": [{"op": "set_cell", "metric": "<uuid>", "value": 1, "coords": {"<dimension uuid>": "<member uuid>"}}, ...]}` |
 | `GET /health` | Whether the server is alive (the sequence number of the current published version and the role `role`). No authentication is necessary. |
 | `GET /ready` | Whether the server can receive requests. It returns 503 and the reason in these conditions: the writer stopped, the server could not open the journal again, the server cannot extend the lease, the standby monitor failed, or `Replica` cannot catch up. It also returns the role `role` (`leader`, `standby`, or `follower` with `--follow`). No authentication is necessary. |
@@ -104,7 +105,7 @@ These are the limits:
 
 - The request body can be up to 16 MiB (`--max-body`).
 - A write must have a `Content-Length` of 1 to 16 digits, without a leading zero (`0` is correct). The server refuses `Transfer-Encoding`, 2 different `Content-Length` values, and other values such as `+5`, `05` or `5` with a space after it with 400. Then a proxy cannot frame the body in a different way.
-- slice, rows, and summary can return up to 100 thousand cells (`--max-cells`). For `POST /query`, the limit is for the sum of the most groups of all its Metrics.
+- slice, rows, and summary can return up to 100 thousand cells (`--max-cells`). For `POST /query`, the limit is for the sum of the most groups of all its Metrics. For `POST /sql`, the limit is for the rows of the result after `LIMIT`.
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`).
 - The server can process up to 64 requests at the same time (`--max-threads`). A request above this waits for a free slot. If no slot frees up in 5 seconds, it gets 503 `busy`. The short wait keeps a write below the 70 seconds that the router gives an attempt.
 - The server reads the body of a write before it takes a slot. Thus a client that sends a body slowly does not block reads. Up to `--max-threads` writes can read or hold a body at the same time, so bodies use up to `--max-threads` × `--max-body` of memory. A write above this waits too. This wait and the wait for a slot share the same 5 seconds. Then the write gets 503 `busy`.
@@ -117,6 +118,7 @@ The server keeps the results of summary reads for the published version, up to a
 When a summary read sees a newer published version (after a write, or after a standby catches up), the server removes those results.
 If many clients ask for the same summary at the same time, the server calculates it 1 time.
 `POST /query` uses the same results: each of its Metrics is one summary read.
+`POST /sql` keeps its encoded body in the same cache. The size of the entry is its bytes / 16.
 
 Each write is 1 request and 1 transaction, and `client_op_id` is necessary.
 `client_op_id` has a maximum of 200 characters, `expect` is an integer, and `reason` is a string.

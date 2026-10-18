@@ -78,6 +78,7 @@ model.get(cost, {dept: m.member_id("Department", "開発"), m.dimension_id("Mont
 | [docs/persistence.md](docs/persistence.md) | Save and load, transactions and the journal, the PostgreSQL journal |
 | [docs/concurrency.md](docs/concurrency.md) | Concurrent reads and writes (`Workspace`, `Replica`, failover to a standby) |
 | [docs/server.md](docs/server.md) | The API of the HTTP server, authentication, limits, how to stop the server |
+| [docs/sql.md](docs/sql.md) | SQL reads (`POST /sql`): the supported SQL, the result, the errors |
 | [router/README.md](../router/README.md) | The Go router that resends requests to the writer (`router/` at the root of the repository) |
 | [docs/performance.md](docs/performance.md) | Performance measurements (recalculation, reads, free-threaded Python, memory, journals, save formats) |
 | [docs/development.md](docs/development.md) | The development environment, the test policy, the source structure, and the locations to change when you add an expression node |
