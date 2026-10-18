@@ -27,8 +27,8 @@ The body has `sql`, and also `app_id` or `appId` as in `POST /query`. Another fi
 | `LIMIT` | An integer |
 
 Other SQL gives 400 with the code `sql_unsupported`. Examples are `HAVING`, `DISTINCT`, `OFFSET`, `JOIN`, a subquery, `WITH`, `*`, `COUNT(*)` and an expression such as `SUM(a + b)`.
-Identifiers and members are names, not UUIDs. If no name is exactly equal, the server uses the one name that is equal when it ignores case. A name that starts with `__` is hidden.
-A member in `WHERE` must be exactly equal to a member name.
+Identifiers and members are names, not UUIDs. A name must be exactly equal to the name of a dimension, a Metric or a member. SQL keywords and `model` can be in any case. A name that starts with `__` is hidden.
+If 2 output columns have the same name, `ORDER BY` with that name gives `sql_ambiguous`.
 
 ## Rules
 

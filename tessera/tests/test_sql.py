@@ -65,14 +65,13 @@ class Behavior:
                          [[None, 0.0]])
         self.assertEqual(self.rows("SELECT COUNT(Flag) AS n FROM model"), [[2.0]])
 
-    def test_names_ignore_case_if_no_name_is_exact(self):
-        out = self.run_sql("select month, sum(sales) from Model group by 1 order by MONTH desc")
+    def test_names_match_exactly_and_keywords_ignore_case(self):
+        out = self.run_sql("select Month, sum(Sales) from Model group by 1 order by Month desc")
         self.assertEqual(out["columns"], ["Month", "sum(Sales)"])
         self.assertEqual(out["rows"], [["Mar", 30.0], ["Feb", 170.0], ["Jan", 180.0]])
-        Named(self.m).add_input("SALES", ["Product"], {})
         with self.assertRaises(SqlError) as cm:
             plan(self.m, "SELECT SUM(sales) FROM model")
-        self.assertEqual(str(cm.exception), "名前 sales が、大文字と小文字の違いだけで SALES、Sales に合う（正確に書く）")
+        self.assertEqual((cm.exception.code, str(cm.exception)), ("sql_unknown", "軸か Metric の名前 sales がない"))
 
     def test_errors_have_a_code_and_japanese_text(self):
         cases = [
@@ -87,6 +86,8 @@ class Behavior:
             ("SELECT SUM(Month) FROM model", "sql_not_metric", "Month は Metric ではない（集計できるのは Metric）"),
             ("SELECT SUM(Sales) FROM sales", "sql_from", "FROM には model だけを書く（sales）"),
             ("SELECT SUM(Sales) FROM model ORDER BY x", "sql_order", "ORDER BY の x が SELECT の列にも GROUP BY の軸にもない"),
+            ("SELECT SUM(Sales) AS s, MAX(Sales) AS s FROM model ORDER BY s", "sql_ambiguous",
+             "ORDER BY の s に合う SELECT の列が 2 つ以上ある"),
             ("SELECT SUM(Sales) FROM model ORDER BY 2", "sql_position", "位置 2 が SELECT の列（1 個）の範囲にない"),
             ("SELECT SUM(Sales) FROM model GROUP BY 1", "sql_group_position", "GROUP BY の位置 1 は軸の列ではない"),
             ("SELECT Month FROM model GROUP BY Month", "sql_no_aggregate",
@@ -118,7 +119,7 @@ class Behavior:
         self.assertEqual(p.aggs, ((n.metric("Sales").id, "sum"),))
         self.assertEqual(p.region, ((n.dimension_id("Version"), (n.member_id("Version", "予算"),)),))
         self.assertEqual(p.columns, (("m", "dim", 0), ("sum(Sales)", "agg", 0)))
-        self.assertEqual(p, plan(self.m, "select  month as m, sum(SALES) from MODEL where version = '予算' group by 1"))
+        self.assertEqual(p, plan(self.m, "select  Month as m, sum(Sales) from MODEL where Version = '予算' group by 1"))
 
 
 class ReferenceBehavior(Behavior, unittest.TestCase):

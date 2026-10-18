@@ -256,7 +256,7 @@ class Api:
         with mock.patch.object(Model, "select", autospec=True, side_effect=Model.select) as select:
             self.assertEqual(self.c.post("/sql", {"sql": text, "app_id": "a"}),
                              (200, {"seq": 0, "columns": ["Month", "s"], "rows": [["Apr", 200.0], ["Mar", 200.0]]}))
-            self.assertEqual(self.c.post("/sql", {"sql": text.lower().replace(" ", "  ")})[0], 200)
+            self.assertEqual(self.c.post("/sql", {"sql": text.replace("SELECT", "select").replace(" ", "  ")})[0], 200)
         self.assertEqual(select.call_count, 1, "the second spelling of the same Plan reads the cache")
         self.assertEqual(self.c.post("/sql", {"sql": "SELECT Prodct, SUM(Stock) FROM model GROUP BY Prodct"}),
                          (400, {"error": "sql", "message": "軸か Metric の名前 Prodct がない", "code": "sql_unknown"}))

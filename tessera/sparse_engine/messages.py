@@ -82,7 +82,7 @@ MESSAGES: dict[str, str] = {
     "sql_unsupported": "SQL の {what} は使えない",
     "sql_from": "FROM には model だけを書く（{name}）",
     "sql_unknown": "軸か Metric の名前 {name} がない",
-    "sql_ambiguous": "名前 {name} が、大文字と小文字の違いだけで {names:join、} に合う（正確に書く）",
+    "sql_ambiguous": "ORDER BY の {name} に合う SELECT の列が 2 つ以上ある",
     "sql_not_dim": "{name} は軸ではない（Metric は SUM などの集計で囲む）",
     "sql_not_metric": "{name} は Metric ではない（集計できるのは Metric）",
     "sql_not_grouped": "軸 {name} が GROUP BY にない",

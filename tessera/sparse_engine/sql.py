@@ -54,19 +54,11 @@ def plan(m, text: str) -> Plan:
     objects = {k: v for k, v in objects.items() if not k.startswith("__")}
 
     def find(name: str, kind: str) -> str:
-        """The id of the object with this name: an exact match, else the one match that ignores case."""
         if name not in objects:
-            hits = sorted(k for k in objects if k.casefold() == name.casefold())
-            if len(hits) > 1:
-                raise SqlError("sql_ambiguous", name=name, names=hits)
-            if not hits:
-                raise SqlError("sql_unknown", name=name)
-            name = hits[0]
+            raise SqlError("sql_unknown", name=name)
         found, id = objects[name]
-        if found != kind and kind == "dim":
-            raise SqlError("sql_not_dim", name=name)
         if found != kind:
-            raise SqlError("sql_not_metric", name=name)
+            raise SqlError("sql_not_dim" if kind == "dim" else "sql_not_metric", name=name)
         return id
 
     items = [(kind, find(name, "dim" if kind == "dim" else "metric"), alias) for kind, name, alias in select]
@@ -120,21 +112,21 @@ def plan(m, text: str) -> Plan:
                 raise SqlError("sql_missing_dim", metric=metric.name, dim=m.dimensions[d].name)
 
     order = []
-    names = [c[0] for c in columns]
+    names: dict[str, int | None] = {}  # output name -> column, None if 2 columns have the name
+    for i, (name, _, _) in enumerate(columns):
+        names[name] = None if name in names else i
     for r, desc, nulls_first in order_by:
         if isinstance(r, int):
             position(r)
             _, kind, i = columns[r - 1]
         elif r in names:
-            _, kind, i = columns[names.index(r)]
+            if names[r] is None:
+                raise SqlError("sql_ambiguous", name=r)
+            _, kind, i = columns[names[r]]
+        elif r in objects and objects[r][1] in group:
+            kind, i = "dim", group.index(objects[r][1])
         else:
-            try:
-                id = find(r, "dim")
-            except SqlError:
-                id = None
-            if id not in group:
-                raise SqlError("sql_order", name=r)
-            kind, i = "dim", group.index(id)
+            raise SqlError("sql_order", name=r)
         order.append((kind, i, desc, nulls_first))
     return Plan(tuple(group), tuple(aggs), tuple(sorted((d, tuple(sorted(ms))) for d, ms in region.items())),
                 tuple(columns), tuple(order), limit)
