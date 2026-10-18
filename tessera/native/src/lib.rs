@@ -1521,14 +1521,10 @@ impl CellBlock {
         })
     }
 
-    /// Tell if the coordinates of a row hold one of the member ids.
-    fn has_member(&self, py: Python<'_>, ids: Vec<String>) -> bool {
-        py.detach(|| {
-            self.c.ids.iter().zip(&self.c.cols).any(|(table, col)| {
-                let hits: FxHashSet<u32> = positions(&ids, table).into_iter().flatten().collect();
-                !hits.is_empty() && col.iter().any(|p| hits.contains(p))
-            })
-        })
+    /// Tell if a row of the block has one of the member ids in its coordinates. The tables of the block hold
+    /// only the ids that its rows use, so the tables answer it.
+    fn has_member(&self, ids: FxHashSet<String>) -> bool {
+        self.c.ids.iter().flatten().any(|s| ids.contains(s))
     }
 
     /// Tell if the block has a cell that other also has.

@@ -110,14 +110,17 @@ class _Request:
 
 
 class Written:
-    """The input cells that a record changed, for the conflict check. Cells in rows go as a set of (Metric id,
-    the member ids of the coordinates). A block of changes stays a block (not Python objects). A removed member
-    counts as every cell whose coordinates hold it, because the record has no rows for those cells."""
+    """The input cells that a record changed, for the conflict check. Cells from rows are a set of (Metric id,
+    coordinate member ids). A block of changes stays a block, not Python objects. A removed member or Metric
+    counts as all of its cells, because the record has no rows for them."""
 
     def __init__(self, record: dict):
         self.cells: set[tuple] = set()
         self.blocks: list[tuple[str, Any]] = []
-        self.removed: set[str] = set()  # member ids are UUIDs, so an id names one member of one dimension
+        # An id is unique across the model and is never used again (Model.tombstones), so the ids alone name
+        # the members and the Metrics
+        self.removed: set[str] = set()
+        self.metrics_removed: set[str] = set(record["changes"].get("metrics_removed", []))
         for c in record["changes"].get("cells", []):
             if isinstance(c["rows"], list):
                 self.cells.update((c["metric"], tuple(ids)) for ids, _, _ in c["rows"])
@@ -127,15 +130,17 @@ class Written:
             self.removed.update(e["removed"])
 
     def __bool__(self) -> bool:
-        return bool(self.cells or self.blocks or self.removed)
+        return bool(self.cells or self.blocks or self.removed or self.metrics_removed)
 
     def overlaps(self, other: Written) -> bool:
         """Tell if the two records changed the same cell."""
         if self.cells & other.cells:
             return True
         for a, b in ((self, other), (other, self)):
-            if a.removed and (any(u in a.removed for _, key in b.cells for u in key)
-                              or any(block.has_member(list(a.removed)) for _, block in b.blocks)):
+            if any(m in a.metrics_removed for m, _ in b.cells) or any(m in a.metrics_removed for m, _ in b.blocks):
+                return True
+            if a.removed and (any(not a.removed.isdisjoint(key) for _, key in b.cells)
+                              or any(block.has_member(a.removed) for _, block in b.blocks)):
                 return True
             for metric, block in a.blocks:
                 keys = [list(k) for m, k in b.cells if m == metric]

@@ -4,7 +4,7 @@ import threading
 import unittest
 
 from sparse_engine import Model, Named
-from sparse_engine.engine import ReferenceEngine, default_engine
+from sparse_engine.engine import ReferenceEngine
 from sparse_engine.workspace import Conflict, Workspace
 
 from .journals import JournalCase, PgStore
@@ -387,6 +387,9 @@ class LargeWriteConflicts(unittest.TestCase):
         with self.assertRaises(Conflict) as e:
             self.ws.write(lambda m: Named(m).remove_member("K", "k7"), user="bob", expect=read)
         self.assertEqual(e.exception.user, "etl")
+        # A stale removal of a member that the block does not hold does not conflict
+        self.ws.write(lambda m: Named(m).add_member("K", "kx"), user="etl")
+        self.assertEqual(self.ws.write(lambda m: Named(m).remove_member("K", "kx"), user="bob", expect=read), 3)
 
 
 @unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
@@ -401,10 +404,11 @@ class PgLargeWriteConflicts(JournalCase, LargeWriteConflicts):
 
 class RemovalConflicts(JournalCase, unittest.TestCase):
     """A stale removal of a member conflicts with a newer edit of a cell of that member. The record of the
-    removal has no cell rows for the member, so the check must use the removed member ids."""
+    removal has no cell rows, so the check uses the ids of the removed members and Metrics."""
+    engine = staticmethod(ReferenceEngine)
 
     def setUp(self):
-        self.ws = workspace(self, model(default_engine()))
+        self.ws = workspace(self, model(self.engine()))
 
     def tearDown(self):
         self.ws.close()
@@ -416,7 +420,7 @@ class RemovalConflicts(JournalCase, unittest.TestCase):
             self.ws.write(lambda m: Named(m).remove_member("Product", "p3"), user="bob", expect=read)
         self.assertEqual((e.exception.user, e.exception.seq), ("alice", 1))
         self.assertEqual(Named(self.ws.version).get("Stock", Product="p3", Month="Feb"), 7.0)
-        # Another member can go
+        # A stale removal of a different member does not conflict
         self.assertEqual(self.ws.write(lambda m: Named(m).remove_member("Product", "p4"), user="bob", expect=read), 2)
 
     def test_stale_removal_in_the_same_batch(self):
@@ -430,8 +434,39 @@ class RemovalConflicts(JournalCase, unittest.TestCase):
             removal.result()
         self.assertEqual(Named(self.ws.version).get("Stock", Product="p3", Month="Feb"), 7.0)
 
+    def test_stale_removal_of_a_metric_after_an_edit_of_its_cell(self):
+        self.ws.write(lambda m: Named(m).add_input("Extra", ["Product"], {}))
+        read = self.ws.seq
+        self.ws.write(lambda m: Named(m).set_cell("Extra", 1.0, Product="p3"), user="alice")
+        with self.assertRaises(Conflict) as e:
+            self.ws.write(lambda m: Named(m).remove_metric("Extra"), user="bob", expect=read)
+        self.assertEqual((e.exception.user, e.exception.seq), ("alice", 2))
+        self.assertEqual(Named(self.ws.version).get("Extra", Product="p3"), 1.0)
+        # A stale removal of a Metric that nobody edited does not conflict
+        self.ws.write(lambda m: Named(m).add_input("Other", ["Product"], {}))
+        self.assertEqual(self.ws.write(lambda m: Named(m).remove_metric("Other"), user="bob", expect=read), 4)
+
+    def test_stale_removal_of_an_overridable_formula_after_an_override(self):
+        self.ws.write(lambda m: Named(m).add_formula("Over", ["Product", "Month"], "Stock * 3", overridable=True))
+        read = self.ws.seq
+        self.ws.write(lambda m: Named(m).set_cell("Over", 1.0, Product="p3", Month="Feb"), user="alice")
+        with self.assertRaises(Conflict) as e:
+            self.ws.write(lambda m: Named(m).remove_metric("Over"), user="bob", expect=read)
+        self.assertEqual(e.exception.user, "alice")
+        self.assertEqual(Named(self.ws.version).get("Over", Product="p3", Month="Feb"), 1.0)
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class RustRemovalConflicts(RemovalConflicts):
+    engine = staticmethod(RustEngine) if RustEngine is not None else None
+
 
 class PgRemovalConflicts(RemovalConflicts):
+    store = PgStore
+
+
+@unittest.skipIf(RustEngine is None, "nanashi_core のビルドが必要")
+class PgRustRemovalConflicts(RustRemovalConflicts):
     store = PgStore
 
 
