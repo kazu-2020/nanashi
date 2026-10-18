@@ -183,13 +183,8 @@ fn item(i: SelectItem) -> Result<Item, Diag> {
         Expr::Identifier(i) => Ok(Item::Dim { name: i.value, alias }),
         Expr::Function(f) => {
             let text = f.to_string();
-            let agg = match ident(&f.name).map(|i| i.value.to_ascii_lowercase()).as_deref() {
-                Some("sum") => ReadAgg::Sum,
-                Some("avg") => ReadAgg::Avg,
-                Some("min") => ReadAgg::Min,
-                Some("max") => ReadAgg::Max,
-                Some("count") => ReadAgg::Count,
-                _ => return Err(unsupported(text)),
+            let Some(agg) = ident(&f.name).and_then(|i| ReadAgg::from_name(&i.value.to_ascii_lowercase())) else {
+                return Err(unsupported(text));
             };
             let plain = !f.uses_odbc_syntax
                 && matches!(f.parameters, FunctionArguments::None)

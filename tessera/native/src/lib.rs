@@ -56,14 +56,7 @@ fn diag_err(py: Python<'_>, d: Diag) -> PyErr {
 }
 
 fn read_agg(agg: &str) -> PyResult<ReadAgg> {
-    Ok(match agg {
-        "sum" => ReadAgg::Sum,
-        "avg" => ReadAgg::Avg,
-        "min" => ReadAgg::Min,
-        "max" => ReadAgg::Max,
-        "count" => ReadAgg::Count,
-        _ => return Err(err(format!("集計 {agg} は使えない（sum、avg、min、max、count）"))),
-    })
+    ReadAgg::from_name(agg).ok_or_else(|| err(format!("集計 {agg} は使えない（sum、avg、min、max、count）")))
 }
 
 fn kind_of(is_bool: bool) -> Kind {
@@ -1694,7 +1687,7 @@ fn parse_sql<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyTuple>> 
         .into_iter()
         .map(|i| match i {
             sql::Item::Dim { name, alias } => ("dim", name, alias).into_pyobject(py),
-            sql::Item::Agg { agg, metric, alias } => (format!("{agg:?}").to_lowercase(), metric, alias).into_pyobject(py),
+            sql::Item::Agg { agg, metric, alias } => (agg.name(), metric, alias).into_pyobject(py),
         })
         .collect::<PyResult<Vec<_>>>()?;
     let group_by = q.group_by.into_iter().map(reference).collect::<PyResult<Vec<_>>>()?;
