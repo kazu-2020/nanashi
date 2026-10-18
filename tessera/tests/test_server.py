@@ -1188,6 +1188,9 @@ class SummaryCacheTest(unittest.TestCase):
         for key, n in [("a", 2), ("b", 2), ("a", 2), ("c", 2), ("b", 2), ("big", 7), ("big", 7)]:
             get(key, n)
         self.assertEqual(calls, ["a", "b", "c", "b", "big", "big"])  # c pushed out b (a was used later); big never fits
+        for _ in range(2):
+            cache.get(v, ("body",), lambda: calls.append("body") or b"", lambda body: 7)
+        self.assertEqual(calls[6:], ["body", "body"], "size gives the size of a result")
 
     def test_clients_that_ask_at_the_same_time_share_one_calculation(self):
         cache, v, release, calls = SummaryCache(max_size=10), Version(1), threading.Event(), []

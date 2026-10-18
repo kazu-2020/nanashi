@@ -785,7 +785,9 @@ class Handler(BaseHTTPRequestHandler):
         fmt = "arrow" if wants_arrow(self.headers.get("Accept")) else "json"
         try:
             p = sql.plan(v, text)
-            out = self.server.summaries.get(v, ("sql", fmt, p), lambda: v.select(p, fmt, self.server.max_cells))
+            members = sum(len(ms) for _, ms in p.region)
+            out = self.server.summaries.get(v, ("sql", fmt, p), lambda: v.select(p, fmt, self.server.max_cells),
+                                            lambda body: len(body) // BODY_CELL_BYTES + members)
         except sql.SqlError as e:
             if e.code == "sql_too_large":
                 raise ApiError(413, "too_large", str(e), code=e.code) from None
@@ -935,13 +937,16 @@ def stats_text(ws) -> str:
     return "\n".join(out) + "\n"
 
 
+BODY_CELL_BYTES = 16  # the bytes of an encoded body that count as 1 cell in the SummaryCache
+
+
 class SummaryCache:
     """The results of summary reads of the published version, up to max_size in total.
 
     Nothing changes a published version, so a result stays correct while that version is published.
     A read of a newer version removes all entries. A read of another version does not use the cache.
     If many clients ask for the same summary at the same time, only 1 of them calculates it.
-    The size of an entry is its number of cells (an encoded body: its bytes / 16) plus the length of its key.
+    The size of an entry is size(result) (by default its number of cells) plus the length of its key.
     """
 
     def __init__(self, max_size: int):
@@ -952,7 +957,8 @@ class SummaryCache:
         self._size = 0
         self._running: dict[tuple, Future] = {}
 
-    def get(self, version, key: tuple, compute: Callable[[], Any]) -> Any:
+    def get(self, version, key: tuple, compute: Callable[[], Any],
+            size: Callable[[Any], int] = lambda r: len(r["cells"])) -> Any:
         with self._lock:
             cached = self._version and self._version()
             if cached is not version and cached is not None and version.seq <= cached.seq:
@@ -976,7 +982,7 @@ class SummaryCache:
         entry = None
         try:
             result = compute()
-            entry = (result, (len(result) // 16 if isinstance(result, bytes) else len(result["cells"])) + len(key))
+            entry = (result, size(result) + len(key))
             future.set_result(result)
             return result
         except BaseException as e:
