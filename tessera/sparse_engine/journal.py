@@ -157,6 +157,8 @@ def structure(before, after) -> dict:
             continue
         if o.name != d.name:
             renamed.append([d.id, d.name])
+        if o.ids == d.ids and o.members == d.members and o._order is d._order:
+            continue  # the same members, numbers and order (Dimension.copy shares _order, and a change replaces it)
         if o.ids != d.ids or o.members != d.members:
             old_names = dict(zip(o.ids, o.members))
             renamed += [[u, n] for u, n in zip(d.ids, d.members) if u in old_names and old_names[u] != n]
