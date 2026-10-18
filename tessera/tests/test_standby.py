@@ -132,6 +132,8 @@ class PgStandby(Standby, unittest.TestCase):
             status, err = c.post("/writes", {"client_op_id": "x", "ops": [write(self.b, "Stock", 1, Product="p0", Month="Jan")]})
             self.assertEqual((status, err["error"], err["leader"]), (421, "not_leader", "http://a"))
             self.assertEqual(c.post("/query", {"metrics": [mid(self.b, "Total")]})[1]["cells"][0]["value"], {"number": 8000.0})
+            self.assertEqual(c.post("/sql", {"sql": "SELECT SUM(Total) FROM model"}),
+                             (200, {"seq": 0, "columns": ["sum(Total)"], "rows": [[8000.0]]}))
             with urllib.request.urlopen(server.url + "/stats", timeout=5) as r:  # Prometheus のテキスト
                 self.assertIn("nanashi_leader 0\n", r.read().decode())
         finally:
