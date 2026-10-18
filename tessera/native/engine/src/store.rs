@@ -1174,10 +1174,10 @@ impl Store {
 
     /// Writes many cells. `cols` holds the member numbers in the declared dimension order. A `None` value deletes the cell.
     /// If the same cell occurs more than one time, the last value wins.
-    /// If the delta and the cells are more than `delta_limit`, the engine makes a new base directly and does not use the delta.
+    /// If the cells are more than the delta limit and 1/8 of the base, the engine makes a new base directly.
+    /// A smaller batch goes through the delta, so a compaction rewrites only the touched segments.
     pub fn write_many(&mut self, cols: &[&[u32]], values: &[Option<f64>]) {
-        let limit = self.delta_limit();
-        if self.delta.len() + values.len() <= limit {
+        if values.len() <= self.delta_limit().max(self.base.rows() / 8) {
             let mut key = vec![0; cols.len()];
             for (i, v) in values.iter().enumerate() {
                 for (k, c) in key.iter_mut().zip(cols) {
@@ -1499,6 +1499,30 @@ mod tests {
             assert_eq!(peak, most, "delta_max {delta_max}");
             assert_eq!(map_of(&s), want);
         }
+    }
+
+    #[test]
+    fn write_many_over_the_delta_cap_keeps_the_untouched_segments() {
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, compact_min: 16, delta_max: 100, ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted(random_cells(10_000, 7));
+        assert_eq!(s.base.segs.len(), 5);
+        let before = s.base.clone();
+        let mut want = map_of(&s);
+        let first = before.segs[2].first;
+        let keys: Vec<u64> = (0..300).map(|i| first + i * 3).chain([first]).collect();
+        let values: Vec<Option<f64>> = (0..keys.len()).map(|i| (i % 4 != 0).then_some(i as f64)).collect();
+        for (&k, v) in keys.iter().zip(&values) {
+            match v {
+                Some(v) => want.insert(k, *v),
+                None => want.remove(&k),
+            };
+        }
+        let decoded: Vec<Vec<u32>> = keys.iter().map(|&k| s.decode(k)).collect();
+        let cols: Vec<Vec<u32>> = (0..2).map(|d| decoded.iter().map(|c| c[d]).collect()).collect();
+        s.write_many(&cols.iter().map(Vec::as_slice).collect::<Vec<_>>(), &values);
+        assert_eq!(map_of(&s), want);
+        assert_eq!(kept(&before, &s), [true, true, false, true, true]);
     }
 
     /// The partition members of the segments are in order and do not meet (no member spans two segments).
