@@ -757,8 +757,10 @@ class Model:
                 regions.pop(i, None)
         self._pending.forget(gone)
         if self._plan is not None:  # no formula refers to it, so only its step leaves the plan
-            self._plan = [s for s in self._plan if s.names[0] not in gone]
-            self._levels = [[s for s in level if s.names[0] not in gone] for level in self._levels]
+            # A scan step can also hold a Metric whose new formula left the scan. It is dirty, so it gets a new step
+            keep = lambda s: set(s.names).isdisjoint(gone)
+            self._plan = [s for s in self._plan if keep(s)]
+            self._levels = [[s for s in level if keep(s)] for level in self._levels]
 
     @_operation
     def rename_metric(self, id: str, new: str) -> None:

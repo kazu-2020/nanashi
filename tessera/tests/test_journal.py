@@ -1,5 +1,7 @@
 """トランザクションと操作ログ（記録）、スナップショットと記録の再生による復元。"""
+import contextlib
 import errno
+import itertools
 import os
 import random
 import tempfile
@@ -634,6 +636,30 @@ class Journal(JournalCase, unittest.TestCase):
         reader.recalc()
         self.assertIn("DeptSalary", list(reader.eval_log))
         check_same_state(self, m, reader)
+
+    def test_removed_metric_of_a_scan_catches_up(self):
+        """A writer breaks a scan of two Metrics and removes one of them, in one record or in two. The writer and
+        a reader that catches up on all of it before a recalc get the values of a full recalculation."""
+        m = self.m
+        reader = Named(self.journals.journal().open(self.engine()))
+        for k, (in_txn, recalc) in enumerate(itertools.product([True, False], repeat=2)):
+            label, a, b = f"transaction={in_txn} recalc={recalc}", f"A{k}", f"B{k}"
+            m.add_input(b, ["Product", "Month"])
+            m.add_formula(a, ["Product", "Month"], f"{b}[SELECT: Month - 1] + Cost")
+            m.add_formula(b, ["Product", "Month"], f"{a} * 0.5", id=m.metric(b).id)
+            m.recalc()
+            self.journals.journal().catch_up(reader.model)
+            reader.recalc()
+            with m.transaction() if in_txn else contextlib.nullcontext():
+                m.add_formula(a, ["Product", "Month"], "Cost", id=m.metric(a).id)
+                if recalc:
+                    m.recalc()
+                m.remove_metric(b)
+            m.recalc()
+            self.assertTrue(self.journals.journal().catch_up(reader.model), label)
+            reader.recalc()
+            check_same_state(self, m, reader)
+            check_same_state(self, reader, self.reopen())
 
     def test_renames_and_a_formula_in_one_transaction_replay(self):
         """A replay defines the objects by id. The order of the renames in a record does not matter: two Metrics
