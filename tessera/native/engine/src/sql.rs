@@ -1,13 +1,14 @@
 //! Parse the SQL subset of `POST /sql` (docs/sql.md) to a `Query`. Names stay as text: Python resolves them.
 
-use crate::{Diag, ReadAgg};
+use crate::{Arg, Diag, ReadAgg};
 use sqlparser::ast::{
     self as sql, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, LimitClause, ObjectName,
     ObjectNamePart, OrderByKind, SelectItem, SetExpr, TableFactor, Value,
 };
 use sqlparser::dialect::DuckDbDialect;
+use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::Token;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 /// A parsed SELECT. Each Vec keeps the order of the SQL text.
 #[derive(Debug, PartialEq)]
@@ -38,8 +39,13 @@ fn unsupported(what: impl ToString) -> Diag {
     Diag::new("sql_unsupported").arg("what", what.to_string())
 }
 
-/// Err codes: sql_syntax {detail}, sql_statements (more than 1 statement), sql_unsupported {what}, sql_from {name}. The recursion
-/// limit of sqlparser (50) keeps a deep expression from the stack limit of a server thread.
+/// Most operator tokens in one text. Each infix operator adds one level to the AST, and a deep AST overflows the
+/// stack in its recursive Drop. The parser recursion limit (50) does not stop a flat chain such as `a AND b AND ...`.
+const MAX_OPERATORS: usize = 256;
+const MAX_ITEMS: usize = 1000;
+
+/// Err codes: sql_syntax {detail}, sql_statements, sql_too_complex {count, max}, sql_columns {count, max},
+/// sql_unsupported {what} and sql_from {name}.
 pub fn parse(text: &str) -> Result<Query, Diag> {
     let syntax = |e: ParserError| {
         let detail = match e {
@@ -48,12 +54,23 @@ pub fn parse(text: &str) -> Result<Query, Diag> {
         };
         Diag::new("sql_syntax").arg("detail", detail)
     };
+    let dialect = DuckDbDialect {};
+    let tokens = Tokenizer::new(&dialect, text).tokenize_with_location().map_err(|e| syntax(e.into()))?;
+    let count = tokens.iter().filter(|t| is_operator(&t.token)).count();
+    if count > MAX_OPERATORS {
+        return Err(Diag::new("sql_too_complex").arg("count", Arg::Int(count as i64)).arg("max", Arg::Int(MAX_OPERATORS as i64)));
+    }
     // parse_query, not parse_statements: the parser of the other statements adds about 1 MB to the library
-    let mut p = Parser::new(&DuckDbDialect {}).try_with_sql(text).map_err(syntax)?;
+    let mut p = Parser::new(&dialect).with_tokens_with_locations(tokens);
     let q = *p.parse_query().map_err(syntax)?;
-    while p.consume_token(&Token::SemiColon) {}
-    if p.peek_token().token != Token::EOF {
-        return Err(Diag::new("sql_statements"));
+    let mut semicolon = false;
+    while p.consume_token(&Token::SemiColon) {
+        semicolon = true;
+    }
+    match p.peek_token() {
+        t if t.token == Token::EOF => {}
+        _ if semicolon => return Err(Diag::new("sql_statements")),
+        t => return Err(syntax(p.expected::<()>("end of statement", t).unwrap_err())),
     }
     let sql::Query { with, body, order_by, limit_clause, fetch, locks, for_clause, settings, format_clause, pipe_operators } = q;
     no(with.is_some(), "WITH")?;
@@ -84,11 +101,11 @@ pub fn parse(text: &str) -> Result<Query, Diag> {
     no(s.value_table_mode.is_some(), "AS VALUE")?;
     no(s.select_modifiers.is_some(), "SELECT modifiers")?;
     from(&s.from)?;
-    let select = s.projection.into_iter().map(item).collect::<Result<_, _>>()?;
-    let mut filters = Vec::new();
-    if let Some(w) = s.selection {
-        conjuncts(w, &mut filters)?;
+    if s.projection.len() > MAX_ITEMS {
+        return Err(Diag::new("sql_columns").arg("count", Arg::Int(s.projection.len() as i64)).arg("max", Arg::Int(MAX_ITEMS as i64)));
     }
+    let select = s.projection.into_iter().map(item).collect::<Result<_, _>>()?;
+    let filters = s.selection.map_or(Ok(Vec::new()), conjuncts)?;
     let group_by = match s.group_by {
         GroupByExpr::Expressions(es, mods) if mods.is_empty() => es.into_iter().map(reference).collect::<Result<_, _>>()?,
         g => return Err(unsupported(g)),
@@ -220,30 +237,41 @@ fn number(e: &Expr) -> Option<u64> {
     }
 }
 
-/// `a AND b`, `d = 'm'` and `d IN ('m', ...)`.
-fn conjuncts(e: Expr, out: &mut Vec<(String, Vec<String>)>) -> Result<(), Diag> {
-    match unnest(e) {
-        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
-            conjuncts(*left, out)?;
-            conjuncts(*right, out)
-        }
-        Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => match (unnest(*left), text(&right)) {
-            (Expr::Identifier(d), Some(m)) => {
-                out.push((d.value, vec![m]));
-                Ok(())
-            }
-            (l, _) => Err(unsupported(format!("{l} = {right}"))),
-        },
-        Expr::InList { expr, list, negated: false } => match unnest(*expr) {
-            Expr::Identifier(d) => {
-                let ms = list.iter().map(|x| text(x).ok_or_else(|| unsupported(x))).collect::<Result<_, _>>()?;
-                out.push((d.value, ms));
-                Ok(())
-            }
-            x => Err(unsupported(format!("{x} IN"))),
-        },
-        e => Err(unsupported(e)),
+/// An infix or postfix operator: each one can add a level to the AST.
+fn is_operator(t: &Token) -> bool {
+    match t {
+        Token::Word(w) => matches!(
+            w.keyword,
+            Keyword::AND | Keyword::OR | Keyword::XOR | Keyword::NOT | Keyword::IS | Keyword::IN | Keyword::BETWEEN | Keyword::OVERLAPS
+                | Keyword::LIKE | Keyword::ILIKE | Keyword::RLIKE | Keyword::REGEXP | Keyword::MATCH | Keyword::SIMILAR | Keyword::MEMBER
+                | Keyword::OPERATOR | Keyword::DIV | Keyword::NOTNULL | Keyword::COLLATE | Keyword::AT
+        ),
+        Token::Number(..) | Token::SingleQuotedString(_) | Token::DoubleQuotedString(_) | Token::Comma | Token::LParen | Token::RParen | Token::SemiColon | Token::Whitespace(_) | Token::EOF => false,
+        _ => true,
     }
+}
+
+/// `a AND b`, `d = 'm'` and `d IN ('m', ...)`, in text order.
+fn conjuncts(e: Expr) -> Result<Vec<(String, Vec<String>)>, Diag> {
+    let (mut out, mut todo) = (Vec::new(), vec![e]);
+    while let Some(e) = todo.pop() {
+        match unnest(e) {
+            Expr::BinaryOp { left, op: BinaryOperator::And, right } => todo.extend([*right, *left]),
+            Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => match (unnest(*left), text(&right)) {
+                (Expr::Identifier(d), Some(m)) => out.push((d.value, vec![m])),
+                (l, _) => return Err(unsupported(format!("{l} = {right}"))),
+            },
+            Expr::InList { expr, list, negated: false } => match unnest(*expr) {
+                Expr::Identifier(d) => {
+                    let ms = list.iter().map(|x| text(x).ok_or_else(|| unsupported(x))).collect::<Result<_, _>>()?;
+                    out.push((d.value, ms));
+                }
+                x => return Err(unsupported(format!("{x} IN"))),
+            },
+            e => return Err(unsupported(e)),
+        }
+    }
+    Ok(out)
 }
 
 fn text(e: &Expr) -> Option<String> {
@@ -314,8 +342,22 @@ mod tests {
         assert_eq!(code("SELECT a FROM model m JOIN model n ON true"), what("JOIN"));
         assert_eq!(code("SELECT a FROM sales"), ("sql_from", vec![("name", crate::Arg::Str("sales".into()))]));
         assert_eq!(code("SELECT 1; SELECT 2").0, "sql_statements");
+        assert_eq!(code("SELECT a FROM model x y"), ("sql_syntax", vec![("detail", crate::Arg::Str("Expected: end of statement, found: y at Line: 1, Column: 23".into()))]));
         let (c, args) = code("SELECT FROM WHERE");
         assert_eq!((c, args.len()), ("sql_syntax", 1));
+    }
+
+    #[test]
+    fn a_long_chain_of_operators_is_an_error_before_the_parse() {
+        let too_complex = |n: i64| ("sql_too_complex", vec![("count", crate::Arg::Int(n)), ("max", crate::Arg::Int(256))]);
+        for op in ["AND", "OR"] {
+            let chain = format!("SELECT SUM(m) FROM model WHERE a = 'x'{}", format!(" {op} a = 'x'").repeat(100_000));
+            assert_eq!(code(&chain), too_complex(200_001), "{op}");
+        }
+        let at_limit = format!("SELECT SUM(m) FROM model WHERE a = 'x'{}", " AND a = 'x'".repeat(127));
+        assert_eq!(parse(&at_limit).unwrap().filters.len(), 128);
+        let items = format!("SELECT {}SUM(m) FROM model", "a, ".repeat(1000));
+        assert_eq!(code(&items), ("sql_columns", vec![("count", crate::Arg::Int(1001)), ("max", crate::Arg::Int(1000))]));
     }
 
     #[test]

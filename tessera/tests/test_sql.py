@@ -92,6 +92,8 @@ class Behavior:
             ("SELECT Month FROM model GROUP BY Month", "sql_no_aggregate",
              "SELECT に集計（SUM、AVG、MIN、MAX、COUNT）が 1 つ以上要る"),
             ("SELECT 1; SELECT 2", "sql_statements", "SQL は SELECT 文 1 つだけを書く"),
+            ("SELECT SUM(Sales) FROM model WHERE " + " AND ".join(["Month = 'Jan'"] * 200), "sql_too_complex",
+             "SQL の演算子が 399 個あり、上限 256 個を超える"),
             ("SELECT SUM(Sales) FROM model LIMIT 1 OFFSET 1", "sql_unsupported", "SQL の OFFSET は使えない"),
         ]
         for text, code, message in cases:

@@ -1674,7 +1674,7 @@ fn query_arrow<'py>(
 ///   filters:  [(dimension name, [member names])]
 ///   group_by: [name | position]
 ///   order_by: [(name | position, desc, nulls_first)]
-/// Err: Diagnostic (sql_syntax, sql_statements, sql_unsupported, sql_from).
+/// Err: Diagnostic with a code of sql::parse.
 #[allow(clippy::type_complexity)]
 #[pyfunction]
 fn parse_sql<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyTuple>> {

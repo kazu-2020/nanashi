@@ -74,9 +74,11 @@ MESSAGES: dict[str, str] = {
     "cycle_future": "循環参照: {src} が {target} の未来の値を参照している",
     "cycle_same_time": "循環参照: {members} が同じ時点で循環している",
 
-    # SQL (POST /sql, docs/sql.md)
+    # SQL
     "sql_syntax": "SQL の構文が正しくない: {detail}",
     "sql_statements": "SQL は SELECT 文 1 つだけを書く",
+    "sql_too_complex": "SQL の演算子が {count:,} 個あり、上限 {max} 個を超える",
+    "sql_columns": "SELECT の列が {count:,} 個あり、上限 {max:,} 個を超える",
     "sql_unsupported": "SQL の {what} は使えない",
     "sql_from": "FROM には model だけを書く（{name}）",
     "sql_unknown": "軸か Metric の名前 {name} がない",
