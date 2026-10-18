@@ -240,11 +240,9 @@ def _app_id(body: dict) -> None:
 
 def sql_in(body) -> str:
     """Check the body of POST /sql: {"sql": "SELECT ..."}, and app_id like a QueryRequest. Returns the text."""
-    if isinstance(body, dict):
-        body = {k: x for k, x in body.items() if x is not None}  # proto3 JSON: null is the default value
     if not isinstance(body, dict) or set(body) - SQL_FIELDS or not isinstance(body.get("sql"), str):
         raise ApiError(400, "bad_request", '本文は {"sql": "SELECT ..."} の JSON オブジェクト')
-    _app_id(body)
+    _app_id({k: x for k, x in body.items() if x is not None})  # proto3 JSON: null is the default value
     return body["sql"]
 
 

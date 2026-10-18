@@ -262,7 +262,7 @@ class Api:
                          (400, {"error": "sql", "message": "軸か Metric の名前 Prodct がない", "code": "sql_unknown"}))
         self.assertEqual(self.c.post("/sql", {"sql": "SELECT SUM(Stock) FROM model HAVING SUM(Stock) > 0"}),
                          (400, {"error": "sql", "message": "SQL の HAVING は使えない", "code": "sql_unsupported"}))
-        for bad in [{"query": "SELECT 1"}, {"sql": 1}, ["SELECT 1"]]:
+        for bad in [{"query": "SELECT 1"}, {"sql": 1}, {"sql": None}, {"sql": text, "typo": None}, ["SELECT 1"]]:
             status, err = self.c.post("/sql", bad)
             self.assertEqual((status, err["error"]), (400, "bad_request"), bad)
         status, err = self.c.post("/sql", {"sql": "SELECT Product, Month, SUM(Stock) FROM model GROUP BY Product, Month"})
