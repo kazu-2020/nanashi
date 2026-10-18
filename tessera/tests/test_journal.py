@@ -13,6 +13,7 @@ from sparse_engine import FormulaError, Model, Named, to_formula
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine import journal as journal_module
 from sparse_engine.journal import AlreadyCommitted, Fenced, FileJournal
+from sparse_engine.workspace import Conflict, Workspace
 
 from .journals import FileStore, JournalCase, PgStore
 from .test_engines import build_with
@@ -553,8 +554,8 @@ class Journal(JournalCase, unittest.TestCase):
         history = m.cell_history(self.journals.journal(), "Lead", Product="A")
         self.assertEqual([(h["old"], h["new"]) for h in history], [(None, "e1"), ("e1", "Eve")])
 
-    def test_record_has_only_the_changed_cells_when_a_member_goes(self):
-        """When a member goes, the numbers after it close up in the keys and in the member-type values. The record
+    def test_record_has_only_the_changed_cells_when_a_member_is_removed(self):
+        """When a member is removed, the numbers after it close up in the keys and in the member-type values. The record
         has only the cells that the transaction changed, as ids, and a new open gives the same state."""
         m = self.m
         m.add_input("Lead", ["Product"], {("A",): "e1", ("B",): "e3"}, kind="member:Employee")
@@ -567,9 +568,9 @@ class Journal(JournalCase, unittest.TestCase):
                                 m.metric("Salary").id: [[[m.member_id("Employee", "e3")], 300.0, 70.0]]})
         check_same_state(self, m, self.reopen())
 
-    def test_a_new_member_can_take_the_number_of_the_last_member_that_went(self):
-        """If the last member goes and a new member comes in one transaction, the new member gets the same number.
-        The record has the cells of the new member, and the cells of the member that went are not in it."""
+    def test_a_new_member_can_take_the_number_of_the_removed_last_member(self):
+        """If the last member is removed and a new member comes in one transaction, the new member gets the same
+        number. The record has the cells of the new member, and the cells of the removed member are not in it."""
         m = self.m
         m.set_cell("Salary", 40, Employee="e4")
         with m.transaction() as txn:
@@ -584,6 +585,70 @@ class Journal(JournalCase, unittest.TestCase):
             m.remove_member("Employee", "e6")  # an empty last member: nothing changes
         self.assertNotIn("cells", empty.record["changes"])
         check_same_state(self, m, self.reopen())
+
+    def caught_up(self, reader: Model) -> Model:
+        """reader after an incremental catch-up on the records of this test (as a standby does)."""
+        self.assertTrue(self.journals.journal().catch_up(reader.model))
+        reader.recalc()
+        return reader
+
+    def test_a_removal_before_the_end_in_a_store_without_a_base_records_the_new_numbers(self):
+        """A store with only a delta (cells set one by one) shares its empty base with the copy from before the
+        transaction. The record still uses the new numbers of the members after the removed one."""
+        m = self.m
+        m.add_input("Y", ["Employee"])
+        m.set_cell("Y", 5, Employee="e2")
+        m.set_cell("Y", 7, Employee="e3")
+        reader = self.reopen()
+        with m.transaction() as txn:
+            m.set_cell("Y", None, Employee="e3")
+            m.remove_member("Employee", "e2")
+        (c,) = txn.record["changes"]["cells"]
+        self.assertEqual(c["rows"], [[[m.member_id("Employee", "e3")], 7.0, None]])
+        self.assertEqual(m.value("Y").cells, {})
+        check_same_state(self, m, self.caught_up(reader))
+        check_same_state(self, m, self.reopen())
+
+    def test_an_equal_value_at_the_reused_number_of_the_removed_last_member_is_a_change(self):
+        """Y[e4] = 40 only in the delta. In one transaction, e4 (the last member) is removed, e5 takes its number
+        and Y[e5] = 40. The old and the new store hold the same key and value, but e5 is a new member."""
+        m = self.m
+        m.add_input("Y", ["Employee"])
+        m.set_cell("Y", 40, Employee="e4")
+        reader = self.reopen()
+        with m.transaction() as txn:
+            m.remove_member("Employee", "e4")
+            m.add_member("Employee", "e5", Department="Eng")
+            m.set_cell("Y", 40, Employee="e5")
+        (c,) = txn.record["changes"]["cells"]
+        self.assertEqual(c["rows"], [[[m.member_id("Employee", "e5")], None, 40.0]])
+        check_same_state(self, m, self.caught_up(reader))
+        check_same_state(self, m, self.reopen())
+
+    def test_a_value_that_pointed_to_the_removed_member_is_recorded_as_a_clear(self):
+        """Lead[A] = e2 and e2 is removed: the record has Lead[A]: e2 -> None, because the conflict check of
+        Workspace and the cell history read it. A replacement in the same transaction is recorded as e2 -> e1."""
+        m = self.m
+        m.add_input("Lead", ["Product"], {("A",): "e2", ("B",): "e2"}, kind="member:Employee")
+        e1, e2 = m.member_id("Employee", "e1"), m.member_id("Employee", "e2")
+        a, b = m.member_id("Product", "A"), m.member_id("Product", "B")
+        ws = Workspace(m.model, self.journals.journal())
+        self.addCleanup(ws.close)
+        read = ws.seq
+
+        def remove_and_replace(model):
+            n = Named(model)
+            n.remove_member("Employee", "e2")
+            n.set_cell("Lead", "e1", Product="B")
+        ws.write(remove_and_replace)
+        (c,) = list(self.journals.journal().records())[-1]["changes"]["cells"]
+        self.assertEqual(sorted(c["rows"]), sorted([[[a], e2, None], [[b], e2, e1]]))
+        with self.assertRaises(Conflict):
+            ws.write(lambda model: Named(model).set_cell("Lead", "e3", Product="A"), expect=read)
+        current = Named(ws.version)
+        history = current.cell_history(self.journals.journal(), "Lead", Product="A")
+        self.assertEqual([(h["old"], h["new"]) for h in history], [(None, e2), (e2, None)])  # a removed member stays an id
+        check_same_state(self, current, self.reopen())
 
     def test_renames_are_followed_without_recalculating(self):
         """A reader that catches up on a rename only changes the name. A new open gives the same names."""

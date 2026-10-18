@@ -98,13 +98,15 @@ class Store(Protocol):
     def same(self, a: Any, b: Any) -> bool:
         """a と b が同じ格納データ（複製しただけで、どちらにも書き込んでいない）か。わからなければ False。"""
     def diff_block(self, old: Any | None, new: Any, maps: list[list[int | None] | None] | None = None,
-                   value_map: list[int | None] | None = None) -> Any | None:
+                   value_map: list[int] | None = None) -> Any | None:
         """The cells with different values in old (before) and new (after). The result has a length, rows() (a
         list of (the positions in each dimension, before, after)) and to_block(the id table of each dimension,
-        the id table of the value dimension, the kind of the value). If old is None, all cells of new. If members
-        went between old and new, maps gives for each dimension the new number of each old number (None: the
-        member went), or None for a dimension whose numbers did not change. value_map does the same for a
-        member-type value. If the engine cannot compare by position, None (the caller compares by id)."""
+        the id table of the value dimension, the kind of the value). If old is None, all cells of new.
+
+        If members were removed between old and new, maps gives for each dimension the new number of each old
+        number (None: the member was removed). A dimension whose numbers did not change has None. value_map gives
+        the new number of each old member-type value (a removed member has a number too). If the engine cannot
+        compare by position, None (the caller compares by id)."""
     def apply_block(self, storage: Any, block: Any, dim_ids: list[list[int]], value_ids: list[int] | None) -> Any | None:
         """記録の変更の塊をまとめて書き込み、格納データを返す。今の軸にない ID のセルは飛ばす。
         まとめて書けなければ None（呼び出し側が 1 セルずつ書く）。"""

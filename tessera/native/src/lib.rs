@@ -826,10 +826,11 @@ impl Core {
     }
 
     /// The cells with different values in old (before) and new (after). If old is None, all cells of new (all
-    /// were blank before). If the key packings differ, None (the caller compares in a different way). maps gives,
-    /// for each declared dimension, the new number of each old number (None: the member went) when members went
-    /// between old and new; None for a dimension whose numbers did not change. value_map does the same for a
-    /// member-type value. Runs without the GIL.
+    /// were blank before). If the key packings differ, None (the caller compares in a different way).
+    ///
+    /// maps gives, for each declared dimension, the new number of each old number (None: the member was removed).
+    /// A dimension whose numbers did not change has None. value_map gives the new number of each old member-type
+    /// value; the caller gives a removed member a number too. Runs without the GIL.
     #[pyo3(signature = (old, new, maps = None, value_map = None))]
     fn diff_block(
         &self,
@@ -837,12 +838,11 @@ impl Core {
         old: Option<&Bound<'_, StoreHandle>>,
         new: &Bound<'_, StoreHandle>,
         maps: Option<Vec<Option<Vec<Option<u32>>>>>,
-        value_map: Option<Vec<Option<u32>>>,
+        value_map: Option<Vec<u32>>,
     ) -> PyResult<Option<Diff>> {
         let a = old.map(read).transpose()?;
         let b = read(new)?;
         let gone = |t: Vec<Option<u32>>| -> Vec<u32> { t.into_iter().map(|m| m.unwrap_or(u32::MAX)).collect() };
-        let value_map = value_map.map(gone);
         let maps = maps.unwrap_or_default();
         if !maps.is_empty() && maps.len() != b.metric_dims.len() {
             return Err(err(format!("番号の対応表の数 {} が軸の数 {} と合わない", maps.len(), b.metric_dims.len())));

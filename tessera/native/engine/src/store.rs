@@ -1004,19 +1004,34 @@ impl Store {
 
     /// The cells with different bits in self (before) and other (after), as (key, before, after). A blank cell is None.
     /// If the key packings are different, it returns None (the caller compares in a different way).
-    /// If the two share the base, it compares only the delta trees and skips their shared parts.
     ///
-    /// If members went between self and other, `maps[p]` gives the new number of each old number at packing
-    /// position p (`u32::MAX`: the member went, so the cell is not a change). `value_map` does the same for a
-    /// member-type value. The surviving members keep their order, so the mapped keys stay in key order. A map of
-    /// None, or an old number beyond the map, keeps the number.
+    /// If members were removed between self and other, `maps[p]` gives the new number of each old number at
+    /// packing position p. `u32::MAX` marks a removed member: its cells are not changes. The surviving members
+    /// keep their order, so the mapped keys stay in key order. `value_map` gives the new number of each old
+    /// member-type value; it is total, so the caller gives a removed member a number too. A map of None, or an
+    /// old number beyond the map, keeps the number.
+    ///
+    /// If the two share the base and no map is given, it compares only the delta trees and skips their shared
+    /// parts. A removal can leave an empty base shared while the keys change, so a map always takes the merge.
     #[allow(clippy::type_complexity)]
     pub fn diff_cells(&self, other: &Store, maps: &[Option<Vec<u32>>], value_map: Option<&[u32]>) -> Option<Vec<(u64, Option<f64>, Option<f64>)>> {
         if self.pack != other.pack {
             return None;
         }
         let mut out = Vec::new();
-        let remap_key = |mut k: u64| -> Option<u64> {
+        if self.base.same_as(&other.base) && maps.iter().all(Option::is_none) && value_map.is_none() {
+            for item in self.delta.diff(&other.delta) {
+                let k = *match item {
+                    DiffItem::Add(k, _) | DiffItem::Remove(k, _) | DiffItem::Update { new: (k, _), .. } => k,
+                };
+                let (a, b) = (self.value_at(k), other.value_at(k));
+                if a.map(f64::to_bits) != b.map(f64::to_bits) {
+                    out.push((k, a, b));
+                }
+            }
+            return Some(out);
+        }
+        let remap = |mut k: u64, v: f64| -> Option<(u64, f64)> {
             for (p, map) in maps.iter().enumerate() {
                 if let Some(n) = map.as_ref().and_then(|t| t.get(self.pack.get(k, p) as usize)) {
                     if *n == u32::MAX {
@@ -1025,32 +1040,8 @@ impl Store {
                     k = self.pack.clear(k, p) | self.pack.put(p, *n);
                 }
             }
-            Some(k)
+            Some((k, value_map.and_then(|t| t.get(v as usize)).map_or(v, |&n| n as f64)))
         };
-        let remap_value = |v: f64| -> Option<f64> {
-            match value_map.and_then(|t| t.get(v as usize)) {
-                Some(&u32::MAX) => None,
-                Some(&n) => Some(n as f64),
-                None => Some(v),
-            }
-        };
-        let remap = |k: u64, v: f64| Some((remap_key(k)?, remap_value(v)?));
-        if self.base.same_as(&other.base) {
-            // A shared base holds no cell of a member that went, and no number closed up (see remove_member), so
-            // the maps change no key. A cell of the member that went is blank after. A new member can have its
-            // number, so its cells in the delta of other are changes
-            for item in self.delta.diff(&other.delta) {
-                let k = *match item {
-                    DiffItem::Add(k, _) | DiffItem::Remove(k, _) | DiffItem::Update { new: (k, _), .. } => k,
-                };
-                let a = if remap_key(k).is_some() { self.value_at(k).and_then(remap_value) } else { None };
-                let b = other.value_at(k);
-                if a.map(f64::to_bits) != b.map(f64::to_bits) {
-                    out.push((k, a, b));
-                }
-            }
-            return Some(out);
-        }
         // Merge the two in key order without a copy of either store: the result holds only the changed cells
         let (mut a, mut b) = (self.merged_iter().filter_map(|(k, v)| remap(k, v)).peekable(), other.merged_iter().peekable());
         loop {
