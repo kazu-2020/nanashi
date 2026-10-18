@@ -6,6 +6,9 @@ use crate::packed::BLOCK;
 use std::iter::Peekable;
 use std::ops::Range;
 
+/// The rows of one sequential read of the base: 64 blocks, the same as the default `Config::chunk`.
+const WINDOW: usize = 64 * BLOCK;
+
 /// Metric の格納。分割軸（index）を先頭（最上位ビット）に詰めた整数キーで持つ。
 ///
 /// The base is sorted in key order, so one sort stores the result of a full recalculation. A small change
@@ -86,9 +89,17 @@ impl Segment {
         self.keys.bytes() + self.vals.len() * 8
     }
 
-    /// The keys are decoded one block at a time (`PackedKeys::range`).
+    /// Block `b` of the segment. Readers reach the keys and values of a segment through this accessor.
+    #[inline]
+    pub(crate) fn block(&self, b: usize) -> SegBlock<'_> {
+        let at = b * BLOCK;
+        SegBlock { fence: self.keys.fences().block(b), packed: self.keys.packed(), vals: &self.vals[at..(at + BLOCK).min(self.vals.len())] }
+    }
+
+    /// The rows in `r`, decoded one block at a time (see `BaseRange`).
     pub(crate) fn range(&self, r: Range<usize>) -> BaseRange<'_> {
-        self.keys.range(r.clone()).zip(self.vals[r].iter().copied())
+        debug_assert!(r.end <= self.len());
+        BaseRange { seg: self, i: r.start, end: r.end, decode_at: r.start, keys: [0; BLOCK], vals: [0.0; BLOCK] }
     }
 
     /// The index of the dimension at packing position `pos`. The first use makes it with a counting sort (linear in
@@ -234,7 +245,79 @@ impl Base {
     }
 }
 
-type BaseRange<'a> = std::iter::Zip<packed::Keys<'a>, std::iter::Copied<std::slice::Iter<'a, f64>>>;
+/// One block of a segment: its fence, the packed offsets that the fence points into, and its values.
+pub(crate) struct SegBlock<'a> {
+    fence: &'a packed::Block,
+    packed: &'a [u8],
+    pub(crate) vals: &'a [f64], // one value for each row of the block
+}
+
+impl SegBlock<'_> {
+    /// Decodes the keys at positions `js` of the block into `out`.
+    #[inline]
+    pub(crate) fn keys(&self, js: Range<usize>, out: &mut [u64]) {
+        packed::decode_block(self.fence, self.packed, js, out);
+    }
+}
+
+/// The rows of one segment in a range. It decodes the keys and the values of one block into two arrays,
+/// then gives the rows from them.
+pub(crate) struct BaseRange<'a> {
+    seg: &'a Segment,
+    i: usize,         // the next row in the segment
+    end: usize,       // the end row in the segment
+    decode_at: usize, // the first row that is not yet in `keys` and `vals`
+    keys: [u64; BLOCK],
+    vals: [f64; BLOCK],
+}
+
+impl BaseRange<'_> {
+    /// Decodes the block of row `i` from `i` to the end of the block or `end`.
+    #[inline]
+    fn decode(&mut self) {
+        let j = self.i % BLOCK;
+        let hi = (self.end - (self.i - j)).min(BLOCK);
+        let block = self.seg.block(self.i / BLOCK);
+        block.keys(j..hi, &mut self.keys[j..hi]);
+        self.vals[j..hi].copy_from_slice(&block.vals[j..hi]);
+        self.decode_at = self.i - j + hi;
+    }
+}
+
+impl Iterator for BaseRange<'_> {
+    type Item = (u64, f64);
+
+    #[inline]
+    fn next(&mut self) -> Option<(u64, f64)> {
+        if self.i >= self.end {
+            return None;
+        }
+        if self.i == self.decode_at {
+            self.decode();
+        }
+        let j = self.i % BLOCK;
+        self.i += 1;
+        Some((self.keys[j], self.vals[j]))
+    }
+
+    /// Folds each block with its own loop over the two arrays.
+    fn fold<B, F: FnMut(B, (u64, f64)) -> B>(mut self, mut acc: B, mut f: F) -> B {
+        while self.i < self.end {
+            if self.i == self.decode_at {
+                self.decode();
+            }
+            let (j, hi) = (self.i % BLOCK, (self.decode_at - 1) % BLOCK + 1);
+            acc = self.keys[j..hi].iter().zip(&self.vals[j..hi]).fold(acc, |a, (&k, &v)| f(a, (k, v)));
+            self.i = self.decode_at;
+        }
+        acc
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.end - self.i;
+        (n, Some(n))
+    }
+}
 
 /// The iterator of `Base::range`: the rows of one segment, then the next segment, up to global row `end`.
 pub(crate) struct Rows<'a> {
@@ -594,18 +677,18 @@ impl Store {
 
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
-            // Each block is decoded once, in parallel on a large base.
+            // Each block is decoded once, in parallel on a large base. One part reads one window of rows.
             let mut cells = vec![(0u64, 0f64); self.base.rows()];
-            let fill = |(b, out): (usize, &mut [(u64, f64)])| {
-                let rows = self.base.range(b * BLOCK..b * BLOCK + out.len());
+            let fill = |(w, out): (usize, &mut [(u64, f64)])| {
+                let rows = self.base.range(w * WINDOW..w * WINDOW + out.len());
                 for (c, row) in out.iter_mut().zip(rows) {
                     *c = row;
                 }
             };
             if self.cfg.par(cells.len()) {
-                cells.par_chunks_mut(BLOCK).enumerate().for_each(fill);
+                cells.par_chunks_mut(WINDOW).enumerate().for_each(fill);
             } else {
-                cells.chunks_mut(BLOCK).enumerate().for_each(fill);
+                cells.chunks_mut(WINDOW).enumerate().for_each(fill);
             }
             return Cube { pack: self.pack.clone(), kind: self.kind, cells };
         }
@@ -1428,6 +1511,16 @@ mod tests {
         assert!(s.best_postings(&r).is_some());
         let want: Vec<(u64, f64)> = s.as_cube().cells.into_iter().filter(|c| [3, 17, 40].contains(&s.pack.get(c.0, 1))).collect();
         assert_eq!(s.read(&r).cells, want);
+    }
+
+    #[test]
+    fn read_of_all_rows_crosses_windows_and_segments() {
+        let cat = two_dims_with(1024, Config { seg_rows: 50_000, par_min: 0, ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        let cells: Vec<(u64, f64)> = (0..150_000u64).map(|k| (k * 5 + k % 3, k as f64)).collect();
+        s.set_sorted(sorted(&cat.cfg, cells.clone()));
+        assert!(s.base.segs.len() > 2 && s.base.rows() > 2 * WINDOW);
+        assert_eq!(s.read(&Restrict::all(2)).cells, cells);
     }
 
     fn two_dims(size: u32) -> Catalog {
