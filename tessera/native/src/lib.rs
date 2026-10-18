@@ -1521,6 +1521,12 @@ impl CellBlock {
         })
     }
 
+    /// Tell if a row of the block has one of the member ids in its coordinates. The tables of the block hold
+    /// only the ids that its rows use, so the tables answer it.
+    fn has_member(&self, ids: FxHashSet<String>) -> bool {
+        self.c.ids.iter().flatten().any(|s| ids.contains(s))
+    }
+
     /// Tell if the block has a cell that other also has.
     fn overlaps(&self, py: Python<'_>, other: &CellBlock) -> bool {
         py.detach(|| {
