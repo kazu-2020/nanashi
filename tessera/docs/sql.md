@@ -54,7 +54,8 @@ An aggregate column is a nullable `float64`. The reference engine does not make 
 ## Errors
 
 An SQL error is 400 `{"error": "sql", "code": "<code>", "message": "<Japanese text>"}`. The codes are the `sql_*` keys of `MESSAGES` in `sparse_engine/messages.py`.
-A text with more than 256 operators (for example `AND`, `=` and `+`) is `sql_too_complex`. A SELECT list with more than 1000 items is `sql_columns`.
+A text with more than 1024 keywords and symbols (for example `SELECT`, `AND`, `=` and `::`) is `sql_too_complex`. Names, literals, commas and parentheses are not counted. A keyword that you use as a name without quotes (for example `Month`) is counted.
+A SELECT list with more than 256 items is `sql_columns`.
 A result with more cells (rows x columns, after `LIMIT`) than `--max-cells` is 413 `{"error": "too_large", "code": "sql_too_large"}`. One memory budget (`max_bytes`) holds the stored data and every buffer of the query. A query over the budget is 400 `sql_budget`.
 
 ## Implementation

@@ -39,10 +39,11 @@ fn unsupported(what: impl ToString) -> Diag {
     Diag::new("sql_unsupported").arg("what", what.to_string())
 }
 
-/// Most operator tokens in one text. Each infix operator adds one level to the AST, and a deep AST overflows the
-/// stack in its recursive Drop. The parser recursion limit (50) does not stop a flat chain such as `a AND b AND ...`.
-const MAX_OPERATORS: usize = 256;
-const MAX_ITEMS: usize = 1000;
+/// Most counted tokens (see `counted`) in one text. A deep AST overflows the stack in its recursive Drop.
+/// The parser recursion limit (50) stops nested parentheses, but not a flat chain such as `a AND b AND ...`.
+const MAX_TOKENS: usize = 1024;
+/// A SELECT list at this cap with `SUM(m) AS a` items uses 512 counted tokens.
+const MAX_ITEMS: usize = 256;
 
 /// Err codes: sql_syntax {detail}, sql_statements, sql_too_complex {count, max}, sql_columns {count, max},
 /// sql_unsupported {what} and sql_from {name}.
@@ -56,9 +57,9 @@ pub fn parse(text: &str) -> Result<Query, Diag> {
     };
     let dialect = DuckDbDialect {};
     let tokens = Tokenizer::new(&dialect, text).tokenize_with_location().map_err(|e| syntax(e.into()))?;
-    let count = tokens.iter().filter(|t| is_operator(&t.token)).count();
-    if count > MAX_OPERATORS {
-        return Err(Diag::new("sql_too_complex").arg("count", Arg::Int(count as i64)).arg("max", Arg::Int(MAX_OPERATORS as i64)));
+    let count = tokens.iter().filter(|t| counted(&t.token)).count();
+    if count > MAX_TOKENS {
+        return Err(Diag::new("sql_too_complex").arg("count", Arg::Int(count as i64)).arg("max", Arg::Int(MAX_TOKENS as i64)));
     }
     // parse_query, not parse_statements: the parser of the other statements adds about 1 MB to the library
     let mut p = Parser::new(&dialect).with_tokens_with_locations(tokens);
@@ -232,16 +233,12 @@ fn number(e: &Expr) -> Option<u64> {
     }
 }
 
-/// An infix or postfix operator: each one can add a level to the AST.
-fn is_operator(t: &Token) -> bool {
+/// Every keyword and every symbol. Invariant: tree depth <= counted tokens, because only an infix or postfix
+/// chain of these makes a deep tree. Lists (commas) are flat, and parentheses hit the parser recursion limit.
+fn counted(t: &Token) -> bool {
     match t {
-        Token::Word(w) => matches!(
-            w.keyword,
-            Keyword::AND | Keyword::OR | Keyword::XOR | Keyword::NOT | Keyword::IS | Keyword::IN | Keyword::BETWEEN | Keyword::OVERLAPS
-                | Keyword::LIKE | Keyword::ILIKE | Keyword::RLIKE | Keyword::REGEXP | Keyword::MATCH | Keyword::SIMILAR | Keyword::MEMBER
-                | Keyword::OPERATOR | Keyword::DIV | Keyword::NOTNULL | Keyword::COLLATE | Keyword::AT
-        ),
-        Token::Number(..) | Token::SingleQuotedString(_) | Token::DoubleQuotedString(_) | Token::Comma | Token::LParen | Token::RParen | Token::SemiColon | Token::Whitespace(_) | Token::EOF => false,
+        Token::Word(w) => w.keyword != Keyword::NoKeyword,
+        Token::Number(..) | Token::SingleQuotedString(_) | Token::DoubleQuotedString(_) | Token::Comma | Token::LParen | Token::RParen | Token::Whitespace(_) | Token::EOF => false,
         _ => true,
     }
 }
@@ -344,16 +341,33 @@ mod tests {
     }
 
     #[test]
-    fn a_long_chain_of_operators_is_an_error_before_the_parse() {
-        let too_complex = |n: i64| ("sql_too_complex", vec![("count", crate::Arg::Int(n)), ("max", crate::Arg::Int(256))]);
-        for op in ["AND", "OR"] {
-            let chain = format!("SELECT SUM(m) FROM model WHERE a = 'x'{}", format!(" {op} a = 'x'").repeat(100_000));
-            assert_eq!(code(&chain), too_complex(200_001), "{op}");
+    fn a_long_chain_is_an_error_before_the_parse() {
+        let n = 100_000;
+        let chains = [
+            (format!("SELECT 1{}", " UNION ALL SELECT 1".repeat(n)), 3 * n + 1),
+            (format!("SELECT a{} FROM model", "::int".repeat(n)), 2 * n + 2),
+            (format!("SELECT a FROM model WHERE a{}", " IS NULL".repeat(n)), 2 * n + 3),
+            (format!("SELECT SUM(m) FROM model WHERE a = 'x'{}", " AND a = 'x'".repeat(n)), 2 * n + 5),
+            (format!("SELECT SUM(m) FROM model WHERE a = 'x'{}", " OR a = 'x'".repeat(n)), 2 * n + 5),
+        ];
+        for (text, count) in chains {
+            let want = ("sql_too_complex", vec![("count", crate::Arg::Int(count as i64)), ("max", crate::Arg::Int(1024))]);
+            assert_eq!(code(&text), want, "{}", &text[..40]);
         }
-        let at_limit = format!("SELECT SUM(m) FROM model WHERE a = 'x'{}", " AND a = 'x'".repeat(127));
-        assert_eq!(parse(&at_limit).unwrap().filters.len(), 128);
-        let items = format!("SELECT {}SUM(m) FROM model", "a, ".repeat(1000));
-        assert_eq!(code(&items), ("sql_columns", vec![("count", crate::Arg::Int(1001)), ("max", crate::Arg::Int(1000))]));
+        let items = format!("SELECT {}SUM(m) FROM model", "a, ".repeat(256));
+        assert_eq!(code(&items), ("sql_columns", vec![("count", crate::Arg::Int(257)), ("max", crate::Arg::Int(256))]));
+    }
+
+    #[test]
+    fn a_large_query_at_the_caps_parses() {
+        let names = (0..1000).map(|i| format!("'e{i}'")).collect::<Vec<_>>().join(", ");
+        let aggs = (0..252).map(|i| format!("SUM(m{i}) AS s{i}")).collect::<Vec<_>>().join(", ");
+        let text = format!(
+            "SELECT d1, d2, d3, {aggs} FROM model WHERE Employee IN ({names}) AND Version = 'Actual' \
+             GROUP BY d1, d2, d3 ORDER BY s0 DESC NULLS LAST, 1 LIMIT 100;"
+        );
+        let q = parse(&text).unwrap();
+        assert_eq!((q.select.len(), q.filters[0].1.len(), q.order_by.len()), (255, 1000, 2));
     }
 
     #[test]

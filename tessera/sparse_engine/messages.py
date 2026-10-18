@@ -77,7 +77,7 @@ MESSAGES: dict[str, str] = {
     # SQL
     "sql_syntax": "SQL の構文が正しくない: {detail}",
     "sql_statements": "SQL は SELECT 文 1 つだけを書く",
-    "sql_too_complex": "SQL の演算子が {count:,} 個あり、上限 {max} 個を超える",
+    "sql_too_complex": "SQL のキーワードと記号が {count:,} 個あり、上限 {max:,} 個を超える",
     "sql_columns": "SELECT の列が {count:,} 個あり、上限 {max:,} 個を超える",
     "sql_unsupported": "SQL の {what} は使えない",
     "sql_from": "FROM には model だけを書く（{name}）",
