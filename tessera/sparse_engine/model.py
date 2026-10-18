@@ -1036,7 +1036,7 @@ class Model:
         self._remove_member(dim, member)
 
     def _remove_member(self, dim: str, member: str) -> None:
-        """remove_member without the checks (a journal replay also uses it)."""
+        """remove_member without the checks."""
         self.recalc()
         index = self.dimensions[dim]._by_id[member]
         point = {dim: frozenset([member])}
