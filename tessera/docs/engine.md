@@ -25,8 +25,9 @@ There are two engines:
 
 The Rust engine keeps the key of one cell as a 64-bit integer. The integer contains the member number of each dimension.
 The storage has two layers. The base is an array in key order. The delta is a tree on top of the base, and it receives small changes.
-If the delta becomes larger than 1/8 of the base, the engine merges the delta into a new base.
-If one change writes more than 1/8 of the base, the engine makes a new base directly and does not use the delta tree.
+The delta limit is 1/8 of the base rows, but not more than `delta_max` (2,097,152 rows by default) and not less than `compact_min`. Thus the delta does not grow with the cells.
+If the delta becomes larger than the limit, the engine merges the delta into a new base.
+If one change writes more than the limit, the engine makes a new base directly and does not use the delta tree.
 It merges the cells directly into the value array and the packed keys of the new base. The packed keys get one block of 1,024 keys at a time, so the merge needs about 10 to 12 B for each cell.
 The base is a list of segments in key order (`Base` and `Segment` in `store.rs`). A segment ends at the first partition-member boundary after `seg_rows` rows (4,194,304 by default), so a segment holds whole partition members. Readers address the base by a global row number, and `Base` finds the segment with a binary search.
 The engine cuts a segment only where the member of the partition dimension changes. If the partition dimension has few members, the segments are large. A member with more than `seg_rows` rows is in one segment.

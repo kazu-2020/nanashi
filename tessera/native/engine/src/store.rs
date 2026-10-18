@@ -764,7 +764,7 @@ impl Store {
 
     /// The most rows of the delta. With more rows, the delta goes into a new base.
     fn delta_limit(&self) -> usize {
-        self.cfg.compact_min.max(self.base.rows() / 8)
+        (self.base.rows() / 8).min(self.cfg.delta_max).max(self.cfg.compact_min)
     }
 
     /// The cells that `replace_diff` (if `diff`) or `replace` needs to write `n` new cells into a region of `size`
@@ -880,7 +880,7 @@ impl Store {
     }
 
     pub(crate) fn after_delta(&mut self) {
-        if self.delta.len() > self.cfg.compact_min.max(self.base.rows() / 8) {
+        if self.delta.len() > self.delta_limit() {
             self.compact();
         }
     }
@@ -1176,7 +1176,7 @@ impl Store {
     /// 同じセルが複数あれば後のものが勝つ。差分に入れると本体にまとめ直すことになる量なら
     /// （write_back と同じ基準）、差分に 1 件ずつ入れずに本体を作り直す。
     pub fn write_many(&mut self, cols: &[&[u32]], values: &[Option<f64>]) {
-        let limit = self.cfg.compact_min.max(self.base.rows() / 8);
+        let limit = self.delta_limit();
         if self.delta.len() + values.len() <= limit {
             let mut key = vec![0; cols.len()];
             for (i, v) in values.iter().enumerate() {
@@ -1481,6 +1481,24 @@ mod tests {
         assert!(s.base.segs.len() >= 5);
         assert_eq!(map_of(&s), want);
         assert_eq!(s.len(), want.len());
+    }
+
+    #[test]
+    fn delta_max_caps_the_delta_of_a_large_base() {
+        for (delta_max, most) in [(usize::MAX, 300), (100, 100)] {
+            let cat = two_dims_with(1024, Config { compact_min: 16, delta_max, ..Config::default() });
+            let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+            s.set_sorted(random_cells(10_000, 7));
+            let mut want = map_of(&s);
+            let mut peak = 0;
+            for k in (0..1 << 20).filter(|k| !want.contains_key(k)).take(300).collect::<Vec<u64>>() {
+                s.write(&s.decode(k), Some(1.0));
+                want.insert(k, 1.0);
+                peak = peak.max(s.delta.len());
+            }
+            assert_eq!(peak, most, "delta_max {delta_max}");
+            assert_eq!(map_of(&s), want);
+        }
     }
 
     /// The partition members of the segments are in order and do not meet (no member spans two segments).

@@ -6,6 +6,8 @@
 pub struct Config {
     /// 差分がこの件数（と本体の 1/8）を超えたら本体にまとめ直す。
     pub compact_min: usize,
+    /// The most rows of the delta, whatever the size of the base. Thus the delta does not grow with the cells.
+    pub delta_max: usize,
     /// The rows after which a segment of the base ends, at the next partition-member boundary.
     /// shortcut: 4 M rows make a value column of 32 MB, the largest dynamic mmap threshold of glibc. So glibc
     /// maps the column, and a free gives the memory back to the OS. A smaller column stays in the malloc arena
@@ -41,6 +43,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             compact_min: 4096,
+            delta_max: 1 << 21,
             seg_rows: 1 << 22,
             par_min: 16_384,
             postings_min_rows: 1024,
