@@ -26,6 +26,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 const HEADER: usize = 32;
 const SPARE: usize = 16;
 const SHARDS: usize = 64;
+/// The buffer of a segment file writer.
+pub(crate) const WRITE_BUF: usize = 1 << 20;
 
 /// One block record in the cache. Readers pin a record by holding the `Arc`.
 pub(crate) type Buf = Arc<Vec<u8>>;
@@ -59,6 +61,11 @@ impl Tier {
         Ok(t)
     }
 
+    /// The bound of the block cache (bytes).
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_bytes
+    }
+
     pub(crate) fn writer(&'static self) -> io::Result<SegWriter> {
         self.writer_of(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -67,7 +74,7 @@ impl Tier {
         let path = self.dir.join(format!("seg-{id}.bin"));
         // A file that exists is the live segment of another process on the same directory: an error, not a truncation
         let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
-        let mut w = BufWriter::with_capacity(1 << 20, file);
+        let mut w = BufWriter::with_capacity(WRITE_BUF, file);
         w.write_all(&[0u8; HEADER])?;
         Ok(SegWriter { tier: self, w, path, id, blocks: Vec::new(), words: (HEADER / 8) as u64, rows: 0, finished: false })
     }

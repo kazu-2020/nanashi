@@ -85,18 +85,25 @@ pub(crate) fn table_cells(keys: usize, entry: usize) -> usize {
     (buckets * (entry + 1)).div_ceil(CELL_BYTES)
 }
 
-/// The bytes of the sources. A source that two entries share (the same Arc) counts once.
+/// The bytes of the sources. A source that two entries share (the same Arc) counts once. If a store has the file
+/// tier, the bound of its block cache also counts once: the process has one cache, and every operation shares it.
 pub fn held<'a>(src: impl IntoIterator<Item = &'a Src>) -> usize {
     let mut seen = FxHashSet::default();
-    src.into_iter()
+    let mut cache = 0;
+    let bytes: usize = src
+        .into_iter()
         .filter_map(|s| {
             let (ptr, bytes) = match s {
-                Src::Store(a) => (Arc::as_ptr(a) as usize, a.memory().bytes()),
+                Src::Store(a) => {
+                    cache = cache.max(a.cfg.tier.map_or(0, Tier::cache_bytes));
+                    (Arc::as_ptr(a) as usize, a.memory().bytes())
+                }
                 Src::Cube(a) => (Arc::as_ptr(a) as usize, a.cells.capacity().saturating_mul(CELL_BYTES)),
             };
             seen.insert(ptr).then_some(bytes)
         })
-        .sum()
+        .sum();
+    bytes.saturating_add(cache)
 }
 
 fn human(bytes: usize) -> String {
