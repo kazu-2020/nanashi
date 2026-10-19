@@ -1173,7 +1173,7 @@ impl Store {
     /// (see `best_postings` and `postings`): (the most at the peak, the bytes that the store keeps).
     fn postings_bytes(&self, filtered: impl Fn(DimId) -> bool) -> (usize, usize) {
         let n = self.base.rows();
-        if n == 0 || n < self.cfg.postings_min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize) || self.pack.dims.first().is_some_and(|&d| filtered(d)) {
+        if n == 0 || n < self.cfg.postings_min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize || s.is_file()) || self.pack.dims.first().is_some_and(|&d| filtered(d)) {
             return (0, 0);
         }
         let (mut peak, mut kept) = (0usize, 0usize);

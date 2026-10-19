@@ -967,7 +967,7 @@ impl Core {
         if (c.kind == pq::Value::Member) != value_ids.is_some() && c.new.iter().any(Option::is_some) {
             return Err(err("変更の塊の値の種類が Metric の値の種類と合わない".into()));
         }
-        let s = py.detach(move || -> Result<Arc<Store>, String> {
+        let s = py.detach(move || -> PyResult<Arc<Store>> {
             let maps: Vec<Vec<Option<u32>>> = c.ids.iter().zip(&dim_ids).map(|(used, table)| positions(used, table)).collect();
             let vmap = value_ids.as_deref().map(|table| positions(&c.value_ids, table));
             let mut cols: Vec<Vec<u32>> = vec![Vec::with_capacity(c.len()); maps.len()];
@@ -981,7 +981,7 @@ impl Core {
                     }
                 }
                 let v = match (c.new[r], &vmap) {
-                    (Some(v), Some(vm)) => Some(vm[v as usize].ok_or_else(|| format!("値のメンバーの ID {} が軸にない", c.value_id(v)))? as f64),
+                    (Some(v), Some(vm)) => Some(vm[v as usize].ok_or_else(|| err(format!("値のメンバーの ID {} が軸にない", c.value_id(v))))? as f64),
                     (v, _) => v,
                 };
                 for (col, p) in cols.iter_mut().zip(key) {
@@ -990,10 +990,10 @@ impl Core {
                 values.push(v);
             }
             let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
-            Arc::make_mut(&mut s).write_many(&slices, &values);
+            guarded(|| Arc::make_mut(&mut s).write_many(&slices, &values))?;
             Ok(s)
         });
-        put(store, s.map_err(err)?)
+        put(store, s?)
     }
 
     fn size(&self, store: &Bound<'_, StoreHandle>) -> PyResult<usize> {
