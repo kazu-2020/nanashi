@@ -3,6 +3,7 @@ path (few groups, dense array, sort) or the thread count."""
 import math
 from fractions import Fraction
 import random
+import tempfile
 import unittest
 
 from sparse_engine import Model, Named
@@ -75,7 +76,8 @@ class SameBitsOnEveryPath(unittest.TestCase):
         engines = [ReferenceEngine(), RustEngine(), RustEngine(par_min=0), RustEngine(par_min=0, chunk=3), RustEngine(par_min=0, stream_always=True),
                    RustEngine(par_min=0, dense_always=True), RustEngine(dense_always=True),
                    RustEngine(par_min=0, dense_always=True, scatter_bytes=0), RustEngine(dense_always=True, scatter_bytes=0),
-                   RustEngine(seg_rows=8, compact_min=4)]
+                   RustEngine(seg_rows=8, compact_min=4),
+                   RustEngine(segment_dir=tempfile.mkdtemp(prefix="nanashi-seg-"), seg_rows=2048, cache_bytes=1 << 16, read_window=2)]
         for engine in engines:
             m = model(engine)
             m.recalc()

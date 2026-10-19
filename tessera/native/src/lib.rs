@@ -3,7 +3,7 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, ipc, pq, select, sql, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
+use nanashi_engine::{eval, graph, ipc, pq, select, sql, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget, Tier};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -428,13 +428,19 @@ impl Core {
     /// before or during the calculation. Evaluation and the recalculation schedule use a new value at once. The
     /// values for the stored data (compaction, index and parallel thresholds) apply to the stored data made after the
     /// change. fail_at is for tests: (Metric number, panic or not), or None.
+    /// segment_dir puts the segments of the stored data in files in that directory (one directory for each
+    /// process), with a block cache of cache_bytes (256 MB by default) and reads of read_window blocks (64).
     #[pyo3(signature = (**config))]
     fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let Some(config) = config else { return Ok(()) };
         let cfg = &mut Arc::make_mut(&mut self.cat).cfg;
+        let (mut dir, mut cache_bytes, mut read_window) = (None, 256usize << 20, 64usize);
         for (k, v) in config.iter() {
             let k: String = k.extract()?;
             match k.as_str() {
+                "segment_dir" => dir = v.extract::<Option<std::path::PathBuf>>()?,
+                "cache_bytes" => cache_bytes = v.extract()?,
+                "read_window" => read_window = v.extract()?,
                 "compact_min" => cfg.compact_min = v.extract()?,
                 "seg_rows" => cfg.seg_rows = v.extract()?,
                 "delta_max" => cfg.delta_max = v.extract()?,
@@ -450,6 +456,9 @@ impl Core {
                 "fail_at" => cfg.fail_at = v.extract()?,
                 _ => return Err(err(format!("未知の調整値 {k}"))),
             }
+        }
+        if let Some(dir) = dir {
+            cfg.tier = Some(Tier::install(&dir, cache_bytes, read_window).map_err(err)?);
         }
         Ok(())
     }
