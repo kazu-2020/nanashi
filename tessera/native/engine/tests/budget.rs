@@ -48,8 +48,10 @@ fn ifblank_beyond_the_budget_fails_before_allocating() {
     let small = catalog_with(Config { max_bytes: stored + 100_000 * 16, fuse: false, ..Config::default() });
     let err = eval(&node, &small, &source(&small), &Restrict::all(3)).unwrap_err();
     assert!(err.contains("IFBLANK"), "{err}");
-    // Fused, the evaluation holds only the result and the small lists of the chunks (4 KiB is enough for them)
+    // Fused, the evaluation holds the result, the list of the 10^5 members (4 B each) and the small lists of the chunks
     let fused = catalog(stored + 100_000 * 16 + 4096);
+    assert!(eval(&node, &fused, &source(&fused), &Restrict::all(3)).unwrap_err().contains("IFBLANK"));
+    let fused = catalog(stored + 100_000 * (16 + 4) + 4096);
     assert_eq!(eval(&node, &fused, &source(&fused), &Restrict::all(3)).unwrap().cells.len(), 100_000);
     // 結果も収まらなければ、確保する前に失敗する
     let tiny = catalog(stored + 100_000 * 8);
@@ -119,6 +121,22 @@ fn a_by_metric_join_beyond_the_budget_fails_before_copying() {
     let small = catalog(held(&src) + 1000 * CELL_BYTES);
     let err = eval(&node, &small, &src, &Restrict::all(3)).unwrap_err();
     assert!(err.contains("メモリの予算を超える") && err.contains("集計"), "{err}");
+}
+
+#[test]
+fn a_by_metric_join_reads_only_the_mappings_of_a_small_source() {
+    // x has 10 cells on d0 = 0. V maps 50,000 members of d0, but the join reads only V[0]
+    let cat = catalog(usize::MAX);
+    let n = 50_000u32;
+    let v = Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&(0..n).collect::<Vec<_>>()], &vec![7.0; n as usize]).unwrap();
+    let src = [column(&cat, &[0, 1], 10), Src::Store(Arc::new(v))];
+    let edges = Node::AsAxis { child: Box::new(Node::Ref(1)), dim: 2 };
+    let node = Node::Remove { child: Box::new(Node::On(Box::new(Node::Ref(0)), Box::new(edges))), dim: 0, agg: Agg::Sum };
+    // All of V and its table (100,000 cells) do not fit in 1000 cells
+    let small = catalog(held(&src) + 1000 * CELL_BYTES);
+    let c = eval(&node, &small, &src, &Restrict::all(3)).unwrap();
+    assert_eq!(c.cells.len(), 10);
+    assert!(c.cells.iter().all(|&(_, v)| v == 1.0));
 }
 
 #[test]

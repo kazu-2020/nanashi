@@ -464,8 +464,9 @@ pub struct Plan {
 struct Task {
     m: usize,
     region: Reg,
-    delta: bool,   // 差分集計で更新する
-    weight: usize, // The estimate of the rows that the task reads or makes (for the waves and the choice of parallel work)
+    delta: bool, // 差分集計で更新する
+    /// The estimate of the rows that the task reads or makes. `waves` and the choice of parallel work use it.
+    weight: usize,
 }
 
 /// A calculated value that waits for the write-back. If the region is the whole, the cells of the new base
@@ -623,8 +624,8 @@ struct Run<'a> {
     log: Log,
 }
 
-/// 並列に計算する仕事を、メモリの予算 max を等分して収まる組（順は保つ）に分ける。1 つの仕事の見積もりは、
-/// 計算し直す範囲の行数の見積もり × 1 セルのバイト数 × 途中結果の倍率（入力を読んだものと結果など）。
+/// Divides the parallel tasks into waves (in their order) that fit in equal parts of the budget max. The estimate of
+/// one task is its weight (`Task::weight`) x the bytes of one cell x the factor of the intermediate results.
 fn waves(tasks: &[Task], max: usize) -> Vec<Vec<&Task>> {
     const INTERMEDIATE: usize = 4;
     let need = |t: &Task| t.weight.saturating_mul(CELL_BYTES * INTERMEDIATE);
@@ -712,7 +713,7 @@ impl<'a> Run<'a> {
             }
         }
         // 小さな仕事ばかりなら、並列にする受け渡しの費用のほうが大きいので順に計算する
-        let weight: usize = tasks.iter().map(|t| t.weight).sum();
+        let weight = tasks.iter().map(|t| t.weight).fold(0, usize::saturating_add);
         let run: &Self = self;
         let max = self.cat.cfg.max_bytes;
         // The regions of the tasks and the changed regions of the Metrics stay until the level ends. The small parts
@@ -783,7 +784,7 @@ impl<'a> Run<'a> {
         eval_sums(&f.node, self.cat, &self.srcs(f, work), r, b)
     }
 
-    /// 段の 1 つの Metric について、計算し直す範囲と方法を決める。計算し直さなくてよければ None。
+    /// Decides the region, the method and the weight of one Metric of a level. None if the Metric needs no recalculation.
     fn prepare(&self, m: usize) -> Option<Task> {
         let plan: &'a Plan = self.plan;
         let metric = &plan.metrics[m];
@@ -799,10 +800,10 @@ impl<'a> Run<'a> {
         let share: f64 = region.sels.iter().map(|(d, ms)| ms.len() as f64 / size(*d)).product();
         // The most rows of the result and its sources, or the estimate of the result if it is larger. The estimate
         // covers a result that a snapshot load did not store (0 rows), and a result that is larger than its sources
-        let rows = f.refs.iter().map(|&i| self.stores[i].rows_hint()).fold(self.stores[m].rows_hint(), usize::max);
         let refs: Vec<(Vec<DimId>, f64)> = f.refs.iter().map(|&i| (self.stores[i].pack.dims.clone(), self.stores[i].rows_hint() as f64)).collect();
+        let rows = refs.iter().map(|r| r.1).fold(self.stores[m].rows_hint() as f64, f64::max);
         let est = crate::check::estimate(&f.node, self.cat, &refs).map_or(0.0, |(_, n)| n);
-        let weight = (est.max(rows as f64) * share) as usize;
+        let weight = (est.max(rows) * share) as usize;
         Some(Task { m, region, delta, weight })
     }
 
@@ -1169,7 +1170,7 @@ mod tests {
     fn a_result_with_no_stored_rows_is_weighed_by_its_source_or_its_estimate() {
         // After a snapshot load, metrics 1 and 2 have no rows. Each makes 1,000 rows, so each runs alone. Together,
         // each would get half of the room, less than the write of 1,000 rows (about 33 KB). The rows of the source
-        // set the weight of a copy, and the estimate sets the weight of a broadcast of 1 row to 1,000 members of d1
+        // set the weight of a copy. The estimate sets the weight of 1 row broadcast to 1,000 members of d1
         let dim = |name: &str| crate::DimInfo { size: 1000, ordered: false, name: name.into() };
         let start = Catalog { dims: vec![dim("d0"), dim("d1")], maps: Vec::new(), cfg: crate::Config::default() };
         let keys: Vec<u32> = (0..1000).collect();
