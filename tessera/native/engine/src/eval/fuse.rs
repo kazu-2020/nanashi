@@ -695,7 +695,16 @@ pub(crate) fn fused_into<S: Sink>(node: &Node, cat: &Catalog, src: &[Src], r: &R
     let merged: Vec<OnceCell<Cube>> = src.iter().map(|_| OnceCell::new()).collect();
     let mut fu = Fuse { cat, src, bud, merged: &merged, copied: 0, reserve: 0, leaves: Vec::new(), ids: Vec::new() };
     let Some(info) = fu.info(node) else { return Ok(None) };
-    if !fits(info.mat, fu.copied, bud) {
+    // A result with the dimensions of the target store can go into its columns, which can be smaller than 16 B cells.
+    // The part buffers in flight are at most 2 batches of parts of about `chunk` cells (see `stream`).
+    let mat = match target {
+        Some(t) if same_set(&t.store.pack.dims, &info.dims) && info.mat < usize::MAX as f64 => {
+            let rows = info.mat as usize;
+            info.mat.min(t.cells(Need { rows, extra: 0, parts: rows.min(2 * batch() * cat.cfg.chunk.max(1)) }) as f64)
+        }
+        _ => info.mat,
+    };
+    if !fits(mat, fu.copied, bud) {
         return Ok(None);
     }
     fused_with(node, &mut fu, info, bud, target, make)

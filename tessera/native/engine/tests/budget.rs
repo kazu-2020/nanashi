@@ -147,6 +147,22 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
 }
 
 #[test]
+fn a_streamed_file_result_needs_no_room_for_all_its_cells() {
+    // A file base keeps only its fences in RAM, and the scan holds at most 2 batches of parts of about 100 cells
+    let cat = catalog_with(Config { seg_rows: 1000, chunk: 100, tier: tier(), ..Config::default() });
+    let rows = 300_000usize;
+    let (d0, d1): (Vec<u32>, Vec<u32>) = (0..rows as u32).map(|i| (i / 1000, i % 1000)).unzip();
+    let s = Store::new(&[0, 1], None, Kind::Num, &cat).unwrap().with_rows(&[&d0, &d1], &vec![1.0; rows]).unwrap();
+    let src = [Src::Store(Arc::new(s))];
+    let held = held(&src);
+    let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
+    let store = Store::new(&[0, 1], None, Kind::Num, &cat).unwrap();
+    let b = Budget::new(held + rows * CELL_BYTES / 2, held);
+    let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &b, &store, false).unwrap() else { panic!("streams") };
+    assert_eq!(store.with_columns(c).0.as_cube().cells.len(), rows);
+}
+
+#[test]
 fn a_sorted_scan_whose_ranges_do_not_fit_is_not_fused() {
     // 100 drivers and a range at each key of the largest: 10,000 ranges of 2 x 100 row positions (16 MB)
     let cat = catalog(usize::MAX);
