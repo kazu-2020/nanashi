@@ -504,9 +504,11 @@ fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usiz
     let lists = (old + n).saturating_mul(4 + store.metric_dims.len()) / 4;
     let merge = if diff { ((old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 }).max(lists) } else { 0 };
     let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
-    let blocks = sides.iter().map(|c| c.cells.len()).fold(n, usize::max).div_ceil(crate::packed::BLOCK) * 4 + 64;
+    let most = sides.iter().map(|c| c.cells.len()).fold(n, usize::max);
+    let blocks = most.div_ceil(crate::packed::BLOCK) * 4 + 64;
     let segs = sides.iter().map(|c| store.seg_bytes(c.cells.len())).sum::<usize>() + store.seg_bytes(n);
-    let blocks = blocks + segs.div_ceil(CELL_BYTES);
+    // The writes come one after the other, so only the writer buffers of the largest write count
+    let blocks = blocks + (segs + store.write_bufs(most)).div_ceil(CELL_BYTES);
     sides.iter().map(|c| c.cells.capacity()).sum::<usize>() + value.cells.capacity() + peak + blocks
 }
 

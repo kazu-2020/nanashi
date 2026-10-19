@@ -132,5 +132,6 @@ A reader pins a record while it reads it, so an evicted record frees when its la
 The memory budget (`max_bytes`) counts only the RAM of a file base: its fences. It also counts the cache bound (`cache_bytes`) one time, because every operation shares the cache.
 Thus `max_bytes` must be larger than `cache_bytes`. If it is not, the engine and the server do not start.
 A compaction into files counts the fences of the new base, the block in build and one read window. It also counts the 1 MiB buffer of the file writer, but not 16 B for each row.
+A write of whole results writes its segments in parallel. It counts one writer buffer for each segment, but not more than one for each thread.
 The `base` value of `Model.memory()` is the RAM of the base. The `file` value is the bytes of the segment files on disk. Without `segment_dir`, `file` is 0.
 Without `segment_dir`, every segment stays in RAM and nothing changes.

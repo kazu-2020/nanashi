@@ -1130,6 +1130,15 @@ impl Store {
         (rows / self.cfg.seg_rows.max(1) + 1).saturating_mul(256 + self.pack.dims.len() * 16)
     }
 
+    /// The bytes of the writer buffers when `set_sorted` writes `rows` rows. File mode writes the segments in parallel.
+    pub(crate) fn write_bufs(&self, rows: usize) -> usize {
+        if self.cfg.tier.is_none() {
+            return 0;
+        }
+        let segs = rows / self.cfg.seg_rows.max(1) + 1;
+        if self.cfg.par(rows) { segs.min(rayon::current_num_threads()) * WRITE_BUF } else { WRITE_BUF }
+    }
+
     /// The most rows of the delta. With more rows, the delta goes into a new base.
     fn delta_limit(&self) -> usize {
         (self.base.rows() / 8).min(self.cfg.delta_max).max(self.cfg.compact_min)
@@ -1829,6 +1838,16 @@ mod tests {
             assert_eq!(s.get(&[0, 1]), Some(-1.0));
             assert_eq!(s.len(), cells.len() + 1);
         }
+    }
+
+    #[test]
+    fn a_write_into_files_counts_one_writer_buffer_for_each_parallel_segment() {
+        let file = two_dims_with(1024, Config { seg_rows: 1000, par_min: 0, tier: Some(Tier::for_tests()), ..Config::default() });
+        let s = Store::new(&[0, 1], Some(0), Kind::Num, &file).unwrap();
+        assert_eq!(s.write_bufs(500), WRITE_BUF);
+        assert_eq!(s.write_bufs(1_000_000), rayon::current_num_threads().min(1001) * WRITE_BUF);
+        let ram = Store::new(&[0, 1], Some(0), Kind::Num, &two_dims_with(1024, Config::default())).unwrap();
+        assert_eq!(ram.write_bufs(1_000_000), 0);
     }
 
     #[test]
