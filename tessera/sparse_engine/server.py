@@ -84,7 +84,7 @@ import logging
 import math
 import os
 import re
-import shutil
+import resource
 import signal
 import sys
 import threading
@@ -1142,6 +1142,18 @@ class Server(ThreadingHTTPServer):
         self.workspace.close()
 
 
+def _clear_segment_dir(path: str) -> None:
+    """Remove the segment files of an earlier process. The directory and other files stay."""
+    os.makedirs(path, exist_ok=True)
+    for name in os.listdir(path):
+        if re.fullmatch(r"seg-\d+\.bin", name):
+            os.remove(os.path.join(path, name))
+    # Each segment file stays open while a version holds it. Raise the open-file limit to the hard limit
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < hard:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="nanashi の HTTP サーバー")
     ap.add_argument("path", help="記録先のディレクトリ（FileJournal）。--pg ならスナップショットと"
@@ -1168,7 +1180,7 @@ def main(argv=None) -> None:
     ap.add_argument("--max-threads", type=int, default=64, help="同時に処理する要求の上限（空くのを待ち、待ちきれなければ 503）")
     ap.add_argument("--max-connections", type=int, default=1024, help="同時に開ける接続の上限（超えたら 503 で閉じる）")
     ap.add_argument("--max-bytes", type=int, help="Rust のエンジンで、1 つの処理が持つ格納データと途中結果の合計の上限（バイト）")
-    ap.add_argument("--segment-dir", metavar="DIR", help="Rust のエンジンで、格納データの本体をこのディレクトリのファイルに置く（起動時に空にする）")
+    ap.add_argument("--segment-dir", metavar="DIR", help="Rust のエンジンで、格納データの本体をこのディレクトリのファイルに置く（起動時に、前のプロセスのセグメントファイルを消す）")
     ap.add_argument("--cache-bytes", type=int, default=256 << 20, help="--segment-dir のとき、ブロックキャッシュの大きさ（バイト）")
     ap.add_argument("--follow", action="store_true",
                     help="書き込まず、記録先に追従する読み出し専用のサーバーにする（読み手を増やすとき）")
@@ -1203,8 +1215,7 @@ def main(argv=None) -> None:
         from .rust_engine import RustEngine
         config = {"max_bytes": args.max_bytes}
         if args.segment_dir:
-            # The files are a cache of the state. A leftover directory of an earlier process is garbage
-            shutil.rmtree(args.segment_dir, ignore_errors=True)
+            _clear_segment_dir(args.segment_dir)
             config.update(segment_dir=args.segment_dir, cache_bytes=args.cache_bytes)
         engine = RustEngine(**config)
     else:
