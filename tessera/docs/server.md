@@ -104,6 +104,7 @@ If the router is between the proxy and the engine, see [router.md](../../router/
 These are the limits:
 
 - The request body can be up to 16 MiB (`--max-body`).
+- With `--segment-dir DIR`, the Rust engine keeps the base of the stored data in files in `DIR` and a block cache of `--cache-bytes` (256 MiB) in RAM ([engine.md](engine.md)). At the start, the server removes the `seg-<digits>.bin` files in `DIR` and keeps the other files. Give each process its own directory. Size the disk at 2 times the base of the model.
 - A write must have a `Content-Length` of 1 to 16 digits, without a leading zero (`0` is correct). The server refuses `Transfer-Encoding`, 2 different `Content-Length` values, and other values such as `+5`, `05` or `5` with a space after it with 400. Then a proxy cannot frame the body in a different way.
 - slice, rows, and summary can return up to 100 thousand cells (`--max-cells`). For `POST /query`, the limit is for the sum of the most groups of all its Metrics. For `POST /sql`, the limit is for the cells of the result (rows x columns, after `LIMIT`).
 - The kernel keeps up to 1024 connections that the server did not accept yet (the kernel limits it to `somaxconn`).

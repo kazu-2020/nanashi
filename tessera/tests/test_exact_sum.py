@@ -3,6 +3,7 @@ path (few groups, dense array, sort) or the thread count."""
 import math
 from fractions import Fraction
 import random
+import tempfile
 import unittest
 
 from sparse_engine import Model, Named
@@ -71,21 +72,23 @@ class ExactSumFunction(unittest.TestCase):
 @unittest.skipIf(RustEngine is None, "nanashi_core must be built")
 class SameBitsOnEveryPath(unittest.TestCase):
     def test_paths_and_thread_counts_give_the_same_bits(self):
-        want = None
-        engines = [ReferenceEngine(), RustEngine(), RustEngine(par_min=0), RustEngine(par_min=0, chunk=3), RustEngine(par_min=0, stream_always=True),
-                   RustEngine(par_min=0, dense_always=True), RustEngine(dense_always=True),
-                   RustEngine(par_min=0, dense_always=True, scatter_bytes=0), RustEngine(dense_always=True, scatter_bytes=0),
-                   RustEngine(seg_rows=8, compact_min=4)]
-        for engine in engines:
-            m = model(engine)
-            m.recalc()
-            got = {n: cells(m, n) for n in ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "DeptOfTotal",
-                                            "DeptOfAll", "NorthByMonth", "Avg"]}
-            if want is None:
-                want = got
-                self.assertEqual(got["Total"][()], math.fsum(cells(m, "Amount").values()))
-                continue
-            self.assertEqual(got, want, engine)
+        with tempfile.TemporaryDirectory(prefix="nanashi-seg-") as segment_dir:
+            want = None
+            engines = [ReferenceEngine(), RustEngine(), RustEngine(par_min=0), RustEngine(par_min=0, chunk=3), RustEngine(par_min=0, stream_always=True),
+                       RustEngine(par_min=0, dense_always=True), RustEngine(dense_always=True),
+                       RustEngine(par_min=0, dense_always=True, scatter_bytes=0), RustEngine(dense_always=True, scatter_bytes=0),
+                       RustEngine(seg_rows=8, compact_min=4),
+                       RustEngine(segment_dir=segment_dir, seg_rows=2048, cache_bytes=1 << 16, read_window=2)]
+            for engine in engines:
+                m = model(engine)
+                m.recalc()
+                got = {n: cells(m, n) for n in ["ByMonth", "ByHome", "ByDeptOf", "Total", "HomeTotal", "DeptOfTotal",
+                                                "DeptOfAll", "NorthByMonth", "Avg"]}
+                if want is None:
+                    want = got
+                    self.assertEqual(got["Total"][()], math.fsum(cells(m, "Amount").values()))
+                    continue
+                self.assertEqual(got, want, engine)
 
 
 class OneRoundingForRemoveRun(unittest.TestCase):

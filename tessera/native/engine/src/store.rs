@@ -2,7 +2,8 @@
 
 #[allow(unused_imports)]
 use crate::*;
-use crate::packed::BLOCK;
+use crate::packed::{Block, Fences, BLOCK};
+use crate::tier::{Buf, SegFile, SegWriter};
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -59,53 +60,149 @@ impl Mem {
 
 /// One immutable run of the base in key order. Nothing changes a segment after it is made.
 ///
-/// The keys are packed in frame-of-reference blocks (`PackedKeys`). The values are an immutable column
-/// with no gaps (`Box<[f64]>`), with the same layout as the data of an Arrow Float64 array.
-/// The index (postings) of the segment stays in memory. Its rows are local to the segment.
+/// The keys are packed in frame-of-reference blocks (`packed.rs`). The fences of the blocks stay in RAM.
+/// The packed offsets and the values are in RAM (`Data::Ram`) or in a segment file (`Data::File`, `tier.rs`).
+/// The index (postings) of a RAM segment stays in memory. Its rows are local to the segment.
 #[derive(Debug)]
 pub(crate) struct Segment {
-    pub(crate) keys: PackedKeys, // ascending, no duplicates, never empty
-    pub(crate) vals: Box<[f64]>,
+    fences: Fences, // never empty
+    data: Data,
     first: u64,
     last: u64,
     postings: Vec<OnceLock<Arc<Postings>>>, // one for each packing position, made when it is necessary
 }
 
+/// Where the packed offsets and the values of a segment are.
+#[derive(Debug)]
+pub(crate) enum Data {
+    Ram { packed: Box<[u8]>, vals: Box<[f64]> },
+    File(SegFile),
+}
+
 impl Segment {
-    fn new(keys: PackedKeys, vals: Box<[f64]>, n_dims: usize) -> Arc<Segment> {
-        debug_assert!(keys.len() > 0 && keys.len() == vals.len());
-        let (first, last) = (keys.get(0), keys.get(keys.len() - 1));
-        Arc::new(Segment { keys, vals, first, last, postings: fresh_postings(n_dims) })
+    fn new(fences: Fences, data: Data, last: u64, n_dims: usize) -> Arc<Segment> {
+        debug_assert!(fences.len() > 0);
+        if let Data::Ram { vals, .. } = &data {
+            debug_assert_eq!(fences.len(), vals.len());
+        }
+        let first = fences.first(0);
+        Arc::new(Segment { fences, data, first, last, postings: fresh_postings(n_dims) })
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.keys.len()
+        self.fences.len()
     }
 
+    pub(crate) fn fences(&self) -> &Fences {
+        &self.fences
+    }
+
+    pub(crate) fn is_file(&self) -> bool {
+        matches!(self.data, Data::File(_))
+    }
+
+    /// The segment file, if the segment is in the file tier.
+    #[cfg(test)]
+    pub(crate) fn file(&self) -> Option<&SegFile> {
+        match &self.data {
+            Data::File(f) => Some(f),
+            Data::Ram { .. } => None,
+        }
+    }
+
+    /// The RAM bytes: the fences, and for a RAM segment the packed offsets and the values.
     fn bytes(&self) -> usize {
-        self.keys.bytes() + self.vals.len() * 8
+        self.key_bytes()
+            + match &self.data {
+                Data::Ram { vals, .. } => vals.len() * 8,
+                Data::File(_) => 0,
+            }
     }
 
-    /// Block `b` of the segment.
+    /// The RAM bytes of the keys: the fences, and for a RAM segment the packed offsets.
+    pub(crate) fn key_bytes(&self) -> usize {
+        self.fences.bytes()
+            + match &self.data {
+                Data::Ram { packed, .. } => packed.len(),
+                Data::File(_) => 0,
+            }
+    }
+
+    /// The bytes of the records of blocks `bs` in the segment file.
+    fn records(&self, f: &SegFile, bs: Range<usize>) -> Range<u64> {
+        let start = self.fences.block(bs.start).start as u64 * 8;
+        let end = if bs.end < self.fences.blocks() { self.fences.block(bs.end).start as u64 * 8 } else { f.end() };
+        start..end
+    }
+
+    /// Block `b` of the segment. A file segment gives its record through the block cache.
     #[inline]
     pub(crate) fn block(&self, b: usize) -> SegBlock<'_> {
-        let at = b * BLOCK;
-        SegBlock { fence: self.keys.fences().block(b), packed: self.keys.packed(), vals: &self.vals[at..(at + BLOCK).min(self.vals.len())] }
+        let fence = self.fences.block(b);
+        let rows = self.fences.rows(b);
+        match &self.data {
+            Data::Ram { packed, vals } => SegBlock { fence: *fence, rows, src: BlockSrc::Ram { packed, vals: &vals[b * BLOCK..b * BLOCK + rows] } },
+            Data::File(f) => SegBlock { fence: Block { start: 0, ..*fence }, rows, src: BlockSrc::File(f.block(b, self.records(f, b..b + 1))) },
+        }
+    }
+
+    /// The key at row `j` (one block read for a file segment).
+    #[inline]
+    pub(crate) fn key(&self, j: usize) -> u64 {
+        let (b, i) = self.fences.locate(j);
+        match &self.data {
+            Data::Ram { packed, .. } => self.fences.block(b).key(packed, i),
+            Data::File(_) => self.block(b).key(i),
+        }
+    }
+
+    /// The first row whose key does not satisfy `pred`. `pred` must be true for a prefix of the keys.
+    pub(crate) fn partition_point(&self, mut pred: impl FnMut(u64) -> bool) -> usize {
+        let nb = self.fences.partition_point(&mut pred);
+        if nb == 0 {
+            return 0;
+        }
+        // The base of block nb - 1 satisfies pred and the base of block nb does not, so the answer
+        // is in block nb - 1 or at its end. One block read gives every probe.
+        let block = self.block(nb - 1);
+        let (mut lo, mut hi) = (1, block.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if pred(block.key(mid)) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        (nb - 1) * BLOCK + lo
+    }
+
+    /// The value of the row with `key`, or None if the segment has no such row.
+    fn value(&self, key: u64) -> Option<f64> {
+        let i = self.partition_point(|k| k < key);
+        if i == self.len() {
+            return None;
+        }
+        let (b, j) = self.fences.locate(i);
+        let block = self.block(b);
+        (block.key(j) == key).then(|| block.val(j))
     }
 
     /// The rows in `r`, decoded one block at a time.
     pub(crate) fn range(&self, r: Range<usize>) -> BaseRange<'_> {
         debug_assert!(r.end <= self.len());
-        BaseRange { seg: self, i: r.start, end: r.end, decode_at: r.start, keys: [0; BLOCK], vals: [0.0; BLOCK] }
+        BaseRange { seg: self, i: r.start, end: r.end, decode_at: r.start, keys: [0; BLOCK], vals: [0.0; BLOCK], win: Vec::new(), win_blocks: 0..0 }
     }
 
     /// The index of the dimension at packing position `pos`. The first use makes it with a counting sort (linear in
     /// the rows). The build is sequential: a rayon wait inside `get_or_init` can run a task that waits on the same cell.
     pub(crate) fn postings(&self, pack: &Packing, pos: usize) -> &Postings {
         self.postings[pos].get_or_init(|| {
+            let Data::Ram { packed, .. } = &self.data else { unreachable!("best_postings gives a file base no index") };
+            let keys = || packed::Keys::new(&self.fences, packed, 0..self.len());
             let size = (pack.masks[pos] + 1) as usize;
             let mut count = vec![0u32; size + 1];
-            for k in self.keys.iter() {
+            for k in keys() {
                 count[pack.get(k, pos) as usize + 1] += 1;
             }
             for i in 1..count.len() {
@@ -115,7 +212,7 @@ impl Segment {
             let n = self.len() as u64; // best_postings makes sure that n fits in u32
             // Hold the rows as u32 and pack the u64 entries one at a time. Then the build needs 4 B for each row, not 8 B.
             let mut rows = vec![0u32; n as usize];
-            for (row, k) in self.keys.iter().enumerate() {
+            for (row, k) in keys().enumerate() {
                 let m = pack.get(k, pos) as usize;
                 rows[fill[m] as usize] = row as u32;
                 fill[m] += 1;
@@ -173,7 +270,7 @@ impl Base {
     #[inline]
     pub(crate) fn key(&self, i: usize) -> u64 {
         let (s, j) = self.locate(i);
-        self.segs[s].keys.get(j)
+        self.segs[s].key(j)
     }
 
     /// The first global row whose key is at least `key`.
@@ -182,13 +279,12 @@ impl Base {
         if s == self.segs.len() {
             return self.rows();
         }
-        self.starts[s] + self.segs[s].keys.partition_point(|k| k < key)
+        self.starts[s] + self.segs[s].partition_point(|k| k < key)
     }
 
     /// The value of the row with `key`, or None if the base has no such row.
-    fn value(&self, key: u64) -> Option<f64> {
-        let seg = self.segs.get(self.segs.partition_point(|seg| seg.last < key))?;
-        seg.keys.find(key).map(|j| seg.vals[j])
+    pub(crate) fn value(&self, key: u64) -> Option<f64> {
+        self.segs.get(self.segs.partition_point(|seg| seg.last < key))?.value(key)
     }
 
     /// The rows in `r` (global rows), decoded one block at a time, segment after segment.
@@ -208,9 +304,9 @@ impl Base {
     fn segments_in(&self, lo: u64, hi: Option<u64>) -> impl Iterator<Item = BaseRange<'_>> {
         let first = self.segs.partition_point(|s| s.last < lo);
         self.segs[first..].iter().take_while(move |s| hi.is_none_or(|h| s.first < h)).map(move |s| {
-            let a = if s.first < lo { s.keys.partition_point(|k| k < lo) } else { 0 };
+            let a = if s.first < lo { s.partition_point(|k| k < lo) } else { 0 };
             let b = match hi {
-                Some(h) if s.last >= h => s.keys.partition_point(|k| k < h),
+                Some(h) if s.last >= h => s.partition_point(|k| k < h),
                 _ => s.len(),
             };
             s.range(a..b)
@@ -236,29 +332,93 @@ impl Base {
     }
 
     /// A base of the given segments, with the key as the value of each row (for the tests of the readers).
+    /// With `tier`, the segments are files.
     #[cfg(test)]
-    pub(crate) fn from_parts(parts: &[&[u64]]) -> Base {
-        Base::new(parts.iter().map(|p| Segment::new(PackedKeys::new(p, false), p.iter().map(|&k| k as f64).collect(), 0)).collect())
+    pub(crate) fn from_parts(parts: &[&[u64]], tier: Option<&'static Tier>) -> Base {
+        let make = |p: &&[u64]| match tier {
+            Some(t) => file_segment(t, &p.iter().map(|&k| (k, k as f64)).collect::<Vec<_>>(), 0),
+            None => {
+                let (fences, packed) = PackedKeys::new(p, false).into_parts();
+                Segment::new(fences, Data::Ram { packed, vals: p.iter().map(|&k| k as f64).collect() }, p[p.len() - 1], 0)
+            }
+        };
+        Base::new(parts.iter().map(make).collect())
     }
 }
 
-/// One block of a segment: its fence, the packed offsets that the fence points into, and its values.
+/// One block of a segment: its fence (`start` relative to the packed bytes of its source), its rows, and its source.
 pub(crate) struct SegBlock<'a> {
-    fence: &'a packed::Block,
-    packed: &'a [u8],
-    pub(crate) vals: &'a [f64], // one value for each row of the block
+    fence: Block,
+    rows: usize,
+    src: BlockSrc<'a>,
 }
 
-impl SegBlock<'_> {
+/// The bytes of one block: the packed offsets and the values in RAM, or the pinned record of a segment file.
+enum BlockSrc<'a> {
+    Ram { packed: &'a [u8], vals: &'a [f64] },
+    File(Buf),
+}
+
+impl<'a> SegBlock<'a> {
+    /// The number of rows of the block.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.rows
+    }
+
+    /// The values of a RAM block, without a copy.
+    #[inline]
+    pub(crate) fn ram_vals(&self) -> Option<&'a [f64]> {
+        match self.src {
+            BlockSrc::Ram { vals, .. } => Some(vals),
+            BlockSrc::File(_) => None,
+        }
+    }
+
     /// Decodes the keys at positions `js` of the block into `out`.
     #[inline]
     pub(crate) fn keys(&self, js: Range<usize>, out: &mut [u64]) {
-        packed::decode_block(self.fence, self.packed, js, out);
+        match &self.src {
+            BlockSrc::Ram { packed, .. } => packed::decode_block(&self.fence, packed, js, out),
+            BlockSrc::File(rec) => packed::decode_block(&self.fence, &rec[self.rows * 8..], js, out),
+        }
+    }
+
+    /// Copies the values at positions `js` of the block into `out`.
+    #[inline]
+    pub(crate) fn vals(&self, js: Range<usize>, out: &mut [f64]) {
+        match &self.src {
+            BlockSrc::Ram { vals, .. } => out.copy_from_slice(&vals[js]),
+            BlockSrc::File(rec) => {
+                for (o, v) in out.iter_mut().zip(rec[js.start * 8..js.end * 8].as_chunks::<8>().0) {
+                    *o = f64::from_le_bytes(*v);
+                }
+            }
+        }
+    }
+
+    /// The key at position `j` of the block.
+    #[inline]
+    pub(crate) fn key(&self, j: usize) -> u64 {
+        match &self.src {
+            BlockSrc::Ram { packed, .. } => self.fence.key(packed, j),
+            BlockSrc::File(rec) => self.fence.key(&rec[self.rows * 8..], j),
+        }
+    }
+
+    /// The value at position `j` of the block.
+    #[inline]
+    pub(crate) fn val(&self, j: usize) -> f64 {
+        match &self.src {
+            BlockSrc::Ram { vals, .. } => vals[j],
+            BlockSrc::File(rec) => f64::from_le_bytes(rec[j * 8..j * 8 + 8].try_into().unwrap()),
+        }
     }
 }
 
 /// The rows of one segment in a range. It decodes the keys and the values of one block into two arrays,
-/// then gives the rows from them.
+/// then gives the rows from them. A file segment is read in windows of `read_window` blocks with one read
+/// each, not through the block cache.
 pub(crate) struct BaseRange<'a> {
     seg: &'a Segment,
     i: usize,         // the next row in the segment
@@ -266,6 +426,8 @@ pub(crate) struct BaseRange<'a> {
     decode_at: usize, // the first row that is not yet in `keys` and `vals`
     keys: [u64; BLOCK],
     vals: [f64; BLOCK],
+    win: Vec<u8>,             // the records of the blocks `win_blocks` of a file segment
+    win_blocks: Range<usize>, // empty until the first read
 }
 
 impl BaseRange<'_> {
@@ -274,9 +436,28 @@ impl BaseRange<'_> {
     fn decode(&mut self) {
         let j = self.i % BLOCK;
         let hi = (self.end - (self.i - j)).min(BLOCK);
-        let block = self.seg.block(self.i / BLOCK);
-        block.keys(j..hi, &mut self.keys[j..hi]);
-        self.vals[j..hi].copy_from_slice(&block.vals[j..hi]);
+        let b = self.i / BLOCK;
+        match &self.seg.data {
+            Data::Ram { packed, vals } => {
+                packed::decode_block(self.seg.fences.block(b), packed, j..hi, &mut self.keys[j..hi]);
+                self.vals[j..hi].copy_from_slice(&vals[b * BLOCK + j..b * BLOCK + hi]);
+            }
+            Data::File(f) => {
+                if !self.win_blocks.contains(&b) {
+                    let last = (b + f.read_window()).min((self.end - 1) / BLOCK + 1);
+                    f.read_into(self.seg.records(f, b..last), &mut self.win);
+                    self.win_blocks = b..last;
+                }
+                let fence = self.seg.fences.block(b);
+                let at = (fence.start as usize - self.seg.fences.block(self.win_blocks.start).start as usize) * 8;
+                let rows = self.seg.fences.rows(b);
+                let rec = &self.win[at..];
+                packed::decode_block(&Block { start: 0, ..*fence }, &rec[rows * 8..], j..hi, &mut self.keys[j..hi]);
+                for (o, v) in self.vals[j..hi].iter_mut().zip(rec[j * 8..hi * 8].as_chunks::<8>().0) {
+                    *o = f64::from_le_bytes(*v);
+                }
+            }
+        }
         self.decode_at = self.i - j + hi;
     }
 }
@@ -354,23 +535,36 @@ impl<'a> Rows<'a> {
 
 /// Builds a Base in key order. It cuts a segment at the first partition-member boundary after `seg_rows`
 /// rows, so a segment holds whole partition members. `like` gives the key density for the reservation.
+/// It keeps one block of keys and, in file mode, one block of values unpacked.
 pub(crate) struct BaseBuilder<'a> {
     pack: &'a Packing,
+    cfg: &'a Config,
     seg_rows: usize,
     density: (usize, usize), // (bytes, rows) of the packed keys of a base like the new one
     hint: usize,             // the rows still expected
-    keys: packed::Builder,
-    vals: Vec<f64>,
+    keys: Vec<u64>,          // the keys of the block in build
+    vals: Vec<f64>,          // the values of the segment (RAM) or of the block in build (file)
+    rows: usize,             // the rows of the segment in build
+    out: Option<Out>,        // None only while `seal` runs
     last: u64,
     done: Vec<Arc<Segment>>,
 }
 
+/// Where the blocks of the segment in build go. The segment file opens at the first block, so a cut or a
+/// sink without a row makes no file.
+enum Out {
+    Ram(packed::Builder),
+    File(Option<SegWriter>),
+}
+
 impl<'a> BaseBuilder<'a> {
-    pub(crate) fn new(pack: &'a Packing, cfg: &Config, hint: usize, like: &Base) -> BaseBuilder<'a> {
-        let density = (like.segs.iter().map(|s| s.keys.bytes()).sum(), like.rows());
+    pub(crate) fn new(pack: &'a Packing, cfg: &'a Config, hint: usize, like: &Base) -> BaseBuilder<'a> {
+        let density = (like.segs.iter().map(|s| s.key_bytes()).sum(), like.rows());
         let seg_rows = cfg.seg_rows.max(1);
         let cap = BaseBuilder::cap(seg_rows, hint);
-        BaseBuilder { pack, seg_rows, density, hint, keys: PackedKeys::builder(cap, density), vals: Vec::with_capacity(cap), last: 0, done: Vec::new() }
+        let out = BaseBuilder::out(cfg, cap, density);
+        let vals = Vec::with_capacity(if cfg.tier.is_some() { BLOCK } else { cap });
+        BaseBuilder { pack, cfg, seg_rows, density, hint, keys: Vec::with_capacity(BLOCK), vals, rows: 0, out: Some(out), last: 0, done: Vec::new() }
     }
 
     /// The reservation of one segment: `seg_rows` and room for the rest of the partition member at the cut,
@@ -379,32 +573,87 @@ impl<'a> BaseBuilder<'a> {
         seg_rows.saturating_add(seg_rows / 16).min(hint)
     }
 
+    fn out(cfg: &Config, cap: usize, density: (usize, usize)) -> Out {
+        match cfg.tier {
+            None => Out::Ram(PackedKeys::builder(cap, density)),
+            Some(_) => Out::File(None),
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn push(&mut self, k: u64, v: f64) {
-        if self.vals.len() >= self.seg_rows && self.pack.get(k, 0) != self.pack.get(self.last, 0) {
+        if self.rows >= self.seg_rows && self.pack.get(k, 0) != self.pack.get(self.last, 0) {
             self.cut();
         }
         self.keys.push(k);
         self.vals.push(v);
+        self.rows += 1;
         self.last = k;
+        if self.keys.len() == BLOCK {
+            self.flush();
+        }
     }
 
+    /// Packs the block in build. In file mode it also writes its record.
+    #[cold]
+    fn flush(&mut self) {
+        let tier = self.cfg.tier;
+        match self.out.as_mut().expect("the output of the segment in build") {
+            Out::Ram(b) => b.push_block(&self.keys),
+            Out::File(w) => {
+                let w = match w {
+                    Some(w) => w,
+                    None => w.insert(tier.expect("a file output has a tier").writer().unwrap_or_else(|e| panic!("セグメントファイルを作れない: {e}"))),
+                };
+                w.block(&self.keys, &self.vals).unwrap_or_else(|e| panic!("セグメントファイルに書けない: {e}"));
+                self.vals.clear();
+            }
+        }
+        self.keys.clear();
+    }
+
+    /// Ends the segment in build and opens the output of the next one.
     #[cold]
     fn cut(&mut self) {
-        self.hint = self.hint.saturating_sub(self.vals.len());
+        self.seal();
         let cap = BaseBuilder::cap(self.seg_rows, self.hint);
+        self.out = Some(BaseBuilder::out(self.cfg, cap, self.density));
+        if self.cfg.tier.is_none() {
+            self.vals.reserve(cap);
+        }
+    }
+
+    /// Ends the segment in build. `finish` opens no next output: that would be a transient block buffer, or an
+    /// empty file.
+    fn seal(&mut self) {
+        if !self.keys.is_empty() {
+            self.flush();
+        }
+        self.hint = self.hint.saturating_sub(self.rows);
+        let n_dims = self.pack.dims.len();
         // The next segment packs like this one. In a full recalculation the old base is empty. Then 2 B for each
         // key is too small, and the key bytes grow by doubling (a copy).
-        self.density = self.keys.density();
-        let keys = std::mem::replace(&mut self.keys, PackedKeys::builder(cap, self.density)).finish();
-        let vals = std::mem::replace(&mut self.vals, Vec::with_capacity(cap));
-        self.done.push(Segment::new(keys, vals.into_boxed_slice(), self.pack.dims.len()));
+        let seg = match self.out.take().expect("the output of the segment in build") {
+            Out::Ram(b) => {
+                self.density = b.density();
+                let (fences, packed) = b.finish().into_parts();
+                let vals = std::mem::take(&mut self.vals).into_boxed_slice();
+                Segment::new(fences, Data::Ram { packed, vals }, self.last, n_dims)
+            }
+            Out::File(w) => {
+                let w = w.expect("a segment in build has a block");
+                let (fences, file) = w.finish().unwrap_or_else(|e| panic!("セグメントファイルに書けない: {e}"));
+                Segment::new(fences, Data::File(file), self.last, n_dims)
+            }
+        };
+        self.rows = 0;
+        self.done.push(seg);
     }
 
     /// Appends a segment of the old base unchanged (an Arc clone, so its index survives). The segment in build
     /// ends first, so a kept segment and its neighbours stay whole partition members.
     pub(crate) fn keep(&mut self, seg: &Arc<Segment>) {
-        if !self.vals.is_empty() {
+        if self.rows > 0 {
             self.cut();
         }
         self.hint = self.hint.saturating_sub(seg.len());
@@ -413,12 +662,25 @@ impl<'a> BaseBuilder<'a> {
     }
 
     pub(crate) fn finish(mut self) -> Base {
-        if !self.vals.is_empty() {
-            let n_dims = self.pack.dims.len();
-            self.done.push(Segment::new(self.keys.finish(), self.vals.into_boxed_slice(), n_dims));
+        if self.rows > 0 {
+            self.seal();
         }
         Base::new(self.done)
     }
+}
+
+/// A segment file of the sorted `cells` (not empty), one block record at a time.
+fn file_segment(t: &'static Tier, cells: &[(u64, f64)], n_dims: usize) -> Arc<Segment> {
+    let mut w = t.writer().unwrap_or_else(|e| panic!("セグメントファイルを作れない: {e}"));
+    let (mut keys, mut vals) = ([0u64; BLOCK], [0f64; BLOCK]);
+    for chunk in cells.chunks(BLOCK) {
+        for (i, &(k, v)) in chunk.iter().enumerate() {
+            (keys[i], vals[i]) = (k, v);
+        }
+        w.block(&keys[..chunk.len()], &vals[..chunk.len()]).unwrap_or_else(|e| panic!("セグメントファイルに書けない: {e}"));
+    }
+    let (fences, file) = w.finish().unwrap_or_else(|e| panic!("セグメントファイルに書けない: {e}"));
+    Segment::new(fences, Data::File(file), cells[cells.len() - 1].0, n_dims)
 }
 
 /// The iterator of `Store::merged_iter`: the base rows and the delta in one key order (as `merged`). A delta entry
@@ -627,9 +889,11 @@ impl Store {
                 let post = seg.postings(&self.pack, pos);
                 for &m in &sel.members {
                     for row in post.of(m) {
-                        let k = seg.keys.get(row as usize);
+                        let (b, j) = seg.fences.locate(row as usize);
+                        let block = seg.block(b);
+                        let k = block.key(j);
                         if !self.delta.contains_key(&k) && pass(&self.pack, k, &cs) {
-                            cells.push((k, seg.vals[row as usize]));
+                            cells.push((k, block.val(j)));
                         }
                     }
                 }
@@ -669,24 +933,33 @@ impl Store {
 
     pub fn read(&self, r: &Restrict) -> Cube {
         if r.is_all() && self.delta.is_empty() {
-            // Each block is decoded once, in parallel on a large base.
+            // Each block is decoded once, in parallel on a large base. A file base reads one window for each part.
             let mut cells = vec![(0u64, 0f64); self.base.rows()];
+            let step = self.read_step();
             let fill = |(b, out): (usize, &mut [(u64, f64)])| {
-                let rows = self.base.range(b * BLOCK..b * BLOCK + out.len());
+                let rows = self.base.range(b * step..b * step + out.len());
                 for (c, row) in out.iter_mut().zip(rows) {
                     *c = row;
                 }
             };
             if self.cfg.par(cells.len()) {
-                cells.par_chunks_mut(BLOCK).enumerate().for_each(fill);
+                cells.par_chunks_mut(step).enumerate().for_each(fill);
             } else {
-                cells.chunks_mut(BLOCK).enumerate().for_each(fill);
+                cells.chunks_mut(step).enumerate().for_each(fill);
             }
             return Cube { pack: self.pack.clone(), kind: self.kind, cells };
         }
         let mut cells = Vec::new();
         self.for_each_in(r, |k, v| cells.push((k, v)));
         Cube { pack: self.pack.clone(), kind: self.kind, cells }
+    }
+
+    /// The rows of one part of a read of the whole base: one block in RAM, one read window for a base with file segments.
+    pub(crate) fn read_step(&self) -> usize {
+        match self.cfg.tier {
+            Some(t) if self.base.segs.iter().any(|s| s.is_file()) => BLOCK * t.read_window,
+            _ => BLOCK,
+        }
     }
 
     /// 差分がなければ本体の行数（本体の行を番号で直接読める）。差分があれば None。
@@ -761,6 +1034,14 @@ impl Store {
         }
         cuts.push(cells.len());
         cuts.dedup();
+        let n_dims = self.pack.dims.len();
+        if let Some(t) = self.cfg.tier {
+            // One thread writes one segment file, so the segments go in parallel
+            let make = |w: &[usize]| file_segment(t, &cells[w[0]..w[1]], n_dims);
+            let segs = if par { cuts.par_windows(2).map(make).collect() } else { cuts.windows(2).map(make).collect() };
+            self.set_base(Base::new(segs));
+            return;
+        }
         // Allocate the value columns on the calling thread. A parallel collect also reserves its Vec there.
         // If the rayon workers allocate the columns, their malloc arenas keep the freed columns of old segments.
         // Then RSS grows by about 20 % on retail xlarge.
@@ -769,8 +1050,10 @@ impl Store {
         };
         let vals: Vec<Box<[f64]>> = cuts.windows(2).map(|w| column(&cells[w[0]..w[1]])).collect();
         let keys = keys_in_place(cells);
-        let n_dims = self.pack.dims.len();
-        let make = |(w, vals): (&[usize], Box<[f64]>)| Segment::new(PackedKeys::new(&keys[w[0]..w[1]], par), vals, n_dims);
+        let make = |(w, vals): (&[usize], Box<[f64]>)| {
+            let (fences, packed) = PackedKeys::new(&keys[w[0]..w[1]], par).into_parts();
+            Segment::new(fences, Data::Ram { packed, vals }, keys[w[1] - 1], n_dims)
+        };
         self.set_base(Base::new(cuts.windows(2).zip(vals).map(make).collect()));
     }
 
@@ -799,7 +1082,8 @@ impl Store {
     pub(crate) fn best_postings<'a>(&'a self, r: &'a Restrict) -> Option<(&'a Arc<Sel>, usize)> {
         let min_rows = self.cfg.postings_min_rows;
         let n = self.base.rows();
-        if n == 0 || n < min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize) {
+        // A file segment has no index: an index is O(rows) in RAM (see `docs/engine.md`)
+        if n == 0 || n < min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize || s.is_file()) {
             return None;
         }
         let mut best: Option<(usize, &Arc<Sel>, usize)> = None;
@@ -889,7 +1173,7 @@ impl Store {
     /// (see `best_postings` and `postings`): (the most at the peak, the bytes that the store keeps).
     fn postings_bytes(&self, filtered: impl Fn(DimId) -> bool) -> (usize, usize) {
         let n = self.base.rows();
-        if n == 0 || n < self.cfg.postings_min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize) || self.pack.dims.first().is_some_and(|&d| filtered(d)) {
+        if n == 0 || n < self.cfg.postings_min_rows || self.base.segs.iter().any(|s| s.len() > u32::MAX as usize || s.is_file()) || self.pack.dims.first().is_some_and(|&d| filtered(d)) {
             return (0, 0);
         }
         let (mut peak, mut kept) = (0usize, 0usize);
@@ -922,12 +1206,14 @@ impl Store {
     }
 
     /// Makes a new base from the old base and the delta. With `removed`, the keys that pass its checks go out (no
-    /// checks take every key out), and `new` (in key order) goes in. Each old segment drops after the builder reads
-    /// it, so a rewrite holds about one base and one segment. If a version shares the old segments, nothing frees.
+    /// checks take every key out), and `new` (in key order) goes in. In RAM, each old segment drops after the builder
+    /// reads it, so a rewrite holds about one base and one segment. If a version shares the old segments, nothing
+    /// frees. In file mode the old base stays until the new one is complete: if a segment write fails (a panic),
+    /// the store keeps its old base and delta.
     fn rewrite(&mut self, hint: usize, touched: &[bool], new: Vec<(u64, f64)>, removed: Option<&[(usize, Arc<Sel>)]>) {
         let mut out = BaseBuilder::new(&self.pack, &self.cfg, hint, &self.base);
-        let (base, delta) = (std::mem::take(&mut self.base), std::mem::take(&mut self.delta));
-        let mut delta = delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable();
+        let base = if self.cfg.tier.is_some() { self.base.clone() } else { std::mem::take(&mut self.base) };
+        let mut delta = self.delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable();
         let mut new = new.into_iter().peekable();
         let kept = |k| removed.is_none_or(|cs| !pass(&self.pack, k, cs));
         for (seg, &hit) in base.segs.into_iter().zip(touched) {
@@ -951,7 +1237,8 @@ impl Store {
         }
         drain_delta(delta, &mut |k, v| rewrite_row(&mut out, &mut new, kept, k, v));
         new.for_each(|(k, v)| out.push(k, v));
-        self.set_base(out.finish());
+        let base = out.finish();
+        self.set_base(base);
     }
 
     pub(crate) fn after_delta(&mut self) {
@@ -1493,7 +1780,7 @@ mod tests {
         s.set_sorted(sorted(&cat.cfg, cells));
         assert_eq!(s.base.segs.len(), 3);
         for seg in &s.base.segs {
-            let keys: Vec<u64> = seg.keys.iter().collect();
+            let keys: Vec<u64> = seg.range(0..seg.len()).map(|(k, _)| k).collect();
             for m in 0..64 {
                 let want: Vec<u32> = keys.iter().enumerate().filter(|(_, &k)| s.pack.get(k, 1) == m).map(|(row, _)| row as u32).collect();
                 assert_eq!(seg.postings(&s.pack, 1).of(m).collect::<Vec<u32>>(), want, "m={m}");
@@ -1507,12 +1794,57 @@ mod tests {
 
     #[test]
     fn read_of_all_rows_crosses_segments() {
-        let cat = two_dims_with(1024, Config { seg_rows: 50_000, par_min: 0, ..Config::default() });
+        for tier in [None, Some(Tier::for_tests())] {
+            let cat = two_dims_with(1024, Config { seg_rows: 50_000, par_min: 0, tier, ..Config::default() });
+            let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+            let cells: Vec<(u64, f64)> = (0..150_000u64).map(|k| (k * 5 + k % 3, k as f64)).collect();
+            s.set_sorted(sorted(&cat.cfg, cells.clone()));
+            assert!(s.base.segs.len() > 2);
+            assert_eq!(s.base.segs.iter().all(|g| g.is_file()), tier.is_some());
+            assert_eq!(s.read(&Restrict::all(2)).cells, cells);
+            // A range inside one window, one that crosses windows, and one that crosses segments
+            let n = s.base.segs[0].len();
+            for r in [10..20, 1020..3100, n - 5..n + 2100, 0..cells.len()] {
+                assert_eq!(s.base.range(r.clone()).collect::<Vec<_>>(), cells[r.clone()], "range {r:?}");
+            }
+            s.write(&[0, 1], Some(-1.0));
+            assert_eq!(s.get(&[0, 1]), Some(-1.0));
+            assert_eq!(s.len(), cells.len() + 1);
+        }
+    }
+
+    #[test]
+    fn a_segment_file_lives_while_a_version_holds_it() {
+        let tier = Tier::for_tests();
+        let cat = two_dims_with(1024, Config { seg_rows: 2048, compact_min: 16, postings_min_rows: 0, tier: Some(tier), ..Config::default() });
         let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
-        let cells: Vec<(u64, f64)> = (0..150_000u64).map(|k| (k * 5 + k % 3, k as f64)).collect();
-        s.set_sorted(sorted(&cat.cfg, cells.clone()));
-        assert!(s.base.segs.len() > 2);
-        assert_eq!(s.read(&Restrict::all(2)).cells, cells);
+        s.set_sorted(random_cells(10_000, 7));
+        assert_eq!(s.base.segs.len(), 5);
+        let paths: Vec<std::path::PathBuf> = s.base.segs.iter().map(|g| g.file().unwrap().path().to_path_buf()).collect();
+        assert!(paths.iter().all(|p| p.exists()));
+        let r = Restrict::all(2).with(1, Sel::new(vec![3, 17, 40], 1024));
+        assert!(s.best_postings(&r).is_none(), "no index on a file base");
+        let want: Vec<(u64, f64)> = s.as_cube().cells.into_iter().filter(|c| [3, 17, 40].contains(&s.pack.get(c.0, 1))).collect();
+        assert_eq!(s.read(&r).cells, want);
+        let version = s.clone();
+        let mut want = map_of(&s);
+        // A compaction that touches segment 2 only: its old file stays with the version, the others are kept
+        for i in 0..20u64 {
+            let k = s.base.segs[2].first + i * 3;
+            s.write(&s.decode(k), Some(i as f64));
+            want.insert(k, i as f64);
+        }
+        s.compact();
+        assert_eq!(map_of(&s), want);
+        let after: Vec<std::path::PathBuf> = s.base.segs.iter().map(|g| g.file().unwrap().path().to_path_buf()).collect();
+        assert!(paths.iter().all(|p| p.exists()), "the version holds the old files");
+        assert_eq!(kept(&version.base, &s), [true, true, false, true, true]);
+        assert!(!after.contains(&paths[2]));
+        drop(version);
+        assert!(!paths[2].exists(), "the last reference went");
+        assert!(after.iter().all(|p| p.exists()));
+        s.set_sorted(random_cells(100, 3));
+        assert!(after.iter().all(|p| !p.exists()), "the whole old base went");
     }
 
     fn two_dims(size: u32) -> Catalog {
@@ -1746,27 +2078,47 @@ mod tests {
 
     #[test]
     fn a_sink_builds_the_same_base_as_set_sorted() {
-        let cat = two_dims_with(1024, Config { seg_rows: 2048, ..Config::default() });
-        let cells = random_cells(10_000, 7);
-        let mut want = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
-        want.set_sorted(cells.clone());
-        assert_eq!(want.base.segs.len(), 5);
-        // Also with more room than cells (the Exact cover reserves the rows of the drivers)
-        let empty = want.empty_like();
-        for n in [cells.len(), cells.len() + 1234] {
-            let mut sink = empty.sink(n, false);
-            for part in cells.chunks(700) {
-                sink.part(part.to_vec()).unwrap();
-            }
-            let (got, changed) = want.with_columns(sink.finish());
-            assert!(changed.is_none());
-            assert_eq!(got.base.starts, want.base.starts);
-            for (g, w) in got.base.segs.iter().zip(&want.base.segs) {
-                assert_eq!(g.keys.bytes(), w.keys.bytes());
-                assert_eq!(g.keys.iter().collect::<Vec<u64>>(), w.keys.iter().collect::<Vec<u64>>());
-                assert_eq!(g.vals, w.vals);
+        for tier in [None, Some(Tier::for_tests())] {
+            let cat = two_dims_with(1024, Config { seg_rows: 2048, tier, ..Config::default() });
+            let cells = random_cells(10_000, 7);
+            let mut want = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+            want.set_sorted(cells.clone());
+            assert_eq!(want.base.segs.len(), 5);
+            // Also with more room than cells (the Exact cover reserves the rows of the drivers)
+            let empty = want.empty_like();
+            for n in [cells.len(), cells.len() + 1234] {
+                let mut sink = empty.sink(n, false);
+                for part in cells.chunks(700) {
+                    sink.part(part.to_vec()).unwrap();
+                }
+                let (got, changed) = want.with_columns(sink.finish());
+                assert!(changed.is_none());
+                assert_eq!(got.base.starts, want.base.starts);
+                for (g, w) in got.base.segs.iter().zip(&want.base.segs) {
+                    assert_eq!(g.bytes(), w.bytes());
+                    assert_eq!(g.is_file(), tier.is_some());
+                    assert_eq!(g.range(0..g.len()).collect::<Vec<_>>(), w.range(0..w.len()).collect::<Vec<_>>());
+                    assert_eq!(g.fences.blocks(), w.fences.blocks());
+                    for b in 0..g.fences.blocks() {
+                        assert_eq!((g.fences.block(b).base, g.fences.block(b).width), (w.fences.block(b).base, w.fences.block(b).width));
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn an_empty_sink_opens_no_file() {
+        let tier = Tier::for_tests();
+        let cat = two_dims_with(64, Config { tier: Some(tier), ..Config::default() });
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted(random_cells(100, 3));
+        let mut sink = s.sink(10, false);
+        sink.out.keep(&s.base.segs[0]);
+        assert!(matches!(sink.out.out, Some(Out::File(None))), "no block, so no file");
+        let (got, _) = s.with_columns(sink.finish());
+        assert_eq!(got.base.rows(), s.base.rows());
+        assert!(Arc::ptr_eq(&got.base.segs[0], &s.base.segs[0]));
     }
 
     #[test]

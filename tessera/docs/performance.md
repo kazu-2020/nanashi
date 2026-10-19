@@ -194,6 +194,24 @@ In a production environment (with writes to the disk and network round trips), w
 The keys of a base are frame-of-reference blocks of 1,024 keys (`PackedKeys`, [Engine](engine.md)). In the retail model, the keys use about 2 B for each cell.
 A random read with `PackedKeys::get` is about 1.6 times slower than a `Vec` read (`bench_reads` in `packed.rs`, run with `--ignored`).
 
+### Segment files
+
+With `segment_dir` ("Segment files" in [Engine](engine.md)), the base of the stored data is in files and only the fences stay in RAM.
+We measured `examples/fpa.py` at 32 times its large size (157 M cells, 4 threads) on the cloud VM above. The block cache was 256 MiB.
+The table gives the median of 2 runs for each mode. Each run did these steps in order: open from a snapshot, full recalculation, 5 cutoff edits, 20 point edits, 2 filtered reads of `PayrollByEmployee`. Every read gave the same cells in both modes.
+
+| Measurement | RAM | Segment files |
+|---|---|---|
+| Rust heap after the 5 cutoff edits | 1,823 MB | 328 MB (fences 2, delta 30, cache 256) |
+| Maximum RSS of the process | 2,855 MB | 1,476 MB |
+| Full recalculation | 8.0 s | 8.3 s |
+| Cutoff edit (median of 10) | 4.3 s | 8.0 s |
+| Point edit (p99 of 20, warm) | 1.6 ms | 3.6 ms |
+| `rows` filtered by Month (36 members) | 0.8 s (the first read makes the index) | 0.3 s (a scan) |
+| `rows` filtered by Version | 1.2 s (the same) | 0.3 s |
+
+The full recalculation does not change, because the fused scan reads whole blocks in order. A cutoff edit is about 2 times slower: the rewrite reads the old segment through one thread and the segment file has no index. With the files out of the page cache (cold), a cutoff edit takes 8 to 10 s. A point edit takes 2.4 ms at the median.
+
 ## Save and journal formats
 
 (Profit and loss plan (large), PostgreSQL in local Docker, Python 3.14.)

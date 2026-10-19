@@ -21,7 +21,7 @@ from unittest import mock
 from sparse_engine.engine import ReferenceEngine
 from sparse_engine.named import Named
 from sparse_engine.model import Model
-from sparse_engine.server import Server, SummaryCache, idle_for, main
+from sparse_engine.server import Server, SummaryCache, _clear_segment_dir, idle_for, main
 from sparse_engine.workspace import Workspace
 
 from .journals import JournalCase, PgStore
@@ -1037,6 +1037,13 @@ class MainOptions(unittest.TestCase):
 
     def test_no_authentication_listens_only_on_loopback(self):
         self.assertIn("--insecure", self.refused("--host", "0.0.0.0"))
+
+    def test_segment_dir_keeps_the_files_that_are_not_segments(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("seg-0.bin", "seg-12.bin", "notes.txt", "seg-x.bin"):
+                open(os.path.join(d, name), "w").close()
+            _clear_segment_dir(d)
+            self.assertEqual(sorted(os.listdir(d)), ["notes.txt", "seg-x.bin"])
 
 
 class Observability(JournalCase, unittest.TestCase):

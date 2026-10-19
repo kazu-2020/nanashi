@@ -175,7 +175,7 @@ impl Store {
         let kept = self.metric_dims.iter().filter(|d| keep.contains(d)).map(|&d| cat.dims[d].size as usize * 8).sum::<usize>();
         // The key ranges and the Items: each range gives one Item, plus one Item for each block border that it crosses
         let n = self.pack.dims.first().and_then(|&d| r.get(d)).map_or(1, |s| s.members.len());
-        let blocks = self.base.segs.iter().map(|g| g.keys.fences().blocks()).sum::<usize>();
+        let blocks = self.base.segs.iter().map(|g| g.fences().blocks()).sum::<usize>();
         let work = n.saturating_mul(size_of::<RangeInclusive<u64>>()).saturating_add(n.saturating_add(blocks).saturating_mul(size_of::<Item>()));
         b.take(kept.saturating_add(work).div_ceil(CELL_BYTES), "集計")?;
         let radix = radix(self, keep, r, cat);
@@ -386,15 +386,15 @@ fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) 
             }
             continue;
         }
-        let mut s = segs.partition_point(|g| g.keys.fences().first(0) <= lo).saturating_sub(1);
-        let mut b = segs[s].keys.fences().owner(lo);
+        let mut s = segs.partition_point(|g| g.fences().first(0) <= lo).saturating_sub(1);
+        let mut b = segs[s].fences().owner(lo);
         'segs: loop {
-            let keys = &segs[s].keys;
-            let f = keys.fences();
-            let (start, end) = (keys.partition_point(|k| k < lo), keys.partition_point(|k| k <= hi));
+            let seg = &segs[s];
+            let f = seg.fences();
+            let (start, end) = (seg.partition_point(|k| k < lo), seg.partition_point(|k| k <= hi));
             loop {
                 let own_lo = if s == 0 && b == 0 { 0 } else { f.first(b) };
-                let next = if b + 1 < f.blocks() { Some(f.first(b + 1)) } else { segs.get(s + 1).map(|g| g.keys.fences().first(0)) };
+                let next = if b + 1 < f.blocks() { Some(f.first(b + 1)) } else { segs.get(s + 1).map(|g| g.fences().first(0)) };
                 let (a, e) = (start.max(b * BLOCK), end.min((b + 1) * BLOCK));
                 let rows = if a < e { a - b * BLOCK..e - b * BLOCK } else { 0..0 };
                 if !rows.is_empty() || !no_delta {
@@ -418,14 +418,25 @@ fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) 
 /// value goes first. A delta key replaces (or removes) the base row with the same key.
 #[inline]
 fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(u64, f64)) {
-    let mut buf = [0u64; BLOCK];
-    let keys = &mut buf[..it.rows.len()];
-    let mut vals = &[][..];
-    if !keys.is_empty() {
-        let block = st.base.segs[it.seg].block(it.block_in_segment);
-        block.keys(it.rows.clone(), keys);
-        vals = &block.vals[it.rows.clone()];
-    }
+    let mut kbuf = [0u64; BLOCK];
+    let keys = &mut kbuf[..it.rows.len()];
+    let mut vbuf = Vec::new();
+    let block = (!keys.is_empty()).then(|| st.base.segs[it.seg].block(it.block_in_segment));
+    let vals: &[f64] = match &block {
+        None => &[],
+        Some(b) => {
+            b.keys(it.rows.clone(), keys);
+            match b.ram_vals() {
+                Some(v) => &v[it.rows.clone()],
+                None => {
+                    vbuf.resize(it.rows.len(), 0.0);
+                    b.vals(it.rows.clone(), &mut vbuf);
+                    &vbuf
+                }
+            }
+        }
+    };
+    let keys: &[u64] = keys;
     let pass = |k: u64| tests.iter().all(|t| t.sel.has(((k >> t.shift) & t.mask) as u32));
     let mut delta = st.delta.range(it.keys.clone()).peekable();
     if delta.peek().is_none() {
@@ -502,7 +513,7 @@ mod tests {
         }
         let slices: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
         let mut st = Store::new(&[0, 1, 2], Some(index), Kind::Num, cat).unwrap().with_rows(&slices, &vals).unwrap();
-        assert!(st.base.segs.iter().map(|g| g.keys.fences().blocks()).sum::<usize>() > 3);
+        assert!(st.base.segs.iter().map(|g| g.fences().blocks()).sum::<usize>() > 3);
         for i in 0..300 {
             let key: Vec<u32> = SIZES.iter().map(|&s| rng.below(s as u64) as u32).collect();
             let v = if rng.below(3) == 0 { None } else { Some(value(rng, i)) };
@@ -553,7 +564,8 @@ mod tests {
         let (mut seen, mut segmented) = ((0, 0), 0);
         for round in 0..24 {
             let seg_rows = if round % 5 < 3 { 1500 } else { usize::MAX };
-            let cfg = Config { compact_min: usize::MAX, par_min: if round % 2 == 0 { 0 } else { usize::MAX }, dense_always: round % 4 < 2, seg_rows, ..Config::default() };
+            let tier = if round % 7 < 2 { Some(Tier::for_tests()) } else { None };
+            let cfg = Config { compact_min: usize::MAX, par_min: if round % 2 == 0 { 0 } else { usize::MAX }, dense_always: round % 4 < 2, seg_rows, tier, ..Config::default() };
             let cat = catalog(cfg);
             let st = store(&mut rng, [0, 2][round % 3 % 2], &cat);
             segmented += (st.base.segs.len() > 2) as usize;
@@ -597,7 +609,7 @@ mod tests {
     #[test]
     fn items_cover_each_key_once() {
         let keys: Vec<u64> = (0..3000).map(|i| 10 + i * 3).collect();
-        let one = Base::from_parts(&[&keys]);
+        let one = Base::from_parts(&[&keys], None);
         let all = items(&one.segs, false, &[RangeInclusive::new(0, u64::MAX)]);
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].keys, 0..=keys[1024] - 1);
@@ -606,7 +618,7 @@ mod tests {
         let part = items(&one.segs, true, &[keys[1000]..=keys[1030], keys[2999] + 1..=u64::MAX]);
         assert_eq!(part, vec![Item { seg: 0, block_in_segment: 0, rows: 1000..1024, keys: keys[1000]..=keys[1024] - 1 }, Item { seg: 0, block_in_segment: 1, rows: 0..7, keys: keys[1024]..=keys[1030] }]);
 
-        let two = Base::from_parts(&[&keys[..1500], &keys[1500..]]);
+        let two = Base::from_parts(&[&keys[..1500], &keys[1500..]], None);
         let all = items(&two.segs, false, &[RangeInclusive::new(0, u64::MAX)]);
         let owners: Vec<(usize, usize, RangeInclusive<u64>)> = all.iter().map(|it| (it.seg, it.block_in_segment, it.keys.clone())).collect();
         assert_eq!(

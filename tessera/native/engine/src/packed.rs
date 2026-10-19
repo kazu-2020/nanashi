@@ -13,15 +13,15 @@ pub(crate) const BLOCK: usize = 1024;
 /// The metadata of one block. It is 16 bytes, so a random read touches one cache line of metadata.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Block {
-    base: u64,  // the first key of the block
-    start: u32, // the first word of the block in `bytes` (a word is 8 bytes)
-    width: u8,  // bits per offset (0 to 64)
+    pub(crate) base: u64,  // the first key of the block
+    pub(crate) start: u32, // the first word of the block in `bytes` (a word is 8 bytes)
+    pub(crate) width: u8,  // bits per offset (0 to 64)
 }
 
 impl Block {
     /// `bytes` must hold 16 bytes from the byte of position `j`.
     #[inline(always)]
-    fn key(&self, bytes: &[u8], j: usize) -> u64 {
+    pub(crate) fn key(&self, bytes: &[u8], j: usize) -> u64 {
         let width = self.width as usize;
         let bit = j * width;
         let o = self.start as usize * 8 + bit / 8;
@@ -56,6 +56,36 @@ pub(crate) struct Fences {
 }
 
 impl Fences {
+    pub(crate) fn new(len: usize, blocks: Box<[Block]>) -> Fences {
+        Fences { len, blocks }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The bytes of the fences: 16 B for each block.
+    pub(crate) fn bytes(&self) -> usize {
+        self.blocks.len() * std::mem::size_of::<Block>()
+    }
+
+    /// The block of key `i` and the position of `i` in it. `i` must be less than `len()`.
+    #[inline]
+    pub(crate) fn locate(&self, i: usize) -> (usize, usize) {
+        (i / BLOCK, i % BLOCK)
+    }
+
+    /// The number of keys in block `b`.
+    #[inline]
+    pub(crate) fn rows(&self, b: usize) -> usize {
+        (self.len - b * BLOCK).min(BLOCK)
+    }
+
+    /// The first block whose first key does not satisfy `pred`, which must be true for a prefix of the keys.
+    pub(crate) fn partition_point(&self, mut pred: impl FnMut(u64) -> bool) -> usize {
+        self.blocks.partition_point(|b| pred(b.base))
+    }
+
     pub(crate) fn blocks(&self) -> usize {
         self.blocks.len()
     }
@@ -112,84 +142,46 @@ impl PackedKeys {
         PackedKeys { fences: Fences { len: keys.len(), blocks: blocks.into_boxed_slice() }, bytes: bytes.into_boxed_slice() }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.fences.len
     }
 
-    pub(crate) fn fences(&self) -> &Fences {
-        &self.fences
-    }
-
-    /// The packed offsets of all blocks, for `decode_block`.
-    pub(crate) fn packed(&self) -> &[u8] {
-        &self.bytes
+    /// The fences and the packed offsets (a RAM segment keeps them apart from each other).
+    pub(crate) fn into_parts(self) -> (Fences, Box<[u8]>) {
+        (self.fences, self.bytes)
     }
 
     /// A builder for about `capacity` keys. It reserves the bytes at the density of `like`, the (bytes, keys)
     /// of similar packed keys, so the byte buffer does not grow by doubling. If `like` has no keys, it reserves
     /// 2 B for each key (the density of the large models, `docs/performance.md`), and the buffer grows if the
     /// keys pack worse.
+    /// The builder gets whole blocks (`push_block`), so it reserves no block buffer of its own.
     pub(crate) fn builder(capacity: usize, like: (usize, usize)) -> Builder {
         let bytes = if like.1 == 0 { capacity * 2 } else { (like.0 * capacity).div_ceil(like.1).min(capacity * 8) };
-        PackedKeys::builder_with_bytes(capacity, bytes)
+        Builder::new(capacity, bytes, 0)
     }
 
     /// A builder for about `capacity` keys that reserves `bytes` for the packed offsets (see `packed_bytes`).
     pub(crate) fn builder_with_bytes(capacity: usize, bytes: usize) -> Builder {
-        Builder {
-            len: 0,
-            blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
-            bytes: Vec::with_capacity(bytes + 16),
-            buf: Vec::with_capacity(BLOCK),
-            most: capacity.saturating_mul(8).saturating_add(16),
-        }
+        Builder::new(capacity, bytes, BLOCK)
     }
 
     /// The key at `i`. `i` must be less than `len()`.
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn get(&self, i: usize) -> u64 {
         debug_assert!(i < self.len(), "key index past the number of rows");
         self.fences.blocks[i / BLOCK].key(&self.bytes, i % BLOCK)
     }
 
-    /// Decodes the keys at positions `js` of block `b` into `out` (see `decode_block`).
-    pub(crate) fn decode(&self, b: usize, js: Range<usize>, out: &mut [u64]) {
-        decode_block(&self.fences.blocks[b], &self.bytes, js, out);
-    }
-
     /// The keys at the indexes in `r`, in order. It decodes block by block, so it is faster than `get`.
     pub(crate) fn range(&self, r: Range<usize>) -> Keys<'_> {
-        debug_assert!(r.end <= self.len());
-        Keys { keys: self, i: r.start, end: r.end, decode_at: r.start, buf: [0; BLOCK] }
+        Keys::new(&self.fences, &self.bytes, r)
     }
 
+    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.range(0..self.len())
-    }
-
-    /// The first index whose key does not satisfy `pred`. `pred` must be true for a prefix of the keys.
-    pub(crate) fn partition_point(&self, mut pred: impl FnMut(u64) -> bool) -> usize {
-        let nb = self.fences.blocks.partition_point(|b| pred(b.base));
-        if nb == 0 {
-            return 0;
-        }
-        // The base of block nb - 1 satisfies pred and the base of block nb does not, so the answer
-        // is in block nb - 1 or at its end.
-        let (mut lo, mut hi) = ((nb - 1) * BLOCK + 1, (nb * BLOCK).min(self.len()));
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if pred(self.get(mid)) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        lo
-    }
-
-    pub(crate) fn find(&self, key: u64) -> Option<usize> {
-        let i = self.partition_point(|k| k < key);
-        (i < self.len() && self.get(i) == key).then_some(i)
     }
 
     #[cfg(test)]
@@ -233,7 +225,7 @@ pub(crate) fn decode_block(blk: &Block, bytes: &[u8], js: Range<usize>, out: &mu
 }
 
 /// The header of the block of `chunk` that starts at word `start`, and its number of words.
-fn block_of(chunk: &[u64], start: usize) -> (Block, usize) {
+pub(crate) fn block_of(chunk: &[u64], start: usize) -> (Block, usize) {
     let width = width_of(chunk[0], chunk[chunk.len() - 1]);
     (Block { base: chunk[0], start: u32::try_from(start).expect("too many words"), width: width as u8 }, (chunk.len() * width).div_ceil(64))
 }
@@ -273,6 +265,16 @@ pub(crate) struct Builder {
 }
 
 impl Builder {
+    fn new(capacity: usize, bytes: usize, buf: usize) -> Builder {
+        Builder {
+            len: 0,
+            blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
+            bytes: Vec::with_capacity(bytes + 16),
+            buf: Vec::with_capacity(buf),
+            most: capacity.saturating_mul(8).saturating_add(16),
+        }
+    }
+
     /// The (bytes, keys) of the keys packed so far, without the block that is not yet packed.
     pub(crate) fn density(&self) -> (usize, usize) {
         (self.bytes.len(), self.len)
@@ -287,7 +289,14 @@ impl Builder {
     }
 
     fn flush(&mut self) {
-        let chunk = &self.buf;
+        let chunk = std::mem::take(&mut self.buf);
+        self.push_block(&chunk);
+        self.buf = chunk;
+        self.buf.clear();
+    }
+
+    /// Packs one whole block of keys (at most `BLOCK`, sorted, after the keys pushed so far).
+    pub(crate) fn push_block(&mut self, chunk: &[u64]) {
         let start = self.bytes.len() / 8;
         let (blk, words) = block_of(chunk, start);
         let need = (start + words) * 8;
@@ -300,7 +309,6 @@ impl Builder {
         pack_into(&mut self.bytes[start * 8..], chunk, &blk);
         self.blocks.push(blk);
         self.len += chunk.len();
-        self.buf.clear();
     }
 
     pub(crate) fn finish(mut self) -> PackedKeys {
@@ -315,11 +323,20 @@ impl Builder {
 
 /// The iterator of `range`. It decodes one block at a time into `buf`.
 pub(crate) struct Keys<'a> {
-    keys: &'a PackedKeys,
+    fences: &'a Fences,
+    bytes: &'a [u8],
     i: usize,
     end: usize,
     decode_at: usize, // the first index that is not yet in `buf`
     buf: [u64; BLOCK],
+}
+
+impl<'a> Keys<'a> {
+    /// The keys `r` of the blocks of `fences`, whose packed offsets are `bytes`.
+    pub(crate) fn new(fences: &'a Fences, bytes: &'a [u8], r: Range<usize>) -> Keys<'a> {
+        debug_assert!(r.end <= fences.len);
+        Keys { fences, bytes, i: r.start, end: r.end, decode_at: r.start, buf: [0; BLOCK] }
+    }
 }
 
 impl Iterator for Keys<'_> {
@@ -334,7 +351,7 @@ impl Iterator for Keys<'_> {
         if self.i == self.decode_at {
             // Decode the rest of the block, but not past `end`.
             let hi = (self.end - (self.i - j)).min(BLOCK);
-            self.keys.decode(self.i / BLOCK, j..hi, &mut self.buf[j..hi]);
+            decode_block(&self.fences.blocks[self.i / BLOCK], self.bytes, j..hi, &mut self.buf[j..hi]);
             self.decode_at = self.i - j + hi;
         }
         self.i += 1;
@@ -356,22 +373,25 @@ pub(crate) enum Sorted<'a> {
 }
 
 /// A cursor over sorted rows. `pos` is the row of the last read. Over a base, the cursor caches the segment of
-/// the last read and one decoded block with its values. A read inside the cached block costs one range check.
-/// A read within `BLOCK` rows of `pos` decodes the block of that row. A read farther away uses `get` for that
-/// row only.
+/// the last read and one decoded block of keys. The first `val` in that block caches its values: a RAM segment
+/// gives its slice, and the cursor decodes a file segment into `vals`. A read inside the cached block costs one
+/// range check. A read within `BLOCK` rows of `pos` decodes the block of that row. A read farther away takes
+/// that key alone from the segment.
 pub(crate) struct Cursor<'a> {
     src: Sorted<'a>,
     pub(crate) pos: usize,
     seg: Option<&'a Segment>, // the segment of the last read (`Sorted::Base`)
     seg_rows: Range<usize>,   // its global rows, empty until the first read
-    vals: &'a [f64],          // the values of the rows in `block_rows`
-    block_rows: Range<usize>, // the global rows decoded in `buf`, empty until the first decode
-    buf: Vec<u64>,
+    block_rows: Range<usize>, // the global rows decoded in `keys`, empty until the first decode
+    vals_rows: Range<usize>,  // the global rows of the cached values
+    keys: Vec<u64>,
+    ram_vals: &'a [f64], // the values of `vals_rows` of a RAM segment, else empty
+    vals: Vec<f64>,      // the values of `vals_rows` of a file segment
 }
 
 impl<'a> Cursor<'a> {
     pub(crate) fn new(src: Sorted<'a>) -> Cursor<'a> {
-        Cursor { src, pos: 0, seg: None, seg_rows: 0..0, vals: &[], block_rows: 0..0, buf: Vec::new() }
+        Cursor { src, pos: 0, seg: None, seg_rows: 0..0, block_rows: 0..0, vals_rows: 0..0, keys: Vec::new(), ram_vals: &[], vals: Vec::new() }
     }
 
     #[inline]
@@ -399,23 +419,22 @@ impl<'a> Cursor<'a> {
     pub(crate) fn key(&mut self, i: usize) -> u64 {
         let k = match self.src {
             Sorted::Cells(c) => c[i].0,
-            Sorted::Base(_) if self.block_rows.contains(&i) => self.buf[i - self.block_rows.start],
+            Sorted::Base(_) if self.block_rows.contains(&i) => self.keys[i - self.block_rows.start],
             Sorted::Base(b) => {
                 let (seg, j) = self.segment(b, i);
                 let from = self.pos.saturating_sub(self.seg_rows.start);
                 if j.abs_diff(from) > BLOCK {
-                    seg.keys.get(j)
+                    seg.key(j)
                 } else {
                     let block = seg.block(j / BLOCK);
-                    if self.buf.is_empty() {
-                        self.buf = vec![0; BLOCK];
+                    if self.keys.is_empty() {
+                        self.keys = vec![0; BLOCK];
                     }
-                    let m = block.vals.len();
-                    block.keys(0..m, &mut self.buf[..m]);
-                    self.vals = block.vals;
+                    let m = block.len();
+                    block.keys(0..m, &mut self.keys[..m]);
                     let start = i - j % BLOCK;
                     self.block_rows = start..start + m;
-                    self.buf[i - start]
+                    self.keys[i - start]
                 }
             }
         };
@@ -428,16 +447,35 @@ impl<'a> Cursor<'a> {
     pub(crate) fn val(&mut self, i: usize) -> f64 {
         match self.src {
             Sorted::Cells(c) => c[i].1,
-            Sorted::Base(_) if self.block_rows.contains(&i) => self.vals[i - self.block_rows.start],
+            Sorted::Base(_) if self.vals_rows.contains(&i) => {
+                let j = i - self.vals_rows.start;
+                if self.ram_vals.is_empty() { self.vals[j] } else { self.ram_vals[j] }
+            }
             Sorted::Base(b) => self.val_in_other_block(b, i),
         }
     }
 
     /// Out of line, so that `val` is small enough to inline: a read after `key(i)` finds the block cached.
+    /// It caches the values of the block whose keys are cached. Another block gives its one value.
     #[cold]
     fn val_in_other_block(&mut self, b: &'a Base, i: usize) -> f64 {
         let (seg, j) = self.segment(b, i);
-        seg.block(j / BLOCK).vals[j % BLOCK]
+        let block = seg.block(j / BLOCK);
+        if !self.block_rows.contains(&i) {
+            return block.val(j % BLOCK);
+        }
+        match block.ram_vals() {
+            Some(v) => self.ram_vals = v,
+            None => {
+                if self.vals.is_empty() {
+                    self.vals = vec![0.0; BLOCK];
+                }
+                self.ram_vals = &[];
+                block.vals(0..block.len(), &mut self.vals[..block.len()]);
+            }
+        }
+        self.vals_rows = self.block_rows.clone();
+        self.val(i)
     }
 
     /// The first row at or after `key`, searched near `pos` (an exponential search in both directions).
@@ -534,7 +572,7 @@ fn unpack<const W: usize>(base: u64, bytes: &[u8], js: Range<usize>, mut out: &m
     }
 }
 
-fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
+pub(crate) fn pack_into(out: &mut [u8], chunk: &[u64], blk: &Block) {
     let width = blk.width as usize;
     if width == 0 {
         return; // every key equals the base
@@ -568,18 +606,30 @@ mod tests {
             for (i, &k) in keys.iter().enumerate() {
                 assert_eq!(p.get(i), k);
             }
+        }
+        if keys.is_empty() {
+            return;
+        }
+        for tier in [None, Some(Tier::for_tests())] {
+            let base = Base::from_parts(&[keys], tier);
+            let seg = &*base.segs[0];
+            assert_eq!(seg.len(), keys.len());
+            for (i, &k) in keys.iter().enumerate() {
+                assert_eq!(seg.key(i), k, "key {i} tier={tier:?}");
+            }
             for lo in [0, 1, BLOCK - 1, BLOCK, BLOCK + 5, keys.len() / 2, keys.len()] {
                 for hi in [lo, lo + 1, lo + BLOCK + 3, keys.len()] {
                     let (lo, hi) = (lo.min(keys.len()), hi.min(keys.len()));
                     if lo <= hi {
-                        assert_eq!(p.range(lo..hi).collect::<Vec<_>>(), &keys[lo..hi], "range {lo}..{hi}");
+                        let want: Vec<(u64, f64)> = keys[lo..hi].iter().map(|&k| (k, k as f64)).collect();
+                        assert_eq!(seg.range(lo..hi).collect::<Vec<_>>(), want, "range {lo}..{hi} tier={tier:?}");
                     }
                 }
             }
             let probes = keys.iter().flat_map(|&k| [k.saturating_sub(1), k, k.saturating_add(1)]).chain([0, u64::MAX]);
             for q in probes {
-                assert_eq!(p.partition_point(|k| k < q), keys.partition_point(|&k| k < q), "q={q}");
-                assert_eq!(p.find(q), keys.binary_search(&q).ok(), "q={q}");
+                assert_eq!(seg.partition_point(|k| k < q), keys.partition_point(|&k| k < q), "q={q} tier={tier:?}");
+                assert_eq!(base.value(q), keys.binary_search(&q).ok().map(|i| keys[i] as f64), "q={q} tier={tier:?}");
             }
         }
     }
@@ -656,9 +706,15 @@ mod tests {
 
     #[test]
     fn cursor_finds_the_same_rows_as_a_binary_search() {
+        for tier in [None, Some(Tier::for_tests())] {
+            cursor_check(tier);
+        }
+    }
+
+    fn cursor_check(tier: Option<&'static Tier>) {
         let mut seed = 0x9E37_79B9_7F4A_7C15;
         let keys = sorted_random(&mut seed, 20_000, 1 << 30, 24);
-        let base = Base::from_parts(&[&keys[..7000], &keys[7000..7777], &keys[7777..]]);
+        let base = Base::from_parts(&[&keys[..7000], &keys[7000..7777], &keys[7777..]], tier);
         for r in [100..19_000, 7500..7800, 7000..7777] {
             let mut rows = Vec::new();
             base.range(r.clone()).for_each(|(k, v)| rows.push((k, v as u64)));
@@ -758,7 +814,7 @@ mod tests {
             let mut a = 0u64;
             for b in 0..n.div_ceil(BLOCK) {
                 let m = BLOCK.min(n - b * BLOCK);
-                p.decode(b, 0..m, &mut buf[..m]);
+                decode_block(&p.fences.blocks[b], &p.bytes, 0..m, &mut buf[..m]);
                 for (&k, &v) in buf[..m].iter().zip(&keys[b * BLOCK..]) {
                     a = a.wrapping_add(k ^ v);
                 }
@@ -782,7 +838,7 @@ mod tests {
             let mut buf = [0u64; BLOCK];
             (0..n.div_ceil(BLOCK)).fold(0, |a, b| {
                 let m = BLOCK.min(n - b * BLOCK);
-                p.decode(b, 0..m, &mut buf[..m]);
+                decode_block(&p.fences.blocks[b], &p.bytes, 0..m, &mut buf[..m]);
                 a.wrapping_add(buf[m - 1])
             })
         });

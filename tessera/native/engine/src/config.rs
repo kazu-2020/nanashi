@@ -37,6 +37,9 @@ pub struct Config {
     pub fuse: bool,
     /// テスト用に、この Metric の番号の書き戻しで再計算を失敗させる（true なら panic させる）。
     pub fail_at: Option<(usize, bool)>,
+    /// The file tier (`tier.rs`). With a tier, a new segment of the base goes to a file and only its fences
+    /// stay in RAM. None keeps every segment in RAM.
+    pub tier: Option<&'static crate::Tier>,
 }
 
 impl Default for Config {
@@ -55,6 +58,7 @@ impl Default for Config {
             dense_always: false,
             scatter_bytes: 4 << 20,
             fail_at: None,
+            tier: None,
         }
     }
 }

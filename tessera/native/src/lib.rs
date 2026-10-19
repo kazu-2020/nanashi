@@ -3,7 +3,7 @@
 
 use nanashi_engine::check::{self, Env, TKind, Ty};
 use nanashi_engine::plan::{self, Env as RangeEnv, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, graph, ipc, pq, select, sql, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget};
+use nanashi_engine::{eval, graph, ipc, pq, select, sql, Agg, Arg, Catalog, Cube, DimId, DimInfo, Diag, Kind, Mapping, Node, Op, ReadAgg, Restrict, Sel, Src, Store, Budget, Tier};
 use bytes::Bytes;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -428,13 +428,19 @@ impl Core {
     /// before or during the calculation. Evaluation and the recalculation schedule use a new value at once. The
     /// values for the stored data (compaction, index and parallel thresholds) apply to the stored data made after the
     /// change. fail_at is for tests: (Metric number, panic or not), or None.
+    /// segment_dir puts the segments of the stored data in files in that directory (one directory for each
+    /// process), with a block cache of cache_bytes (256 MiB by default) and reads of read_window blocks (64).
     #[pyo3(signature = (**config))]
     fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let Some(config) = config else { return Ok(()) };
         let cfg = &mut Arc::make_mut(&mut self.cat).cfg;
+        let (mut dir, mut cache_bytes, mut read_window) = (None, 256usize << 20, 64usize);
         for (k, v) in config.iter() {
             let k: String = k.extract()?;
             match k.as_str() {
+                "segment_dir" => dir = v.extract::<Option<std::path::PathBuf>>()?,
+                "cache_bytes" => cache_bytes = v.extract()?,
+                "read_window" => read_window = v.extract()?,
                 "compact_min" => cfg.compact_min = v.extract()?,
                 "seg_rows" => cfg.seg_rows = v.extract()?,
                 "delta_max" => cfg.delta_max = v.extract()?,
@@ -450,6 +456,9 @@ impl Core {
                 "fail_at" => cfg.fail_at = v.extract()?,
                 _ => return Err(err(format!("未知の調整値 {k}"))),
             }
+        }
+        if let Some(dir) = dir {
+            cfg.tier = Some(Tier::install(&dir, cache_bytes, read_window).map_err(err)?);
         }
         Ok(())
     }
@@ -484,16 +493,14 @@ impl Core {
         let last = m >= self.cat.dims[dim].size;
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.remove_member(dim, m, values, last));
-        Ok(())
+        py.detach(|| guarded(|| target.remove_member(dim, m, values, last)))
     }
 
     /// 値が value のセルを消す。
     fn drop_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) -> PyResult<()> {
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.drop_value(value));
-        Ok(())
+        py.detach(|| guarded(|| target.drop_value(value)))
     }
 
     /// 値が value のセルを囲む範囲（軸ごとのメンバー番号）。なければ None。
@@ -607,8 +614,7 @@ impl Core {
     fn write(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>, value: Option<f64>) -> PyResult<()> {
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         self.key(&handle.store, &key)?;
-        Arc::make_mut(&mut handle.store).write(&key, value);
-        Ok(())
+        guarded(|| Arc::make_mut(&mut handle.store).write(&key, value))
     }
 
     /// まとめて書き込む。cols は宣言した軸の順の、軸ごとのメンバー番号の列、values の None は消す。
@@ -619,9 +625,11 @@ impl Core {
         self.columns(&s.metric_dims, &slices, values.len())?;
         let s = py.detach(move || {
             let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
-            Arc::make_mut(&mut s).write_many(&slices, &values);
-            s
-        });
+            guarded(|| {
+                Arc::make_mut(&mut s).write_many(&slices, &values);
+                s
+            })
+        })?;
         put(store, s)
     }
 
@@ -757,7 +765,7 @@ impl Core {
         let r = self.restrict(&region)?;
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.replace(&r, &new)).map_err(err)
+        py.detach(|| guarded(|| target.replace(&r, &new)))?.map_err(err)
     }
 
     /// replace と同じだが、値が実際に変わったセルの範囲（軸ごとのメンバー番号）を返す。変化なしなら None。
@@ -772,7 +780,7 @@ impl Core {
         let r = self.restrict(&region)?;
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.replace_diff(&r, &new)).map_err(err)
+        py.detach(|| guarded(|| target.replace_diff(&r, &new)))?.map_err(err)
     }
 
     /// 評価結果から新しい格納データを作る。
@@ -959,7 +967,7 @@ impl Core {
         if (c.kind == pq::Value::Member) != value_ids.is_some() && c.new.iter().any(Option::is_some) {
             return Err(err("変更の塊の値の種類が Metric の値の種類と合わない".into()));
         }
-        let s = py.detach(move || -> Result<Arc<Store>, String> {
+        let s = py.detach(move || -> PyResult<Arc<Store>> {
             let maps: Vec<Vec<Option<u32>>> = c.ids.iter().zip(&dim_ids).map(|(used, table)| positions(used, table)).collect();
             let vmap = value_ids.as_deref().map(|table| positions(&c.value_ids, table));
             let mut cols: Vec<Vec<u32>> = vec![Vec::with_capacity(c.len()); maps.len()];
@@ -973,7 +981,7 @@ impl Core {
                     }
                 }
                 let v = match (c.new[r], &vmap) {
-                    (Some(v), Some(vm)) => Some(vm[v as usize].ok_or_else(|| format!("値のメンバーの ID {} が軸にない", c.value_id(v)))? as f64),
+                    (Some(v), Some(vm)) => Some(vm[v as usize].ok_or_else(|| err(format!("値のメンバーの ID {} が軸にない", c.value_id(v))))? as f64),
                     (v, _) => v,
                 };
                 for (col, p) in cols.iter_mut().zip(key) {
@@ -982,10 +990,10 @@ impl Core {
                 values.push(v);
             }
             let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
-            Arc::make_mut(&mut s).write_many(&slices, &values);
+            guarded(|| Arc::make_mut(&mut s).write_many(&slices, &values))?;
             Ok(s)
         });
-        put(store, s.map_err(err)?)
+        put(store, s?)
     }
 
     fn size(&self, store: &Bound<'_, StoreHandle>) -> PyResult<usize> {
@@ -1206,6 +1214,13 @@ impl Drop for Returned<'_> {
 
 fn busy<E>(_: E) -> PyErr {
     PyRuntimeError::new_err("格納データを別のスレッドが使用中（同じモデルを複数のスレッドから書き換えない）")
+}
+
+/// Runs a write of stored data. A panic (a segment file that the engine cannot write) becomes a RuntimeError.
+/// A PanicException is a BaseException, which ends the writer thread of the Workspace. The store keeps its old
+/// base and delta after a panic (`Store::rewrite`), so the handle stays usable.
+fn guarded<T>(f: impl FnOnce() -> T) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| PyRuntimeError::new_err(format!("書き込みの内部エラー: {}", panic_message(&p))))
 }
 
 fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
