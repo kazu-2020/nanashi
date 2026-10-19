@@ -62,7 +62,8 @@ Each directory has its own workflow in `.github/workflows/`. A workflow starts o
 ```bash
 # The PgResolver tests use the nanashi_model table. If the table is missing, they are skipped
 # Make the table: in tessera/, run .venv/bin/python -m sparse_engine.pg_journal migrate <DSN>
-(cd router && go vet ./... && go test ./...)
+# -count=1: the test cache does not know the contents of the table
+(cd router && go vet ./... && go test -count=1 ./...)
 ```
 
 - The router (`router/README.md`) resends writes. Because of `client_op_id`, a resent write is not committed two times. If you change the next action for each response (`decide` in `router.go`), keep this condition.
