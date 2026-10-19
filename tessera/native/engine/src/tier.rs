@@ -243,13 +243,14 @@ impl SegWriter {
     /// Writes the footer and the header. The segment must not be empty.
     pub(crate) fn finish(mut self) -> io::Result<(Fences, SegFile)> {
         let end = self.words * 8;
-        let mut footer = Vec::with_capacity(self.blocks.len() * 16);
+        // Write each fence through the writer buffer. A footer list would add to the fences that `most_bytes` counts
         for b in &self.blocks {
-            footer.extend_from_slice(&b.base.to_le_bytes());
-            footer.extend_from_slice(&b.start.to_le_bytes());
-            footer.extend_from_slice(&[b.width, 0, 0, 0]);
+            let mut f = [0u8; 16];
+            f[..8].copy_from_slice(&b.base.to_le_bytes());
+            f[8..12].copy_from_slice(&b.start.to_le_bytes());
+            f[12] = b.width;
+            self.w.write_all(&f)?;
         }
-        self.w.write_all(&footer)?;
         self.w.flush()?;
         let file = self.w.get_ref();
         let mut header = [0u8; HEADER];

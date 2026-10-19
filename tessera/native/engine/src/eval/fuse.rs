@@ -720,7 +720,7 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, tar
         let out = fu.leaves[ls[0]].pack;
         if same_set(&out.dims, &info.dims) && ls.iter().all(|&l| fu.leaves[l].pack == out) {
             let drivers: Vec<Col> = ls.iter().map(|&l| fu.leaves[l].col).collect();
-            fu.reserve = sink(out, drivers.iter().map(|d| d.n()).sum());
+            fu.reserve = sink(out, drivers.iter().map(|d| d.n()).sum()).saturating_add(range_cells(cfg, &drivers));
             let mut access = Vec::new();
             let Some(f) = fu.build(node, out, true, &mut access) else { return Ok(None) };
             let copied = fu.copied + access.iter().map(Access::cells).sum::<usize>();
@@ -850,10 +850,8 @@ fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev,
     // A unit of work: split at every cfg.chunk-th key of the largest driver, and find the row range of each driver
     let chunk = cfg.chunk.max(1);
     let big = (0..drivers.len()).max_by_key(|&i| drivers[i].n()).unwrap();
-    // Check the lists of the ranges before they exist. `stream` adds a slice and a written count for each range.
-    // If they do not fit, the evaluation of one operation at a time needs no ranges
-    let range = 2 * size_of::<Vec<usize>>() + 3 * size_of::<usize>() + size_of::<&mut [(u64, f64)]>() + 2 * drivers.len() * size_of::<usize>();
-    let lists = (drivers[big].n() / chunk + 1).saturating_mul(range).div_ceil(CELL_BYTES).saturating_add(copied);
+    // Check the lists of the ranges before they exist. If they do not fit, the evaluation of one operation at a time needs no ranges
+    let lists = range_cells(cfg, drivers).saturating_add(copied);
     if bud.need(lists, "").is_err() {
         return Ok(None);
     }
@@ -906,6 +904,13 @@ fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev,
     let mut sink = make(Need { rows: total, extra: lists, parts: in_flight(par, &sizes) })?;
     stream(par, &ranges, &sizes, work, &mut sink)?;
     Ok(Some(sink))
+}
+
+/// The cells of the lists of the ranges that `run_sorted` makes. `stream` adds a slice and a written count for each range.
+fn range_cells(cfg: &Config, drivers: &[Col]) -> usize {
+    let most = drivers.iter().map(|d| d.n()).max().unwrap_or(0);
+    let range = 2 * size_of::<Vec<usize>>() + 3 * size_of::<usize>() + size_of::<&mut [(u64, f64)]>() + 2 * drivers.len() * size_of::<usize>();
+    (most / cfg.chunk.max(1) + 1).saturating_mul(range).div_ceil(CELL_BYTES)
 }
 
 /// 1 つの仕事の単位: 被覆ごとの行の範囲の始まりと終わり。
@@ -1134,6 +1139,23 @@ mod tests {
         let mut sizes = vec![1; 3 * b];
         sizes[2 * b] = 5; // the batches are b, b and b + 4 cells
         assert_eq!(in_flight(true, &sizes), 2 * b + 4);
+    }
+
+    #[test]
+    fn a_dense_lookup_leaves_room_for_the_ranges_of_a_sorted_scan() {
+        // A[d0, d1] * B[d1] scans A. A larger budget lets B be a Dense lookup, which must not take the room of the ranges
+        let dims = [10, 262_145].iter().enumerate().map(|(i, &size)| DimInfo { size, ordered: false, name: format!("d{i}") }).collect();
+        let cat = Catalog { dims, maps: Vec::new(), cfg: Config { chunk: 100, ..Config::default() } };
+        let (d0, d1): (Vec<u32>, Vec<u32>) = (0..100_000u32).map(|i| (i % 10, i / 10 * 16)).unzip();
+        let a = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap().with_rows(&[&d0, &d1], &vec![1.0; 100_000]).unwrap();
+        let b_keys: Vec<u32> = (0..16_384u32).map(|i| i * 16).collect();
+        let b = Store::new(&[1], None, Kind::Num, &cat).unwrap().with_rows(&[&b_keys], &vec![2.0; 16_384]).unwrap();
+        let src = [Src::Store(Arc::new(a)), Src::Store(Arc::new(b))];
+        let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Ref(1)), vec![]);
+        for bytes in [1_704_112, 11_037_184] {
+            let cube = eval_with(&node, &cat, &src, &Restrict::all(2), &Budget::new(bytes, 0)).unwrap_or_else(|e| panic!("{bytes} B: {e}"));
+            assert_eq!(cube.cells.len(), 100_000, "{bytes} B");
+        }
     }
 
     #[test]
