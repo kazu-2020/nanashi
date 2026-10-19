@@ -362,11 +362,20 @@ enum BlockSrc<'a> {
     File(Buf),
 }
 
-impl SegBlock<'_> {
+impl<'a> SegBlock<'a> {
     /// The number of rows of the block.
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.rows
+    }
+
+    /// The values of a RAM block, without a copy.
+    #[inline]
+    pub(crate) fn ram_vals(&self) -> Option<&'a [f64]> {
+        match self.src {
+            BlockSrc::Ram { vals, .. } => Some(vals),
+            BlockSrc::File(_) => None,
+        }
     }
 
     /// Decodes the keys at positions `js` of the block into `out`.
@@ -539,7 +548,7 @@ pub(crate) struct BaseBuilder<'a> {
     keys: Vec<u64>,          // the keys of the block in build
     vals: Vec<f64>,          // the values of the segment (RAM) or of the block in build (file)
     rows: usize,             // the rows of the segment in build
-    out: Out,
+    out: Option<Out>,        // None only while `seal` runs
     last: u64,
     done: Vec<Arc<Segment>>,
 }
@@ -557,7 +566,7 @@ impl<'a> BaseBuilder<'a> {
         let cap = BaseBuilder::cap(seg_rows, hint);
         let out = BaseBuilder::out(cfg, cap, density);
         let vals = Vec::with_capacity(if cfg.tier.is_some() { BLOCK } else { cap });
-        BaseBuilder { pack, cfg, seg_rows, density, hint, keys: Vec::with_capacity(BLOCK), vals, rows: 0, out, last: 0, done: Vec::new() }
+        BaseBuilder { pack, cfg, seg_rows, density, hint, keys: Vec::with_capacity(BLOCK), vals, rows: 0, out: Some(out), last: 0, done: Vec::new() }
     }
 
     /// The reservation of one segment: `seg_rows` and room for the rest of the partition member at the cut,
@@ -590,7 +599,7 @@ impl<'a> BaseBuilder<'a> {
     /// Packs the block in build. In file mode it also writes its record.
     #[cold]
     fn flush(&mut self) {
-        match &mut self.out {
+        match self.out.as_mut().expect("the output of the segment in build") {
             Out::Ram(b) => b.push_block(&self.keys),
             Out::File(w) => {
                 w.block(&self.keys, &self.vals).unwrap_or_else(|e| panic!("セグメントファイルに書けない: {e}"));
@@ -600,23 +609,32 @@ impl<'a> BaseBuilder<'a> {
         self.keys.clear();
     }
 
+    /// Ends the segment in build and opens the output of the next one.
     #[cold]
     fn cut(&mut self) {
+        self.seal();
+        let cap = BaseBuilder::cap(self.seg_rows, self.hint);
+        self.out = Some(BaseBuilder::out(self.cfg, cap, self.density));
+        if self.cfg.tier.is_none() {
+            self.vals.reserve(cap);
+        }
+    }
+
+    /// Ends the segment in build. `finish` opens no next output: that would be a transient block buffer, or an
+    /// empty file.
+    fn seal(&mut self) {
         if !self.keys.is_empty() {
             self.flush();
         }
         self.hint = self.hint.saturating_sub(self.rows);
-        let cap = BaseBuilder::cap(self.seg_rows, self.hint);
         let n_dims = self.pack.dims.len();
         // The next segment packs like this one. In a full recalculation the old base is empty. Then 2 B for each
         // key is too small, and the key bytes grow by doubling (a copy).
-        if let Out::Ram(b) = &self.out {
-            self.density = b.density();
-        }
-        let seg = match std::mem::replace(&mut self.out, BaseBuilder::out(self.cfg, cap, self.density)) {
+        let seg = match self.out.take().expect("the output of the segment in build") {
             Out::Ram(b) => {
+                self.density = b.density();
                 let (fences, packed) = b.finish().into_parts();
-                let vals = std::mem::replace(&mut self.vals, Vec::with_capacity(cap)).into_boxed_slice();
+                let vals = std::mem::take(&mut self.vals).into_boxed_slice();
                 Segment::new(fences, Data::Ram { packed, vals }, self.last, n_dims)
             }
             Out::File(w) => {
@@ -641,7 +659,7 @@ impl<'a> BaseBuilder<'a> {
 
     pub(crate) fn finish(mut self) -> Base {
         if self.rows > 0 {
-            self.cut();
+            self.seal();
         }
         Base::new(self.done)
     }

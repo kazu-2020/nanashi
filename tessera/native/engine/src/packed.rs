@@ -156,20 +156,15 @@ impl PackedKeys {
     /// of similar packed keys, so the byte buffer does not grow by doubling. If `like` has no keys, it reserves
     /// 2 B for each key (the density of the large models, `docs/performance.md`), and the buffer grows if the
     /// keys pack worse.
+    /// The builder gets whole blocks (`push_block`), so it reserves no block buffer of its own.
     pub(crate) fn builder(capacity: usize, like: (usize, usize)) -> Builder {
         let bytes = if like.1 == 0 { capacity * 2 } else { (like.0 * capacity).div_ceil(like.1).min(capacity * 8) };
-        PackedKeys::builder_with_bytes(capacity, bytes)
+        Builder::new(capacity, bytes, 0)
     }
 
     /// A builder for about `capacity` keys that reserves `bytes` for the packed offsets (see `packed_bytes`).
     pub(crate) fn builder_with_bytes(capacity: usize, bytes: usize) -> Builder {
-        Builder {
-            len: 0,
-            blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
-            bytes: Vec::with_capacity(bytes + 16),
-            buf: Vec::with_capacity(BLOCK),
-            most: capacity.saturating_mul(8).saturating_add(16),
-        }
+        Builder::new(capacity, bytes, BLOCK)
     }
 
     /// The key at `i`. `i` must be less than `len()`.
@@ -270,6 +265,16 @@ pub(crate) struct Builder {
 }
 
 impl Builder {
+    fn new(capacity: usize, bytes: usize, buf: usize) -> Builder {
+        Builder {
+            len: 0,
+            blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
+            bytes: Vec::with_capacity(bytes + 16),
+            buf: Vec::with_capacity(buf),
+            most: capacity.saturating_mul(8).saturating_add(16),
+        }
+    }
+
     /// The (bytes, keys) of the keys packed so far, without the block that is not yet packed.
     pub(crate) fn density(&self) -> (usize, usize) {
         (self.bytes.len(), self.len)
@@ -368,23 +373,25 @@ pub(crate) enum Sorted<'a> {
 }
 
 /// A cursor over sorted rows. `pos` is the row of the last read. Over a base, the cursor caches the segment of
-/// the last read and one decoded block of keys; the values of that block decode on the first `val` in it.
-/// A read inside the cached block costs one range check. A read within `BLOCK` rows of `pos` decodes the
-/// block of that row. A read farther away takes that key alone from the segment.
+/// the last read and one decoded block of keys; the values of that block are cached on the first `val` in it
+/// (a RAM segment gives its slice, a file segment is decoded into `vals`). A read inside the cached block
+/// costs one range check. A read within `BLOCK` rows of `pos` decodes the block of that row. A read farther
+/// away takes that key alone from the segment.
 pub(crate) struct Cursor<'a> {
     src: Sorted<'a>,
     pub(crate) pos: usize,
     seg: Option<&'a Segment>, // the segment of the last read (`Sorted::Base`)
     seg_rows: Range<usize>,   // its global rows, empty until the first read
     block_rows: Range<usize>, // the global rows decoded in `keys`, empty until the first decode
-    vals_rows: Range<usize>,  // the global rows decoded in `vals`
+    vals_rows: Range<usize>,  // the global rows of the cached values
     keys: Vec<u64>,
-    vals: Vec<f64>,
+    ram_vals: &'a [f64], // the values of `vals_rows` of a RAM segment, else empty
+    vals: Vec<f64>,      // the values of `vals_rows` of a file segment
 }
 
 impl<'a> Cursor<'a> {
     pub(crate) fn new(src: Sorted<'a>) -> Cursor<'a> {
-        Cursor { src, pos: 0, seg: None, seg_rows: 0..0, block_rows: 0..0, vals_rows: 0..0, keys: Vec::new(), vals: Vec::new() }
+        Cursor { src, pos: 0, seg: None, seg_rows: 0..0, block_rows: 0..0, vals_rows: 0..0, keys: Vec::new(), ram_vals: &[], vals: Vec::new() }
     }
 
     #[inline]
@@ -440,13 +447,16 @@ impl<'a> Cursor<'a> {
     pub(crate) fn val(&mut self, i: usize) -> f64 {
         match self.src {
             Sorted::Cells(c) => c[i].1,
-            Sorted::Base(_) if self.vals_rows.contains(&i) => self.vals[i - self.vals_rows.start],
+            Sorted::Base(_) if self.vals_rows.contains(&i) => {
+                let j = i - self.vals_rows.start;
+                if self.ram_vals.is_empty() { self.vals[j] } else { self.ram_vals[j] }
+            }
             Sorted::Base(b) => self.val_in_other_block(b, i),
         }
     }
 
     /// Out of line, so that `val` is small enough to inline: a read after `key(i)` finds the block cached.
-    /// It decodes the values of the block whose keys are cached. Another block gives its one value.
+    /// It caches the values of the block whose keys are cached. Another block gives its one value.
     #[cold]
     fn val_in_other_block(&mut self, b: &'a Base, i: usize) -> f64 {
         let (seg, j) = self.segment(b, i);
@@ -454,13 +464,18 @@ impl<'a> Cursor<'a> {
         if !self.block_rows.contains(&i) {
             return block.val(j % BLOCK);
         }
-        if self.vals.is_empty() {
-            self.vals = vec![0.0; BLOCK];
+        match block.ram_vals() {
+            Some(v) => self.ram_vals = v,
+            None => {
+                if self.vals.is_empty() {
+                    self.vals = vec![0.0; BLOCK];
+                }
+                self.ram_vals = &[];
+                block.vals(0..block.len(), &mut self.vals[..block.len()]);
+            }
         }
-        let m = block.len();
-        block.vals(0..m, &mut self.vals[..m]);
         self.vals_rows = self.block_rows.clone();
-        self.vals[i - self.vals_rows.start]
+        self.val(i)
     }
 
     /// The first row at or after `key`, searched near `pos` (an exponential search in both directions).

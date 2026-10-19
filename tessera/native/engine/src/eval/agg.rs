@@ -236,9 +236,13 @@ const GROUP_BYTES: usize = std::mem::size_of::<(u64, Acc)>() + 1;
 /// the most groups. Err if the hash maps and the Spills are larger than b permits with the `live` cells of the
 /// caller. Also gives the cells of the Spills.
 pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b: &Budget, key: impl Fn(u64) -> Option<u64> + Sync) -> Result<(FxHashMap<u64, Acc>, usize)> {
-    use crate::packed::BLOCK; // one unit of work is one block of packed keys
+    // One unit of work is one block of packed keys, or one read window of a file base
+    let step = match rows {
+        Rows::Store(s) => s.read_step(),
+        _ => crate::packed::BLOCK,
+    };
     let n = rows.len();
-    let blocks = n.div_ceil(BLOCK);
+    let blocks = n.div_ceil(step);
     let min_len = (blocks / rayon::current_num_threads()).max(1); // one table of intermediate values per thread
     let maps = if cfg.par(n) { blocks.div_ceil(min_len) } else { 1 };
     // A map with e entries has at most 16e/7 buckets (7/8 full, a power of 2, at least 4). While it grows, its
@@ -251,7 +255,7 @@ pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b
     b.need(live, "集計")?;
     let m = Meter::new(b.room().saturating_sub(live));
     let add = |mut g: FxHashMap<u64, Acc>, b: usize| {
-        rows.for_each_in(b * BLOCK..((b + 1) * BLOCK).min(n), |k, v| {
+        rows.for_each_in(b * step..((b + 1) * step).min(n), |k, v| {
             if let Some(o) = key(k) {
                 g.entry(o).or_insert_with(Acc::new).add(v, &m);
             }
