@@ -460,6 +460,10 @@ impl Core {
         if let Some(dir) = dir {
             cfg.tier = Some(Tier::install(&dir, cache_bytes, read_window).map_err(err)?);
         }
+        // Every operation counts the cache bound, so a budget that is not larger has no room for any operation
+        if cfg.tier.is_some() && cfg.max_bytes != usize::MAX && cfg.max_bytes <= cfg.cache_bound() {
+            return Err(err("max_bytes は cache_bytes より大きくする".into()));
+        }
         Ok(())
     }
 
@@ -691,7 +695,7 @@ impl Core {
         let agg = read_agg(agg)?;
         self.dims(&keep)?;
         let (s, r, cat) = (read(store)?, self.restrict(&region)?, self.cat.clone());
-        let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes()))).map_err(err)?;
+        let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes().saturating_add(cat.cfg.cache_bound())))).map_err(err)?;
         if ids.len() != g.cols.len() {
             return Err(err(format!("ids の数 {} が残す軸の数 {} と違う", ids.len(), g.cols.len())));
         }
@@ -1005,8 +1009,8 @@ impl Core {
         Ok(read(store)?.rows_hint())
     }
 
-    /// The memory of the stored data: the base rows, the base, the delta rows, the delta, the index (bytes of RAM),
-    /// and the bytes of the segment files.
+    /// Returns the memory of the stored data as a tuple. The order: base rows, base, delta rows, delta, index (RAM
+    /// bytes), file (disk bytes).
     fn memory(&self, store: &Bound<'_, StoreHandle>) -> PyResult<(usize, usize, usize, usize, usize, usize)> {
         let m = read(store)?.memory();
         Ok((m.rows, m.base, m.delta_rows, m.delta, m.index, m.file))

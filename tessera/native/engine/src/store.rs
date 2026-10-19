@@ -43,14 +43,14 @@ impl PartialEq for Slot {
 /// メンバー番号。何も変わらなければ None）。
 pub type Replaced = (Vec<(u64, f64)>, Option<Vec<Vec<u32>>>);
 
-/// Store が確保しているメモリの内訳（Store::memory）。
+/// The memory of a Store (Store::memory). All fields except `rows`, `delta_rows` and `file` are RAM bytes.
 pub struct Mem {
-    pub rows: usize,       // 本体の行数
-    pub base: usize,       // 本体のキーと値（バイト）
-    pub delta_rows: usize, // 差分の件数
-    pub delta: usize,      // 差分（バイト。木の節の分を含まない）
-    pub index: usize,      // 分割軸以外の軸の索引（バイト）
-    pub file: usize,       // the bytes of the segment files (on disk, not in `bytes`)
+    pub rows: usize,       // the base rows
+    pub base: usize,       // the keys and values of the base
+    pub delta_rows: usize, // the delta rows
+    pub delta: usize,      // the delta, without the tree nodes
+    pub index: usize,      // the indexes of the dimensions other than the partition dimension
+    pub file: usize,       // the bytes of the segment files on disk (not in `bytes`)
 }
 
 impl Mem {
@@ -122,7 +122,7 @@ impl Segment {
 
     fn file_bytes(&self) -> usize {
         match &self.data {
-            Data::File(f) => f.len() as usize,
+            Data::File(f) => f.end() as usize + self.fences.blocks() * 16, // the records and a footer of 16 B for each block
             Data::Ram { .. } => 0,
         }
     }
@@ -1164,11 +1164,13 @@ impl Store {
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
             let rows = self.rows_hint().saturating_add(n);
             let fences = rows.div_ceil(BLOCK) * 16;
-            // File mode keeps only the fences. The writer grows its block list by push (2 times) and copies it to the
-            // footer, holds its buffer and the block in build, and the reader of an old segment holds one window
             let (base, scratch) = match self.cfg.tier {
                 None => (rows.saturating_mul(16).saturating_add(fences), BLOCK * 8),
-                Some(t) => (fences, fences * 2 + WRITE_BUF + BLOCK * 16 + t.read_window * BLOCK * 16),
+                Some(t) => {
+                    // The block list grows by push, so it can hold 2 times the fences
+                    let (block_list, in_build, window) = (fences * 2, BLOCK * 16, t.read_window * BLOCK * 16);
+                    (fences, block_list + WRITE_BUF + in_build + window)
+                }
             };
             let base = base.saturating_add(self.seg_bytes(rows));
             let tree = tree.min(self.delta_limit().saturating_mul(4 * CELL_BYTES).saturating_add(1024));

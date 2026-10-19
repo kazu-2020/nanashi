@@ -1217,7 +1217,10 @@ def main(argv=None) -> None:
         if args.segment_dir:
             _clear_segment_dir(args.segment_dir)
             config.update(segment_dir=args.segment_dir, cache_bytes=args.cache_bytes)
-        engine = RustEngine(**config)
+        try:
+            engine = RustEngine(**config)
+        except ValueError as e:
+            ap.error(str(e))
     else:
         from .engine import ReferenceEngine
         engine = ReferenceEngine()

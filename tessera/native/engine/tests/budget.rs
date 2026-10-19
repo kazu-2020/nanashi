@@ -1,12 +1,14 @@
 //! Memory budget tests. An operation that can make a large result checks the budget before it makes the result.
 
-use nanashi_engine::plan::{recalc, Formula, Metric, Plan, Reg, Step};
-use nanashi_engine::{eval, eval_columns, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store, Tier, Whole, CELL_BYTES};
+use nanashi_engine::plan::{derive_delta, recalc, Formula, Metric, Plan, Reg, Step};
+use nanashi_engine::{eval, Agg, eval_columns, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store, Tier, Whole, CELL_BYTES};
 use std::sync::Arc;
 
-/// The file tier of this test process: a cache of 64 KiB and a window of 2 blocks.
+const CACHE: usize = 1 << 16;
+
+/// The file tier of this test process, with a window of 2 blocks.
 fn tier() -> Option<&'static Tier> {
-    Some(Tier::install(&std::env::temp_dir().join(format!("nanashi-budget-{}", std::process::id())), 1 << 16, 2).unwrap())
+    Some(Tier::install(&std::env::temp_dir().join(format!("nanashi-budget-{}", std::process::id())), CACHE, 2).unwrap())
 }
 
 fn catalog(max_bytes: usize) -> Catalog {
@@ -115,8 +117,7 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
     let src = [column(&cat, &[0], rows as u32)];
     let held = held(&src);
     if tier.is_some() {
-        // The fences of 3 segments of 1 block each, and the cache bound
-        assert_eq!(held, 3 * 16 + (1 << 16));
+        assert_eq!(held, 3 * 16, "the fences of 3 segments");
     }
     let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
     let store = Store::new(&[0], None, Kind::Num, &cat).unwrap();
@@ -200,14 +201,42 @@ fn join_against_few_cells_fits_a_tight_budget() {
 }
 
 #[test]
-fn held_counts_the_cache_bound_once() {
+fn held_counts_only_the_ram_of_the_sources() {
     let file = catalog_with(Config { tier: tier(), ..Config::default() });
     let ram = catalog(usize::MAX);
-    let (a, b, r) = (source(&file), source(&file), source(&ram));
-    // A file store of 3 rows keeps the fences of 1 block (16 B). A RAM store keeps 64 B
-    assert_eq!(held([&a[0], &b[0]]), 2 * 16 + (1 << 16));
-    assert_eq!(held([&a[0], &r[0]]), 16 + 64 + (1 << 16));
-    assert_eq!(held(&r), 64);
+    let (a, r) = (source(&file), source(&ram));
+    assert_eq!(held([&a[0], &r[0]]), 16 + 64, "the fences of 1 block, and a RAM store");
+    assert_eq!(file.cfg.cache_bound(), CACHE);
+    assert_eq!(ram.cfg.cache_bound(), 0);
+}
+
+/// Adds 1 cell to a file source of 10000 rows and updates an incremental COUNT of it. `budget` gets the RAM bytes
+/// of the stores.
+fn incremental_count(budget: impl FnOnce(usize) -> usize) -> Result<Option<f64>, String> {
+    let rows = 10_000u32;
+    let dims = vec![DimInfo { size: 2, ordered: false, name: "d0".into() }, DimInfo { size: rows + 1, ordered: false, name: "d1".into() }];
+    let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg: Config { tier: tier(), ..Config::default() } };
+    let Src::Store(old) = column(&start, &[0, 1], rows) else { unreachable!() };
+    let mut new = (*old).clone();
+    new.write(&[0, rows], Some(1.0));
+    let count = Store::new(&[0], None, Kind::Num, &start).unwrap().with_rows(&[&[0]], &[rows as f64]).unwrap();
+    let mut stores = vec![Arc::new(new), Arc::new(count)];
+    let ram = stores.iter().chain([&old]).map(|s| s.memory().bytes()).sum();
+    let cat = Catalog { dims, maps: Vec::new(), cfg: Config { max_bytes: budget(ram), ..start.cfg } };
+    let formula = Formula { node: Arc::new(Node::Remove { child: Box::new(Node::Ref(0)), dim: 1, agg: Agg::Count }), refs: vec![0] };
+    let delta = Some(derive_delta(&formula).expect("an incremental COUNT"));
+    let metrics = vec![Metric { formula: None, delta: None, source: true }, Metric { formula: Some(formula), delta, source: false }];
+    let plan = Plan { metrics, levels: vec![vec![Step::One(1)]] };
+    let changed = vec![(0, Reg::new(vec![(0, vec![0]), (1, vec![rows])]))];
+    recalc(&cat, &plan, &mut stores, &mut vec![None; 2], &mut vec![None; 2], changed, &[], vec![(0, Src::Store(old))], vec![], false)?;
+    Ok(stores[1].get(&[0]))
+}
+
+#[test]
+fn an_incremental_aggregation_counts_the_cache_bound_once() {
+    let headroom = CACHE / 2;
+    assert_eq!(incremental_count(|ram| ram + CACHE + headroom), Ok(Some(10_001.0)));
+    assert!(incremental_count(|ram| ram + headroom).unwrap_err().contains("メモリの予算を超える"), "the cache bound counts");
 }
 
 /// Writes 1 cell of a copy of a column of `rows` rows. The copy compacts at each write (a delta limit of 1 row).
@@ -218,7 +247,7 @@ fn write_one_cell(tier: Option<&'static Tier>, rows: u32, headroom: usize) -> Re
     let Src::Store(input) = column(&start, &[0], rows) else { unreachable!() };
     let mut stores = vec![input.clone(), input];
     let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
-    let cat = Catalog { dims, maps: Vec::new(), cfg: Config { max_bytes: held(&src) + headroom, ..cfg } };
+    let cat = Catalog { dims, maps: Vec::new(), cfg: Config { max_bytes: held(&src) + cfg.cache_bound() + headroom, ..cfg } };
     let input = Metric { formula: None, delta: None, source: false };
     let copy = Metric { formula: Some(Formula { node: Arc::new(Node::Ref(0)), refs: vec![0] }), delta: None, source: false };
     let plan = Plan { metrics: vec![input, copy], levels: vec![vec![Step::One(1)]] };

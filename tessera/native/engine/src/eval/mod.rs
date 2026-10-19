@@ -84,7 +84,7 @@ pub(crate) fn kleene(op: Op, a: Option<f64>, b: Option<f64>) -> Option<f64> {
 
 /// Evaluate a formula. Err if the sources plus the intermediate results are more than cat.cfg.max_bytes.
 pub fn eval(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict) -> Result<Cube> {
-    eval_with(node, cat, src, r, &Budget::new(cat.cfg.max_bytes, held(src)))
+    eval_with(node, cat, src, r, &Budget::new(cat.cfg.max_bytes, held(src).saturating_add(cat.cfg.cache_bound())))
 }
 
 /// Evaluate a formula in the budget b. If formulas evaluate in parallel, give each formula its own budget.

@@ -75,7 +75,7 @@ The Rust engine can set one memory budget for an operation (`RustEngine(max_byte
 The budget covers the stored data that the operation holds plus the intermediate results that it keeps at the same time.
 A recalculation holds all the stored data of the model: the values, the counts and residuals, the old values, and the new values that wait for the write-back.
 A query holds only the stored data that its formula reads. If two references read the same stored data, the engine counts it one time.
-With `segment_dir`, the budget counts only the RAM of the stored data, and the bound of the block cache one time ([Engine](engine.md), "Segment files").
+With `segment_dir`, the budget counts only the RAM of the stored data, and the cache bound (`cache_bytes`) one time. Thus `max_bytes` must be larger than `cache_bytes` ([Engine](engine.md), "Segment files").
 If the stored data alone is more than the budget, a recalculation that calculates a Metric gives an error. Increase `max_bytes` or make the model smaller.
 A write checks the budget with an incremental recalculation, but a server start, a reload and a replica do a full recalculation. The full recalculation holds all stores, so it can need more than the writes did. If the server cannot open the model, increase `--max-bytes`.
 The engine counts the necessary size first for three types of operation. These are an operation that makes all combinations (`EXPAND`, `ISBLANK`, `IFBLANK`), a join (`*`, `/`, comparisons, `ON`, `FILTER`, the branches of `IF`), and a `BY` mapping. If the size is more than the budget, the engine gives an error before it makes the result.

@@ -752,7 +752,7 @@ impl<'a> Run<'a> {
         }
         let stores = self.stores.iter().chain(self.counts.iter().flatten()).chain(self.lows.iter().flatten());
         let src: Vec<Src> = stores.map(|s| Src::Store(s.clone())).chain(self.olds.iter().flatten().cloned()).collect();
-        held(&src)
+        held(&src).saturating_add(self.cat.cfg.cache_bound())
     }
 
     fn env(&self) -> Env<'_> {

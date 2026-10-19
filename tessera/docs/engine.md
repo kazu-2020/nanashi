@@ -129,7 +129,8 @@ A sequential reader (a scan, a merge with the delta, a rewrite) reads `read_wind
 The cursor of the fused evaluation, a point read and a SQL scan read one block record (about 10 KiB) at a time. These reads go through a block cache of `cache_bytes` (256 MiB by default, `--cache-bytes`).
 The cache has 64 shards, each with its own LRU list and byte bound. The cache does not keep a record that is larger than the bound of its shard.
 A reader pins a record while it reads it, so an evicted record frees when its last reader stops.
-The memory budget (`max_bytes`) counts only the RAM of a file base: its fences. It also counts the cache bound one time, because every operation shares the cache.
-A compaction into files counts the fences of the new base, the 1 MiB buffer of the file writer, the block in build and one read window. It does not count 16 B for each row.
+The memory budget (`max_bytes`) counts only the RAM of a file base: its fences. It also counts the cache bound (`cache_bytes`) one time, because every operation shares the cache.
+Thus `max_bytes` must be larger than `cache_bytes`. If it is not, the engine and the server do not start.
+A compaction into files counts the fences of the new base, the block in build and one read window. It also counts the 1 MiB buffer of the file writer, but not 16 B for each row.
 The `base` value of `Model.memory()` is the RAM of the base. The `file` value is the bytes of the segment files on disk. Without `segment_dir`, `file` is 0.
 Without `segment_dir`, every segment stays in RAM and nothing changes.
