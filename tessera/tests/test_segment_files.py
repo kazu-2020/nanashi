@@ -50,8 +50,9 @@ import shutil, tempfile
 from sparse_engine import Model, Named
 from sparse_engine.rust_engine import RustEngine
 d = tempfile.mkdtemp(prefix="nanashi-seg-")
+# A refused configuration installs no tier, so a later engine can use another directory
 try:
-    RustEngine(segment_dir=d, cache_bytes=1 << 16, max_bytes=1 << 16)
+    RustEngine(segment_dir=d + "-refused", cache_bytes=1 << 16, max_bytes=1 << 16)
 except ValueError as e:
     print(e)
 for limit in [(1 << 16) + 1024, 4 << 16]:

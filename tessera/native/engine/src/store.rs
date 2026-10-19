@@ -1132,7 +1132,7 @@ impl Store {
 
     /// The bytes of the writer buffers when `set_sorted` writes `rows` rows. File mode writes the segments in parallel.
     pub(crate) fn write_bufs(&self, rows: usize) -> usize {
-        if self.cfg.tier.is_none() {
+        if self.cfg.tier.is_none() || rows == 0 {
             return 0;
         }
         let segs = rows / self.cfg.seg_rows.max(1) + 1;

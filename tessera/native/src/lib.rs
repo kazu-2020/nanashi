@@ -433,7 +433,8 @@ impl Core {
     #[pyo3(signature = (**config))]
     fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let Some(config) = config else { return Ok(()) };
-        let cfg = &mut Arc::make_mut(&mut self.cat).cfg;
+        // Change a copy, so an error leaves the config and the process tier as they were
+        let mut cfg = self.cat.cfg;
         let (mut dir, mut cache_bytes, mut read_window) = (None, 256usize << 20, 64usize);
         for (k, v) in config.iter() {
             let k: String = k.extract()?;
@@ -457,13 +458,15 @@ impl Core {
                 _ => return Err(err(format!("未知の調整値 {k}"))),
             }
         }
+        // Every operation counts the cache bound, so a budget that is not larger has no room for any operation
+        let bound = if dir.is_some() { Some(cache_bytes) } else { cfg.tier.map(|_| cfg.cache_bound()) };
+        if bound.is_some_and(|b| cfg.max_bytes != usize::MAX && cfg.max_bytes <= b) {
+            return Err(err("max_bytes は cache_bytes より大きくする".into()));
+        }
         if let Some(dir) = dir {
             cfg.tier = Some(Tier::install(&dir, cache_bytes, read_window).map_err(err)?);
         }
-        // Every operation counts the cache bound, so a budget that is not larger has no room for any operation
-        if cfg.tier.is_some() && cfg.max_bytes != usize::MAX && cfg.max_bytes <= cfg.cache_bound() {
-            return Err(err("max_bytes は cache_bytes より大きくする".into()));
-        }
+        Arc::make_mut(&mut self.cat).cfg = cfg;
         Ok(())
     }
 
