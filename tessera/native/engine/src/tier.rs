@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 const HEADER: usize = 32;
 const SPARE: usize = 16;
 const SHARDS: usize = 64;
+pub(crate) const WRITE_BUF: usize = 1 << 20;
 
 /// One block record in the cache. Readers pin a record by holding the `Arc`.
 pub(crate) type Buf = Arc<Vec<u8>>;
@@ -34,7 +35,7 @@ pub(crate) type Buf = Arc<Vec<u8>>;
 pub struct Tier {
     dir: PathBuf,
     cache: Cache,
-    cache_bytes: usize,
+    pub(crate) cache_bytes: usize,
     next_id: AtomicU64,
     /// The blocks that a sequential reader takes from the file with one read.
     pub(crate) read_window: usize,
@@ -67,7 +68,7 @@ impl Tier {
         let path = self.dir.join(format!("seg-{id}.bin"));
         // A file that exists is the live segment of another process on the same directory: an error, not a truncation
         let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
-        let mut w = BufWriter::with_capacity(1 << 20, file);
+        let mut w = BufWriter::with_capacity(WRITE_BUF, file);
         w.write_all(&[0u8; HEADER])?;
         Ok(SegWriter { tier: self, w, path, id, blocks: Vec::new(), words: (HEADER / 8) as u64, rows: 0, finished: false })
     }

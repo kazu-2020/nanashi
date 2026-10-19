@@ -96,8 +96,8 @@ class Store(Protocol):
     def size_hint(self, storage: Any) -> int:
         """行数の上限（セル数の見積もりに使う）。size が行を数え直すエンジンは、それより安く返す。"""
     def memory(self, storage: Any) -> dict[str, int]:
-        """格納データが確保しているメモリ。rows（本体の行数）は必ず返す。バイト数を測れるエンジンは
-        base（本体）、delta_rows（差分の件数）、delta（差分）、index（索引）も返す。"""
+        """The memory of the stored data. Always return rows (the base rows). An engine that can measure bytes
+        also returns base, delta_rows (the delta rows), delta and index (bytes of RAM), and file (bytes on disk)."""
     def same(self, a: Any, b: Any) -> bool:
         """a と b が同じ格納データ（複製しただけで、どちらにも書き込んでいない）か。わからなければ False。"""
     def diff_block(self, old: Any | None, new: Any, maps: list[list[int | None] | None] | None = None,

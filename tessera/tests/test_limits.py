@@ -357,6 +357,7 @@ class Memory(unittest.TestCase):
         self.assertGreater(mem["V"]["base"], 24_000 * 8)
         self.assertLess(mem["V"]["base"], 24_000 * 16)
         self.assertEqual(mem["V"]["delta_rows"], 0)
+        self.assertEqual(mem["V"]["file"], 0)
         m.set_cell("V", 1.0, P="p0", M="m0")
         m.recalc()
         self.assertEqual(m.memory()["V"]["delta_rows"], 1)

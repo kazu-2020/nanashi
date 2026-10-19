@@ -3,7 +3,7 @@
 #[allow(unused_imports)]
 use crate::*;
 use crate::packed::{Block, Fences, BLOCK};
-use crate::tier::{Buf, SegFile, SegWriter};
+use crate::tier::{Buf, SegFile, SegWriter, WRITE_BUF};
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -43,13 +43,14 @@ impl PartialEq for Slot {
 /// メンバー番号。何も変わらなければ None）。
 pub type Replaced = (Vec<(u64, f64)>, Option<Vec<Vec<u32>>>);
 
-/// Store が確保しているメモリの内訳（Store::memory）。
+/// The memory of a Store (Store::memory). All fields except `rows`, `delta_rows` and `file` are RAM bytes.
 pub struct Mem {
-    pub rows: usize,       // 本体の行数
-    pub base: usize,       // 本体のキーと値（バイト）
-    pub delta_rows: usize, // 差分の件数
-    pub delta: usize,      // 差分（バイト。木の節の分を含まない）
-    pub index: usize,      // 分割軸以外の軸の索引（バイト）
+    pub rows: usize,       // the base rows
+    pub base: usize,       // the keys and values of the base
+    pub delta_rows: usize, // the delta rows
+    pub delta: usize,      // the delta, without the tree nodes
+    pub index: usize,      // the indexes of the dimensions other than the partition dimension
+    pub file: usize,       // the bytes of the segment files on disk (not in `bytes`)
 }
 
 impl Mem {
@@ -117,6 +118,13 @@ impl Segment {
                 Data::Ram { vals, .. } => vals.len() * 8,
                 Data::File(_) => 0,
             }
+    }
+
+    fn file_bytes(&self) -> usize {
+        match &self.data {
+            Data::File(f) => f.end() as usize + self.fences.blocks() * 16, // the records and a footer of 16 B for each block
+            Data::Ram { .. } => 0,
+        }
     }
 
     /// The RAM bytes of the keys: the fences, and for a RAM segment the packed offsets.
@@ -991,6 +999,7 @@ impl Store {
             delta_rows: self.delta.len(),
             delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
             index,
+            file: self.base.segs.iter().map(|s| s.file_bytes()).sum(),
         }
     }
 
@@ -1121,6 +1130,15 @@ impl Store {
         (rows / self.cfg.seg_rows.max(1) + 1).saturating_mul(256 + self.pack.dims.len() * 16)
     }
 
+    /// The bytes of the writer buffers when `set_sorted` writes `rows` rows. File mode writes the segments in parallel.
+    pub(crate) fn write_bufs(&self, rows: usize) -> usize {
+        if self.cfg.tier.is_none() || rows == 0 {
+            return 0;
+        }
+        let segs = rows / self.cfg.seg_rows.max(1) + 1;
+        if self.cfg.par(rows) { segs.min(rayon::current_num_threads()) * WRITE_BUF } else { WRITE_BUF }
+    }
+
     /// The most rows of the delta. With more rows, the delta goes into a new base.
     fn delta_limit(&self) -> usize {
         (self.base.rows() / 8).min(self.cfg.delta_max).max(self.cfg.compact_min)
@@ -1154,10 +1172,19 @@ impl Store {
             // values, and the block buffer of the builder. The old base goes if no other version has it.
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
             let rows = self.rows_hint().saturating_add(n);
-            let base = rows.saturating_mul(16).saturating_add(rows.div_ceil(BLOCK) * 16).saturating_add(self.seg_bytes(rows));
+            let fences = rows.div_ceil(BLOCK) * 16;
+            let (base, scratch) = match self.cfg.tier {
+                None => (rows.saturating_mul(16).saturating_add(fences), BLOCK * 8),
+                Some(t) => {
+                    // The block list grows by push, so it can hold 2 times the fences
+                    let (block_list, in_build, window) = (fences * 2, BLOCK * 16, t.read_window * BLOCK * 16);
+                    (fences, block_list + WRITE_BUF + in_build + window)
+                }
+            };
+            let base = base.saturating_add(self.seg_bytes(rows));
             let tree = tree.min(self.delta_limit().saturating_mul(4 * CELL_BYTES).saturating_add(1024));
             let freed = if shared || self.base.segs.iter().any(|s| Arc::strong_count(s) > 1) { 0 } else { self.memory().base };
-            (base.max(tree), BLOCK * 8, base.saturating_sub(freed).max(tree))
+            (base.max(tree), scratch, base.saturating_sub(freed).max(tree))
         };
         // Small parts: the packing of the new cells, the checks of the region, the axes of region_of
         let small = 256 + axes * 64;
@@ -1811,6 +1838,16 @@ mod tests {
             assert_eq!(s.get(&[0, 1]), Some(-1.0));
             assert_eq!(s.len(), cells.len() + 1);
         }
+    }
+
+    #[test]
+    fn a_write_into_files_counts_one_writer_buffer_for_each_parallel_segment() {
+        let file = two_dims_with(1024, Config { seg_rows: 1000, par_min: 0, tier: Some(Tier::for_tests()), ..Config::default() });
+        let s = Store::new(&[0, 1], Some(0), Kind::Num, &file).unwrap();
+        assert_eq!(s.write_bufs(500), WRITE_BUF);
+        assert_eq!(s.write_bufs(1_000_000), rayon::current_num_threads().min(1001) * WRITE_BUF);
+        let ram = Store::new(&[0, 1], Some(0), Kind::Num, &two_dims_with(1024, Config::default())).unwrap();
+        assert_eq!(ram.write_bufs(1_000_000), 0);
     }
 
     #[test]

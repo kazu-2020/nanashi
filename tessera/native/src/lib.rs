@@ -433,7 +433,8 @@ impl Core {
     #[pyo3(signature = (**config))]
     fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let Some(config) = config else { return Ok(()) };
-        let cfg = &mut Arc::make_mut(&mut self.cat).cfg;
+        // Change a copy, so an error leaves the config and the process tier as they were
+        let mut cfg = self.cat.cfg;
         let (mut dir, mut cache_bytes, mut read_window) = (None, 256usize << 20, 64usize);
         for (k, v) in config.iter() {
             let k: String = k.extract()?;
@@ -457,9 +458,15 @@ impl Core {
                 _ => return Err(err(format!("未知の調整値 {k}"))),
             }
         }
+        // Every operation counts the cache bound, so a budget that is not larger has no room for any operation
+        let bound = if dir.is_some() { Some(cache_bytes) } else { cfg.tier.map(|_| cfg.cache_bound()) };
+        if bound.is_some_and(|b| cfg.max_bytes != usize::MAX && cfg.max_bytes <= b) {
+            return Err(err("max_bytes は cache_bytes より大きくする".into()));
+        }
         if let Some(dir) = dir {
             cfg.tier = Some(Tier::install(&dir, cache_bytes, read_window).map_err(err)?);
         }
+        Arc::make_mut(&mut self.cat).cfg = cfg;
         Ok(())
     }
 
@@ -691,7 +698,7 @@ impl Core {
         let agg = read_agg(agg)?;
         self.dims(&keep)?;
         let (s, r, cat) = (read(store)?, self.restrict(&region)?, self.cat.clone());
-        let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes()))).map_err(err)?;
+        let g = py.detach(move || s.summarize(&keep, &r, agg, &cat, &Budget::new(cat.cfg.max_bytes, s.memory().bytes().saturating_add(cat.cfg.cache_bound())))).map_err(err)?;
         if ids.len() != g.cols.len() {
             return Err(err(format!("ids の数 {} が残す軸の数 {} と違う", ids.len(), g.cols.len())));
         }
@@ -1005,10 +1012,11 @@ impl Core {
         Ok(read(store)?.rows_hint())
     }
 
-    /// 格納データが確保しているメモリ（本体の行数、本体、差分の件数、差分、索引。単位はバイト）。
-    fn memory(&self, store: &Bound<'_, StoreHandle>) -> PyResult<(usize, usize, usize, usize, usize)> {
+    /// Returns the memory of the stored data as a tuple. The order: base rows, base, delta rows, delta, index (RAM
+    /// bytes), file (disk bytes).
+    fn memory(&self, store: &Bound<'_, StoreHandle>) -> PyResult<(usize, usize, usize, usize, usize, usize)> {
         let m = read(store)?.memory();
-        Ok((m.rows, m.base, m.delta_rows, m.delta, m.index))
+        Ok((m.rows, m.base, m.delta_rows, m.delta, m.index, m.file))
     }
 
     fn is_bool(&self, store: &Bound<'_, StoreHandle>) -> PyResult<bool> {

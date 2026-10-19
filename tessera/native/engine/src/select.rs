@@ -70,7 +70,7 @@ pub fn run<S: AsRef<str> + Sync>(sel: &Select<S>, cat: &Catalog) -> std::result:
     for j in (0..sizes.len().saturating_sub(1)).rev() {
         strides[j] = strides[j + 1] * sizes[j + 1];
     }
-    let b = Budget::new(cat.cfg.max_bytes, held(&sel.aggs.iter().map(|(s, _)| Src::Store(s.clone())).collect::<Vec<_>>()));
+    let b = Budget::new(cat.cfg.max_bytes, held(&sel.aggs.iter().map(|(s, _)| Src::Store(s.clone())).collect::<Vec<_>>()).saturating_add(cat.cfg.cache_bound()));
     let zero = b.mark();
     let one = |(s, a): &(Arc<Store>, ReadAgg), b: &Budget| -> Result<Vec<(u64, f64)>> {
         let start = b.mark();

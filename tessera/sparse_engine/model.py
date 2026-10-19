@@ -376,7 +376,8 @@ class Model:
         """The memory (bytes) of the stored data of each Metric (Metric id -> row). Intermediate results and the
         plan are not included.
 
-        rows is the number of base rows. base, delta and index are the base, the delta and the index. counts is
+        rows is the number of base rows. base, delta and index are the RAM of the base, the delta and the index.
+        file is the bytes of the segment files (``segment_dir``) on disk. counts is
         the stored data of incremental aggregation: the counts and the residuals (base, delta and index). An engine
         that cannot measure bytes (the reference implementation) returns only rows.
         """

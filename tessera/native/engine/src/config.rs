@@ -68,4 +68,9 @@ impl Config {
     pub fn par(&self, n: usize) -> bool {
         n >= self.par_min
     }
+
+    /// The cache bound, or 0 without the tier. Every operation shares the one cache, so a top-level budget counts it once.
+    pub fn cache_bound(&self) -> usize {
+        self.tier.map_or(0, |t| t.cache_bytes)
+    }
 }
