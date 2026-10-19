@@ -571,12 +571,13 @@ impl<'a> BaseBuilder<'a> {
         let seg_rows = cfg.seg_rows.max(1);
         let cap = BaseBuilder::cap(seg_rows, hint);
         let out = BaseBuilder::out(cfg, cap, density);
-        let vals = Vec::with_capacity(if cfg.tier.is_some() { BLOCK } else { cap });
-        BaseBuilder { pack, cfg, seg_rows, density, hint, keys: Vec::with_capacity(BLOCK), vals, rows: 0, out: Some(out), last: 0, done: Vec::new() }
+        let block = if hint == 0 { 0 } else { BLOCK };
+        let vals = Vec::with_capacity(if cfg.tier.is_some() { block } else { cap });
+        BaseBuilder { pack, cfg, seg_rows, density, hint, keys: Vec::with_capacity(block), vals, rows: 0, out: Some(out), last: 0, done: Vec::new() }
     }
 
     /// The reservation of one segment: `seg_rows` and room for the rest of the partition member at the cut.
-    /// A longer member makes the segment grow one time (`grow`).
+    /// A longer member makes the segment grow (`grow`).
     fn cap(seg_rows: usize, hint: usize) -> usize {
         seg_rows.saturating_add(seg_rows / 16).min(hint)
     }
@@ -595,7 +596,7 @@ impl<'a> BaseBuilder<'a> {
     /// The most RAM bytes that `new(.., hint, like)` holds for at most `hint` rows, without the structs of the
     /// segments (`Store::seg_bytes`). The segments in RAM reserve at most the hint in all (see `grow`). Their
     /// keys count at the density of `like`, or at 8 B each if `like` has no rows. In file mode the list of
-    /// fences grows by push, so it can hold 2 times the fences.
+    /// fences grows by push, so it can hold 2 times the fences. With a hint of 0 rows it holds no block.
     pub(crate) fn most_bytes(cfg: &Config, hint: usize, like: &Base) -> usize {
         let fences = hint.div_ceil(BLOCK).saturating_mul(size_of::<Block>());
         let columns = match cfg.tier {
@@ -606,7 +607,7 @@ impl<'a> BaseBuilder<'a> {
             }
             Some(_) => fences.saturating_mul(2),
         };
-        columns.saturating_add(BaseBuilder::scratch(cfg))
+        columns.saturating_add(if hint == 0 { 0 } else { BaseBuilder::scratch(cfg) })
     }
 
     fn out(cfg: &Config, cap: usize, density: (usize, usize)) -> Out {
@@ -651,12 +652,12 @@ impl<'a> BaseBuilder<'a> {
         self.keys.clear();
     }
 
-    /// The partition member in build goes past the reservation of the segment. Reserve the rest of the hint in
-    /// one step: growth by doubling copies the columns many times and can hold 2 times the rows. If the hint
-    /// is too small, double.
+    /// The partition member in build goes past the reservation of the segment. Double the columns, but not past
+    /// the hint, so the segments in RAM reserve at most the hint in all. The hint can be far above the real rows.
     #[cold]
     fn grow(&mut self) {
-        let more = if self.hint > self.rows { self.hint - self.rows } else { self.rows.max(BLOCK) };
+        let more = self.rows.max(BLOCK);
+        let more = if self.hint > self.rows { more.min(self.hint - self.rows) } else { more };
         self.vals.reserve_exact(more);
         if let Some(Out::Ram(b)) = &mut self.out {
             b.grow(self.rows.saturating_add(more));
@@ -1228,13 +1229,13 @@ impl Store {
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
             let rows = self.rows_hint().saturating_add(n);
             let fences = rows.div_ceil(BLOCK) * size_of::<Block>();
-            let scratch = BaseBuilder::scratch(&self.cfg);
+            let block = BaseBuilder::scratch(&self.cfg);
             let (base, scratch) = match self.cfg.tier {
-                None => (rows.saturating_mul(16).saturating_add(fences), scratch),
+                None => (rows.saturating_mul(16).saturating_add(fences), block),
                 Some(t) => {
                     // The block list grows by push, so it can hold 2 times the fences
                     let (block_list, window) = (fences * 2, t.read_window * BLOCK * 16);
-                    (fences, block_list + scratch + window)
+                    (fences, block_list + block + window)
                 }
             };
             let base = base.saturating_add(self.seg_bytes(rows));

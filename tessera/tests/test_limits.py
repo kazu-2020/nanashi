@@ -765,7 +765,7 @@ class WriteBudget(unittest.TestCase):
                 error = str(e)
             return error, start + nanashi_core.heap()[1] - base
 
-        # 17,000 rows of one member: a reservation of 1,062 rows that doubles would grow to 33,984 rows
+        # 17,000 rows of one member: a reservation of 1,062 rows that doubles past the hint would grow to 33,984 rows
         long = lambda: model([("P", 1), ("Q", 17_000)], {("m0", f"m{i}"): float(i) for i in range(17_000)}, partition="P")  # noqa: E731
         # 5 dimensions of 4,096 members, and the cells on the diagonal: the keys are far apart
         sparse = lambda: model([(f"D{j}", 4096) for j in range(5)], {(f"m{i}",) * 5: float(i) for i in range(4096)})  # noqa: E731

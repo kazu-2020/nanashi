@@ -710,8 +710,7 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, tar
     let cat = fu.cat;
     let cfg = &cat.cfg;
     let prefer: &[DimId] = target.map_or(&[], |t| &t.store.pack.dims);
-    // The cells of the sink of `rows` rows, which a Dense access leaves room for: the columns of the target
-    // store with the part buffers (at most all rows), or an array
+    // Room that a Dense access leaves for the sink: the store columns and part buffers if the packing matches, else `rows` cells
     let sink = |pack: &Packing, rows: usize| match target {
         Some(t) if t.store.pack == *pack => t.cells(Need { rows, extra: 0, parts: rows }),
         _ => rows,
@@ -725,7 +724,7 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, tar
             let mut access = Vec::new();
             let Some(f) = fu.build(node, out, true, &mut access) else { return Ok(None) };
             let copied = fu.copied + access.iter().map(Access::cells).sum::<usize>();
-            let sink = run_sorted(cfg, &drivers, &access, &compile(&f, &access), bud, copied, |need| make(out, need))?;
+            let Some(sink) = run_sorted(cfg, &drivers, &access, &compile(&f, &access), bud, copied, |need| make(out, need))? else { return Ok(None) };
             return Ok(Some((out.clone(), info.kind, sink)));
         }
     }
@@ -846,15 +845,18 @@ fn in_flight(par: bool, sizes: &[usize]) -> usize {
 
 /// Scan the union of the keys of the drivers (same packing) in order, and get the value of f at each key.
 /// The result goes in key order into the sink `make`. The rows of the result are at most the rows of the
-/// drivers. `copied` is the cells of the copied sources.
-fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev, bud: &Budget, copied: usize, make: impl FnOnce(Need) -> Result<S>) -> Result<S> {
+/// drivers. `copied` is the cells of the copied sources. Gives Ok(None) if the lists of the ranges do not fit.
+fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev, bud: &Budget, copied: usize, make: impl FnOnce(Need) -> Result<S>) -> Result<Option<S>> {
     // A unit of work: split at every cfg.chunk-th key of the largest driver, and find the row range of each driver
     let chunk = cfg.chunk.max(1);
     let big = (0..drivers.len()).max_by_key(|&i| drivers[i].n()).unwrap();
-    // Check the lists of the ranges before they exist. A range has its bound and size, and 2 lists of a row for each driver
-    let range = 2 * size_of::<Vec<usize>>() + 2 * size_of::<usize>() + 2 * drivers.len() * size_of::<usize>();
+    // Check the lists of the ranges before they exist. `stream` adds a slice and a written count for each range.
+    // If they do not fit, the evaluation of one operation at a time needs no ranges
+    let range = 2 * size_of::<Vec<usize>>() + 3 * size_of::<usize>() + size_of::<&mut [(u64, f64)]>() + 2 * drivers.len() * size_of::<usize>();
     let lists = (drivers[big].n() / chunk + 1).saturating_mul(range).div_ceil(CELL_BYTES).saturating_add(copied);
-    bud.need(lists, "式の結果")?;
+    if bud.need(lists, "").is_err() {
+        return Ok(None);
+    }
     let mut bounds: Vec<u64> = (chunk..drivers[big].n()).step_by(chunk).map(|i| drivers[big].key(i)).collect();
     bounds.dedup();
     let starts = |key: Option<u64>| -> Vec<usize> { drivers.iter().map(|d| key.map_or(d.n(), |k| d.lower_bound(k))).collect() };
@@ -903,7 +905,7 @@ fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev,
     let par = cfg.par(total);
     let mut sink = make(Need { rows: total, extra: lists, parts: in_flight(par, &sizes) })?;
     stream(par, &ranges, &sizes, work, &mut sink)?;
-    Ok(sink)
+    Ok(Some(sink))
 }
 
 /// 1 つの仕事の単位: 被覆ごとの行の範囲の始まりと終わり。

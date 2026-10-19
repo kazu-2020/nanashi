@@ -122,8 +122,10 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
     let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
     let store = Store::new(&[0], None, Kind::Num, &cat).unwrap();
     // The columns need room for the part buffers: here one part of all rows, 16 B for each cell. The list of
-    // the ranges of the scan needs less than 1 KiB
+    // the ranges of the scan needs less than 1 KiB. Without that room, an array of cells fits
     let b = Budget::new(held + store.sink_bytes(rows, false), held);
+    assert!(matches!(eval_columns(&node, &cat, &src, &b, &store, false).unwrap(), Some(Whole::Cube(c)) if c.cells.len() == rows));
+    let b = Budget::new(held + rows * CELL_BYTES, held);
     assert!(eval_columns(&node, &cat, &src, &b, &store, false).is_err_and(|e| e.contains("メモリの予算を超える")));
     let limit = store.sink_bytes(rows, false) + rows * CELL_BYTES + 1024;
     let b = Budget::new(held + limit, held);
@@ -145,14 +147,17 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
 }
 
 #[test]
-fn the_ranges_of_a_sorted_scan_are_counted_before_they_exist() {
+fn a_sorted_scan_whose_ranges_do_not_fit_is_not_fused() {
     // 100 drivers and a range at each key of the largest: 10,000 ranges of 2 x 100 row positions (16 MB)
     let cat = catalog(usize::MAX);
     let src: Vec<Src> = (0..100).map(|i| column(&cat, &[0], if i == 0 { 10_000 } else { 1 })).collect();
     let cat = catalog_with(Config { max_bytes: held(&src) + (1 << 20), chunk: 1, ..Config::default() });
     let node = (1..100).fold(Node::Ref(0), |acc, i| Node::Bin(Op::Add, Box::new(acc), Box::new(Node::Ref(i)), vec![]));
-    let err = eval(&node, &cat, &src, &Restrict::all(3)).unwrap_err();
-    assert!(err.contains("メモリの予算を超える") && err.contains("式の結果"), "{err}");
+    // One operation at a time, each result has at most 10,000 cells (160 KB)
+    let c = eval(&node, &cat, &src, &Restrict::all(3)).unwrap();
+    assert_eq!(c.cells.len(), 10_000);
+    assert_eq!(c.cells[0].1, 100.0);
+    assert!(c.cells[1..].iter().all(|&(_, v)| v == 1.0));
 }
 
 /// A full recalculation of `Month >= HireMonth AND ISBLANK(LeaveMonth)[EXPAND: Month]` (Employed in
