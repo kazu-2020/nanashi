@@ -24,6 +24,14 @@ impl Cube {
         Cube { pack: self.pack.clone(), kind: self.kind, cells }
     }
 
+    /// The same as filter, but if the restriction keeps all cells, it gives back the Cube without a copy.
+    pub fn into_filtered(self, cfg: &Config, r: &Restrict) -> Cube {
+        if checks(&self.pack, r).is_empty() {
+            return self;
+        }
+        self.filter(cfg, r)
+    }
+
     /// repack と同じだが、詰め方が同じならセルを写さずにそのまま返す。
     pub fn into_repacked(self, cfg: &Config, pack: &Packing) -> Cube {
         if &self.pack == pack {

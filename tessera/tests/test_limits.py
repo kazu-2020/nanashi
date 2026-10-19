@@ -496,6 +496,23 @@ class AggregationBudget(unittest.TestCase):
         m.recalc()
         self.assertEqual(m.get("Z", D="d7", M="m0"), 34.0)
 
+    def test_join_reads_all_of_the_member_metric(self):
+        # S has 5,000 cells, too many to narrow the read of DeptOf. The join reads all 50,000 cells of DeptOf
+        # (0.76 MiB) and makes its table. A third copy of DeptOf went over 2.25 MiB
+        import nanashi_core
+        nanashi_core.heap_exact(True)
+        self.addCleanup(nanashi_core.heap_exact, False)
+
+        def build(m):
+            m.add_dimension("E", [f"e{i}" for i in range(87_000)])
+            m.add_dimension("M", [f"m{i}" for i in range(12)])
+            m.add_dimension("D", [f"d{i}" for i in range(30)])
+            m.add_input("S", ["E", "M"], {(f"e{i}", "m0"): 1.0 for i in range(5000)})
+            m.add_input("DeptOf", ["E", "M"], {(f"e{i}", "m0"): f"d{i % 30}" for i in range(50_000)}, kind="member:D")
+            m.add_formula("Z", ["D", "M"], "S[BY SUM: E.DeptOf]")
+            return {"D": "d7", "M": "m0"}, 167.0
+        self.check(build, fit=int(4.5 * (1 << 20)), below=int(2.25 * (1 << 20)), stream_always=True)
+
     def test_spill(self):
         # Each group spills (3 partials) and then cancels back to 1.0, so its residual is 0. The 20,000 Spills
         # take about 1.7 MiB next to the 0.6 MiB array
