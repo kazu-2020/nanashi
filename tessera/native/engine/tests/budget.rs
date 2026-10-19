@@ -105,6 +105,23 @@ fn by_lookup_on_one_member_counts_only_that_member() {
 }
 
 #[test]
+fn a_by_metric_join_beyond_the_budget_fails_before_copying() {
+    // x[BY SUM: d0.V]: x has 3000 cells on (d0 = 0, d1), and V maps member 0 of d0 to member 7 of d2.
+    // The 10^10 groups on (d1, d2) are too many for the table, so the engine joins x with V
+    let cat = catalog(usize::MAX);
+    let v = Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[0]], &[7.0]).unwrap();
+    let src = [column(&cat, &[0, 1], 3000), Src::Store(Arc::new(v))];
+    let edges = Node::AsAxis { child: Box::new(Node::Ref(1)), dim: 2 };
+    let node = Node::Remove { child: Box::new(Node::On(Box::new(Node::Ref(0)), Box::new(edges))), dim: 0, agg: Agg::Sum };
+    let c = eval(&node, &cat, &src, &Restrict::all(3)).unwrap();
+    assert_eq!(c.cells.len(), 3000);
+    // The copy of x (3000 cells) does not fit in 1000 cells
+    let small = catalog(held(&src) + 1000 * CELL_BYTES);
+    let err = eval(&node, &small, &src, &Restrict::all(3)).unwrap_err();
+    assert!(err.contains("メモリの予算を超える") && err.contains("集計"), "{err}");
+}
+
+#[test]
 fn a_streamed_result_is_budgeted_by_its_columns() {
     for tier in [None, tier()] {
         streamed_result_is_budgeted_by_its_columns(tier);

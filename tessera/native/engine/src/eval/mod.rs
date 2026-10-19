@@ -407,7 +407,10 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                             if let Some(c) = remove_by_table(&rows, &dims, *target, vs, aggs, cat, r, bud)? {
                                 return Ok(c);
                             }
-                            // If the table cannot be used, join and then aggregate (the same as On)
+                            // If the table cannot be used, join and then aggregate (the same as On).
+                            // The copy of x, and the read of V with its table, exist before any check
+                            let copy = if matches!(rows, Rows::Owned(_)) { 0 } else { rows.len() };
+                            bud.need(copy.saturating_add(vs.rows_hint().saturating_mul(2)), "集計")?;
                             let xc = rows.into_cube();
                             let o = match semi(&sub, &xc, cat) {
                                 Some(r2) => eval_with(edges, cat, src, &r2, bud)?,
