@@ -335,13 +335,16 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         Node::AsAxis { child, dim } => {
             // メンバー番号を値に持つ Cube を、そのメンバーを dim の座標に持つ表（値は 1）にする
             let c = eval_with(child, cat, src, &r.without(&[*dim]), bud)?;
+            // The budget holds the real capacity of c, which can be larger than its rows. The output lives next to it
+            bud.need(c.cells.len(), "BY（対応表）")?;
             let out = Packing::new(&[c.dims(), &[*dim]].concat(), cat)?;
             let proj = Proj::new(&c.pack, &out);
             let (p, size) = (out.pos(*dim).unwrap(), cat.dims[*dim].size as f64);
-            let cells = map_cells(cfg, &c.cells, |k, v| {
-                (v >= 0.0 && v < size).then(|| (proj.apply(&c.pack, &out, k) | out.put(p, v as u32), 1.0))
+            // An exact-size map, as in repack. A filter_map collect can make the Vec up to 2 times larger.
+            let cells = flat_map_cells(cfg, &c.cells, c.cells.len(), |k, v| {
+                (v >= 0.0 && v < size).then(|| (proj.apply(&c.pack, &out, k) | out.put(p, v as u32), 1.0)).into_iter()
             });
-            Ok(Cube { pack: out, kind: Kind::Num, cells }.filter(cfg, r))
+            Ok(Cube { pack: out, kind: Kind::Num, cells }.into_filtered(cfg, r))
         }
 
         Node::Select { child, dim, member, .. } => {
@@ -367,7 +370,7 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
                 let t = c.pack.get(k, p) as i64 + n;
                 (0..size).contains(&t).then(|| (c.pack.clear(k, p) | c.pack.put(p, t as u32), v))
             });
-            Ok(Cube { pack: c.pack, kind: c.kind, cells }.filter(cfg, r))
+            Ok(Cube { pack: c.pack, kind: c.kind, cells }.into_filtered(cfg, r))
         }
     }
 }
@@ -407,11 +410,19 @@ fn aggregate(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget
                             if let Some(c) = remove_by_table(&rows, &dims, *target, vs, aggs, cat, r, bud)? {
                                 return Ok(c);
                             }
-                            // If the table cannot be used, join and then aggregate (the same as On)
+                            // If the table cannot be used, join and then aggregate (the same as On).
+                            // A copy of x lives until the end. The enclosing settle releases it
+                            if !matches!(rows, Rows::Owned(_)) {
+                                bud.take(rows.len(), "集計")?;
+                            }
                             let xc = rows.into_cube();
                             let o = match semi(&sub, &xc, cat) {
                                 Some(r2) => eval_with(edges, cat, src, &r2, bud)?,
-                                None => eval_with(edges, cat, src, &sub, bud)?,
+                                None => {
+                                    // AsAxis holds all of V and the table that it makes from V before it settles
+                                    bud.need(vs.rows_hint().saturating_mul(2), "集計")?;
+                                    eval_with(edges, cat, src, &sub, bud)?
+                                }
                             };
                             let joined = intersect(&xc, &o, xc.kind, cat, bud, |a, _| Some(a))?;
                             return remove_rows(Rows::Owned(joined), &dims, aggs, cat, r, bud);

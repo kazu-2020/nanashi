@@ -75,11 +75,17 @@ The engine calculates the parts in parallel, in batches of 2 parts for each thre
 
 The budget counts the new base and these batches, not 16 B for each cell. In RAM, the new base counts 8 B for each value. It counts the keys at the key density of the old base, or 8 B for each key if the old base is empty. The columns of a segment with a long partition member grow by doubling, but not past the rows that the scan expects. In file mode, the new base counts only the fences, the writer buffer and the block in build. If the new base and the batches do not fit in the budget, the scan writes an array of cells. If the array also does not fit, the scan gives an error.
 
+Before the scan starts, the engine estimates the result rows. It also counts the lists of the members that the scan adds to the rows of the source. If the result has the packing of the stored data, the check uses the smaller of two costs. One cost is the new base with 2 batches. The other cost is the array of cells. If the estimate does not fit in the budget, the engine does not fuse the formula.
+
 The engine continues to evaluate one operation at a time for these: an incremental recalculation on a limited range, and an aggregation. For an aggregation, the engine fuses the expression inside the aggregation and makes it one time.
 
 For an aggregation (`REMOVE`, `BY`) on the array path or the hash map path, the engine does not copy the aggregation source. It reads the source and adds each value to the intermediate value of its target.
 If the aggregation source is stored data, the engine reads the base directly by row number.
+
 The type check rewrites a `BY` aggregation with a Metric into a join with `On` and `AsAxis` and an aggregation. In a full evaluation, the engine puts the mapping table (for example, employee and month → department) into an array of all combinations. It looks up the targets in this array and does not make the join result. This path uses only the hash map, and only if the targets are few.
+
+If the targets are not few, the engine joins the source with the mapping table and then aggregates. The budget counts the copy of the source until the aggregation ends. If the source has 4,096 cells or fewer, the join reads only the rows of the mapping table for the members of the source. Otherwise, the engine first checks that all rows of the mapping Metric and the table that it makes from them fit in the budget.
+
 The engine tries 3 paths in this order: an array of all target combinations, a hash map, and a sort. If an incremental recalculation narrows the range of the targets, the engine tries the hash map first, because the array ignores the range.
 If all combinations of the aggregation targets are few, the engine adds the values into an array of all combinations. For a SUM, "few" means that the arrays (32 B for each combination and array) are not larger than the (target, value) pairs (16 B a row). For `MIN`, `MAX` and `COUNT`, the limit is half of the pairs (16 B or 4 B for each combination and array).
 If the slot of each row follows the order of the rows, the engine divides the rows into one part for each thread, and each part has its own array. At the end, the engine adds the arrays in order.

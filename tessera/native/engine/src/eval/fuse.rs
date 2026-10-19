@@ -210,7 +210,7 @@ struct Fuse<'a> {
     src: &'a [Src],
     bud: &'a Budget,
     merged: &'a [OnceCell<Cube>], // Per src index: the stored data merged with its delta, made on first use
-    copied: usize,                // The cell capacity of `merged`. Later budget checks add it, because Budget::need does not keep it
+    copied: usize,                // The cells of `merged` and the fill member lists. Later budget checks add it, because Budget::need does not keep it
     reserve: usize,               // The cells that the scan needs after `build`. A Dense access leaves room for them
     leaves: Vec<Leaf<'a>>,
     ids: Vec<usize>, // leaves の番号 -> src の番号
@@ -695,9 +695,6 @@ pub(crate) fn fused_into<S: Sink>(node: &Node, cat: &Catalog, src: &[Src], r: &R
     let merged: Vec<OnceCell<Cube>> = src.iter().map(|_| OnceCell::new()).collect();
     let mut fu = Fuse { cat, src, bud, merged: &merged, copied: 0, reserve: 0, leaves: Vec::new(), ids: Vec::new() };
     let Some(info) = fu.info(node) else { return Ok(None) };
-    if !fits(info.mat, fu.copied, bud) {
-        return Ok(None);
-    }
     fused_with(node, &mut fu, info, bud, target, make)
 }
 
@@ -715,10 +712,24 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, tar
         Some(t) if t.store.pack == *pack => t.cells(Need { rows, extra: 0, parts: rows }),
         _ => rows,
     };
+    // An estimate before the scan. `make` checks the real cost. A result in the packing of the target store goes
+    // into its columns, as in `make`. The parts in flight are at most 2 batches of `chunk` cells (`in_flight`).
+    let mat = info.mat;
+    let fits_as = |out: &Packing, copied: usize| match target {
+        Some(t) if t.store.pack == *out && mat < usize::MAX as f64 => {
+            let rows = mat as usize;
+            let cols = t.cells(Need { rows, extra: 0, parts: rows.min(batch().saturating_mul(2).saturating_mul(cfg.chunk.max(1))) });
+            fits(mat.min(cols as f64), copied, bud)
+        }
+        _ => fits(mat, copied, bud),
+    };
     // Scan the union of the sources that have all dimensions of the formula, in key order (same packing)
     if let Cover::Exact(ls) = &info.cover {
         let out = fu.leaves[ls[0]].pack;
         if same_set(&out.dims, &info.dims) && ls.iter().all(|&l| fu.leaves[l].pack == out) {
+            if !fits_as(out, fu.copied) {
+                return Ok(None);
+            }
             let drivers: Vec<Col> = ls.iter().map(|&l| fu.leaves[l].col).collect();
             fu.reserve = sink(out, drivers.iter().map(|d| d.n()).sum()).saturating_add(range_cells(cfg, &drivers));
             let mut access = Vec::new();
@@ -757,6 +768,12 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, tar
         }
     };
     let Ok(out) = Packing::new(&order, cat) else { return Ok(None) };
+    let filled: usize = out.dims.iter().filter(|d| !matches!(&cover, Cover::Part(l) if fu.leaves[*l].pack.dims.contains(d))).map(|&d| cat.dims[d].size as usize).sum();
+    let filled = (filled * size_of::<u32>()).div_ceil(CELL_BYTES);
+    if !fits_as(&out, fu.copied.saturating_add(filled)) {
+        return Ok(None);
+    }
+    fu.copied += filled;
     let base = match cover {
         Cover::Part(l) => Some((fu.leaves[l].col, Proj::new(fu.leaves[l].pack, &out), fu.leaves[l].pack)),
         _ => None,

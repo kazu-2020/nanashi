@@ -48,8 +48,10 @@ fn ifblank_beyond_the_budget_fails_before_allocating() {
     let small = catalog_with(Config { max_bytes: stored + 100_000 * 16, fuse: false, ..Config::default() });
     let err = eval(&node, &small, &source(&small), &Restrict::all(3)).unwrap_err();
     assert!(err.contains("IFBLANK"), "{err}");
-    // Fused, the evaluation holds only the result and the small lists of the chunks (4 KiB is enough for them)
+    // Fused, the evaluation holds the result, the list of the 10^5 members (4 B each) and the small lists of the chunks
     let fused = catalog(stored + 100_000 * 16 + 4096);
+    assert!(eval(&node, &fused, &source(&fused), &Restrict::all(3)).unwrap_err().contains("IFBLANK"));
+    let fused = catalog(stored + 100_000 * (16 + 4) + 4096);
     assert_eq!(eval(&node, &fused, &source(&fused), &Restrict::all(3)).unwrap().cells.len(), 100_000);
     // 結果も収まらなければ、確保する前に失敗する
     let tiny = catalog(stored + 100_000 * 8);
@@ -105,6 +107,39 @@ fn by_lookup_on_one_member_counts_only_that_member() {
 }
 
 #[test]
+fn a_by_metric_join_beyond_the_budget_fails_before_copying() {
+    // x[BY SUM: d0.V]: x has 3000 cells on (d0 = 0, d1), and V maps member 0 of d0 to member 7 of d2.
+    // The 10^10 groups on (d1, d2) are too many for the table, so the engine joins x with V
+    let cat = catalog(usize::MAX);
+    let v = Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&[0]], &[7.0]).unwrap();
+    let src = [column(&cat, &[0, 1], 3000), Src::Store(Arc::new(v))];
+    let edges = Node::AsAxis { child: Box::new(Node::Ref(1)), dim: 2 };
+    let node = Node::Remove { child: Box::new(Node::On(Box::new(Node::Ref(0)), Box::new(edges))), dim: 0, agg: Agg::Sum };
+    let c = eval(&node, &cat, &src, &Restrict::all(3)).unwrap();
+    assert_eq!(c.cells.len(), 3000);
+    // The copy of x (3000 cells) does not fit in 1000 cells
+    let small = catalog(held(&src) + 1000 * CELL_BYTES);
+    let err = eval(&node, &small, &src, &Restrict::all(3)).unwrap_err();
+    assert!(err.contains("メモリの予算を超える") && err.contains("集計"), "{err}");
+}
+
+#[test]
+fn a_by_metric_join_reads_only_the_mappings_of_a_small_source() {
+    // x has 10 cells on d0 = 0. V maps 50,000 members of d0, but the join reads only V[0]
+    let cat = catalog(usize::MAX);
+    let n = 50_000u32;
+    let v = Store::new(&[0], None, Kind::Num, &cat).unwrap().with_rows(&[&(0..n).collect::<Vec<_>>()], &vec![7.0; n as usize]).unwrap();
+    let src = [column(&cat, &[0, 1], 10), Src::Store(Arc::new(v))];
+    let edges = Node::AsAxis { child: Box::new(Node::Ref(1)), dim: 2 };
+    let node = Node::Remove { child: Box::new(Node::On(Box::new(Node::Ref(0)), Box::new(edges))), dim: 0, agg: Agg::Sum };
+    // All of V and its table (100,000 cells) do not fit in 1000 cells
+    let small = catalog(held(&src) + 1000 * CELL_BYTES);
+    let c = eval(&node, &small, &src, &Restrict::all(3)).unwrap();
+    assert_eq!(c.cells.len(), 10);
+    assert!(c.cells.iter().all(|&(_, v)| v == 1.0));
+}
+
+#[test]
 fn a_streamed_result_is_budgeted_by_its_columns() {
     for tier in [None, tier()] {
         streamed_result_is_budgeted_by_its_columns(tier);
@@ -144,6 +179,22 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
     let tight = Budget::new(held + rows * 9, held);
     assert!(eval_columns(&node, &cat, &src, &tight, &store, false).unwrap().is_none());
     assert!(eval_with(&node, &cat, &src, &Restrict::all(1), &tight).unwrap_err().contains("メモリの予算を超える"));
+}
+
+#[test]
+fn a_streamed_file_result_needs_no_room_for_all_its_cells() {
+    // A file base keeps only its fences in RAM, and the scan holds at most 2 batches of parts of about 100 cells
+    let cat = catalog_with(Config { seg_rows: 1000, chunk: 100, tier: tier(), ..Config::default() });
+    let rows = 300_000usize;
+    let (d0, d1): (Vec<u32>, Vec<u32>) = (0..rows as u32).map(|i| (i / 1000, i % 1000)).unzip();
+    let s = Store::new(&[0, 1], None, Kind::Num, &cat).unwrap().with_rows(&[&d0, &d1], &vec![1.0; rows]).unwrap();
+    let src = [Src::Store(Arc::new(s))];
+    let held = held(&src);
+    let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
+    let store = Store::new(&[0, 1], None, Kind::Num, &cat).unwrap();
+    let b = Budget::new(held + rows * CELL_BYTES / 2, held);
+    let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &b, &store, false).unwrap() else { panic!("streams") };
+    assert_eq!(store.with_columns(c).0.as_cube().cells.len(), rows);
 }
 
 #[test]
