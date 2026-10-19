@@ -158,13 +158,12 @@ impl PackedKeys {
     /// keys pack worse.
     /// The builder gets whole blocks (`push_block`), so it reserves no block buffer of its own.
     pub(crate) fn builder(capacity: usize, like: (usize, usize)) -> Builder {
-        let bytes = if like.1 == 0 { capacity * 2 } else { (like.0 * capacity).div_ceil(like.1).min(capacity * 8) };
-        Builder::new(capacity, bytes, 0)
+        Builder::new(capacity, reserve_bytes(capacity, like), 0)
     }
 
     /// A builder for about `capacity` keys that reserves `bytes` for the packed offsets (see `packed_bytes`).
     pub(crate) fn builder_with_bytes(capacity: usize, bytes: usize) -> Builder {
-        Builder::new(capacity, bytes, BLOCK)
+        Builder::new(capacity, bytes.saturating_add(16), BLOCK)
     }
 
     /// The key at `i`. `i` must be less than `len()`.
@@ -253,6 +252,17 @@ pub(crate) fn packed_bytes(keys: impl Iterator<Item = u64>) -> usize {
     words * 8
 }
 
+/// The bytes that `PackedKeys::builder(capacity, like)` reserves for the packed offsets, with the 16 spare bytes.
+pub(crate) fn reserve_bytes(capacity: usize, like: (usize, usize)) -> usize {
+    let bytes = if like.1 == 0 { capacity.saturating_mul(2) } else { like.0.saturating_mul(capacity).div_ceil(like.1).min(capacity.saturating_mul(8)) };
+    bytes.saturating_add(16)
+}
+
+/// The most bytes of the packed offsets of `capacity` keys (8 B for each key), with the 16 spare bytes.
+pub(crate) fn most_bytes(capacity: usize) -> usize {
+    capacity.saturating_mul(8).saturating_add(16)
+}
+
 /// Packs keys pushed one at a time, in sorted order and with no duplicates. It keeps only one block of
 /// keys unpacked, so a merge into a new base does not hold a `Vec<u64>` of all keys. `finish` gives
 /// the same bytes as `PackedKeys::new`.
@@ -261,18 +271,22 @@ pub(crate) struct Builder {
     blocks: Vec<Block>,
     bytes: Vec<u8>,
     buf: Vec<u64>, // the keys of the block that is not yet packed
-    most: usize,   // 8 B for each key of the capacity and the 16 spare bytes: the packed offsets never need more
+    most: usize,   // `most_bytes` of the capacity: the packed offsets never need more
 }
 
 impl Builder {
+    /// `bytes` includes the 16 spare bytes.
     fn new(capacity: usize, bytes: usize, buf: usize) -> Builder {
-        Builder {
-            len: 0,
-            blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)),
-            bytes: Vec::with_capacity(bytes + 16),
-            buf: Vec::with_capacity(buf),
-            most: capacity.saturating_mul(8).saturating_add(16),
-        }
+        Builder { len: 0, blocks: Vec::with_capacity(capacity.div_ceil(BLOCK)), bytes: Vec::with_capacity(bytes), buf: Vec::with_capacity(buf), most: most_bytes(capacity) }
+    }
+
+    /// Makes room for `capacity` keys in all, in one step: the block headers, and the bytes at the density of
+    /// the keys packed so far. If the next keys pack worse, the bytes grow by doubling up to `most_bytes`.
+    pub(crate) fn grow(&mut self, capacity: usize) {
+        self.most = most_bytes(capacity);
+        self.blocks.reserve_exact(capacity.div_ceil(BLOCK).saturating_sub(self.blocks.len()));
+        let bytes = if self.len == 0 { 0 } else { self.bytes.len().saturating_mul(capacity).div_ceil(self.len).saturating_add(16).min(self.most) };
+        self.bytes.reserve_exact(bytes.saturating_sub(self.bytes.len()));
     }
 
     /// The (bytes, keys) of the keys packed so far, without the block that is not yet packed.

@@ -121,11 +121,13 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
     }
     let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
     let store = Store::new(&[0], None, Kind::Num, &cat).unwrap();
-    // The scan checks CELL_BYTES for each driver row before it starts. The columns also need room for the part
-    // buffers (here one part of all rows). Without that room, the result is a Cube.
-    let b = Budget::new(held + rows * CELL_BYTES, held);
+    // The columns need room for the part buffers: here one part of all rows, 16 B for each cell. The list of
+    // the ranges of the scan needs less than 1 KiB. Without that room, an array of cells fits
+    let b = Budget::new(held + store.sink_bytes(rows, false), held);
     assert!(matches!(eval_columns(&node, &cat, &src, &b, &store, false).unwrap(), Some(Whole::Cube(c)) if c.cells.len() == rows));
-    let limit = 2 * rows * CELL_BYTES;
+    let b = Budget::new(held + rows * CELL_BYTES, held);
+    assert!(eval_columns(&node, &cat, &src, &b, &store, false).is_err_and(|e| e.contains("メモリの予算を超える")));
+    let limit = store.sink_bytes(rows, false) + rows * CELL_BYTES + 1024;
     let b = Budget::new(held + limit, held);
     let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &b, &store, false).unwrap() else { panic!("streams") };
     // Only the columns stay counted, and they are smaller than the cells
@@ -142,6 +144,65 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
     let tight = Budget::new(held + rows * 9, held);
     assert!(eval_columns(&node, &cat, &src, &tight, &store, false).unwrap().is_none());
     assert!(eval_with(&node, &cat, &src, &Restrict::all(1), &tight).unwrap_err().contains("メモリの予算を超える"));
+}
+
+#[test]
+fn a_sorted_scan_whose_ranges_do_not_fit_is_not_fused() {
+    // 100 drivers and a range at each key of the largest: 10,000 ranges of 2 x 100 row positions (16 MB)
+    let cat = catalog(usize::MAX);
+    let src: Vec<Src> = (0..100).map(|i| column(&cat, &[0], if i == 0 { 10_000 } else { 1 })).collect();
+    let cat = catalog_with(Config { max_bytes: held(&src) + (1 << 20), chunk: 1, ..Config::default() });
+    let node = (1..100).fold(Node::Ref(0), |acc, i| Node::Bin(Op::Add, Box::new(acc), Box::new(Node::Ref(i)), vec![]));
+    // One operation at a time, each result has at most 10,000 cells (160 KB)
+    let c = eval(&node, &cat, &src, &Restrict::all(3)).unwrap();
+    assert_eq!(c.cells.len(), 10_000);
+    assert_eq!(c.cells[0].1, 100.0);
+    assert!(c.cells[1..].iter().all(|&(_, v)| v == 1.0));
+}
+
+/// A full recalculation of `Month >= HireMonth AND ISBLANK(LeaveMonth)[EXPAND: Month]` (Employed in
+/// examples/fpa.py) into a store on (Employee, Month). No source has both dimensions, and the store does not
+/// keep the dimensions in the order of their ids (Month is d0). `budget` gets the result rows and the RAM bytes
+/// of the inputs. Gives the cells of the result.
+fn employed(tier: Option<&'static Tier>, budget: impl FnOnce(usize, usize) -> usize) -> Result<Vec<(u64, f64)>, String> {
+    let (months, employees) = (400u32, 1000u32);
+    let dims = vec![DimInfo { size: months, ordered: true, name: "Month".into() }, DimInfo { size: employees, ordered: false, name: "Employee".into() }];
+    // Small parts, one at a time, so the part buffers are small against the result
+    let cfg = Config { tier, chunk: 1000, par_min: usize::MAX, ..Config::default() };
+    let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg };
+    let all: Vec<u32> = (0..employees).collect();
+    let hire: Vec<f64> = all.iter().map(|e| (e % months) as f64).collect();
+    let hire = Store::new(&[1], None, Kind::Num, &start)?.with_rows(&[&all], &hire)?;
+    let left: Vec<u32> = (0..employees).step_by(3).collect();
+    let leave = Store::new(&[1], None, Kind::Num, &start)?.with_rows(&[&left], &vec![1.0; left.len()])?;
+    let out = Store::new(&[1, 0], None, Kind::Bool, &start)?;
+    let mut stores = vec![Arc::new(hire), Arc::new(leave), Arc::new(out)];
+    let src: Vec<Src> = stores[..2].iter().map(|s| Src::Store(s.clone())).collect();
+    let rows = (months * employees) as usize;
+    let cat = Catalog { dims, maps: Vec::new(), cfg: Config { max_bytes: budget(rows, held(&src) + cfg.cache_bound()), ..cfg } };
+    let ge = Node::Bin(Op::Ge, Box::new(Node::DimRef(0)), Box::new(Node::Ref(0)), vec![]);
+    let blank = Node::Expand(Box::new(Node::IsBlank(Box::new(Node::Ref(1)), vec![])), vec![0]);
+    let node = Node::Bin(Op::And, Box::new(ge), Box::new(blank), vec![]);
+    let input = || Metric { formula: None, delta: None, source: false };
+    let formula = Metric { formula: Some(Formula { node: Arc::new(node), refs: vec![0, 1] }), delta: None, source: false };
+    let plan = Plan { metrics: vec![input(), input(), formula], levels: vec![vec![Step::One(2)]] };
+    recalc(&cat, &plan, &mut stores, &mut vec![None; 3], &mut vec![None; 3], vec![], &[], vec![], vec![(2, Reg::new(vec![]))], true)?;
+    Ok(stores[2].as_cube().cells)
+}
+
+#[test]
+fn a_fused_result_in_the_order_of_its_store_is_budgeted_by_its_columns() {
+    // Every (Employee, Month) gets a cell: 1 from the hire month of an employee who did not leave, else 0
+    let ones: usize = (0..1000).filter(|e| e % 3 != 0).map(|e| 400 - e % 400).sum();
+    for tier in [None, tier()] {
+        let all = employed(tier, |_, _| usize::MAX).unwrap();
+        assert_eq!(all.len(), 400_000);
+        assert_eq!(all.iter().filter(|c| c.1 == 1.0).count(), ones);
+        // The result array and its write (2 cells for each row) do not fit. The columns of the store (at most
+        // 1 cell for each row) and the part buffers do. The scan must give the dimension order of the store
+        let tight = employed(tier, |rows, held| held + rows * CELL_BYTES * 3 / 2).unwrap();
+        assert_eq!(tight, all);
+    }
 }
 
 #[test]

@@ -102,9 +102,11 @@ pub enum Whole {
 }
 
 /// Evaluate a formula whose result replaces the whole stored data of `store`. If the top node fuses in the
-/// packing of `store`, the cells go in key order into the new base, and the 16 B cells never exist.
+/// packing of `store`, the cells go in key order into the new base. Then the 16 B cells never exist, and the
+/// budget counts the new base (`Store::sink_bytes`) and the part buffers.
 /// With `diff`, the result also has the region of the cells whose value changed (as `replaced_all`).
-/// If the result has another packing, or its part buffers do not fit in `b`, gives the fused result as a Cube.
+/// If the result has another packing, or the columns do not fit in `b`, gives the fused result as a Cube
+/// (checked as `eval` checks it).
 /// Gives Ok(None) if the formula does not fuse. Then the caller uses `eval`.
 pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: &Store, diff: bool) -> Result<Option<Whole>> {
     if !cat.cfg.fuse {
@@ -112,14 +114,16 @@ pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: 
     }
     let mark = b.mark();
     let r = Restrict::all(cat.dims.len());
-    let make = |pack: &Packing, n, buffered| {
-        if *pack == store.pack && b.need(buffered, "").is_ok() {
-            Out::Store(Box::new(store.sink(n, diff)))
-        } else {
-            Out::Cells(Vec::new())
+    let target = Target { store, diff };
+    let make = |pack: &Packing, need: Need| {
+        // If the columns and the part buffers do not fit, an array of cells and its write can still fit
+        if *pack == store.pack && b.need(target.cells(need), "").is_ok() {
+            return Ok(Out::Store(Box::new(store.sink(need.rows, diff))));
         }
+        b.need(need.rows.saturating_add(need.extra), "式の結果")?;
+        Ok(Out::Cells(Vec::new()))
     };
-    let Some((pack, kind, sink)) = fused_into(node, cat, src, &r, b, make)? else { return Ok(None) };
+    let Some((pack, kind, sink)) = fused_into(node, cat, src, &r, b, Some(&target), make)? else { return Ok(None) };
     let out = match sink {
         Out::Store(s) => Whole::Columns((*s).finish()),
         Out::Cells(cells) => Whole::Cube(Cube { pack, kind, cells }),
