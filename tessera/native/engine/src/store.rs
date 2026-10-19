@@ -50,6 +50,7 @@ pub struct Mem {
     pub delta_rows: usize, // 差分の件数
     pub delta: usize,      // 差分（バイト。木の節の分を含まない）
     pub index: usize,      // 分割軸以外の軸の索引（バイト）
+    pub file: usize,       // the bytes of the segment files (on disk, not in `bytes`)
 }
 
 impl Mem {
@@ -117,6 +118,13 @@ impl Segment {
                 Data::Ram { vals, .. } => vals.len() * 8,
                 Data::File(_) => 0,
             }
+    }
+
+    fn file_bytes(&self) -> usize {
+        match &self.data {
+            Data::File(f) => f.len() as usize,
+            Data::Ram { .. } => 0,
+        }
     }
 
     /// The RAM bytes of the keys: the fences, and for a RAM segment the packed offsets.
@@ -991,6 +999,7 @@ impl Store {
             delta_rows: self.delta.len(),
             delta: self.delta.len() * std::mem::size_of::<(u64, Option<f64>)>(),
             index,
+            file: self.base.segs.iter().map(|s| s.file_bytes()).sum(),
         }
     }
 

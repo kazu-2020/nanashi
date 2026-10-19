@@ -175,6 +175,7 @@ pub(crate) struct SegFile {
     path: PathBuf,
     id: u64,
     end: u64, // the byte offset of the footer: the end of the records
+    len: u64, // the bytes of the file
 }
 
 impl SegFile {
@@ -190,6 +191,11 @@ impl SegFile {
     /// The end of the records (the byte offset of the footer).
     pub(crate) fn end(&self) -> u64 {
         self.end
+    }
+
+    /// The bytes of the file.
+    pub(crate) fn len(&self) -> u64 {
+        self.len
     }
 
     /// Reads the bytes `r` of the file into `out`. A read error is a hardware error: the file exists while the segment lives.
@@ -266,9 +272,10 @@ impl SegWriter {
         header[20..28].copy_from_slice(&end.to_le_bytes());
         file.write_all_at(&header, 0)?;
         let file = file.try_clone()?;
+        let len = end + footer.len() as u64;
         self.finished = true;
         let fences = Fences::new(self.rows, std::mem::take(&mut self.blocks).into_boxed_slice());
-        Ok((fences, SegFile { tier: self.tier, file, path: std::mem::take(&mut self.path), id: self.id, end }))
+        Ok((fences, SegFile { tier: self.tier, file, path: std::mem::take(&mut self.path), id: self.id, end, len }))
     }
 }
 
@@ -343,6 +350,7 @@ mod tests {
         assert_eq!(u64::from_le_bytes(head[8..16].try_into().unwrap()), 2500);
         assert_eq!(u64::from_le_bytes(head[20..28].try_into().unwrap()), file.end());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), file.end() + 3 * 16);
+        assert_eq!(file.len(), file.end() + 3 * 16);
         // The last record: 452 values, their keys (width 11 -> 452 * 11 / 64 = 78 words) and the spare bytes
         let start = fences.block(2).start as u64 * 8;
         let buf = file.block(2, start..file.end());

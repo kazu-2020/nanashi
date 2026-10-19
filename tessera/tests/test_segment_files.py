@@ -31,6 +31,19 @@ m.set_cell("X", -2.0, A="a9")
 print("again", m.get("X", A="a9"))
 """
 
+MEMORY = """
+import shutil, tempfile
+from sparse_engine import Model, Named
+from sparse_engine.rust_engine import RustEngine
+d = tempfile.mkdtemp(prefix="nanashi-seg-")
+m = Named(Model(engine=RustEngine(segment_dir=d, cache_bytes=1 << 16, read_window=2)))
+m.add_dimension("A", [f"a{i}" for i in range(3000)])
+m.add_input("X", ["A"], {(f"a{i}",): float(i) for i in range(3000)})
+mem = m.memory()["X"]
+print(mem["rows"], mem["base"], mem["file"])
+shutil.rmtree(d)
+"""
+
 
 @unittest.skipIf(RustEngine is None, "nanashi_core must be built")
 class FailedSegmentWrite(unittest.TestCase):
@@ -40,3 +53,12 @@ class FailedSegmentWrite(unittest.TestCase):
         lines = r.stdout.splitlines()
         self.assertIn("RuntimeError 書き込みの内部エラー: セグメントファイルを作れない", lines[0])
         self.assertEqual(lines[1:], ["after -1.0 40.0", "again -2.0"])
+
+    def test_memory_gives_the_ram_and_the_file_bytes_of_the_base(self):
+        r = subprocess.run([sys.executable, "-c", MEMORY], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows, base, file = map(int, r.stdout.split())
+        self.assertEqual(rows, 3000)
+        # In RAM: the fences of 3 blocks. On disk: the values, the packed keys, the header and the footer
+        self.assertEqual(base, 3 * 16)
+        self.assertGreater(file, 3000 * 8)
