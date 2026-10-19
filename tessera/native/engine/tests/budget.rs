@@ -1,7 +1,13 @@
 //! Memory budget tests. An operation that can make a large result checks the budget before it makes the result.
 
-use nanashi_engine::{eval, eval_columns, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store, Whole, CELL_BYTES};
+use nanashi_engine::plan::{recalc, Formula, Metric, Plan, Reg, Step};
+use nanashi_engine::{eval, eval_columns, eval_with, held, Budget, Catalog, Config, DimInfo, Kind, Mapping, Node, Op, Restrict, Sel, Src, Store, Tier, Whole, CELL_BYTES};
 use std::sync::Arc;
+
+/// The file tier of this test process: a cache of 64 KiB and a window of 2 blocks.
+fn tier() -> Option<&'static Tier> {
+    Some(Tier::install(&std::env::temp_dir().join(format!("nanashi-budget-{}", std::process::id())), 1 << 16, 2).unwrap())
+}
 
 fn catalog(max_bytes: usize) -> Catalog {
     catalog_with(Config { max_bytes, ..Config::default() })
@@ -98,10 +104,20 @@ fn by_lookup_on_one_member_counts_only_that_member() {
 
 #[test]
 fn a_streamed_result_is_budgeted_by_its_columns() {
-    let cat = catalog_with(Config { seg_rows: 1000, ..Config::default() });
+    for tier in [None, tier()] {
+        streamed_result_is_budgeted_by_its_columns(tier);
+    }
+}
+
+fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
+    let cat = catalog_with(Config { seg_rows: 1000, tier, ..Config::default() });
     let rows = 3000usize;
     let src = [column(&cat, &[0], rows as u32)];
     let held = held(&src);
+    if tier.is_some() {
+        // The fences of 3 segments of 1 block each, and the cache bound
+        assert_eq!(held, 3 * 16 + (1 << 16));
+    }
     let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
     let store = Store::new(&[0], None, Kind::Num, &cat).unwrap();
     // The scan checks CELL_BYTES for each driver row before it starts. The columns also need room for the part
@@ -113,6 +129,9 @@ fn a_streamed_result_is_budgeted_by_its_columns() {
     let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &b, &store, false).unwrap() else { panic!("streams") };
     // Only the columns stay counted, and they are smaller than the cells
     assert!(c.bytes() < rows * CELL_BYTES, "{}", c.bytes());
+    if tier.is_some() {
+        assert_eq!(c.bytes(), 3 * 16, "a file base keeps only its fences in RAM");
+    }
     let room = (limit - c.bytes()) / CELL_BYTES;
     assert!(b.need(room, "x").is_ok());
     assert!(b.need(room + 1, "x").is_err());
@@ -178,4 +197,43 @@ fn join_against_few_cells_fits_a_tight_budget() {
         let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Ref(1)), vec![]);
         assert_eq!(eval(&node, &tight, &src, &Restrict::all(3)).unwrap().cells.len(), rows as usize);
     }
+}
+
+#[test]
+fn held_counts_the_cache_bound_once() {
+    let file = catalog_with(Config { tier: tier(), ..Config::default() });
+    let ram = catalog(usize::MAX);
+    let (a, b, r) = (source(&file), source(&file), source(&ram));
+    // A file store of 3 rows keeps the fences of 1 block (16 B). A RAM store keeps 64 B
+    assert_eq!(held([&a[0], &b[0]]), 2 * 16 + (1 << 16));
+    assert_eq!(held([&a[0], &r[0]]), 16 + 64 + (1 << 16));
+    assert_eq!(held(&r), 64);
+}
+
+/// Writes 1 cell of a copy of a column of `rows` rows. The copy compacts at each write (a delta limit of 1 row).
+fn write_one_cell(tier: Option<&'static Tier>, rows: u32, headroom: usize) -> Result<usize, String> {
+    let dims = vec![DimInfo { size: rows, ordered: false, name: "d0".into() }];
+    let cfg = Config { compact_min: 1, delta_max: 1, tier, ..Config::default() };
+    let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg };
+    let Src::Store(input) = column(&start, &[0], rows) else { unreachable!() };
+    let mut stores = vec![input.clone(), input];
+    let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
+    let cat = Catalog { dims, maps: Vec::new(), cfg: Config { max_bytes: held(&src) + headroom, ..cfg } };
+    let input = Metric { formula: None, delta: None, source: false };
+    let copy = Metric { formula: Some(Formula { node: Arc::new(Node::Ref(0)), refs: vec![0] }), delta: None, source: false };
+    let plan = Plan { metrics: vec![input, copy], levels: vec![vec![Step::One(1)]] };
+    let changed = vec![(0, Reg::new(vec![(0, vec![5])]))];
+    recalc(&cat, &plan, &mut stores, &mut vec![None; 2], &mut vec![None; 2], changed, &[], vec![], vec![], false)?;
+    Ok(stores[1].rows_hint())
+}
+
+#[test]
+fn a_compaction_into_files_counts_only_the_ram_of_the_new_base() {
+    // In RAM the new base needs 16 B for each row (3.2 MB). In file mode it needs the fences, the writer buffer
+    // (1 MiB), the block in build and one read window
+    let rows = 200_000;
+    let err = write_one_cell(None, rows, 2 << 20).unwrap_err();
+    assert!(err.contains("メモリの予算を超える") && err.contains("結果の書き込み"), "{err}");
+    assert_eq!(write_one_cell(tier(), rows, 2 << 20), Ok(rows as usize));
+    assert!(write_one_cell(tier(), rows, 1 << 20).unwrap_err().contains("結果の書き込み"), "the writer buffer counts");
 }
