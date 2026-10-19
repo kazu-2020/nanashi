@@ -335,6 +335,8 @@ fn node_value(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budge
         Node::AsAxis { child, dim } => {
             // メンバー番号を値に持つ Cube を、そのメンバーを dim の座標に持つ表（値は 1）にする
             let c = eval_with(child, cat, src, &r.without(&[*dim]), bud)?;
+            // The budget holds the real capacity of c, which can be larger than its rows. The output lives next to it
+            bud.need(c.cells.len(), "BY（対応表）")?;
             let out = Packing::new(&[c.dims(), &[*dim]].concat(), cat)?;
             let proj = Proj::new(&c.pack, &out);
             let (p, size) = (out.pos(*dim).unwrap(), cat.dims[*dim].size as f64);

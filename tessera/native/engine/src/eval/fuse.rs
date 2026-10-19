@@ -718,7 +718,7 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, tar
     let fits_as = |out: &Packing, copied: usize| match target {
         Some(t) if t.store.pack == *out && mat < usize::MAX as f64 => {
             let rows = mat as usize;
-            let cols = t.cells(Need { rows, extra: 0, parts: rows.min(2 * batch() * cfg.chunk.max(1)) });
+            let cols = t.cells(Need { rows, extra: 0, parts: rows.min(batch().saturating_mul(2).saturating_mul(cfg.chunk.max(1))) });
             fits(mat.min(cols as f64), copied, bud)
         }
         _ => fits(mat, copied, bud),
