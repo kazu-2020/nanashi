@@ -1,7 +1,7 @@
 //! Store の性質テスト。乱数の操作列を Store と BTreeMap（正解）の両方に適用し、毎回同じ中身かを確かめる。
 //! 調整値を小さくして、差分のまとめ直し、索引、並列の経路も通す。複製（版）は書き換えても元に影響しない。
 
-use nanashi_engine::{Catalog, Config, Cube, DimInfo, Kind, Packing, Restrict, Sel, Store};
+use nanashi_engine::{Catalog, Config, Cube, DimInfo, Kind, Packing, Restrict, Sel, Store, Tier};
 use std::collections::BTreeMap;
 
 /// 再現できる乱数（xorshift64*）。
@@ -178,9 +178,17 @@ fn run(seed: u64, cfg: Config, index: Option<usize>) {
 #[test]
 fn store_matches_btreemap() {
     let small = Config { compact_min: 3, delta_max: 8, par_min: 0, postings_min_rows: 0, seg_rows: 16, ..Config::default() };
+    // File mode: a cache of 64 KB and a window of 2 blocks, so the cache evicts and a window ends inside a segment
+    let dir = std::env::temp_dir().join(format!("nanashi-store-model-{}", std::process::id()));
+    let tier = Some(Tier::install(&dir, 1 << 16, 2).unwrap());
+    let file = Config { seg_rows: 2048, tier, ..small };
     for seed in 1..=20 {
         run(seed, Config::default(), Some(0));
         run(seed, small, Some(2));
         run(seed, small, None);
+        run(seed, file, Some(2));
+        run(seed, Config { seg_rows: 16, ..file }, None);
     }
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "every segment file went with its store");
+    std::fs::remove_dir(&dir).unwrap();
 }

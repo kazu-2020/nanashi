@@ -1128,7 +1128,7 @@ mod tests {
         crate::Sink::part(&mut sink, vec![(1, 1.0), (2, 2.0), (3, 3.0)]).unwrap();
         let c = sink.finish();
         assert_eq!(c.base.segs.len(), 1);
-        let bytes = c.base.segs[0].keys.bytes() + 3 * 8;
+        let bytes = c.base.segs[0].key_bytes() + 3 * 8;
         let done = Done { m: 0, region: Reg::new(vec![]), delta: false, value: Write::Columns(c), count: None, low: None, old: None, kept: 0 };
         assert_eq!(done.bytes(), bytes);
     }

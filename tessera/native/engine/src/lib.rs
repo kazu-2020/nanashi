@@ -24,6 +24,7 @@ mod restrict;
 pub mod select;
 pub mod sql;
 mod store;
+mod tier;
 
 pub use ast::*;
 pub use budget::*;
@@ -38,6 +39,7 @@ pub(crate) use packed::{Cursor, PackedKeys, Sorted};
 pub use query::{Groups, ReadAgg};
 pub use restrict::*;
 pub use store::*;
+pub use tier::Tier;
 
 pub(crate) use imbl::ordmap::DiffItem;
 pub(crate) use imbl::OrdMap;
