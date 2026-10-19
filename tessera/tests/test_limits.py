@@ -528,6 +528,8 @@ class WriteBudget(unittest.TestCase):
         import gc
 
         import nanashi_core
+        nanashi_core.heap_exact(True)
+        self.addCleanup(nanashi_core.heap_exact, False)
         n, k = 20_000, 20
         mib = 1 << 20
         # (label, formula, dimensions, partition, fuse, edit, a budget in MiB that refuses it, a budget in MiB that
