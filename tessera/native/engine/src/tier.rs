@@ -2,8 +2,8 @@
 //!
 //! A process has at most one `Tier` (`Tier::install`). A Store whose `Config` has the tier writes each new
 //! segment to `<dir>/seg-<id>.bin` and keeps only the fences in RAM. A segment file goes when its last `Arc`
-//! drops. The files are a cache of state: the journal and the snapshot make every segment again, so nothing
-//! is fsynced and nothing is read back after a restart.
+//! drops. The files are a cache of state, because the journal and the snapshot make every segment again. So
+//! the tier does not fsync a file and does not read a file after a restart.
 //!
 //! File layout:
 //! ```text
@@ -34,6 +34,7 @@ pub(crate) type Buf = Arc<Vec<u8>>;
 pub struct Tier {
     dir: PathBuf,
     cache: Cache,
+    cache_bytes: usize,
     next_id: AtomicU64,
     /// The blocks that a sequential reader takes from the file with one read.
     pub(crate) read_window: usize,
@@ -42,27 +43,36 @@ pub struct Tier {
 static TIER: OnceLock<Tier> = OnceLock::new();
 
 impl Tier {
-    /// Makes `dir` the segment directory of the process, or gives the tier that is set. A second, different
-    /// directory in the same process is an error.
+    /// Makes `dir` the segment directory of the process, or gives the tier that is set. A second tier in the
+    /// same process with a different directory, cache size or window is an error.
     pub fn install(dir: &Path, cache_bytes: usize, read_window: usize) -> Result<&'static Tier> {
+        let read_window = read_window.max(1);
+        let same = |t: &Tier| t.dir == dir && t.cache_bytes == cache_bytes && t.read_window == read_window;
+        if TIER.get().is_some_and(|t| !same(t)) {
+            return Err("segment_dir はプロセスで 1 つ".into());
+        }
         std::fs::create_dir_all(dir).map_err(|e| format!("segment_dir {} を作れない: {e}", dir.display()))?;
-        let t = TIER.get_or_init(|| Tier { dir: dir.to_path_buf(), cache: Cache::new(cache_bytes), next_id: AtomicU64::new(0), read_window: read_window.max(1) });
-        if t.dir != dir {
+        let t = TIER.get_or_init(|| Tier { dir: dir.to_path_buf(), cache: Cache::new(cache_bytes), cache_bytes, next_id: AtomicU64::new(0), read_window });
+        if !same(t) {
             return Err("segment_dir はプロセスで 1 つ".into());
         }
         Ok(t)
     }
 
     pub(crate) fn writer(&'static self) -> io::Result<SegWriter> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.writer_of(self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn writer_of(&'static self, id: u64) -> io::Result<SegWriter> {
         let path = self.dir.join(format!("seg-{id}.bin"));
-        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?;
+        // A file that exists is the live segment of another process on the same directory: an error, not a truncation
+        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
         let mut w = BufWriter::with_capacity(1 << 20, file);
         w.write_all(&[0u8; HEADER])?;
         Ok(SegWriter { tier: self, w, path, id, blocks: Vec::new(), words: (HEADER / 8) as u64, rows: 0, finished: false })
     }
 
-    /// The tier for the tests of this crate: a directory of the process in the temp directory, a cache of 64 KB
+    /// The tier for the tests of this crate: a directory of the process in the temp directory, a cache of 64 KiB
     /// and a window of 2 blocks, so eviction and window boundaries happen on small stores.
     #[cfg(test)]
     pub(crate) fn for_tests() -> &'static Tier {
@@ -132,13 +142,17 @@ impl Shard {
         Some(e.0.clone())
     }
 
-    /// Inserts the record and evicts the least recently used ones past `bound`. The new record always stays.
+    /// Inserts the record and evicts the least recently used ones past `bound`. A record larger than `bound`
+    /// is not kept: the `Arc` of the reader holds it.
     fn insert(&mut self, key: (u64, u32), buf: Buf, bound: usize) {
+        if buf.len() > bound {
+            return;
+        }
         self.tick += 1;
         self.bytes += buf.len();
         self.map.insert(key, (buf, self.tick));
         self.lru.insert(self.tick, key);
-        while self.bytes > bound && self.lru.len() > 1 {
+        while self.bytes > bound {
             let (_, old) = self.lru.pop_first().unwrap();
             let (b, _) = self.map.remove(&old).unwrap();
             self.bytes -= b.len();
@@ -278,9 +292,30 @@ mod tests {
         assert!(total <= 6 * 10);
         for s in &c.shards {
             let s = s.lock().unwrap();
-            assert!(s.bytes <= c.bound.max(10), "{} bytes in a shard of bound {}", s.bytes, c.bound);
+            assert!(s.bytes <= c.bound, "{} bytes in a shard of bound {}", s.bytes, c.bound);
             assert_eq!(s.map.len(), s.lru.len());
         }
+        let c = Cache::new(SHARDS * 5);
+        let get = |b: u32| c.get((0, b), || { reads.set(reads.get() + 1); vec![b as u8; 10] });
+        assert_eq!(get(1)[0], 1);
+        assert_eq!(get(1)[0], 1);
+        assert_eq!(reads.get(), 8, "a record larger than the bound of a shard is read every time");
+        assert!(c.shards.iter().all(|s| s.lock().unwrap().bytes == 0));
+    }
+
+    #[test]
+    fn a_second_tier_with_other_values_is_an_error() {
+        let t = Tier::for_tests();
+        assert!(Tier::install(&t.dir, 1 << 16, 2).is_ok());
+        assert!(Tier::install(&t.dir.join("other"), 1 << 16, 2).is_err());
+        assert!(Tier::install(&t.dir, 1 << 17, 2).is_err());
+        assert!(Tier::install(&t.dir, 1 << 16, 3).is_err());
+        assert!(!t.dir.join("other").exists(), "no directory is made for a refused tier");
+        let path = t.dir.join("seg-999999.bin");
+        std::fs::write(&path, b"x").unwrap();
+        assert!(t.writer_of(999_999).is_err(), "a file of another process is not truncated");
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
