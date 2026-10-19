@@ -465,7 +465,7 @@ struct Task {
     m: usize,
     region: Reg,
     delta: bool,   // 差分集計で更新する
-    weight: usize, // 計算し直す行数の見積もり（並列にするかの判断に使う）
+    weight: usize, // The estimate of the rows that the task reads or makes (for the waves and the choice of parallel work)
 }
 
 /// A calculated value that waits for the write-back. If the region is the whole, the cells of the new base
@@ -797,7 +797,12 @@ impl<'a> Run<'a> {
         };
         let size = |d: DimId| self.cat.dims[d].size.max(1) as f64;
         let share: f64 = region.sels.iter().map(|(d, ms)| ms.len() as f64 / size(*d)).product();
-        let weight = (self.stores[m].rows_hint() as f64 * share) as usize;
+        // The most rows of the result and its sources, or the estimate of the result if it is larger. The estimate
+        // covers a result that a snapshot load did not store (0 rows), and a result that is larger than its sources
+        let rows = f.refs.iter().map(|&i| self.stores[i].rows_hint()).fold(self.stores[m].rows_hint(), usize::max);
+        let refs: Vec<(Vec<DimId>, f64)> = f.refs.iter().map(|&i| (self.stores[i].pack.dims.clone(), self.stores[i].rows_hint() as f64)).collect();
+        let est = crate::check::estimate(&f.node, self.cat, &refs).map_or(0.0, |(_, n)| n);
+        let weight = (est.max(rows as f64) * share) as usize;
         Some(Task { m, region, delta, weight })
     }
 
@@ -1158,6 +1163,31 @@ mod tests {
         let changed = vec![(0, all()), (4, all())];
         recalc(&cat, &plan, &mut stores, &mut vec![None; 5], &mut vec![None; 5], changed, &[], vec![], vec![], true).unwrap();
         assert_eq!(stores[2].rows_hint(), 1000);
+    }
+
+    #[test]
+    fn a_result_with_no_stored_rows_is_weighed_by_its_source_or_its_estimate() {
+        // After a snapshot load, metrics 1 and 2 have no rows. Each makes 1,000 rows, so each runs alone. Together,
+        // each would get half of the room, less than the write of 1,000 rows (about 33 KB). The rows of the source
+        // set the weight of a copy, and the estimate sets the weight of a broadcast of 1 row to 1,000 members of d1
+        let dim = |name: &str| crate::DimInfo { size: 1000, ordered: false, name: name.into() };
+        let start = Catalog { dims: vec![dim("d0"), dim("d1")], maps: Vec::new(), cfg: crate::Config::default() };
+        let keys: Vec<u32> = (0..1000).collect();
+        let copy = Node::Ref(0);
+        let broadcast = Node::Expand(Box::new(Node::Ref(0)), vec![1]);
+        for (n, node, dims) in [(1000, copy, vec![0]), (1, broadcast, vec![0, 1])] {
+            let source = Arc::new(Store::new(&[0], None, Kind::Num, &start).unwrap().with_rows(&[&keys[..n]], &vec![1.0; n]).unwrap());
+            let empty = || Arc::new(Store::new(&dims, None, Kind::Num, &start).unwrap());
+            let mut stores = vec![source, empty(), empty()];
+            let input = Metric { formula: None, delta: None, source: false };
+            let formula = || Metric { formula: Some(Formula { node: Arc::new(node.clone()), refs: vec![0] }), delta: None, source: false };
+            let plan = Plan { metrics: vec![input, formula(), formula()], levels: vec![vec![Step::One(1), Step::One(2)]] };
+            let src: Vec<Src> = stores.iter().map(|s| Src::Store(s.clone())).collect();
+            let cfg = crate::Config { max_bytes: held(&src) + 60_000, ..crate::Config::default() };
+            let cat = Catalog { cfg, ..start.clone() };
+            recalc(&cat, &plan, &mut stores, &mut vec![None; 3], &mut vec![None; 3], vec![(0, Reg::new(vec![]))], &[], vec![], vec![], true).unwrap();
+            assert_eq!((stores[1].rows_hint(), stores[2].rows_hint()), (1000, 1000));
+        }
     }
 
     #[test]

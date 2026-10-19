@@ -81,7 +81,7 @@ A write checks the budget with an incremental recalculation, but a server start,
 The engine counts the necessary size first for three types of operation. These are an operation that makes all combinations (`EXPAND`, `ISBLANK`, `IFBLANK`), a join (`*`, `/`, comparisons, `ON`, `FILTER`, the branches of `IF`), and a `BY` mapping. If the size is more than the budget, the engine gives an error before it makes the result.
 A fused formula ([Engine](engine.md)) does not make intermediate results. Thus, the engine counts only the size of the result array against the budget, before it allocates the array. If the result goes directly into the new base, the engine counts the new base and the part buffers. It does not count the array.
 The engine does not fuse a formula if the intermediate results that the evaluation of one operation at a time must make are more than the budget. It evaluates one operation at a time and gives an error as above.
-When the engine calculates the Metrics of one stage in parallel, it divides the budget that is left after the held data into equal parts. It calculates together only the Metrics with an estimate in one part. Each other Metric gets the full budget, and the engine calculates these Metrics one at a time.
+When the engine calculates the Metrics of one stage in parallel, it divides the budget that is left after the held data into equal parts. It calculates together only the Metrics with an estimate in one part. The estimate of a Metric uses the most rows of its stored result, its sources, and the estimate of its result from the sources. Each other Metric gets the full budget, and the engine calculates these Metrics one at a time.
 
 ## Blank cells
 
