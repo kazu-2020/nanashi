@@ -3,7 +3,7 @@
 #[allow(unused_imports)]
 use crate::*;
 use crate::packed::{Block, Fences, BLOCK};
-use crate::tier::{Buf, SegFile, SegWriter};
+use crate::tier::{Buf, SegFile, SegWriter, WRITE_BUF};
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -1154,10 +1154,17 @@ impl Store {
             // values, and the block buffer of the builder. The old base goes if no other version has it.
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
             let rows = self.rows_hint().saturating_add(n);
-            let base = rows.saturating_mul(16).saturating_add(rows.div_ceil(BLOCK) * 16).saturating_add(self.seg_bytes(rows));
+            let fences = rows.div_ceil(BLOCK) * 16;
+            // File mode keeps only the fences. The writer grows its block list by push (2 times) and copies it to the
+            // footer, holds its buffer and the block in build, and the reader of an old segment holds one window
+            let (base, scratch) = match self.cfg.tier {
+                None => (rows.saturating_mul(16).saturating_add(fences), BLOCK * 8),
+                Some(t) => (fences, fences * 2 + WRITE_BUF + BLOCK * 16 + t.read_window * BLOCK * 16),
+            };
+            let base = base.saturating_add(self.seg_bytes(rows));
             let tree = tree.min(self.delta_limit().saturating_mul(4 * CELL_BYTES).saturating_add(1024));
             let freed = if shared || self.base.segs.iter().any(|s| Arc::strong_count(s) > 1) { 0 } else { self.memory().base };
-            (base.max(tree), BLOCK * 8, base.saturating_sub(freed).max(tree))
+            (base.max(tree), scratch, base.saturating_sub(freed).max(tree))
         };
         // Small parts: the packing of the new cells, the checks of the region, the axes of region_of
         let small = 256 + axes * 64;
