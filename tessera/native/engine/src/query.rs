@@ -175,7 +175,7 @@ impl Store {
         let kept = self.metric_dims.iter().filter(|d| keep.contains(d)).map(|&d| cat.dims[d].size as usize * 8).sum::<usize>();
         // The key ranges and the Items: each range gives one Item, plus one Item for each block border that it crosses
         let n = self.pack.dims.first().and_then(|&d| r.get(d)).map_or(1, |s| s.members.len());
-        let blocks = self.base.segs.iter().map(|g| g.keys.blocks()).sum::<usize>();
+        let blocks = self.base.segs.iter().map(|g| g.keys.fences().blocks()).sum::<usize>();
         let work = n.saturating_mul(size_of::<RangeInclusive<u64>>()).saturating_add(n.saturating_add(blocks).saturating_mul(size_of::<Item>()));
         b.take(kept.saturating_add(work).div_ceil(CELL_BYTES), "集計")?;
         let radix = radix(self, keep, r, cat);
@@ -386,14 +386,15 @@ fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) 
             }
             continue;
         }
-        let mut s = segs.partition_point(|g| g.keys.first(0) <= lo).saturating_sub(1);
-        let mut b = segs[s].keys.owner(lo);
+        let mut s = segs.partition_point(|g| g.keys.fences().first(0) <= lo).saturating_sub(1);
+        let mut b = segs[s].keys.fences().owner(lo);
         'segs: loop {
             let keys = &segs[s].keys;
+            let f = keys.fences();
             let (start, end) = (keys.partition_point(|k| k < lo), keys.partition_point(|k| k <= hi));
             loop {
-                let own_lo = if s == 0 && b == 0 { 0 } else { keys.first(b) };
-                let next = if b + 1 < keys.blocks() { Some(keys.first(b + 1)) } else { segs.get(s + 1).map(|g| g.keys.first(0)) };
+                let own_lo = if s == 0 && b == 0 { 0 } else { f.first(b) };
+                let next = if b + 1 < f.blocks() { Some(f.first(b + 1)) } else { segs.get(s + 1).map(|g| g.keys.fences().first(0)) };
                 let (a, e) = (start.max(b * BLOCK), end.min((b + 1) * BLOCK));
                 let rows = if a < e { a - b * BLOCK..e - b * BLOCK } else { 0..0 };
                 if !rows.is_empty() || !no_delta {
@@ -403,7 +404,7 @@ fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) 
                     break 'segs;
                 }
                 b += 1;
-                if b == keys.blocks() {
+                if b == f.blocks() {
                     break;
                 }
             }
@@ -421,10 +422,9 @@ fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(u64, f64)) 
     let keys = &mut buf[..it.rows.len()];
     let mut vals = &[][..];
     if !keys.is_empty() {
-        let seg = &st.base.segs[it.seg];
-        seg.keys.decode(it.block_in_segment, it.rows.clone(), keys);
-        let at = it.block_in_segment * BLOCK;
-        vals = &seg.vals[at + it.rows.start..at + it.rows.end];
+        let block = st.base.segs[it.seg].block(it.block_in_segment);
+        block.keys(it.rows.clone(), keys);
+        vals = &block.vals[it.rows.clone()];
     }
     let pass = |k: u64| tests.iter().all(|t| t.sel.has(((k >> t.shift) & t.mask) as u32));
     let mut delta = st.delta.range(it.keys.clone()).peekable();
@@ -502,7 +502,7 @@ mod tests {
         }
         let slices: Vec<&[u32]> = cols.iter().map(|c| c.as_slice()).collect();
         let mut st = Store::new(&[0, 1, 2], Some(index), Kind::Num, cat).unwrap().with_rows(&slices, &vals).unwrap();
-        assert!(st.base.segs.iter().map(|g| g.keys.blocks()).sum::<usize>() > 3);
+        assert!(st.base.segs.iter().map(|g| g.keys.fences().blocks()).sum::<usize>() > 3);
         for i in 0..300 {
             let key: Vec<u32> = SIZES.iter().map(|&s| rng.below(s as u64) as u32).collect();
             let v = if rng.below(3) == 0 { None } else { Some(value(rng, i)) };
