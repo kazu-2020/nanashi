@@ -1139,6 +1139,25 @@ impl Store {
         if self.cfg.par(rows) { segs.min(rayon::current_num_threads()) * WRITE_BUF } else { WRITE_BUF }
     }
 
+    /// The RAM bytes that `sink(n, diff)` holds for `n` rows, so a fused write counts no 16 B cells for them.
+    /// In RAM: the keys at the density of the old base (2 B for each key if it is empty, `PackedKeys::builder`),
+    /// the 8 B values, and the segments. The builder reserves 1/16 more rows for each segment. In file mode: the
+    /// fences (a list that grows by push), the writer buffer and the block in build. Then the block buffer of
+    /// the keys. With `diff`, the changed keys and the member lists of their region (as `whole_write` counts them).
+    pub(crate) fn sink_bytes(&self, n: usize, diff: bool) -> usize {
+        let cap = n.saturating_add(n / 16);
+        let columns = match self.cfg.tier {
+            None => {
+                let (bytes, rows) = (self.base.segs.iter().map(|s| s.key_bytes()).sum::<usize>(), self.base.rows());
+                let keys = if rows == 0 { cap.saturating_mul(2) } else { bytes.saturating_mul(cap).div_ceil(rows).min(cap.saturating_mul(8)) };
+                keys.saturating_add(cap.saturating_mul(8))
+            }
+            Some(_) => n.div_ceil(BLOCK).saturating_mul(32).saturating_add(WRITE_BUF + BLOCK * 8),
+        };
+        let changed = if diff { self.rows_hint().saturating_add(n).saturating_mul(16 + 4 * self.metric_dims.len()) } else { 0 };
+        columns.saturating_add(BLOCK * 8).saturating_add(self.seg_bytes(n)).saturating_add(changed)
+    }
+
     /// The most rows of the delta. With more rows, the delta goes into a new base.
     fn delta_limit(&self) -> usize {
         (self.base.rows() / 8).min(self.cfg.delta_max).max(self.cfg.compact_min)

@@ -656,16 +656,18 @@ impl Sink for Vec<(u64, f64)> {
 /// Evaluates `node` as one fused loop. Gives Ok(None) if the engine cannot fuse it.
 /// Gives Err if the result does not fit in `bud`.
 pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Option<Cube>> {
-    let Some((pack, kind, cells)) = fused_into(node, cat, src, r, bud, &[], |_, _, _| Vec::new())? else { return Ok(None) };
+    let Some((pack, kind, cells)) = fused_into(node, cat, src, r, bud, &[], |_, n, extra, _| bud.need(n.saturating_add(extra), "式の結果").map(|_| Vec::new()))? else { return Ok(None) };
     Ok(Some(Cube { pack, kind, cells }))
 }
 
-/// The fused scan into `make(pack, n, buffered)`. `pack` is the packing of the result. `n` is the upper bound
-/// of the rows (the rows of the drivers, or the counted rows of the space). `buffered` is the cells that the
-/// budget must hold if the sink takes the parts one by one (not `presized`). Gives the packing and the kind of
-/// the result with the sink. If no source decides the order of the result dimensions, they take the order of
-/// `prefer` when it has the same dimensions.
-pub(crate) fn fused_into<S: Sink>(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget, prefer: &[DimId], make: impl FnOnce(&Packing, usize, usize) -> S) -> Result<Option<(Packing, Kind, S)>> {
+/// The fused scan into `make(pack, n, extra, parts)`. `pack` is the packing of the result. `n` is the upper
+/// bound of the rows (the rows of the drivers, or the counted rows of the space). `extra` is the cells that the
+/// budget must hold with the result (the copied sources, the lists of the parts). `parts` is the cells of the
+/// part buffers in flight if the sink takes the parts one by one (not `presized`). The sink checks its own
+/// cost against the budget: 16 B for each row for an array of cells, less for the columns of a store. Gives the
+/// packing and the kind of the result with the sink. If no source decides the order of the result dimensions,
+/// they take the order of `prefer` when it has the same dimensions.
+pub(crate) fn fused_into<S: Sink>(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget, prefer: &[DimId], make: impl FnOnce(&Packing, usize, usize, usize) -> Result<S>) -> Result<Option<(Packing, Kind, S)>> {
     if !r.is_all() || matches!(node, Node::Ref(_) | Node::Const(..) | Node::MemberConst(..)) {
         return Ok(None);
     }
@@ -683,7 +685,7 @@ fn fits(mat: f64, copied: usize, bud: &Budget) -> bool {
     mat < usize::MAX as f64 && bud.need((mat as usize).saturating_add(copied), "").is_ok()
 }
 
-fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, prefer: &[DimId], make: impl FnOnce(&Packing, usize, usize) -> S) -> Result<Option<(Packing, Kind, S)>> {
+fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, prefer: &[DimId], make: impl FnOnce(&Packing, usize, usize, usize) -> Result<S>) -> Result<Option<(Packing, Kind, S)>> {
     let cat = fu.cat;
     let cfg = &cat.cfg;
     // Scan the union of the sources that have all dimensions of the formula, in key order (same packing)
@@ -695,8 +697,7 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, pre
             let mut access = Vec::new();
             let Some(f) = fu.build(node, out, true, &mut access) else { return Ok(None) };
             let copied = fu.copied + access.iter().map(Access::cells).sum::<usize>();
-            bud.need(fu.reserve + copied, "式の結果")?;
-            let sink = run_sorted(cfg, &drivers, &access, &compile(&f, &access), copied, |n, b| make(out, n, b))?;
+            let sink = run_sorted(cfg, &drivers, &access, &compile(&f, &access), copied, |n, e, p| make(out, n, e, p))?;
             return Ok(Some((out.clone(), info.kind, sink)));
         }
     }
@@ -740,7 +741,7 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, pre
     let mut access = Vec::new();
     let Some(f) = fu.build(node, &out, false, &mut access) else { return Ok(None) };
     let copied = fu.copied + access.iter().map(Access::cells).sum::<usize>();
-    let mut sink = run_space(cfg, &space, &access, &compile(&f, &access), bud, copied, |n, b| make(&out, n, b))?;
+    let mut sink = run_space(cfg, &space, &access, &compile(&f, &access), bud, copied, |n, e, p| make(&out, n, e, p))?;
     sink.sort_if_unsorted(cfg);
     Ok(Some((out, info.kind, sink)))
 }
@@ -811,9 +812,9 @@ fn in_flight(par: bool, sizes: &[usize]) -> usize {
 }
 
 /// Scan the union of the keys of the drivers (same packing) in order, and get the value of f at each key.
-/// The result goes in key order into `make(total, buffered)`, where `total` is the number of rows of the drivers.
-/// `copied` is the cells that the budget check of the caller added to `total`.
-fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev, copied: usize, make: impl FnOnce(usize, usize) -> S) -> Result<S> {
+/// The result goes in key order into `make(total, copied, parts)`, where `total` is the number of rows of the
+/// drivers and `parts` is the cells of the part buffers in flight. `copied` is the cells of the copied sources.
+fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev, copied: usize, make: impl FnOnce(usize, usize, usize) -> Result<S>) -> Result<S> {
     // A unit of work: split at every cfg.chunk-th key of the largest driver, and find the row range of each driver
     let chunk = cfg.chunk.max(1);
     let big = (0..drivers.len()).max_by_key(|&i| drivers[i].n()).unwrap();
@@ -863,7 +864,7 @@ fn run_sorted<S: Sink>(cfg: &Config, drivers: &[Col], access: &[Access], f: &Ev,
         w
     };
     let par = cfg.par(total);
-    let mut sink = make(total, total.saturating_add(copied).saturating_add(in_flight(par, &sizes)));
+    let mut sink = make(total, copied, in_flight(par, &sizes))?;
     stream(par, &ranges, &sizes, work, &mut sink)?;
     Ok(sink)
 }
@@ -915,12 +916,14 @@ fn list_cells(n: usize, cfg: &Config) -> usize {
 }
 
 /// Scan the keys of space, and get the value of f at each key. It counts the values before it makes the
-/// sink with `make`. So the sink is only as large as the result, and f runs two times at each key.
+/// sink with `make(total, lists, parts)`: the counted rows, the cells of the lists of the parts and the copied
+/// sources, and the cells of the part buffers in flight. So the sink is only as large as the result, and f
+/// runs two times at each key.
 /// If the dimensions of the base source come first in the result key, the result is in key order.
-fn run_space<S: Sink>(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budget, copied: usize, make: impl FnOnce(usize, usize) -> S) -> Result<S> {
+fn run_space<S: Sink>(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bud: &Budget, copied: usize, make: impl FnOnce(usize, usize, usize) -> Result<S>) -> Result<S> {
     let (n, combos) = (space.len(), space.combos());
     if n == 0 || combos == 0 {
-        return Ok(make(0, 0));
+        return make(0, 0, 0);
     }
     let chunk = cfg.chunk.max(1);
     // Check the lists before they exist
@@ -933,7 +936,6 @@ fn run_space<S: Sink>(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bu
     };
     let sizes: Vec<usize> = if cfg.par(n) { parts.par_iter().map(count).collect() } else { parts.iter().map(count).collect() };
     let total: usize = sizes.iter().sum();
-    bud.need(total.saturating_add(lists), "式の結果")?;
     let write = |&(lo, hi): &(usize, usize), out: &mut [(u64, f64)]| -> usize {
         let (mut readers, mut rd) = (readers(access), space.cursor());
         let mut w = 0;
@@ -947,7 +949,7 @@ fn run_space<S: Sink>(cfg: &Config, space: &Space, access: &[Access], f: &Ev, bu
         w
     };
     let par = cfg.par(n);
-    let mut sink = make(total, total.saturating_add(lists).saturating_add(in_flight(par, &sizes)));
+    let mut sink = make(total, lists, in_flight(par, &sizes))?;
     stream(par, &parts, &sizes, write, &mut sink)?;
     Ok(sink)
 }

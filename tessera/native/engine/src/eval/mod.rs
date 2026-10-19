@@ -102,9 +102,11 @@ pub enum Whole {
 }
 
 /// Evaluate a formula whose result replaces the whole stored data of `store`. If the top node fuses in the
-/// packing of `store`, the cells go in key order into the new base, and the 16 B cells never exist.
+/// packing of `store`, the cells go in key order into the new base, and the 16 B cells never exist. Then the
+/// budget counts the new base (`Store::sink_bytes`) and the part buffers, not 16 B for each cell.
 /// With `diff`, the result also has the region of the cells whose value changed (as `replaced_all`).
-/// If the result has another packing, or its part buffers do not fit in `b`, gives the fused result as a Cube.
+/// If the result has another packing, or the new base and the part buffers do not fit in `b`, gives the fused
+/// result as a Cube (16 B for each cell, checked as `eval` checks it).
 /// Gives Ok(None) if the formula does not fuse. Then the caller uses `eval`.
 pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: &Store, diff: bool) -> Result<Option<Whole>> {
     if !cat.cfg.fuse {
@@ -112,12 +114,13 @@ pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: 
     }
     let mark = b.mark();
     let r = Restrict::all(cat.dims.len());
-    let make = |pack: &Packing, n, buffered| {
-        if *pack == store.pack && b.need(buffered, "").is_ok() {
-            Out::Store(Box::new(store.sink(n, diff)))
-        } else {
-            Out::Cells(Vec::new())
+    let make = |pack: &Packing, n: usize, extra: usize, parts: usize| {
+        let columns = store.sink_bytes(n, diff).div_ceil(CELL_BYTES).saturating_add(extra).saturating_add(parts);
+        if *pack == store.pack && b.need(columns, "").is_ok() {
+            return Ok(Out::Store(Box::new(store.sink(n, diff))));
         }
+        b.need(n.saturating_add(extra), "式の結果")?;
+        Ok(Out::Cells(Vec::new()))
     };
     let Some((pack, kind, sink)) = fused_into(node, cat, src, &r, b, &store.pack.dims, make)? else { return Ok(None) };
     let out = match sink {
