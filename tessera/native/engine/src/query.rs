@@ -418,14 +418,25 @@ fn items(segs: &[Arc<Segment>], no_delta: bool, ranges: &[RangeInclusive<u64>]) 
 /// value goes first. A delta key replaces (or removes) the base row with the same key.
 #[inline]
 fn scan(st: &Store, tests: &[Test], it: &Item, mut visit: impl FnMut(u64, f64)) {
-    let (mut kbuf, mut vbuf) = ([0u64; BLOCK], [0f64; BLOCK]);
-    let (keys, vals) = (&mut kbuf[..it.rows.len()], &mut vbuf[..it.rows.len()]);
-    if !keys.is_empty() {
-        let block = st.base.segs[it.seg].block(it.block_in_segment);
-        block.keys(it.rows.clone(), keys);
-        block.vals(it.rows.clone(), vals);
-    }
-    let (keys, vals): (&[u64], &[f64]) = (keys, vals);
+    let mut kbuf = [0u64; BLOCK];
+    let keys = &mut kbuf[..it.rows.len()];
+    let mut vbuf = Vec::new();
+    let block = (!keys.is_empty()).then(|| st.base.segs[it.seg].block(it.block_in_segment));
+    let vals: &[f64] = match &block {
+        None => &[],
+        Some(b) => {
+            b.keys(it.rows.clone(), keys);
+            match b.ram_vals() {
+                Some(v) => &v[it.rows.clone()],
+                None => {
+                    vbuf.resize(it.rows.len(), 0.0);
+                    b.vals(it.rows.clone(), &mut vbuf);
+                    &vbuf
+                }
+            }
+        }
+    };
+    let keys: &[u64] = keys;
     let pass = |k: u64| tests.iter().all(|t| t.sel.has(((k >> t.shift) & t.mask) as u32));
     let mut delta = st.delta.range(it.keys.clone()).peekable();
     if delta.peek().is_none() {

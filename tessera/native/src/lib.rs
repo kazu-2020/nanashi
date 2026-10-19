@@ -429,7 +429,7 @@ impl Core {
     /// values for the stored data (compaction, index and parallel thresholds) apply to the stored data made after the
     /// change. fail_at is for tests: (Metric number, panic or not), or None.
     /// segment_dir puts the segments of the stored data in files in that directory (one directory for each
-    /// process), with a block cache of cache_bytes (256 MB by default) and reads of read_window blocks (64).
+    /// process), with a block cache of cache_bytes (256 MiB by default) and reads of read_window blocks (64).
     #[pyo3(signature = (**config))]
     fn configure(&mut self, config: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let Some(config) = config else { return Ok(()) };
@@ -493,16 +493,14 @@ impl Core {
         let last = m >= self.cat.dims[dim].size;
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.remove_member(dim, m, values, last));
-        Ok(())
+        py.detach(|| guarded(|| target.remove_member(dim, m, values, last)))
     }
 
     /// 値が value のセルを消す。
     fn drop_value(&self, py: Python<'_>, store: &Bound<'_, StoreHandle>, value: f64) -> PyResult<()> {
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.drop_value(value));
-        Ok(())
+        py.detach(|| guarded(|| target.drop_value(value)))
     }
 
     /// 値が value のセルを囲む範囲（軸ごとのメンバー番号）。なければ None。
@@ -616,8 +614,7 @@ impl Core {
     fn write(&self, store: &Bound<'_, StoreHandle>, key: Vec<u32>, value: Option<f64>) -> PyResult<()> {
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         self.key(&handle.store, &key)?;
-        Arc::make_mut(&mut handle.store).write(&key, value);
-        Ok(())
+        guarded(|| Arc::make_mut(&mut handle.store).write(&key, value))
     }
 
     /// まとめて書き込む。cols は宣言した軸の順の、軸ごとのメンバー番号の列、values の None は消す。
@@ -628,9 +625,11 @@ impl Core {
         self.columns(&s.metric_dims, &slices, values.len())?;
         let s = py.detach(move || {
             let slices: Vec<&[u32]> = cols.iter().map(|x| x.as_slice()).collect();
-            Arc::make_mut(&mut s).write_many(&slices, &values);
-            s
-        });
+            guarded(|| {
+                Arc::make_mut(&mut s).write_many(&slices, &values);
+                s
+            })
+        })?;
         put(store, s)
     }
 
@@ -766,7 +765,7 @@ impl Core {
         let r = self.restrict(&region)?;
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.replace(&r, &new)).map_err(err)
+        py.detach(|| guarded(|| target.replace(&r, &new)))?.map_err(err)
     }
 
     /// replace と同じだが、値が実際に変わったセルの範囲（軸ごとのメンバー番号）を返す。変化なしなら None。
@@ -781,7 +780,7 @@ impl Core {
         let r = self.restrict(&region)?;
         let mut handle = store.try_borrow_mut().map_err(busy)?;
         let target = Arc::make_mut(&mut handle.store);
-        py.detach(|| target.replace_diff(&r, &new)).map_err(err)
+        py.detach(|| guarded(|| target.replace_diff(&r, &new)))?.map_err(err)
     }
 
     /// 評価結果から新しい格納データを作る。
@@ -1215,6 +1214,13 @@ impl Drop for Returned<'_> {
 
 fn busy<E>(_: E) -> PyErr {
     PyRuntimeError::new_err("格納データを別のスレッドが使用中（同じモデルを複数のスレッドから書き換えない）")
+}
+
+/// Runs a write of stored data. A panic (a segment file that the engine cannot write) becomes a RuntimeError.
+/// A PanicException is a BaseException, which ends the writer thread of the Workspace. The store keeps its old
+/// base and delta after a panic (`Store::rewrite`), so the handle stays usable.
+fn guarded<T>(f: impl FnOnce() -> T) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| PyRuntimeError::new_err(format!("書き込みの内部エラー: {}", panic_message(&p))))
 }
 
 fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {

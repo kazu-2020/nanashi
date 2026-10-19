@@ -75,7 +75,7 @@ pub(crate) struct Segment {
 /// Where the packed offsets and the values of a segment are.
 #[derive(Debug)]
 pub(crate) enum Data {
-    Ram { packed: Box<[u8]>, vals: Box<[f64]> }, // the values are an immutable column with no gaps
+    Ram { packed: Box<[u8]>, vals: Box<[f64]> },
     File(SegFile),
 }
 
@@ -197,39 +197,36 @@ impl Segment {
     /// The index of the dimension at packing position `pos`. The first use makes it with a counting sort (linear in
     /// the rows). The build is sequential: a rayon wait inside `get_or_init` can run a task that waits on the same cell.
     pub(crate) fn postings(&self, pack: &Packing, pos: usize) -> &Postings {
-        self.postings[pos].get_or_init(|| match &self.data {
-            Data::Ram { packed, .. } => self.build_postings(pack, pos, || packed::Keys::new(&self.fences, packed, 0..self.len())),
-            Data::File(_) => self.build_postings(pack, pos, || self.range(0..self.len()).map(|(k, _)| k)),
+        self.postings[pos].get_or_init(|| {
+            let Data::Ram { packed, .. } = &self.data else { unreachable!("best_postings gives a file base no index") };
+            let keys = || packed::Keys::new(&self.fences, packed, 0..self.len());
+            let size = (pack.masks[pos] + 1) as usize;
+            let mut count = vec![0u32; size + 1];
+            for k in keys() {
+                count[pack.get(k, pos) as usize + 1] += 1;
+            }
+            for i in 1..count.len() {
+                count[i] += count[i - 1];
+            }
+            let mut fill = count.clone();
+            let n = self.len() as u64; // best_postings makes sure that n fits in u32
+            // Hold the rows as u32 and pack the u64 entries one at a time. Then the build needs 4 B for each row, not 8 B.
+            let mut rows = vec![0u32; n as usize];
+            for (row, k) in keys().enumerate() {
+                let m = pack.get(k, pos) as usize;
+                rows[fill[m] as usize] = row as u32;
+                fill[m] += 1;
+            }
+            drop(fill);
+            let members: Box<[u32]> = (0..size as u32).filter(|&m| count[m as usize + 1] > count[m as usize]).collect();
+            let entries = || {
+                members.iter().enumerate().flat_map(|(j, &m)| rows[count[m as usize] as usize..count[m as usize + 1] as usize].iter().map(move |&row| j as u64 * n + row as u64))
+            };
+            let mut packed = PackedKeys::builder_with_bytes(n as usize, packed::packed_bytes(entries()));
+            entries().for_each(|e| packed.push(e));
+            let offsets = members.iter().map(|&m| count[m as usize]).chain([n as u32]).collect();
+            Arc::new(Postings { members, offsets, entries: packed.finish(), n })
         })
-    }
-
-    fn build_postings<I: Iterator<Item = u64>>(&self, pack: &Packing, pos: usize, keys: impl Fn() -> I) -> Arc<Postings> {
-        let size = (pack.masks[pos] + 1) as usize;
-        let mut count = vec![0u32; size + 1];
-        for k in keys() {
-            count[pack.get(k, pos) as usize + 1] += 1;
-        }
-        for i in 1..count.len() {
-            count[i] += count[i - 1];
-        }
-        let mut fill = count.clone();
-        let n = self.len() as u64; // best_postings makes sure that n fits in u32
-        // Hold the rows as u32 and pack the u64 entries one at a time. Then the build needs 4 B for each row, not 8 B.
-        let mut rows = vec![0u32; n as usize];
-        for (row, k) in keys().enumerate() {
-            let m = pack.get(k, pos) as usize;
-            rows[fill[m] as usize] = row as u32;
-            fill[m] += 1;
-        }
-        drop(fill);
-        let members: Box<[u32]> = (0..size as u32).filter(|&m| count[m as usize + 1] > count[m as usize]).collect();
-        let entries = || {
-            members.iter().enumerate().flat_map(|(j, &m)| rows[count[m as usize] as usize..count[m as usize + 1] as usize].iter().map(move |&row| j as u64 * n + row as u64))
-        };
-        let mut packed = PackedKeys::builder_with_bytes(n as usize, packed::packed_bytes(entries()));
-        entries().for_each(|e| packed.push(e));
-        let offsets = members.iter().map(|&m| count[m as usize]).chain([n as u32]).collect();
-        Arc::new(Postings { members, offsets, entries: packed.finish(), n })
     }
 }
 
@@ -553,10 +550,11 @@ pub(crate) struct BaseBuilder<'a> {
     done: Vec<Arc<Segment>>,
 }
 
-/// Where the blocks of the segment in build go.
+/// Where the blocks of the segment in build go. The segment file opens at the first block, so a cut or a
+/// sink without a row makes no file.
 enum Out {
     Ram(packed::Builder),
-    File(SegWriter),
+    File(Option<SegWriter>),
 }
 
 impl<'a> BaseBuilder<'a> {
@@ -578,7 +576,7 @@ impl<'a> BaseBuilder<'a> {
     fn out(cfg: &Config, cap: usize, density: (usize, usize)) -> Out {
         match cfg.tier {
             None => Out::Ram(PackedKeys::builder(cap, density)),
-            Some(t) => Out::File(t.writer().unwrap_or_else(|e| panic!("セグメントファイルを作れない: {e}"))),
+            Some(_) => Out::File(None),
         }
     }
 
@@ -599,9 +597,14 @@ impl<'a> BaseBuilder<'a> {
     /// Packs the block in build. In file mode it also writes its record.
     #[cold]
     fn flush(&mut self) {
+        let tier = self.cfg.tier;
         match self.out.as_mut().expect("the output of the segment in build") {
             Out::Ram(b) => b.push_block(&self.keys),
             Out::File(w) => {
+                let w = match w {
+                    Some(w) => w,
+                    None => w.insert(tier.expect("a file output has a tier").writer().unwrap_or_else(|e| panic!("セグメントファイルを作れない: {e}"))),
+                };
                 w.block(&self.keys, &self.vals).unwrap_or_else(|e| panic!("セグメントファイルに書けない: {e}"));
                 self.vals.clear();
             }
@@ -638,6 +641,7 @@ impl<'a> BaseBuilder<'a> {
                 Segment::new(fences, Data::Ram { packed, vals }, self.last, n_dims)
             }
             Out::File(w) => {
+                let w = w.expect("a segment in build has a block");
                 let (fences, file) = w.finish().unwrap_or_else(|e| panic!("セグメントファイルに書けない: {e}"));
                 Segment::new(fences, Data::File(file), self.last, n_dims)
             }
@@ -950,9 +954,12 @@ impl Store {
         Cube { pack: self.pack.clone(), kind: self.kind, cells }
     }
 
-    /// The rows of one part of a read of the whole base: one block in RAM, one read window in file mode.
+    /// The rows of one part of a read of the whole base: one block in RAM, one read window for a base with file segments.
     pub(crate) fn read_step(&self) -> usize {
-        BLOCK * self.cfg.tier.map_or(1, |t| t.read_window)
+        match self.cfg.tier {
+            Some(t) if self.base.segs.iter().any(|s| s.is_file()) => BLOCK * t.read_window,
+            _ => BLOCK,
+        }
     }
 
     /// 差分がなければ本体の行数（本体の行を番号で直接読める）。差分があれば None。
@@ -1199,12 +1206,14 @@ impl Store {
     }
 
     /// Makes a new base from the old base and the delta. With `removed`, the keys that pass its checks go out (no
-    /// checks take every key out), and `new` (in key order) goes in. Each old segment drops after the builder reads
-    /// it, so a rewrite holds about one base and one segment. If a version shares the old segments, nothing frees.
+    /// checks take every key out), and `new` (in key order) goes in. In RAM, each old segment drops after the builder
+    /// reads it, so a rewrite holds about one base and one segment. If a version shares the old segments, nothing
+    /// frees. In file mode the old base stays until the new one is complete: if a segment write fails (a panic),
+    /// the store keeps its old base and delta.
     fn rewrite(&mut self, hint: usize, touched: &[bool], new: Vec<(u64, f64)>, removed: Option<&[(usize, Arc<Sel>)]>) {
         let mut out = BaseBuilder::new(&self.pack, &self.cfg, hint, &self.base);
-        let (base, delta) = (std::mem::take(&mut self.base), std::mem::take(&mut self.delta));
-        let mut delta = delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable();
+        let base = if self.cfg.tier.is_some() { self.base.clone() } else { std::mem::take(&mut self.base) };
+        let mut delta = self.delta.range((Bound::Included(0u64), Bound::Unbounded)).peekable();
         let mut new = new.into_iter().peekable();
         let kept = |k| removed.is_none_or(|cs| !pass(&self.pack, k, cs));
         for (seg, &hit) in base.segs.into_iter().zip(touched) {
@@ -1228,7 +1237,8 @@ impl Store {
         }
         drain_delta(delta, &mut |k, v| rewrite_row(&mut out, &mut new, kept, k, v));
         new.for_each(|(k, v)| out.push(k, v));
-        self.set_base(out.finish());
+        let base = out.finish();
+        self.set_base(base);
     }
 
     pub(crate) fn after_delta(&mut self) {
@@ -2098,15 +2108,17 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_sink_leaves_no_file() {
+    fn an_empty_sink_opens_no_file() {
         let tier = Tier::for_tests();
         let cat = two_dims_with(64, Config { tier: Some(tier), ..Config::default() });
-        let s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
-        let before = std::fs::read_dir(std::env::temp_dir().join(format!("nanashi-engine-test-{}", std::process::id()))).unwrap().count();
-        let (got, _) = s.with_columns(s.sink(10, false).finish());
-        assert_eq!(got.base.rows(), 0);
-        let after = std::fs::read_dir(std::env::temp_dir().join(format!("nanashi-engine-test-{}", std::process::id()))).unwrap().count();
-        assert!(after <= before, "{after} files, {before} before");
+        let mut s = Store::new(&[0, 1], Some(0), Kind::Num, &cat).unwrap();
+        s.set_sorted(random_cells(100, 3));
+        let mut sink = s.sink(10, false);
+        sink.out.keep(&s.base.segs[0]);
+        assert!(matches!(sink.out.out, Some(Out::File(None))), "no block, so no file");
+        let (got, _) = s.with_columns(sink.finish());
+        assert_eq!(got.base.rows(), s.base.rows());
+        assert!(Arc::ptr_eq(&got.base.segs[0], &s.base.segs[0]));
     }
 
     #[test]
