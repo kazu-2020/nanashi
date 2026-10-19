@@ -175,7 +175,7 @@ The tests make sure that the results do not change.
 - Fusion of operations (match with `fuse=False`), the unit of parallel work (`chunk=3`), aggregation into an array of all combinations of the aggregation target (`dense_always=True`), and the fill of that array through bucket buffers (`scatter_bytes=0`): `tests/test_fusion.py`
 - Split of formula evaluation by the memory budget (`max_bytes`, stored data and intermediate results): `tests/test_failures.py`
 - Compaction of deltas, the segments of the base and the inverted index (`compact_min`, `delta_max`, `seg_rows`, `postings_min_rows`): the Rust property test `native/engine/tests/store_model.rs`
-- The segment files and the block cache (`segment_dir`, `cache_bytes=1 << 16`, `read_window=2`, `docs/engine.md`): the same property test in file mode, and `tests/test_exact_sum.py`. A process has one `segment_dir`, so a test gives each `RustEngine` the same directory or a new process.
+- The segment files and the block cache (`segment_dir`, `cache_bytes=1 << 16`, `read_window=2`, `docs/engine.md`): the same property test in file mode, `tests/test_exact_sum.py` and `tests/test_segment_files.py`. A process has one `segment_dir`, so a test gives each `RustEngine` the same directory or a new process.
 
 The tests that use a journal (the common properties of journal and replay, `Workspace`, the HTTP server) run with the file journal and with the PostgreSQL journal (`JournalCase` in `tests/journals.py`).
 In production, the combination is the Rust engine and the PostgreSQL journal.

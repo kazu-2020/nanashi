@@ -236,7 +236,6 @@ const GROUP_BYTES: usize = std::mem::size_of::<(u64, Acc)>() + 1;
 /// the most groups. Err if the hash maps and the Spills are larger than b permits with the `live` cells of the
 /// caller. Also gives the cells of the Spills.
 pub(crate) fn fold_groups(cfg: &Config, rows: &Rows, groups: f64, live: usize, b: &Budget, key: impl Fn(u64) -> Option<u64> + Sync) -> Result<(FxHashMap<u64, Acc>, usize)> {
-    // One unit of work is one block of packed keys, or one read window of a file base
     let step = match rows {
         Rows::Store(s) => s.read_step(),
         _ => crate::packed::BLOCK,

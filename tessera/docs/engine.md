@@ -36,11 +36,8 @@ A rewrite of the base (a compaction or a large write) reads the old segments one
 If a version that a reader keeps shares the old segments, the rewrite frees no old segment. Then the peak is two bases, as before the segments.
 The engine does not change a segment after it makes it, and versions share the segments by `Arc`. The delta is a persistent tree (`OrdMap` of `imbl`), so a change does not break old versions.
 
-With `RustEngine(segment_dir=...)` (for the server, `--segment-dir`), the engine writes each new segment to a file in that directory (`tier.rs`). Then only the fences of the blocks (16 B for each 1,024 rows), the delta and the index stay in RAM. The RAM of a tenant at rest does not grow with the cells. One process has one directory. The server clears it at the start. The files are a cache of the state: the journal and the snapshot make every segment again, so the engine does not fsync a file and does not read a file after a restart. The file of a segment goes when the last version that holds the segment goes. Thus the disk holds the live versions, and the touched segments of a rewrite in flight two times.
-A sequential reader (a scan, a merge with the delta, a rewrite) reads `read_window` blocks (64, about 640 KB) with one read. The cursor of the fused evaluation, a point read and a SQL scan read one block record (about 10 KB) through a block cache of `cache_bytes` (256 MB by default, `--cache-bytes`). The cache has 64 shards, each with its own LRU list and byte bound. A reader pins a record while it reads it, so an evicted record frees when its last reader stops. Without `segment_dir`, every segment stays in RAM and nothing changes.
-A file base has no inverted index: the index is RAM that grows with the cells. A filter on a dimension other than the partition dimension then reads the whole base.
 Thus, a writer can write while a reader keeps a published version. The engine does not copy all of the base or the delta.
-The values of the base are an immutable array with no extra capacity (`Box<[f64]>`). Its layout is the same as the buffer of an Arrow Float64 array.
+Without `segment_dir` ("Segment files" below), the values of the base are an immutable array with no extra capacity (`Box<[f64]>`). Its layout is the same as the buffer of an Arrow Float64 array.
 The keys of the base are packed in blocks of 1,024 keys (`PackedKeys` in `packed.rs`). A block keeps its first key and the offset of each key from it, with the bit width of the largest offset (frame of reference). In the retail model the width is 14 to 19 bits, so the keys use about 2 B for each cell in place of 8 B.
 A scan decodes one block at a time into a buffer of 1,024 keys and then reads a plain array. A binary search decodes one key at a time. The cursor of the fused evaluation (`Cursor`) decodes the block of a row near its last row, and reads a far row one key at a time. The `base` value of `Model.memory()` is equal to the size of the packed keys and the value array.
 The high bits of the key contain the **partition dimension**. Thus, a binary search can read and write a range that a filter on the partition dimension selects.
@@ -118,3 +115,18 @@ The engine does not use this path if an operand has an aggregation, because an a
 If the operands of all periods do not fit in the memory budget (`max_bytes`, stored data and intermediate results), the engine evaluates one period at a time.
 In the reference implementation, Python (`Model.recalc`) does the same schedule.
 Tests match the two results. This makes sure that the Rust schedule gives the same result as the Python schedule.
+
+## Segment files
+
+With `RustEngine(segment_dir=...)` (for the server, `--segment-dir`), the engine writes each new segment to a file in that directory (`tier.rs`).
+Then only the fences of the blocks (16 B for each 1,024 rows) and the delta stay in RAM. The RAM of a tenant at rest does not grow with the cells.
+A file base has no inverted index, because the index is RAM that grows with the cells. A filter on a dimension other than the partition dimension then reads the whole base.
+One process has one directory, one cache size and one window. At the start, the server removes the segment files (`seg-*.bin`) of an earlier process from the directory.
+The files are a cache of the state, because the journal and the snapshot make every segment again. So the engine does not fsync a file and does not read a file after a restart.
+The file of a segment goes when the last version that holds the segment goes. Thus the disk holds the live versions and the new segments of a rewrite in flight.
+A rewrite in file mode keeps the old base until the new base is complete. If a segment write fails, the store keeps its old base and delta, and the write gives an error.
+A sequential reader (a scan, a merge with the delta, a rewrite) reads `read_window` blocks (64, about 640 KiB) with one read.
+The cursor of the fused evaluation, a point read and a SQL scan read one block record (about 10 KiB) at a time. These reads go through a block cache of `cache_bytes` (256 MiB by default, `--cache-bytes`).
+The cache has 64 shards, each with its own LRU list and byte bound. The cache does not keep a record that is larger than the bound of its shard.
+A reader pins a record while it reads it, so an evicted record frees when its last reader stops.
+Without `segment_dir`, every segment stays in RAM and nothing changes.

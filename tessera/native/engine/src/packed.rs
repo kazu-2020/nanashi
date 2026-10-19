@@ -373,10 +373,10 @@ pub(crate) enum Sorted<'a> {
 }
 
 /// A cursor over sorted rows. `pos` is the row of the last read. Over a base, the cursor caches the segment of
-/// the last read and one decoded block of keys; the values of that block are cached on the first `val` in it
-/// (a RAM segment gives its slice, a file segment is decoded into `vals`). A read inside the cached block
-/// costs one range check. A read within `BLOCK` rows of `pos` decodes the block of that row. A read farther
-/// away takes that key alone from the segment.
+/// the last read and one decoded block of keys. The first `val` in that block caches its values: a RAM segment
+/// gives its slice, and the cursor decodes a file segment into `vals`. A read inside the cached block costs one
+/// range check. A read within `BLOCK` rows of `pos` decodes the block of that row. A read farther away takes
+/// that key alone from the segment.
 pub(crate) struct Cursor<'a> {
     src: Sorted<'a>,
     pub(crate) pos: usize,
@@ -610,7 +610,6 @@ mod tests {
         if keys.is_empty() {
             return;
         }
-        // The readers of a segment, in RAM and in a file
         for tier in [None, Some(Tier::for_tests())] {
             let base = Base::from_parts(&[keys], tier);
             let seg = &*base.segs[0];

@@ -197,7 +197,8 @@ A random read with `PackedKeys::get` is about 1.6 times slower than a `Vec` read
 ### Segment files
 
 With `segment_dir` ("Segment files" in [Engine](engine.md)), the base of the stored data is in files and only the fences stay in RAM.
-We measured `examples/fpa.py` at 32 times its large size (157 M cells, 4 threads) on the cloud VM above, with a block cache of 256 MB. The table gives the median of 2 runs for each mode, in the same process order: open from a snapshot, full recalculation, 5 cutoff edits, 20 point edits, 2 filtered reads of `PayrollByEmployee`. Every read gave the same cells in both modes.
+We measured `examples/fpa.py` at 32 times its large size (157 M cells, 4 threads) on the cloud VM above. The block cache was 256 MiB.
+The table gives the median of 2 runs for each mode. Each run did these steps in order: open from a snapshot, full recalculation, 5 cutoff edits, 20 point edits, 2 filtered reads of `PayrollByEmployee`. Every read gave the same cells in both modes.
 
 | Measurement | RAM | Segment files |
 |---|---|---|
@@ -209,7 +210,7 @@ We measured `examples/fpa.py` at 32 times its large size (157 M cells, 4 threads
 | `rows` filtered by Month (36 members) | 0.8 s (the first read makes the index) | 0.3 s (a scan) |
 | `rows` filtered by Version | 1.2 s (the same) | 0.3 s |
 
-The full recalculation does not change, because the fused scan reads whole blocks in order. A cutoff edit is about 2 times slower: the rewrite reads the old segment through one thread and the segment file has no index. With the files out of the page cache (cold), a cutoff edit takes 8 to 10 s and a point edit 2.4 ms at the median.
+The full recalculation does not change, because the fused scan reads whole blocks in order. A cutoff edit is about 2 times slower: the rewrite reads the old segment through one thread and the segment file has no index. With the files out of the page cache (cold), a cutoff edit takes 8 to 10 s. A point edit takes 2.4 ms at the median.
 
 ## Save and journal formats
 

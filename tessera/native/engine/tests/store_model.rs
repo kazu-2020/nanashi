@@ -178,7 +178,7 @@ fn run(seed: u64, cfg: Config, index: Option<usize>) {
 #[test]
 fn store_matches_btreemap() {
     let small = Config { compact_min: 3, delta_max: 8, par_min: 0, postings_min_rows: 0, seg_rows: 16, ..Config::default() };
-    // File mode: a cache of 64 KB and a window of 2 blocks, so the cache evicts and a window ends inside a segment
+    // File mode: a cache of 64 KiB and a window of 2 blocks, so the cache evicts and a window ends inside a segment
     let dir = std::env::temp_dir().join(format!("nanashi-store-model-{}", std::process::id()));
     let tier = Some(Tier::install(&dir, 1 << 16, 2).unwrap());
     let file = Config { seg_rows: 2048, tier, ..small };
