@@ -121,12 +121,11 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
     }
     let node = Node::Bin(Op::Mul, Box::new(Node::Ref(0)), Box::new(Node::Const(2.0, Kind::Num)), vec![]);
     let store = Store::new(&[0], None, Kind::Num, &cat).unwrap();
-    // The columns (about 10 B for each row in RAM) need room for the part buffers (here one part of all rows,
-    // 16 B for each cell). Room for one array of cells is too small for both. Then the result is a Cube
-    let b = Budget::new(held + rows * CELL_BYTES, held);
-    assert!(matches!(eval_columns(&node, &cat, &src, &b, &store, false).unwrap(), Some(Whole::Cube(c)) if c.cells.len() == rows));
-    // In file mode the columns are the fences, the 1 MiB writer buffer and the block in build
-    let limit = 2 * rows * CELL_BYTES + if tier.is_some() { 1 << 20 } else { 0 };
+    // The columns need room for the part buffers: here one part of all rows, 16 B for each cell. The list of
+    // the ranges of the scan needs less than 1 KiB
+    let b = Budget::new(held + store.sink_bytes(rows, false), held);
+    assert!(eval_columns(&node, &cat, &src, &b, &store, false).is_err_and(|e| e.contains("メモリの予算を超える")));
+    let limit = store.sink_bytes(rows, false) + rows * CELL_BYTES + 1024;
     let b = Budget::new(held + limit, held);
     let Some(Whole::Columns(c)) = eval_columns(&node, &cat, &src, &b, &store, false).unwrap() else { panic!("streams") };
     // Only the columns stay counted, and they are smaller than the cells
@@ -145,6 +144,17 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
     assert!(eval_with(&node, &cat, &src, &Restrict::all(1), &tight).unwrap_err().contains("メモリの予算を超える"));
 }
 
+#[test]
+fn the_ranges_of_a_sorted_scan_are_counted_before_they_exist() {
+    // 100 drivers and a range at each key of the largest: 10,000 ranges of 2 x 100 row positions (16 MB)
+    let cat = catalog(usize::MAX);
+    let src: Vec<Src> = (0..100).map(|i| column(&cat, &[0], if i == 0 { 10_000 } else { 1 })).collect();
+    let cat = catalog_with(Config { max_bytes: held(&src) + (1 << 20), chunk: 1, ..Config::default() });
+    let node = (1..100).fold(Node::Ref(0), |acc, i| Node::Bin(Op::Add, Box::new(acc), Box::new(Node::Ref(i)), vec![]));
+    let err = eval(&node, &cat, &src, &Restrict::all(3)).unwrap_err();
+    assert!(err.contains("メモリの予算を超える") && err.contains("式の結果"), "{err}");
+}
+
 /// A full recalculation of `Month >= HireMonth AND ISBLANK(LeaveMonth)[EXPAND: Month]` (Employed in
 /// examples/fpa.py) into a store on (Employee, Month). No source has both dimensions, and the store does not
 /// keep the dimensions in the order of their ids (Month is d0). `budget` gets the result rows and the RAM bytes
@@ -152,7 +162,8 @@ fn streamed_result_is_budgeted_by_its_columns(tier: Option<&'static Tier>) {
 fn employed(tier: Option<&'static Tier>, budget: impl FnOnce(usize, usize) -> usize) -> Result<Vec<(u64, f64)>, String> {
     let (months, employees) = (400u32, 1000u32);
     let dims = vec![DimInfo { size: months, ordered: true, name: "Month".into() }, DimInfo { size: employees, ordered: false, name: "Employee".into() }];
-    let cfg = Config { tier, ..Config::default() };
+    // Small parts, one at a time, so the part buffers are small against the result
+    let cfg = Config { tier, chunk: 1000, par_min: usize::MAX, ..Config::default() };
     let start = Catalog { dims: dims.clone(), maps: Vec::new(), cfg };
     let all: Vec<u32> = (0..employees).collect();
     let hire: Vec<f64> = all.iter().map(|e| (e % months) as f64).collect();
@@ -182,10 +193,9 @@ fn a_fused_result_in_the_order_of_its_store_is_budgeted_by_its_columns() {
         let all = employed(tier, |_, _| usize::MAX).unwrap();
         assert_eq!(all.len(), 400_000);
         assert_eq!(all.iter().filter(|c| c.1 == 1.0).count(), ones);
-        // The result array and its write (2 x 16 B for each row) do not fit. The columns of the store (about
-        // 10 B for each row in RAM) and the part buffers of one batch (16 B for each row) do. The scan must
-        // give the dimension order of the store, or the result is an array
-        let tight = employed(tier, |rows, held| held + rows * 28).unwrap();
+        // The result array and its write (2 cells for each row) do not fit. The columns of the store (at most
+        // 1 cell for each row) and the part buffers do. The scan must give the dimension order of the store
+        let tight = employed(tier, |rows, held| held + rows * CELL_BYTES * 3 / 2).unwrap();
         assert_eq!(tight, all);
     }
 }

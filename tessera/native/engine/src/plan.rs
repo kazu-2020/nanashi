@@ -501,7 +501,7 @@ fn set_bytes(sets: &Option<Vec<Vec<u32>>>) -> usize {
 /// PackedKeys::new also makes 3 lists with 56 bytes for each block of keys. Count 64 bytes and 1 KiB of small parts.
 fn whole_write(store: &Store, value: &Cube, sides: &[&Cube], diff: bool) -> usize {
     let (n, old) = (value.cells.len(), store.rows_hint());
-    let lists = (old + n).saturating_mul(4 + store.metric_dims.len()) / 4;
+    let lists = store.region_bytes(old + n).div_ceil(CELL_BYTES);
     let merge = if diff { ((old + n) * 3 / 2 + if store.base_rows().is_none() { old } else { 0 }).max(lists) } else { 0 };
     let peak = sides.iter().map(|c| c.cells.len()).fold(n.max(merge), usize::max);
     let most = sides.iter().map(|c| c.cells.len()).fold(n, usize::max);

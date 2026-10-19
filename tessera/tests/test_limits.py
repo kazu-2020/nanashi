@@ -734,6 +734,52 @@ class WriteBudget(unittest.TestCase):
                 self.assertIsNone(error)
                 self.assertLessEqual(total, budget, "the work went over max_bytes")
 
+    def test_a_fused_write_into_the_store_stays_in_the_budget(self):
+        """A fused result goes into the new base of an empty store. One partition member has many segments of rows,
+        or the keys are sparse (about 7 B for each packed key). The heap count is exact here."""
+        import nanashi_core
+        nanashi_core.heap_exact(True)
+        self.addCleanup(nanashi_core.heap_exact, False)
+
+        def model(dims, cells, **kw):
+            m = Named(Model(engine=RustEngine(max_bytes=1 << 50, par_min=1 << 40, seg_rows=1000), auto_layout=False))
+            for d, size in dims:
+                m.add_dimension(d, [f"m{i}" for i in range(size)])
+            names = [d for d, _ in dims]
+            m.add_input("A", names, cells, **kw)
+            m.recalc()
+            m.add_formula("Z", names, "A * 2", **kw)
+            return m
+
+        def work(build, max_bytes):
+            m = build()
+            m.engine.core.configure(max_bytes=max_bytes)
+            gc.collect()
+            start = sum(r["base"] + r["delta"] + r["index"] for r in m.memory().values())
+            base = nanashi_core.heap()[0]
+            nanashi_core.reset_heap_peak()
+            try:
+                m.refresh()  # a full recalculation, so the write finds no changed keys
+                error = None
+            except ValueError as e:
+                error = str(e)
+            return error, start + nanashi_core.heap()[1] - base
+
+        # 17,000 rows of one member: a reservation of 1,062 rows that doubles would grow to 33,984 rows
+        long = lambda: model([("P", 1), ("Q", 17_000)], {("m0", f"m{i}"): float(i) for i in range(17_000)}, partition="P")  # noqa: E731
+        # 5 dimensions of 4,096 members, and the cells on the diagonal: the keys are far apart
+        sparse = lambda: model([(f"D{j}", 4096) for j in range(5)], {(f"m{i}",) * 5: float(i) for i in range(4096)})  # noqa: E731
+        for label, build in [("a long partition member", long), ("sparse keys", sparse)]:
+            with self.subTest(label):
+                lo, hi = 0, 64 << 20
+                while hi - lo > 4096:
+                    mid = (lo + hi) // 2
+                    lo, hi = (lo, mid) if work(build, mid)[0] is None else (mid, hi)
+                error, total = work(build, hi)
+                self.assertIsNone(error)
+                # The budget does not count the 8 KiB block cache of the 2 key readers (docs/limitations.md)
+                self.assertLessEqual(total, hi + 2 * 8192, "the work went over max_bytes")
+
 
 if __name__ == "__main__":
     unittest.main()

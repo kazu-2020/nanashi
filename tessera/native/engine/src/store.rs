@@ -567,7 +567,7 @@ enum Out {
 
 impl<'a> BaseBuilder<'a> {
     pub(crate) fn new(pack: &'a Packing, cfg: &'a Config, hint: usize, like: &Base) -> BaseBuilder<'a> {
-        let density = (like.segs.iter().map(|s| s.key_bytes()).sum(), like.rows());
+        let density = BaseBuilder::density(like);
         let seg_rows = cfg.seg_rows.max(1);
         let cap = BaseBuilder::cap(seg_rows, hint);
         let out = BaseBuilder::out(cfg, cap, density);
@@ -575,10 +575,38 @@ impl<'a> BaseBuilder<'a> {
         BaseBuilder { pack, cfg, seg_rows, density, hint, keys: Vec::with_capacity(BLOCK), vals, rows: 0, out: Some(out), last: 0, done: Vec::new() }
     }
 
-    /// The reservation of one segment: `seg_rows` and room for the rest of the partition member at the cut,
-    /// so the columns do not grow by doubling (a copy of the segment) for a usual member.
+    /// The reservation of one segment: `seg_rows` and room for the rest of the partition member at the cut.
+    /// A longer member makes the segment grow one time (`grow`).
     fn cap(seg_rows: usize, hint: usize) -> usize {
         seg_rows.saturating_add(seg_rows / 16).min(hint)
+    }
+
+    /// The (bytes, rows) of the packed keys of `like`.
+    fn density(like: &Base) -> (usize, usize) {
+        (like.segs.iter().map(|s| s.key_bytes()).sum(), like.rows())
+    }
+
+    /// The bytes of the block in build: its keys, and in file mode its values and the writer buffer.
+    pub(crate) fn scratch(cfg: &Config) -> usize {
+        let keys = BLOCK * size_of::<u64>();
+        if cfg.tier.is_some() { 2 * keys + WRITE_BUF } else { keys }
+    }
+
+    /// The most RAM bytes that `new(.., hint, like)` holds for at most `hint` rows, without the structs of the
+    /// segments (`Store::seg_bytes`). The segments in RAM reserve at most the hint in all (see `grow`). Their
+    /// keys count at the density of `like`, or at 8 B each if `like` has no rows. In file mode the list of
+    /// fences grows by push, so it can hold 2 times the fences.
+    pub(crate) fn most_bytes(cfg: &Config, hint: usize, like: &Base) -> usize {
+        let fences = hint.div_ceil(BLOCK).saturating_mul(size_of::<Block>());
+        let columns = match cfg.tier {
+            None => {
+                let density = BaseBuilder::density(like);
+                let keys = if density.1 == 0 { packed::most_bytes(hint) } else { packed::reserve_bytes(hint, density) };
+                keys.saturating_add(hint.saturating_mul(size_of::<f64>())).saturating_add(fences)
+            }
+            Some(_) => fences.saturating_mul(2),
+        };
+        columns.saturating_add(BaseBuilder::scratch(cfg))
     }
 
     fn out(cfg: &Config, cap: usize, density: (usize, usize)) -> Out {
@@ -592,6 +620,9 @@ impl<'a> BaseBuilder<'a> {
     pub(crate) fn push(&mut self, k: u64, v: f64) {
         if self.rows >= self.seg_rows && self.pack.get(k, 0) != self.pack.get(self.last, 0) {
             self.cut();
+        }
+        if self.vals.len() == self.vals.capacity() && self.cfg.tier.is_none() {
+            self.grow();
         }
         self.keys.push(k);
         self.vals.push(v);
@@ -618,6 +649,18 @@ impl<'a> BaseBuilder<'a> {
             }
         }
         self.keys.clear();
+    }
+
+    /// The partition member in build goes past the reservation of the segment. Reserve the rest of the hint in
+    /// one step: growth by doubling copies the columns many times and can hold 2 times the rows. If the hint
+    /// is too small, double.
+    #[cold]
+    fn grow(&mut self) {
+        let more = if self.hint > self.rows { self.hint - self.rows } else { self.rows.max(BLOCK) };
+        self.vals.reserve_exact(more);
+        if let Some(Out::Ram(b)) = &mut self.out {
+            b.grow(self.rows.saturating_add(more));
+        }
     }
 
     /// Ends the segment in build and opens the output of the next one.
@@ -1140,22 +1183,15 @@ impl Store {
     }
 
     /// The RAM bytes that `sink(n, diff)` holds for `n` rows, so a fused write counts no 16 B cells for them.
-    /// In RAM: the keys at the density of the old base (2 B for each key if it is empty, `PackedKeys::builder`),
-    /// the 8 B values, and the segments. The builder reserves 1/16 more rows for each segment. In file mode: the
-    /// fences (a list that grows by push), the writer buffer and the block in build. Then the block buffer of
-    /// the keys. With `diff`, the changed keys and the member lists of their region (as `whole_write` counts them).
-    pub(crate) fn sink_bytes(&self, n: usize, diff: bool) -> usize {
-        let cap = n.saturating_add(n / 16);
-        let columns = match self.cfg.tier {
-            None => {
-                let (bytes, rows) = (self.base.segs.iter().map(|s| s.key_bytes()).sum::<usize>(), self.base.rows());
-                let keys = if rows == 0 { cap.saturating_mul(2) } else { bytes.saturating_mul(cap).div_ceil(rows).min(cap.saturating_mul(8)) };
-                keys.saturating_add(cap.saturating_mul(8))
-            }
-            Some(_) => n.div_ceil(BLOCK).saturating_mul(32).saturating_add(WRITE_BUF + BLOCK * 8),
-        };
-        let changed = if diff { self.rows_hint().saturating_add(n).saturating_mul(16 + 4 * self.metric_dims.len()) } else { 0 };
-        columns.saturating_add(BLOCK * 8).saturating_add(self.seg_bytes(n)).saturating_add(changed)
+    pub fn sink_bytes(&self, n: usize, diff: bool) -> usize {
+        let changed = if diff { self.region_bytes(self.rows_hint().saturating_add(n)) } else { 0 };
+        BaseBuilder::most_bytes(&self.cfg, n, &self.base).saturating_add(self.seg_bytes(n)).saturating_add(changed)
+    }
+
+    /// The bytes that a diff holds to find the region of `keys` changed keys. The list of keys grows by push,
+    /// so it can use 16 B for each key. `region_of` makes a member list of 4 B for each key and dimension.
+    pub(crate) fn region_bytes(&self, keys: usize) -> usize {
+        keys.saturating_mul(16 + 4 * self.metric_dims.len())
     }
 
     /// The most rows of the delta. With more rows, the delta goes into a new base.
@@ -1191,13 +1227,14 @@ impl Store {
             // values, and the block buffer of the builder. The old base goes if no other version has it.
             // The region can have fewer old cells than `old`. Then the write goes into a tree of at most `limit` rows
             let rows = self.rows_hint().saturating_add(n);
-            let fences = rows.div_ceil(BLOCK) * 16;
+            let fences = rows.div_ceil(BLOCK) * size_of::<Block>();
+            let scratch = BaseBuilder::scratch(&self.cfg);
             let (base, scratch) = match self.cfg.tier {
-                None => (rows.saturating_mul(16).saturating_add(fences), BLOCK * 8),
+                None => (rows.saturating_mul(16).saturating_add(fences), scratch),
                 Some(t) => {
                     // The block list grows by push, so it can hold 2 times the fences
-                    let (block_list, in_build, window) = (fences * 2, BLOCK * 16, t.read_window * BLOCK * 16);
-                    (fences, block_list + WRITE_BUF + in_build + window)
+                    let (block_list, window) = (fences * 2, t.read_window * BLOCK * 16);
+                    (fences, block_list + scratch + window)
                 }
             };
             let base = base.saturating_add(self.seg_bytes(rows));
