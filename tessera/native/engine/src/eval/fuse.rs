@@ -656,15 +656,16 @@ impl Sink for Vec<(u64, f64)> {
 /// Evaluates `node` as one fused loop. Gives Ok(None) if the engine cannot fuse it.
 /// Gives Err if the result does not fit in `bud`.
 pub(crate) fn fused(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget) -> Result<Option<Cube>> {
-    let Some((pack, kind, cells)) = fused_into(node, cat, src, r, bud, |_, _, _| Vec::new())? else { return Ok(None) };
+    let Some((pack, kind, cells)) = fused_into(node, cat, src, r, bud, &[], |_, _, _| Vec::new())? else { return Ok(None) };
     Ok(Some(Cube { pack, kind, cells }))
 }
 
 /// The fused scan into `make(pack, n, buffered)`. `pack` is the packing of the result. `n` is the upper bound
 /// of the rows (the rows of the drivers, or the counted rows of the space). `buffered` is the cells that the
 /// budget must hold if the sink takes the parts one by one (not `presized`). Gives the packing and the kind of
-/// the result with the sink.
-pub(crate) fn fused_into<S: Sink>(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget, make: impl FnOnce(&Packing, usize, usize) -> S) -> Result<Option<(Packing, Kind, S)>> {
+/// the result with the sink. If no source decides the order of the result dimensions, they take the order of
+/// `prefer` when it has the same dimensions.
+pub(crate) fn fused_into<S: Sink>(node: &Node, cat: &Catalog, src: &[Src], r: &Restrict, bud: &Budget, prefer: &[DimId], make: impl FnOnce(&Packing, usize, usize) -> S) -> Result<Option<(Packing, Kind, S)>> {
     if !r.is_all() || matches!(node, Node::Ref(_) | Node::Const(..) | Node::MemberConst(..)) {
         return Ok(None);
     }
@@ -674,7 +675,7 @@ pub(crate) fn fused_into<S: Sink>(node: &Node, cat: &Catalog, src: &[Src], r: &R
     if !fits(info.mat, fu.copied, bud) {
         return Ok(None);
     }
-    fused_with(node, &mut fu, info, bud, make)
+    fused_with(node, &mut fu, info, bud, prefer, make)
 }
 
 /// True if `mat` estimated cells and `copied` cells fit in `bud`. An estimate of `2^64` or more does not fit.
@@ -682,7 +683,7 @@ fn fits(mat: f64, copied: usize, bud: &Budget) -> bool {
     mat < usize::MAX as f64 && bud.need((mat as usize).saturating_add(copied), "").is_ok()
 }
 
-fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, make: impl FnOnce(&Packing, usize, usize) -> S) -> Result<Option<(Packing, Kind, S)>> {
+fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, prefer: &[DimId], make: impl FnOnce(&Packing, usize, usize) -> S) -> Result<Option<(Packing, Kind, S)>> {
     let cat = fu.cat;
     let cfg = &cat.cfg;
     // Scan the union of the sources that have all dimensions of the formula, in key order (same packing)
@@ -718,7 +719,8 @@ fn fused_with<S: Sink>(node: &Node, fu: &mut Fuse, info: Info, bud: &Budget, mak
         }
         _ => {
             let big = (0..fu.leaves.len()).filter(|&l| same_set(&fu.leaves[l].pack.dims, &info.dims)).max_by_key(|&l| fu.leaves[l].col.n());
-            big.map_or(info.dims.clone(), |l| fu.leaves[l].pack.dims.clone())
+            let free = if same_set(prefer, &info.dims) { prefer } else { &info.dims };
+            big.map_or(free.to_vec(), |l| fu.leaves[l].pack.dims.clone())
         }
     };
     let Ok(out) = Packing::new(&order, cat) else { return Ok(None) };

@@ -119,7 +119,7 @@ pub fn eval_columns(node: &Node, cat: &Catalog, src: &[Src], b: &Budget, store: 
             Out::Cells(Vec::new())
         }
     };
-    let Some((pack, kind, sink)) = fused_into(node, cat, src, &r, b, make)? else { return Ok(None) };
+    let Some((pack, kind, sink)) = fused_into(node, cat, src, &r, b, &store.pack.dims, make)? else { return Ok(None) };
     let out = match sink {
         Out::Store(s) => Whole::Columns((*s).finish()),
         Out::Cells(cells) => Whole::Cube(Cube { pack, kind, cells }),
